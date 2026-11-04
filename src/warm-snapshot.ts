@@ -6,14 +6,15 @@
  * is never written again: agents get an OverlayFS fork of it instead of a full
  * checkout.
  *
- * A fork is a normal jj workspace added with empty sparse patterns, so its
- * directory on disk holds only `.jj` and jj outside the fork never sees (or
- * deletes) files. Next to it, `<workspace>.fork/` holds:
- * - `upper/`, `work/`: the agent's private OverlayFS layers;
- * - `wc/`: the working-copy state used inside the fork (the snapshot's
- *   tree_state, whose file stats match the shared lower, so the first `jj
- *   status` does not rehash the tree);
- * - `lower`: path of the warm snapshot;
+ * A fork is a jj workspace on the `rudder-overlay` working copy, added by
+ * `rudder-jj rudder-fork-add`: its directory on disk holds only `.jj`, the
+ * agent's private OverlayFS layers live in `.jj/working_copy/{upper,work}`,
+ * and the warm snapshot directory is the lower layer (linked into the shared
+ * `.warm/lowers/<tree>` cache). Snapshot reads only the upper layer (no tree
+ * scan); check-out repoints the lower (no copy). Only rudder-jj can load such
+ * a workspace. Next to it, `<workspace>.fork/` holds:
+ * - `lower`: path of the warm snapshot (for pruning);
+ * - `bin/jj`: rudder-jj, first on PATH inside the fork;
  * - `enter`: runs a command in a private user+mount namespace with the overlay
  *   mounted at the workspace path and `.jj` bound back, as the real user.
  * The native PTY layer runs every agent command whose cwd has a sibling
@@ -24,7 +25,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { runCommand } from "./util.js";
+import { runCommand, rudderJjPath } from "./util.js";
 import { workspacePath } from "./state.js";
 import { toolCacheEnv } from "./tool-cache.js";
 
@@ -140,6 +141,8 @@ export async function buildWarmSnapshot(repoRoot: string, commit: string): Promi
     await fsp.rm(dir, { recursive: true, force: true });
     const added = await runCommand("jj", ["workspace", "add", dir, "--name", name, "-r", commit], { cwd: repoRoot, allowFailure: true });
     if (added.code !== 0) throw new Error(added.stderr.trim() || "jj workspace add failed");
+    const previous = readySnapshots(repoRoot).find((snap) => snap.key !== key);
+    if (previous) await seedFromPrevious(previous.dir, dir);
     const env = { ...process.env, ...toolCacheEnv("builder") };
     for (const command of warmCommands(dir)) {
       process.stderr.write(`[rudder] warm snapshot ${key}: ${command}\n`);
@@ -159,6 +162,25 @@ export async function buildWarmSnapshot(repoRoot: string, commit: string): Promi
   } finally {
     await lock.close();
     await fsp.rm(marker("building"), { force: true });
+  }
+}
+
+/**
+ * Incremental warm build: copies the previous snapshot's untracked top-level
+ * entries (dependencies and build outputs such as node_modules, target, .venv)
+ * into the new checkout, so install/build only redo what changed.
+ */
+export async function seedFromPrevious(previousDir: string, dir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(previousDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === ".jj" || name === ".git" || fs.existsSync(path.join(dir, name))) continue;
+    const ran = spawnSync("cp", ["-a", "--reflink=auto", path.join(previousDir, name), path.join(dir, name)], { stdio: "ignore" });
+    if (ran.status !== 0) await fsp.rm(path.join(dir, name), { recursive: true, force: true });
   }
 }
 
@@ -191,8 +213,18 @@ export async function pruneWarmSnapshots(repoRoot: string): Promise<void> {
   for (const snap of readySnapshots(repoRoot).slice(KEEP_READY)) {
     if (used.has(snap.dir)) continue;
     await fsp.rm(path.join(warmDir(repoRoot), `${snap.key}.ready`), { force: true });
+    await removeLowerLinks(repoRoot, snap.dir);
     await runCommand("jj", ["workspace", "forget", `${WARM_WORKSPACE_PREFIX}${snap.key}`], { cwd: repoRoot, allowFailure: true });
     await fsp.rm(snap.dir, { recursive: true, force: true });
+  }
+}
+
+/** Drops `.warm/lowers/<tree>` links into a snapshot that is being deleted. */
+async function removeLowerLinks(repoRoot: string, target: string): Promise<void> {
+  const root = path.join(warmDir(repoRoot), "lowers");
+  for (const name of await fsp.readdir(root).catch(() => [] as string[])) {
+    const link = path.join(root, name);
+    if ((await fsp.readlink(link).catch(() => null)) === target) await fsp.rm(link, { force: true });
   }
 }
 
@@ -203,10 +235,11 @@ F="$(dirname "$(readlink -f "$0")")"; M="\${F%.fork}"; U="$(id -u)"; G="$(id -g)
 exec unshare -rm --propagation private sh -ec '
 F="$1"; M="$2"; U="$3"; G="$4"; shift 4
 mount --bind "$M/.jj" "$F/jjmnt"
-mount -t overlay overlay -o "lowerdir=$(cat "$F/lower"),upperdir=$F/upper,workdir=$F/work,userxattr" "$M"
+W="$F/jjmnt/working_copy"
+mount -t overlay overlay -o "lowerdir=$(readlink -f "$(cat "$W/lower")"),upperdir=$W/upper,workdir=$W/work,userxattr" "$M"
 mount --bind "$F/jjmnt" "$M/.jj"
-mount --bind "$F/wc" "$M/.jj/working_copy"
 cd "$M"
+PATH="$F/bin:$PATH"; export PATH
 exec unshare -U --map-user="$U" --map-group="$G" -- "$@"' sh "$F" "$M" "$U" "$G" "$@"
 `;
 
@@ -230,22 +263,25 @@ export async function createForkWorkspace(params: {
   }
   const snapshot = snaps.find((snap) => snap.commit === base) ?? snaps[0];
   if (!snapshot) return { reason: "no warm snapshot yet (building)" };
+  const rudderJj = rudderJjPath();
+  if (!rudderJj) return { reason: "rudder-jj is not available" };
   const added = await runCommand(
     "jj",
-    ["workspace", "add", params.targetPath, "--name", params.workspaceName, "--sparse-patterns", "empty", "-r", snapshot.commit],
+    [
+      "rudder-fork-add", params.targetPath, "--name", params.workspaceName, "-r", snapshot.commit,
+      "--lower", snapshot.dir, "--lowers-root", path.join(warmDir(params.repoRoot), "lowers"),
+      "-m", params.description ?? "",
+    ],
     { cwd: params.repoRoot, allowFailure: true },
   );
-  if (added.code !== 0) return { reason: added.stderr.trim() || "jj workspace add failed" };
+  if (added.code !== 0) {
+    await fsp.rm(params.targetPath, { recursive: true, force: true });
+    return { reason: added.stderr.trim() || "rudder-jj rudder-fork-add failed" };
+  }
   const state = forkStateDir(params.targetPath);
   try {
-    if (params.description) {
-      await runCommand("jj", ["describe", "-m", params.description], { cwd: params.targetPath, allowFailure: true });
-    }
-    for (const sub of ["upper", "work", "wc", "jjmnt"]) await fsp.mkdir(path.join(state, sub), { recursive: true });
-    const wc = path.join(params.targetPath, ".jj", "working_copy");
-    await fsp.copyFile(path.join(wc, "checkout"), path.join(state, "wc", "checkout"));
-    await fsp.copyFile(path.join(wc, "type"), path.join(state, "wc", "type"));
-    await fsp.copyFile(path.join(snapshot.dir, ".jj", "working_copy", "tree_state"), path.join(state, "wc", "tree_state"));
+    for (const sub of ["jjmnt", "bin"]) await fsp.mkdir(path.join(state, sub), { recursive: true });
+    await fsp.symlink(rudderJj, path.join(state, "bin", "jj"));
     await fsp.writeFile(path.join(state, "lower"), snapshot.dir);
     await fsp.writeFile(path.join(state, "enter"), ENTER_SCRIPT, { mode: 0o755 });
     const probe = spawnSync(path.join(state, "enter"), ["true"], { cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"] });
@@ -262,6 +298,7 @@ export async function createForkWorkspace(params: {
 /** Removes `<workspace>.fork/` (OverlayFS leaves a mode-000 `work/work`). */
 export async function removeForkState(workspace: string): Promise<void> {
   const state = forkStateDir(workspace);
+  await fsp.chmod(path.join(workspace, ".jj", "working_copy", "work", "work"), 0o700).catch(() => undefined);
   await fsp.chmod(path.join(state, "work", "work"), 0o700).catch(() => undefined);
   await fsp.rm(state, { recursive: true, force: true });
 }

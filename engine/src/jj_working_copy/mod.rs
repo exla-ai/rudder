@@ -158,6 +158,10 @@ fn write_state(state_path: &Path, state: &State) -> anyhow::Result<()> {
     file.write_all(&serde_json::to_vec_pretty(state)?)?;
     file.sync_all()?;
     fs::rename(&tmp, state_path.join(STATE_FILE))?;
+    // Plain-text lower path for the namespace helper script (no JSON parsing).
+    let lower_tmp = state_path.join("lower.tmp");
+    fs::write(&lower_tmp, mount_from_state(state_path, state).lower.as_os_str().as_encoded_bytes())?;
+    fs::rename(&lower_tmp, state_path.join("lower"))?;
     Ok(())
 }
 
@@ -179,6 +183,23 @@ fn mount_from_state(state_path: &Path, state: &State) -> OverlayMount {
 /// Mount paths for a working copy without loading the jj store (launch path).
 pub fn read_mount(state_path: &Path) -> anyhow::Result<OverlayMount> {
     Ok(mount_from_state(state_path, &read_state(state_path)?))
+}
+
+/// Points `lowers_root/<tree-key>` at an existing directory holding `tree`
+/// (for example a warm snapshot with dependencies installed), so check-out of
+/// that tree reuses it instead of materializing a copy. Keeps an existing entry.
+pub fn link_lower(lowers_root: &Path, tree: &MergedTree, dir: &Path) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all(lowers_root)?;
+    let link = lowers_root.join(tree_key(tree));
+    if !link.is_dir() {
+        let _ = fs::remove_file(&link);
+        match std::os::unix::fs::symlink(dir, &link) {
+            Ok(()) => {}
+            Err(_) if link.is_dir() => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(link)
 }
 
 /// Writes `tree` into `lowers_root/<tree-key>` once; later forks reuse it.

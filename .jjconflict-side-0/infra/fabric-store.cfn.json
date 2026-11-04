@@ -1,0 +1,349 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Rudder immutable Fabric CAS with private versioned retention and Fly workload identity; no access keys or automatic GC",
+  "Metadata": {
+    "RudderComponent": "FabricV1",
+    "AccountId": "597088032164",
+    "FlyOrg": "exla",
+    "ControlApp": "rudder-cloud-control"
+  },
+  "Resources": {
+    "ContentBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "BucketName": {
+          "Fn::Sub": "${AWS::StackName}-${AWS::AccountId}-${AWS::Region}"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "FabricV1"
+          }
+        ]
+      }
+    },
+    "WriterBoundary": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Maximum permissions for the Rudder Fabric object-store writer",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ReadWriteImmutableContent",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*"
+              }
+            },
+            {
+              "Sid": "DistinguishCacheMisses",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ContentBucket",
+                  "Arn"
+                ]
+              }
+            },
+            {
+              "Sid": "ReleaseStagingOnly",
+              "Effect": "Allow",
+              "Action": "s3:DeleteObject",
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/staging/*"
+              }
+            },
+            {
+              "Sid": "InspectRetention",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetBucketLocation",
+                "s3:GetBucketVersioning",
+                "s3:GetLifecycleConfiguration"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ContentBucket",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "FabricRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "rudder-fabric-control-v1",
+        "MaxSessionDuration": 3600,
+        "PermissionsBoundary": {
+          "Ref": "WriterBoundary"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "FlyIdentityProvider"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "oidc.fly.io/exla:aud": "sts.amazonaws.com"
+                },
+                "StringLike": {
+                  "oidc.fly.io/exla:sub": "exla:rudder-cloud-control:*"
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "RudderFabricObjects",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadWriteImmutableContent",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*"
+                  }
+                },
+                {
+                  "Sid": "DistinguishCacheMisses",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ContentBucket",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReleaseStagingOnly",
+                  "Effect": "Allow",
+                  "Action": "s3:DeleteObject",
+                  "Resource": {
+                    "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/staging/*"
+                  }
+                },
+                {
+                  "Sid": "InspectRetention",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketVersioning",
+                    "s3:GetLifecycleConfiguration"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ContentBucket",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "FabricV1"
+          }
+        ]
+      }
+    },
+    "ContentPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "ContentBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "RequireTLS",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "ContentBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            },
+            {
+              "Sid": "RequireImmutableConditionalPut",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:PutObject",
+              "Resource": [
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/objects/*"
+                },
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/roots/*"
+                }
+              ],
+              "Condition": {
+                "Null": {
+                  "s3:if-none-match": "true"
+                },
+                "Bool": {
+                  "s3:ObjectCreationOperation": "true"
+                }
+              }
+            },
+            {
+              "Sid": "RequireStagingCAS",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:PutObject",
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/staging/*"
+              },
+              "Condition": {
+                "Null": {
+                  "s3:if-none-match": "true",
+                  "s3:if-match": "true"
+                },
+                "Bool": {
+                  "s3:ObjectCreationOperation": "true"
+                }
+              }
+            },
+            {
+              "Sid": "WriterCannotSweepRetainedContent",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": [
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion"
+              ],
+              "Resource": [
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/objects/*"
+                },
+                {
+                  "Fn::Sub": "${ContentBucket.Arn}/fabric/v1/accounts/*/roots/*"
+                }
+              ],
+              "Condition": {
+                "ArnEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "FabricRole",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "FlyIdentityProvider": {
+      "Type": "AWS::IAM::OIDCProvider",
+      "Properties": {
+        "Url": "https://oidc.fly.io/exla",
+        "ClientIdList": [
+          "sts.amazonaws.com"
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "FabricV1"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "BucketName": {
+      "Value": {
+        "Ref": "ContentBucket"
+      }
+    },
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "FabricRole",
+          "Arn"
+        ]
+      }
+    },
+    "OidcIssuer": {
+      "Value": "https://oidc.fly.io/exla"
+    }
+  }
+}

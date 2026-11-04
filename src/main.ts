@@ -33,6 +33,7 @@ import type { MirrorPayload } from "./graph.js";
 import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
+import { toolCacheEnv } from "./tool-cache.js";
 import { ensureEngineRunning, persistentProjectEngineRequested, runEngineCommand } from "./engine.js";
 import {
   cleanupRuns,
@@ -879,6 +880,8 @@ async function runNativeDashboard(): Promise<boolean> {
   const previousNativeTui = process.env.RUDDER_NATIVE_TUI;
   process.env.RUDDER_NATIVE_TUI = "1";
   env.RUDDER_NATIVE_TUI = "1";
+  // Native-launched agents get the same shared tool caches as CLI launches.
+  env.RUDDER_AGENT_TOOL_ENV = JSON.stringify(toolCacheEnv("agent"));
   if (update) {
     env.RUDDER_UPDATE_AVAILABLE = update.latest;
     env.RUDDER_UPDATE_CURRENT = update.current;

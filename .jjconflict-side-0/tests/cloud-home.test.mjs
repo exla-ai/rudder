@@ -1,0 +1,955 @@
+// The home machine + phone app, end to end against the real control plane:
+// a fake home supervisor holds the control socket, and the phone's routes
+// (/api/app/*, /app, /app/native-done) are driven over HTTP. Plus the
+// transcript reader the supervisor uses, on Claude and Codex fixtures.
+import { test as nodeTest } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { WebSocket } from "ws";
+
+import { readTranscript, lastAssistantText } from "../cloud/worker/transcripts.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "..");
+const cloudDir = path.join(repoRoot, "cloud");
+const cloudReady =
+  fs.existsSync(path.join(cloudDir, "dist", "server.js")) &&
+  fs.existsSync(path.join(cloudDir, "node_modules", "better-sqlite3"));
+const serverTest = cloudReady
+  ? nodeTest
+  : (name, fn) =>
+      nodeTest(name, { skip: "cloud not built (npm --prefix cloud install && npm --prefix cloud run build)" }, fn);
+const require = createRequire(path.join(cloudDir, "package.json"));
+const Database = cloudReady ? require("better-sqlite3") : null;
+
+const tokenHash = (token) => createHash("sha256").update(token).digest("hex").slice(0, 32);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitFor(fn, { timeout = 8000, interval = 50 } = {}) {
+  const start = Date.now();
+  for (;;) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch {
+      // keep polling
+    }
+    if (Date.now() - start > timeout) throw new Error("waitFor timed out");
+    await sleep(interval);
+  }
+}
+
+async function bootServer(t, extraEnv = {}) {
+  const port = await freePort();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-test-"));
+  const dbPath = extraEnv.RUDDER_CLOUD_DB ?? path.join(dataDir, "state.sqlite");
+  const base = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, [path.join(cloudDir, "dist", "server.js")], {
+    cwd: cloudDir,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      BETTER_AUTH_URL: base,
+      BETTER_AUTH_SECRET: "test-secret-test-secret",
+      RUDDER_CLOUD_DATA_DIR: dataDir,
+      RUDDER_CLOUD_DB: dbPath,
+      RUDDER_CLOUD_PERSIST_STATE: "0",
+      RUDDER_S3_BUCKET: "",
+      SLACK_BOT_TOKEN: "",
+      FLY_API_TOKEN: "",
+      ...extraEnv,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  child.stdout.on("data", (d) => { log += d.toString(); });
+  child.stderr.on("data", (d) => { log += d.toString(); });
+  t.after(() => {
+    child.kill("SIGKILL");
+    try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+  await waitFor(async () => (await fetch(`${base}/health`).catch(() => null))?.ok);
+  await waitFor(() => fs.existsSync(dbPath));
+  await sleep(150);
+  return { port, base, dbPath, child, log: () => log };
+}
+
+serverTest("a home machine's repos, state and phone requests flow over its control socket", async (t) => {
+  const { port, base, dbPath, log } = await bootServer(t);
+  const cliToken = "rdr_home_test_cli";
+  const workerToken = "rdrw_home_test_worker";
+  const accountId = "acct-home";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), accountId, "me@example.com", now, now);
+  const insert = db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values (@id, @account, @key, @name, 'running', @machine, @hash, @kind, @url, @home, @now, @now, @now)
+  `);
+  insert.run({ id: "home-test", account: accountId, key: "home", name: "home", machine: "m-home", hash: tokenHash(workerToken), kind: "home", url: null, home: null, now });
+  insert.run({ id: "libra-test", account: accountId, key: "home:exla-ai/libra", name: "libra", machine: null, hash: tokenHash(workerToken), kind: "home-repo", url: "https://github.com/exla-ai/libra.git", home: "home-test", now });
+  // Someone else's repo must never show up.
+  insert.run({ id: "other-test", account: "acct-other", key: "home:x/y", name: "y", machine: null, hash: tokenHash("rdrw_other"), kind: "home-repo", url: "https://github.com/x/y.git", home: "home-other", now });
+  db.close();
+
+  const auth = { authorization: `Bearer ${cliToken}`, "content-type": "application/json" };
+
+  // Signed out: the app API refuses, the shell still serves.
+  assert.equal((await fetch(`${base}/api/app/state`)).status, 401);
+  const shell = await fetch(`${base}/app/p/libra-test/a/some-run`);
+  assert.equal(shell.status, 200, "client routes fall back to the app shell");
+  assert.match(await shell.text(), /<html/i);
+  const sw = await fetch(`${base}/app/sw.js`);
+  assert.equal(sw.headers.get("service-worker-allowed"), "/app");
+  const traversal = await fetch(`${base}/app/..%2f..%2fpackage.json`);
+  assert.doesNotMatch(await traversal.text(), /"better-auth"/, "no reads outside the app dir");
+
+  // The iOS shell's sign-in ends here; with no browser session it reports an error on its scheme.
+  const nativeDone = await fetch(`${base}/app/native-done`, { redirect: "manual" });
+  assert.equal(nativeDone.status, 302);
+  assert.match(nativeDone.headers.get("location"), /^rudder:\/\/auth\?error=signin&message=Sign-in%20did%20not%20finish/);
+  // A refused sign-in (Better Auth's errorCallbackURL) says why, to the shell and on the web.
+  const refused = await fetch(`${base}/app/native-done?error=account_not_linked`, { redirect: "manual" });
+  assert.match(decodeURIComponent(refused.headers.get("location")), /error=account_not_linked&message=This email already has a Rudder account/);
+  const webRefused = await fetch(`${base}/app/signin-error?error=account_not_linked`);
+  assert.equal(webRefused.status, 200);
+  assert.match(await webRefused.text(), /already has a Rudder account[\s\S]*href="\/app"/);
+
+  // A worker token is not a user token.
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: { authorization: `Bearer ${workerToken}` } })).status, 401);
+
+  // Before the supervisor connects: the project is listed, phone requests explain why they can't run.
+  let state = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+  assert.equal(state.home.id, "home-test");
+  assert.equal(state.home.connected, false);
+  assert.deepEqual(state.projects.map((p) => p.workspaceId), ["libra-test"]);
+  const early = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "hi" }) });
+  assert.equal(early.status, 503);
+  assert.match((await early.json()).error, /not connected/);
+  // Polled reads never surface an error: they wake the home and say so.
+  const earlyRead = await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1`, { headers: auth });
+  assert.equal(earlyRead.status, 503);
+  assert.equal((await earlyRead.json()).waking, true);
+
+  // A bad worker token can't take the control socket.
+  const rejected = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-test/control`, { headers: { authorization: "Bearer rdrw_wrong" } });
+    ws.on("unexpected-response", (_req, res) => resolve(res.statusCode));
+    ws.on("open", () => resolve("open"));
+    ws.on("error", () => undefined);
+  });
+  assert.equal(rejected, 401);
+
+  // The fake supervisor connects, gets its repo list, publishes state, answers RPCs.
+  const messages = [];
+  const control = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-test/control`, {
+    headers: { authorization: `Bearer ${workerToken}` },
+  });
+  t.after(() => control.close());
+  const uploads = [];
+  control.on("message", async (data) => {
+    const message = JSON.parse(data.toString());
+    messages.push(message);
+    if (message.type === "rpc" && message.method === "upload") {
+      // Like home.mjs: pull the bytes with the worker token.
+      const res = await fetch(`${base}${message.params.uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+      const bytes = Buffer.from(await res.arrayBuffer());
+      uploads.push({ params: message.params, status: res.status, bytes });
+      control.send(JSON.stringify({ type: "rpc-result", id: message.id, result: { path: `/workspace/code/libra/.rudder/uploads/x-${message.params.name}`, name: message.params.name, size: bytes.length } }));
+      return;
+    }
+    if (message.type === "rpc") {
+      const reply = message.method === "send" && message.params.text === "boom"
+        ? { type: "rpc-result", id: message.id, error: "the libra dashboard is starting" }
+        : message.method === "createRepo"
+          ? { type: "rpc-result", id: message.id, result: { repo: `${message.params.owner}/${message.params.name}` } }
+          : { type: "rpc-result", id: message.id, result: { ok: true, echo: message.method, params: message.params } };
+      control.send(JSON.stringify(reply));
+    }
+  });
+  await new Promise((resolve, reject) => { control.on("open", resolve); control.on("error", reject); });
+  const repos = await waitFor(() => messages.find((m) => m.type === "repos"));
+  assert.deepEqual(repos.repos, [{ workspaceId: "libra-test", name: "libra", repo: "exla-ai/libra", remote: "https://github.com/exla-ai/libra.git", ref: null }]);
+
+  control.send(JSON.stringify({
+    type: "state",
+    tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail1.ts.net", online: true, https: true },
+    credentials: { github: { ok: true, account: "me" }, claude: { ok: false, account: "me@example.com", detail: "login expired" }, checkedAt: "2026-10-16T00:00:00.000Z" },
+    logins: { claude: { id: "l1", provider: "claude", mode: "browser", status: "waiting", error: null } },
+    projects: [{
+      workspaceId: "libra-test",
+      name: "libra",
+      dashboard: "running",
+      error: null,
+      agents: [{ id: "r1", title: "Fix the webhook", status: "waiting", attention: "permission" }],
+      ports: [{ port: 3000, label: "next dev", url: "https://rudder-home.tail1.ts.net:3000" }],
+    }],
+  }));
+  state = await waitFor(async () => {
+    const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+    return next.projects[0]?.agents?.length ? next : null;
+  });
+  assert.equal(state.email, "me@example.com");
+  assert.equal(state.home.connected, true);
+  assert.equal(state.home.tailnet.dnsName, "rudder-home.tail1.ts.net");
+  assert.deepEqual(state.home.credentials.claude, { ok: false, account: "me@example.com", detail: "login expired" }, "the phone sees which login is broken");
+  assert.equal(state.home.logins.claude.status, "waiting", "and a sign-in in progress");
+  assert.equal(state.projects[0].dashboard, "running");
+  assert.equal(state.projects[0].agents[0].attention, "permission");
+  assert.equal(state.projects[0].ports[0].url, "https://rudder-home.tail1.ts.net:3000");
+
+  // Phone requests become RPCs to the supervisor, scoped to that project.
+  const sent = await (await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "yes, allow it" }) })).json();
+  assert.deepEqual(sent, { ok: true, echo: "send", params: { workspaceId: "libra-test", runId: "r1", text: "yes, allow it" } });
+  const task = await (await fetch(`${base}/api/app/task`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", text: "add a health check" }) })).json();
+  assert.equal(task.echo, "task");
+  const action = await (await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "merge" }) })).json();
+  assert.deepEqual(action.params, { workspaceId: "libra-test", runId: "r1", action: "merge" });
+  const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5`, { headers: auth })).json();
+  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20 });
+
+  // Add project: the repo list and creating a repo run on the home machine.
+  const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();
+  assert.equal(repoList.echo, "repos");
+  const created = await (await fetch(`${base}/api/app/create`, { method: "POST", headers: auth, body: JSON.stringify({ owner: "exla-ai", name: "fresh", private: true }) })).json();
+  assert.ok(created.workspace, `create opens the new repo on the home machine: ${JSON.stringify(created)}`);
+  const createRpc = messages.find((m) => m.type === "rpc" && m.method === "createRepo");
+  assert.deepEqual(createRpc.params, { owner: "exla-ai", name: "fresh", private: true, description: "" });
+
+  // Signing Claude Code or Codex in from the phone: the CLI's own login runs
+  // on the machine (cloud/worker/logins.mjs); these routes only carry it.
+  const post = (route, body) => fetch(`${base}${route}`, { method: "POST", headers: auth, body: JSON.stringify(body) });
+  assert.deepEqual(await (await post("/api/app/login/start", { provider: "codex", device: true })).json(),
+    { ok: true, echo: "loginStart", params: { provider: "codex", device: true } });
+  assert.equal((await post("/api/app/login/start", { provider: "gemini" })).status, 400);
+  const finished = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", callback: "code=c&state=s" })).json();
+  assert.deepEqual(finished.params, { provider: "claude", id: "l1", callback: "code=c&state=s" });
+  const pasted = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", code: "abc#s" })).json();
+  assert.deepEqual(pasted.params, { provider: "claude", id: "l1", code: "abc#s" });
+  assert.equal((await post("/api/app/login/finish", { provider: "claude", id: "l1" })).status, 400, "nothing to finish with");
+  assert.deepEqual(await (await post("/api/app/login/cancel", { provider: "claude", id: "l1" })).json(), { ok: true });
+  assert.deepEqual(messages.find((m) => m.type === "rpc" && m.method === "loginCancel").params, { provider: "claude", id: "l1" });
+
+  // The terminal view and key strip go to the supervisor too; key names are checked here.
+  const screen = await (await fetch(`${base}/api/app/screen?workspace=libra-test&run=r1`, { headers: auth })).json();
+  assert.deepEqual(screen.params, { workspaceId: "libra-test", runId: "r1" });
+  const keys = await (await fetch(`${base}/api/app/keys`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", keys: "down,enter" }) })).json();
+  assert.deepEqual(keys.params, { workspaceId: "libra-test", runId: "r1", keys: "down,enter" });
+  const badKeys = await fetch(`${base}/api/app/keys`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", keys: "rm -rf /" }) });
+  assert.equal(badKeys.status, 400);
+
+  // A supervisor error is the phone's error message.
+  const failed = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "boom" }) });
+  assert.equal(failed.status, 400);
+  assert.equal((await failed.json()).error, "the libra dashboard is starting");
+
+  // Another account's project is not reachable, even by id.
+  const foreign = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "other-test", run: "r1", text: "hi" }) });
+  assert.equal(foreign.status, 404, log());
+  // Photos and files from the phone: the bytes reach the machine through a
+  // one-time fetch with its worker token, under a cleaned-up name.
+  const photo = Buffer.from(Array.from({ length: 70_000 }, (_, i) => i % 251));
+  const uploaded = await fetch(`${base}/api/app/upload?workspace=libra-test&name=${encodeURIComponent("../My Photo (1).png")}`, {
+    method: "POST", headers: { ...auth, "Content-Type": "image/png" }, body: photo,
+  });
+  assert.equal(uploaded.status, 200, log());
+  assert.deepEqual(await uploaded.json(), { path: "/workspace/code/libra/.rudder/uploads/x-My-Photo-1.png", name: "My-Photo-1.png", size: photo.length });
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].status, 200);
+  assert.ok(uploads[0].bytes.equals(photo), "the machine gets the exact bytes");
+  assert.equal(uploads[0].params.workspaceId, "libra-test");
+  assert.match(uploads[0].params.uploadPath, /^\/api\/rudder\/home\/home-test\/uploads\/[0-9a-f-]+$/);
+  const again = await fetch(`${base}${uploads[0].params.uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  assert.equal(again.status, 404, "an upload is fetched once, then dropped");
+  const empty = await fetch(`${base}/api/app/upload?workspace=libra-test&name=a.txt`, { method: "POST", headers: auth, body: "" });
+  assert.equal(empty.status, 400);
+  const foreignUpload = await fetch(`${base}/api/app/upload?workspace=other-test&name=a.txt`, { method: "POST", headers: auth, body: "hi" });
+  assert.equal(foreignUpload.status, 404);
+  const huge = await fetch(`${base}/api/app/upload?workspace=libra-test&name=big.bin`, { method: "POST", headers: auth, body: Buffer.alloc(26 * 1024 * 1024) });
+  assert.equal(huge.status, 413, "a file over 25 MB gets a readable refusal, not a reset connection");
+  assert.equal((await huge.json()).error, "that file is over 25 MB");
+  assert.equal(uploads.length, 1, "nothing too large or foreign reached the machine");
+
+  // Pins live on the project row: every device sees them, pinning twice keeps
+  // the first time (the list is in pin order), and only your own projects pin.
+  const pinOf = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json())
+    .projects.find((p) => p.workspaceId === "libra-test").pinnedAt;
+  assert.equal(await pinOf(), null);
+  const pinBody = (pinned, workspace = "libra-test") => ({ method: "POST", headers: auth, body: JSON.stringify({ workspace, pinned }) });
+  const pinned = await (await fetch(`${base}/api/app/pin`, pinBody(true))).json();
+  assert.equal(pinned.workspaceId, "libra-test");
+  assert.ok(Date.parse(pinned.pinnedAt), `pinning stamps a time: ${JSON.stringify(pinned)}`);
+  assert.equal((await (await fetch(`${base}/api/app/pin`, pinBody(true))).json()).pinnedAt, pinned.pinnedAt);
+  assert.equal(await pinOf(), pinned.pinnedAt);
+  assert.equal((await fetch(`${base}/api/app/pin`, pinBody(true, "other-test"))).status, 404);
+  assert.equal((await (await fetch(`${base}/api/app/pin`, pinBody(false))).json()).pinnedAt, null);
+  assert.equal(await pinOf(), null);
+  // (delete is a real action now: cloud-home-move.test.mjs covers it.)
+  const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "reboot" }) });
+  assert.equal(badAction.status, 400);
+
+  // The CLI view of the same machine.
+  const home = await (await fetch(`${base}/api/rudder/home`, { headers: auth })).json();
+  assert.equal(home.home.id, "home-test");
+  assert.equal(home.projects.find((p) => p.workspaceId === "libra-test").ports[0].port, 3000);
+
+  // A project error reported by the supervisor is persisted as its failure reason.
+  control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "libra-test", name: "libra", dashboard: "failed", error: "git clone failed: Repository not found", agents: [], ports: [] }] }));
+  await waitFor(async () => {
+    const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+    return next.projects.find((p) => p.workspaceId === "libra-test")?.failureReason === "git clone failed: Repository not found";
+  });
+});
+
+serverTest("a signed-in laptop pairs a phone with a one-time code", async (t) => {
+  const { base, dbPath } = await bootServer(t);
+  const cliToken = "rdr_pair_test_cli";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct-pair", "me@example.com", now, now);
+  db.close();
+  const post = (path, body, headers = {}) => fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  // Only a signed-in device can start a pairing.
+  assert.equal((await post("/api/app/pair/start")).status, 401);
+  const started = await (await post("/api/app/pair/start", {}, { authorization: `Bearer ${cliToken}` })).json();
+  assert.match(started.code, /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+  assert.equal(started.link, `rudder://pair?code=${started.code}`);
+  assert.equal(started.url, `${base}/app/pair?code=${started.code}`);
+
+  // Lowercase, no dash: still the same code. It yields a token on the same account.
+  const loose = started.code.replace("-", "").toLowerCase();
+  const finished = await (await post("/api/app/pair/finish", { code: loose })).json();
+  assert.match(finished.token, /^rdr_/);
+  assert.equal(finished.email, "me@example.com");
+  const state = await (await fetch(`${base}/api/app/state`, { headers: { authorization: `Bearer ${finished.token}` } })).json();
+  assert.equal(state.email, "me@example.com");
+
+  // Single use.
+  const again = await post("/api/app/pair/finish", { code: started.code });
+  assert.equal(again.status, 400);
+  assert.match((await again.json()).error, /wrong or expired/);
+
+  // Guessing is rate limited per address.
+  let last = 0;
+  for (let attempt = 0; attempt < 11; attempt += 1) {
+    last = (await post("/api/app/pair/finish", { code: "AAAA-AAAA" })).status;
+  }
+  assert.equal(last, 429);
+});
+
+serverTest("signing out of the app revokes its token and the next sign-in can pick another account", async (t) => {
+  const { base, dbPath } = await bootServer(t, {
+    GOOGLE_CLIENT_ID: "test-google-client",
+    GOOGLE_CLIENT_SECRET: "test-google-secret",
+    GITHUB_CLIENT_ID: "test-github-client",
+    GITHUB_CLIENT_SECRET: "test-github-secret",
+  });
+  const appToken = "rdr_signout_test_app";
+  const otherToken = "rdr_signout_test_other";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  const insertToken = db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  );
+  insertToken.run(tokenHash(appToken), "acct-first", "first@example.com", now, now);
+  insertToken.run(tokenHash(otherToken), "acct-first", "first@example.com", now, now);
+  db.close();
+  const bearer = (token) => ({ authorization: `Bearer ${token}` });
+
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(appToken) })).status, 200);
+  assert.equal((await fetch(`${base}/api/app/sign-out`)).status, 405);
+  const out = await fetch(`${base}/api/app/sign-out`, { method: "POST", headers: bearer(appToken) });
+  assert.equal(out.status, 200);
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(appToken) })).status, 401, "the signed-out token is revoked");
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(otherToken) })).status, 200, "other devices stay signed in");
+  // Already signed out, or no token at all: still fine.
+  assert.equal((await fetch(`${base}/api/app/sign-out`, { method: "POST", headers: bearer(appToken) })).status, 200);
+  assert.equal((await fetch(`${base}/api/app/sign-out`, { method: "POST" })).status, 200);
+
+  // The shells share the system browser's Google and GitHub sessions, so the
+  // provider must show its account picker instead of reusing the old account.
+  for (const [provider, host] of [["google", "accounts.google.com"], ["github", "github.com"]]) {
+    const login = await fetch(`${base}/app/login?native=1&provider=${provider}`, { redirect: "manual" });
+    assert.equal(login.status, 302, `${provider} login redirects`);
+    const target = new URL(login.headers.get("location"));
+    assert.equal(target.host, host);
+    assert.equal(target.searchParams.get("prompt"), "select_account", `${provider} shows the account picker`);
+  }
+});
+
+serverTest("a failed worker heartbeat records why", async (t) => {
+  const { base, dbPath } = await bootServer(t);
+  const workerToken = "rdrw_fail_test";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert into rudder_workspaces (id, account_id, workspace_key, status, worker_token_hash, created_at, updated_at) values (?,?,?,?,?,?,?)",
+  ).run("ws-fail", "acct", "k", "running", tokenHash(workerToken), now, now);
+  db.close();
+  const res = await fetch(`${base}/api/rudder/workspace/ws-fail/heartbeat`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ state: "failed", exitCode: 2, reason: "git clone failed: Repository not found" }),
+  });
+  assert.equal(res.status, 200);
+  const check = new Database(dbPath, { readonly: true });
+  const row = check.prepare("select status, failure_reason from rudder_workspaces where id = 'ws-fail'").get();
+  check.close();
+  assert.deepEqual(row, { status: "failed", failure_reason: "git clone failed: Repository not found" });
+});
+
+// ---------------------------------------------------------------------------
+// Transcripts.
+// ---------------------------------------------------------------------------
+
+function fixtureRepo(record) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-transcript-"));
+  fs.mkdirSync(path.join(dir, ".rudder", "runs", record.id), { recursive: true });
+  fs.writeFileSync(path.join(dir, ".rudder", "runs", record.id, "run.json"), JSON.stringify(record));
+  return dir;
+}
+
+nodeTest("a Claude transcript becomes chat messages with tool calls matched to their results", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const cwd = "/workspace/code/libra";
+  const sessionId = "11111111-2222-3333-4444-555555555555";
+  const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const lines = [
+    { type: "user", uuid: "u1", timestamp: "2026-10-15T10:00:00Z", message: { role: "user", content: "Objective: fix the webhook\nDone when: tests pass\n\nRudder-specific context injected by Rudder:\n- use jj\n\nfix the webhook" } },
+    { type: "user", uuid: "u0", message: { role: "user", content: "<system-reminder>internal</system-reminder>" } },
+    { type: "assistant", uuid: "a1", timestamp: "2026-10-15T10:00:05Z", message: { role: "assistant", content: [
+      { type: "thinking", thinking: "hidden" },
+      { type: "text", text: "Looking at **the handler**." },
+      { type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } },
+    ] } },
+    { type: "assistant", uuid: "side", isSidechain: true, message: { role: "assistant", content: [{ type: "text", text: "subagent chatter" }] } },
+    { type: "user", uuid: "u2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: [{ type: "text", text: "1 failing" }] }] } },
+    { type: "attachment", attachment: { type: "remote_session", url: "https://claude.ai/code/session_01AbCdEf" } },
+    { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Fixed; tests pass." }] } },
+  ];
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const record = { id: "run-1", backend: "claude", task: "Objective: fix the webhook\nDone when: tests pass\n\nfix the webhook", taskSummary: "Fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } };
+  const repo = fixtureRepo(record);
+
+  const transcript = readTranscript(repo, "run-1", { limit: 50, home });
+  assert.equal(transcript.title, "Fix the webhook");
+  assert.deepEqual(
+    transcript.messages.map((m) => [m.role, m.text || m.tool?.name]),
+    [["user", "fix the webhook"], ["assistant", "Looking at **the handler**."], ["tool", "Bash"], ["assistant", "Fixed; tests pass."]],
+  );
+  const tool = transcript.messages[2].tool;
+  assert.deepEqual(tool, { name: "Bash", input: "npm test", output: "1 failing", isError: true });
+  assert.equal(transcript.messages[0].ts, Date.parse("2026-10-15T10:00:00Z"));
+  const preview = lastAssistantText(record, { home });
+  assert.equal(preview.text, "Fixed; tests pass.");
+  assert.equal(preview.remoteUrl, "https://claude.ai/code/session_01AbCdEf", "the Remote Control session link");
+  assert.throws(() => readTranscript(repo, "../../etc", { home }), /agent not found/);
+});
+
+nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const sessionId = "01a13ce1-6861-7893-b4a0-9fb8e889dd57";
+  const day = path.join(home, ".codex", "sessions", "2026", "10", "14");
+  fs.mkdirSync(day, { recursive: true });
+  const item = (payload) => ({ type: "response_item", timestamp: "2026-10-14T17:06:07Z", payload });
+  const lines = [
+    { type: "session_meta", payload: { id: sessionId } },
+    item({ type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>cwd</environment_context>" }] }),
+    item({ type: "message", role: "user", content: [{ type: "input_text", text: "Rudder-specific context injected by Rudder: be the owner\n\nadd billing" }] }),
+    item({ type: "custom_tool_call", name: "exec", call_id: "c1", input: 'text(await tools.exec_command({cmd:"rg billing src"}))' }),
+    item({ type: "custom_tool_call_output", call_id: "c1", output: [{ type: "input_text", text: "src/billing.ts" }] }),
+    item({ type: "function_call", name: "shell", call_id: "c2", arguments: JSON.stringify({ command: ["bash", "-lc", "npm test"] }) }),
+    item({ type: "function_call_output", call_id: "c2", output: JSON.stringify({ output: "boom", metadata: { exit_code: 1 } }) }),
+    item({ type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] }),
+  ];
+  fs.writeFileSync(path.join(day, `rollout-2026-10-14T17-06-07-${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const repo = fixtureRepo({ id: "run-2", backend: "codex", task: "add billing", session: { nativeSessionId: sessionId } });
+
+  const transcript = readTranscript(repo, "run-2", { limit: 50, home });
+  assert.deepEqual(
+    transcript.messages.map((m) => [m.role, m.text || m.tool?.input]),
+    [["user", "add billing"], ["tool", "rg billing src"], ["tool", "npm test"], ["assistant", "Billing is in."]],
+  );
+  assert.equal(transcript.messages[1].tool.output, "src/billing.ts");
+  assert.deepEqual([transcript.messages[2].tool.output, transcript.messages[2].tool.isError], ["boom", true]);
+});
+
+nodeTest("a compacted conversation shows one marker holding the summary, not a message from the user", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const cwd = "/workspace/code/libra";
+  const sessionId = "22222222-2222-3333-4444-555555555555";
+  const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const lines = [
+    { type: "user", uuid: "u1", message: { role: "user", content: "fix the webhook" } },
+    { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "On it." }] } },
+    { type: "system", subtype: "compact_boundary", uuid: "cb1", timestamp: "2026-10-16T11:21:00.799Z", content: "Conversation compacted", compactMetadata: { trigger: "auto", preTokens: 367082 } },
+    { type: "user", uuid: "s1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Fix the **webhook**.\n\nIf you need specific details from before compaction (like exact code snippets), read the full transcript at: /x.jsonl\nContinue the conversation from where it left off without asking the user any further questions." } },
+    { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
+  ];
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const repo = fixtureRepo({ id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
+  const transcript = readTranscript(repo, "run-4", { limit: 50, home });
+  assert.deepEqual(transcript.messages.map((m) => [m.role, m.kind ?? null, m.text]), [
+    ["user", null, "fix the webhook"],
+    ["assistant", null, "On it."],
+    ["system", "compact", "Context compacted"],
+    ["assistant", null, "Picking up the webhook fix."],
+  ]);
+  assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, summary: "1. Fix the **webhook**." });
+  assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));
+
+  // Codex records its compaction as one `compacted` line.
+  const codexId = "01a13ce1-6861-7893-b4a0-9fb8e889dd58";
+  const day = path.join(home, ".codex", "sessions", "2026", "10", "16");
+  fs.mkdirSync(day, { recursive: true });
+  const codexLines = [
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] } },
+    { type: "compacted", timestamp: "2026-10-16T12:00:00Z", payload: { message: "", replacement_history: [{ type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] } },
+  ];
+  fs.writeFileSync(path.join(day, `rollout-2026-10-16T12-00-00-${codexId}.jsonl`), `${codexLines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const codexRepo = fixtureRepo({ id: "run-5", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
+  const codex = readTranscript(codexRepo, "run-5", { limit: 50, home });
+  assert.deepEqual(codex.messages.map((m) => [m.role, m.kind ?? null]), [["user", null], ["system", "compact"], ["assistant", null]]);
+});
+
+nodeTest("an agent with no session yet shows the prompts Rudder recorded", () => {
+  const repo = fixtureRepo({ id: "run-3", backend: "claude", task: "t", turns: [{ ts: "1789425365440", prompt: "start here", source: "user" }] });
+  const transcript = readTranscript(repo, "run-3", { home: os.tmpdir() });
+  assert.deepEqual(transcript.messages, [{ id: "turn-0", role: "user", ts: 1789425365440, text: "start here" }]);
+});
+
+// The supervisor itself must boot. 2.16.5 shipped a home.mjs that crashed in
+// its first second (a `let` read before initialization), and every project on
+// the machine went down with it; nothing short of running it caught that.
+const workerDir = path.join(cloudDir, "worker");
+const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modules", "ws")) && fs.existsSync(path.join(workerDir, "node_modules", "node-pty"));
+(workerReady ? nodeTest : (name, fn) => nodeTest(name, { skip: "worker deps not installed (npm --prefix cloud/worker install)" }, fn))(
+  "the home supervisor boots, connects its control socket and reports credentials",
+  async (t) => {
+    const { base, dbPath } = await bootServer(t);
+    const cliToken = "rdr_boot_test_cli";
+    const workerToken = "rdrw_boot_test_worker";
+    const now = new Date().toISOString();
+    const db = new Database(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.prepare("insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)")
+      .run(tokenHash(cliToken), "acct-boot", "me@example.com", now, now);
+    db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash, source_kind, created_at, updated_at, last_activity_at)
+      values ('home-boot', 'acct-boot', 'home', 'home', 'running', 'm-boot', ?, 'home', ?, ?, ?)`).run(tokenHash(workerToken), now, now, now);
+    db.close();
+
+    // Stand-ins for the agent CLIs: logged out, so the credential check finishes
+    // fast and never touches a real account.
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-boot-"));
+    const bin = path.join(scratch, "bin");
+    fs.mkdirSync(bin);
+    for (const tool of ["codex", "gh", "aws", "tailscaled", "tailscale"]) {
+      fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n", { mode: 0o755 });
+    }
+    // Claude signs in like the real CLI: `auth login` hands $BROWSER a URL
+    // whose redirect is a server it runs here, and finishes on the callback.
+    const fakeLogin = path.join(scratch, "fake-login.cjs");
+    fs.writeFileSync(fakeLogin, `
+      const http = require("node:http"), fs = require("node:fs"), path = require("node:path");
+      const { execFileSync } = require("node:child_process");
+      const state = "st" + Date.now();
+      const server = http.createServer((req, res) => {
+        const url = new URL(req.url, "http://localhost");
+        if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) { res.writeHead(400); res.end(); process.exit(1); }
+        fs.writeFileSync(path.join(process.env.HOME, ".claude-ok"), "1");
+        res.writeHead(302, { location: "https://example.com/ok" }); res.end();
+        console.log("Login successful."); setTimeout(() => process.exit(0), 20);
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const port = server.address().port;
+        execFileSync(process.env.BROWSER, ["https://claude.example/oauth/authorize?redirect_uri=" + encodeURIComponent("http://localhost:" + port + "/callback") + "&state=" + state]);
+        console.log("If the browser didn't open, visit: https://claude.example/oauth/authorize?code=true&redirect_uri=" + encodeURIComponent("https://platform.example/oauth/code/callback") + "&state=" + state);
+        process.stdout.write("Paste code here if prompted > ");
+      });
+    `);
+    fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
+case "$1 $2" in
+  "auth login") exec "${process.execPath}" "${fakeLogin}" ;;
+  "auth status") if [ -f "$HOME/.claude-ok" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
+  *) if [ -f "$HOME/.claude-ok" ]; then echo OK; exit 0; fi; echo "Not logged in"; exit 1 ;;
+esac
+`, { mode: 0o755 });
+    const home = path.join(scratch, "home");
+    fs.mkdirSync(home);
+    let log = "";
+    const child = spawn(process.execPath, [path.join(workerDir, "home.mjs")], {
+      cwd: workerDir,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: home,
+        RUDDER_CLOUD_URL: base,
+        RUDDER_WORKSPACE_ID: "home-boot",
+        RUDDER_WORKER_TOKEN: workerToken,
+        RUDDER_HOME_VOLUME: path.join(scratch, "volume"),
+        RUDDER_HOME_TOOLCHAINS: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let exited = null;
+    child.on("exit", (code) => { exited = code; });
+    child.stdout.on("data", (d) => { log += d.toString(); });
+    child.stderr.on("data", (d) => { log += d.toString(); });
+    t.after(() => {
+      child.kill("SIGKILL");
+      try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    const auth = { authorization: `Bearer ${cliToken}` };
+    const state = await waitFor(async () => {
+      if (exited !== null) throw new Error(`supervisor exited (${exited}):\n${log}`);
+      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+      return next.home?.connected && next.home?.credentials?.checkedAt ? next : null;
+    }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    assert.equal(state.home.credentials.claude.ok, false);
+    assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
+
+    // Signing Claude Code in from the phone, through the real supervisor: the
+    // app gets the CLI's URL, and the callback the phone caught finishes it.
+    const post = async (route, body) => {
+      const res = await fetch(`${base}${route}`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify(body) });
+      const json = await res.json();
+      assert.equal(res.status, 200, `${route}: ${JSON.stringify(json)}\n${log}`);
+      return json;
+    };
+    const started = await post("/api/app/login/start", { provider: "claude" });
+    assert.equal(started.status, "waiting");
+    assert.equal(started.callback.path, "/callback");
+    assert.match(started.codeUrl, /code=true/);
+    const loginState = new URL(started.url).searchParams.get("state");
+    const finished = await post("/api/app/login/finish", { provider: "claude", id: started.id, callback: `code=abc&state=${loginState}` });
+    assert.equal(finished.status, "done", log);
+    const signedIn = await waitFor(async () => {
+      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+      return next.home?.credentials?.claude?.ok ? next : null;
+    }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    assert.equal(signedIn.home.credentials.claude.account, "me@example.com");
+    assert.equal(signedIn.home.credentials.claude.plan, "max");
+    assert.equal(signedIn.home.logins.claude.status, "done");
+    await sleep(1500);
+    assert.equal(exited, null, `the supervisor is still running:\n${log}`);
+  },
+);
+
+
+serverTest("a home on an old image is updated in place once its agents are idle, never mid-turn", async (t) => {
+  // A fake Fly API: the home machine runs img:old.
+  const flyCalls = [];
+  let image = "registry.fly.io/workers:old";
+  const fly = (await import("node:http")).createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    flyCalls.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : null });
+    if (req.url === "/v1/apps/workers/machines/m-home" && req.method === "GET") {
+      res.end(JSON.stringify({ id: "m-home", state: "started", config: { image, env: { A: "1" }, mounts: [{ volume: "vol_1", path: "/workspace" }] } }));
+      return;
+    }
+    if (req.url === "/v1/apps/workers/machines/m-home" && req.method === "POST") {
+      image = JSON.parse(body).config.image;
+      res.end(JSON.stringify({ id: "m-home", state: "replacing" }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end("{}");
+  });
+  await new Promise((resolve) => fly.listen(0, "127.0.0.1", resolve));
+  t.after(() => fly.close());
+  const { port, dbPath, log } = await bootServer(t, {
+    FLY_API_TOKEN: "fly-test",
+    FLY_API_HOSTNAME: `http://127.0.0.1:${fly.address().port}`,
+    RUDDER_FLY_APP_NAME: "workers",
+    RUDDER_WORKER_IMAGE: "registry.fly.io/workers:new",
+    RUDDER_HOME_IDLE_UPDATE_MS: "1500",
+    RUDDER_HOME_UPDATE_SWEEP_MS: "1000",
+  });
+  const workerToken = "rdrw_idle_update";
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const db = new Database(dbPath);
+  db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values ('home-idle', 'acct-idle', 'home', 'home', 'running', 'm-home', ?, 'home', null, null, ?, ?, ?)
+  `).run(tokenHash(workerToken), old, old, old);
+  db.close();
+  const control = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-idle/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+  t.after(() => control.close());
+  await new Promise((resolve) => control.on("open", resolve));
+  const publish = (agents) => control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "r", repo: "a/b", name: "b", agents }] }));
+
+  // Busy: one agent working, another waiting on a question. Reported ONCE, the
+  // way the supervisor does (it sends state only when it changes): a long
+  // steady turn must still count as busy.
+  publish([{ id: "1", status: "working", asks: [] }, { id: "2", status: "done", asks: [{ id: "x" }] }]);
+  await sleep(4000);
+  assert.ok(!flyCalls.some((call) => call.method === "POST"), `updated mid-turn: ${JSON.stringify(flyCalls)}\n${log()}`);
+
+  // Idle: everything done, also reported once and then silence. Within idle
+  // time + a sweep, the machine gets the new image, same config.
+  publish([{ id: "1", status: "done", asks: [] }]);
+  const update = await waitFor(() => flyCalls.find((call) => call.method === "POST"), { timeout: 8000 });
+  assert.equal(update.body.config.image, "registry.fly.io/workers:new");
+  assert.deepEqual(update.body.config.mounts, [{ volume: "vol_1", path: "/workspace" }]);
+  // Same config, plus a fresh worker token for the restarted home.
+  const { RUDDER_WORKER_TOKEN: newToken, ...env } = update.body.config.env;
+  assert.deepEqual(env, { A: "1" });
+  assert.match(newToken, /^rdrw_/);
+  assert.notEqual(newToken, workerToken);
+  // Once is enough.
+  await sleep(2500);
+  assert.equal(flyCalls.filter((call) => call.method === "POST").length, 1);
+
+  // A repo added while the update is in flight still moves with its home.
+  const live = new Database(dbPath);
+  live.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values ('repo-idle', 'acct-idle', 'home:a/b', 'b', 'running', null, ?, 'home-repo', 'https://github.com/a/b.git', 'home-idle', ?, ?, ?)
+  `).run(tokenHash(workerToken), old, old, old);
+  const opens = (token, path = "home/home-idle/control") => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/${path}`, { headers: { authorization: `Bearer ${token}` } });
+    ws.on("open", () => { ws.close(); resolve(true); });
+    ws.on("error", () => resolve(false));
+  });
+  const repo = "workspace/repo-idle/worker";
+  // Until the home boots with the new token, the old one keeps working, so an
+  // update that never landed cannot lock the home out.
+  assert.equal(await opens(workerToken), true, log());
+  // The restarted home's first call may come through that newer repo.
+  assert.equal(await opens(newToken, repo), true, log());
+  assert.equal(await opens(workerToken), false, "the replaced token stops working once the new one is used");
+  assert.equal(await opens(workerToken, repo), false, "the replaced token stops working for the home's repos too");
+  assert.equal(await opens(newToken), true, log());
+  const hashes = live.prepare("select id, worker_token_hash as hash, worker_token_next_hash as next from rudder_workspaces where id in ('home-idle', 'repo-idle') order by id").all();
+  live.close();
+  assert.deepEqual(hashes, [
+    { id: "home-idle", hash: tokenHash(newToken), next: null },
+    { id: "repo-idle", hash: tokenHash(newToken), next: null },
+  ]);
+});
+
+async function idleRotationFixture(t, respond) {
+  const calls = [];
+  const fly = (await import("node:http")).createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const call = { method: req.method, body: body ? JSON.parse(body) : null };
+    calls.push(call);
+    await respond(call, res);
+  });
+  await new Promise((resolve) => fly.listen(0, "127.0.0.1", resolve));
+  t.after(() => { fly.closeAllConnections(); fly.close(); });
+  const env = {
+    FLY_API_TOKEN: "fly-fixture-only",
+    FLY_API_HOSTNAME: `http://127.0.0.1:${fly.address().port}`,
+    RUDDER_FLY_APP_NAME: "workers",
+    RUDDER_WORKER_IMAGE: "registry.fly.io/workers:new",
+    RUDDER_HOME_IDLE_UPDATE_MS: "1",
+    RUDDER_HOME_UPDATE_SWEEP_MS: "1000",
+  };
+  const server = await bootServer(t, env);
+  const oldToken = "rdrw_rotation_fixture_only";
+  const db = new Database(server.dbPath);
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id,
+    worker_token_hash, source_kind, created_at, updated_at, last_activity_at)
+    values ('home-rotation', 'acct-rotation', 'home', 'home', 'running', 'm-rotation', ?, 'home', ?, ?, ?)`)
+    .run(tokenHash(oldToken), old, old, old);
+  t.after(() => db.close());
+  const connect = async (target = server, token = oldToken) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${target.port}/api/rudder/home/home-rotation/control`,
+      { headers: { authorization: `Bearer ${token}` } });
+    t.after(() => socket.close());
+    await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    return socket;
+  };
+  const publish = (socket, busy = false) => socket.send(JSON.stringify({ type: "state", projects: [
+    { workspaceId: "repo", repo: "a/b", name: "b", agents: [{ id: "agent", status: busy ? "working" : "done", asks: [] }] },
+  ] }));
+  return { server, env, db, calls, connect, publish, oldToken };
+}
+
+const oldRotationConfig = () => ({ image: "registry.fly.io/workers:old", env: { A: "1" }, mounts: [{ volume: "vol_1", path: "/workspace" }] });
+
+serverTest("idle rotation claims a slow provider read before another sweep and rechecks busy state", async (t) => {
+  const reads = [];
+  const f = await idleRotationFixture(t, async (call, res) => {
+    if (call.method === "GET") { reads.push(res); return; }
+    res.end(JSON.stringify({ id: "m-rotation", state: "replacing" }));
+  });
+  const control = await f.connect(); f.publish(control);
+  await waitFor(() => reads.length);
+  // Multiple sweep ticks happen while the original GET remains outstanding.
+  // Previously a later GET could return first and both sweeps would POST.
+  await sleep(2200);
+  assert.equal(reads.length, 1, "one unresolved GET owns this home's update flight");
+  f.publish(control, true);
+  await sleep(100);
+  reads[0].end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+  await sleep(1200);
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 0, "becoming busy during GET prevents mutation");
+  // The read-only refusal releases the local flight, so a later idle read can run.
+  f.publish(control);
+  await waitFor(() => reads.length === 2);
+  reads[1].end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+  await waitFor(() => f.calls.some((call) => call.method === "POST"));
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 1);
+});
+
+serverTest("an uncertain idle update retains its pending token across restart without another mutation", async (t) => {
+  const f = await idleRotationFixture(t, async (call, res) => {
+    if (call.method === "GET") {
+      res.end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+    } else {
+      // The request body arrived; losing the reply cannot establish whether
+      // the provider applied it. A subsequent old-image GET cannot settle it.
+      res.destroy();
+    }
+  });
+  const control = await f.connect(); f.publish(control);
+  await waitFor(() => f.server.log().includes("idle update failed"));
+  const post = f.calls.find((call) => call.method === "POST");
+  assert(post);
+  const pending = f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get();
+  assert.equal(pending.current, tokenHash(f.oldToken));
+  assert.equal(pending.next, tokenHash(post.body.config.env.RUDDER_WORKER_TOKEN));
+  const exited = new Promise((resolve) => f.server.child.once("exit", resolve));
+  f.server.child.kill("SIGTERM"); await exited;
+  const restarted = await bootServer(t, { ...f.env, RUDDER_CLOUD_DB: f.server.dbPath });
+  const oldControl = await f.connect(restarted); f.publish(oldControl);
+  await sleep(2200);
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 1, "persisted pending token fences a second update after restart");
+  assert.deepEqual(f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get(), pending);
+  // Actual authenticated use of that same replacement resolves the pending
+  // transition, even though the provider response was lost.
+  await f.connect(restarted, post.body.config.env.RUDDER_WORKER_TOKEN);
+  assert.deepEqual(f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get(),
+    { current: pending.next, next: null });
+});
+
+serverTest("a sleeping home's last state is a memory: live rows read paused, never working", async (t) => {
+  const { port, base, dbPath } = await bootServer(t);
+  const cliToken = "rdr_stale_test_cli";
+  const workerToken = "rdrw_stale_test_worker";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct-stale", "stale@example.com", now, now);
+  const insert = db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values (@id, 'acct-stale', @key, @name, 'running', @machine, @hash, @kind, @url, @home, @now, @now, @now)
+  `);
+  insert.run({ id: "home-stale", key: "home", name: "home", machine: "m-stale", hash: tokenHash(workerToken), kind: "home", url: null, home: null, now });
+  insert.run({ id: "repo-stale", key: "home:a/b", name: "b", machine: null, hash: tokenHash(workerToken), kind: "home-repo", url: "https://github.com/a/b.git", home: "home-stale", now });
+  db.close();
+  const auth = { authorization: `Bearer ${cliToken}` };
+  const agentsNow = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json()).projects[0];
+  const connect = async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-stale/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+    await new Promise((resolve, reject) => { ws.on("open", resolve); ws.on("error", reject); });
+    return ws;
+  };
+  const agents = [
+    { id: "w", title: "working", status: "working" },
+    { id: "q", title: "asking", status: "working", asks: [{ id: "1-aaaaaaaa", kind: "question" }] },
+    { id: "i", title: "interrupted", status: "waiting", attention: "interrupted" },
+    { id: "rv", title: "review", status: "review", phase: "review" },
+    { id: "pr", title: "pr open", status: "review", phase: "review", pr: { state: "open", number: 7, url: "https://github.com/a/b/pull/7" } },
+    { id: "cf", title: "conflict", status: "review", phase: "integration-blocked", conflict: true, pr: { state: "open" } },
+    { id: "pm", title: "pr merged (old supervisor)", status: "done", phase: "completed", pr: { state: "merged" } },
+    { id: "db", title: "delivery blocked (old supervisor)", status: "done", phase: "delivery blocked" },
+  ];
+  const preview = { port: 3000, label: "dev", url: "https://rudder-home.tail1.ts.net:3000" };
+  const first = await connect();
+  first.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents, ports: [preview] }] }));
+  let project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.agents?.length ? next : null;
+  });
+  const byId = (p) => Object.fromEntries(p.agents.map((a) => [a.id, a]));
+  let rows = byId(project);
+  assert.equal(project.live, true);
+  assert.deepEqual(project.ports, [preview], "the live home's ready preview is visible");
+  assert.deepEqual([rows.w.status, rows.w.needsYou, rows.w.reason], ["working", false, null]);
+  assert.deepEqual([rows.q.needsYou, rows.q.reason], [true, "question"]);
+  assert.deepEqual([rows.i.needsYou, rows.i.reason], [true, "interrupted"]);
+  assert.deepEqual([rows.rv.needsYou, rows.rv.reason], [true, "review"]);
+  assert.deepEqual([rows.pr.needsYou, rows.pr.reason], [false, null], "an open PR waits on GitHub, not on you");
+  assert.deepEqual([rows.cf.needsYou, rows.cf.reason], [true, "conflict"], "a conflict needs you even with a PR open");
+  assert.deepEqual([rows.pm.status, rows.pm.needsYou], ["merged", false], "a merged PR is merged");
+  assert.deepEqual([rows.db.status, rows.db.reason], ["failed", "delivery-blocked"]);
+  assert.ok(!rows.w.stale);
+
+  // The machine goes to sleep: the socket closes and nothing new arrives.
+  first.close();
+  project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.live === false ? next : null;
+  });
+  rows = byId(project);
+  assert.deepEqual(project.ports, [], "an offline home cannot advertise a remembered preview as ready");
+  for (const id of ["w", "q", "i"]) {
+    assert.equal(rows[id].status, "paused", `${id} is not live on a sleeping machine`);
+    assert.equal(rows[id].stale, true);
+    assert.equal(typeof rows[id].lastSeen, "number");
+  }
+  assert.deepEqual(rows.q.asks, [], "a prompt held by a dead hook cannot be answered");
+  assert.equal(rows.q.needsYou, false);
+  assert.equal(rows.rv.reason, "review", "finished work still waits for review while it sleeps");
+  assert.ok(!rows.rv.stale);
+
+  // It wakes: until it reports again the old state stays a memory, then it is live.
+  const second = await connect();
+  t.after(() => second.close());
+  const notYetReported = await agentsNow();
+  assert.equal(notYetReported.live, false);
+  assert.deepEqual(notYetReported.ports, [], "a new socket needs fresh state before previews return");
+  second.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents: [agents[0]] }] }));
+  project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.live === true ? next : null;
+  });
+  assert.equal(project.agents[0].status, "working");
+});

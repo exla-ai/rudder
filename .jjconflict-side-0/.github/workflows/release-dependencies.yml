@@ -1,0 +1,85 @@
+name: Warm release Rust dependencies
+
+# Main is the shared cache scope. Sibling release-check branches cannot share
+# their own cache writes. This workflow never publishes or qualifies a release.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rust-dependency-warmup
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main'
+    name: Dependencies ${{ matrix.key }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: darwin-arm64
+            runner: macos-15
+            cache_profile: release-fixtures
+          - key: darwin-x64
+            runner: macos-15-intel
+            cache_profile: release
+          - key: linux-x64
+            runner: ubuntu-22.04
+            cache_profile: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Never use this cache as native artifact or qualification evidence.
+      - name: Restore external Rust dependencies
+        id: rust_dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rudder-external-deps-v1
+          shared-key: "${{ matrix.key }}-${{ matrix.runner }}-${{ matrix.cache_profile }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml', 'scripts/build-native.mjs', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}"
+          workspaces: ". -> target"
+          cache-targets: "true"
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-bin: "false"
+          cache-on-failure: "false"
+          cache-provider: github
+          env-vars: "ImageOS ImageVersion SDKROOT DEVELOPER_DIR MACOSX_DEPLOYMENT_TARGET LIBRARY_PATH PKG_CONFIG LDFLAGS AR"
+          save-if: ${{ github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main' }}
+
+      # Only this warmup may skip compilation on an exact dependency cache hit.
+      # The release workflow still builds source and runs every required test.
+      - name: Warm required profiles on a dependency miss
+        if: steps.rust_dependencies.outputs.cache-hit != 'true'
+        run: |
+          git diff --exit-code HEAD -- Cargo.lock Cargo.toml native/Cargo.toml engine/Cargo.toml vcs-bridge/Cargo.toml
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const metadata = JSON.parse(cp.execFileSync('cargo', ['metadata', '--locked', '--all-features', '--format-version', '1'], {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024}));
+          const local = metadata.packages.filter(pkg => pkg.source === null).map(pkg => pkg.name);
+          if (!local.length) throw new Error('Expected local workspace packages');
+          for (const profile of ['dev', 'release']) cp.execFileSync('cargo', ['clean', '--profile', profile, ...local.flatMap(name => ['--package', name])], {stdio: 'inherit'});
+          NODE
+          node scripts/build-native.mjs
+          if [ "${{ matrix.key }}" = "darwin-arm64" ]; then
+            cargo test --workspace --locked --features rudder-vcs-bridge/cli --no-run
+          fi
+          # Fail the job before the action's post-save if local cleanup fails.
+          git diff --exit-code HEAD -- Cargo.lock Cargo.toml native/Cargo.toml engine/Cargo.toml vcs-bridge/Cargo.toml
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const metadata = JSON.parse(cp.execFileSync('cargo', ['metadata', '--locked', '--all-features', '--format-version', '1'], {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024}));
+          const local = metadata.packages.filter(pkg => pkg.source === null).map(pkg => pkg.name);
+          if (!local.length) throw new Error('Expected local workspace packages');
+          for (const profile of ['dev', 'release']) cp.execFileSync('cargo', ['clean', '--profile', profile, ...local.flatMap(name => ['--package', name])], {stdio: 'inherit'});
+          NODE

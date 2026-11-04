@@ -1,0 +1,30 @@
+format_version = 1
+name = "rudder-linux-rust-typescript-v1"
+
+[platform]
+os = "linux"
+architecture = "x86_64"
+abi = "glibc-2.36"
+
+[buck2]
+release = "2026-10-15"
+executable_sha256 = "f90e3b3674650a96f9773d8cda92006890a6a348bd7ab7d85dd0f8837fcbcab4"
+
+[policy]
+version = "linux-managed-compile-v1"
+effects = []
+
+[policy.environment]
+SOURCE_DATE_EPOCH = "0"
+
+[[targets]]
+name = "rust"
+language = "rust"
+entrypoint = "rust/lib.rs"
+sources = ["rust/lib.rs", "Cargo.lock", "package-lock.json"]
+
+[[targets]]
+name = "typescript"
+language = "typescript"
+entrypoint = "typescript/main.ts"
+sources = ["typescript/main.ts", "Cargo.lock", "package-lock.json"]

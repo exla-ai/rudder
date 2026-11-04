@@ -1,0 +1,50 @@
+app = "rudder-cloud-control"
+primary_region = "sjc"
+# Room to tell a caller the server is restarting before it goes (voice-call.ts).
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  BETTER_AUTH_URL = "https://rudder-cloud-control.fly.dev"
+  AWS_REGION = "us-east-1"
+  RUDDER_S3_BUCKET = "rudder-cloud-snapshots-597088032164-us-east-1"
+  RUDDER_FABRIC_S3_BUCKET = "rudder-fabric-v1-597088032164-us-east-1"
+  RUDDER_FABRIC_AWS_ROLE_ARN = "arn:aws:iam::597088032164:role/rudder-fabric-control-v1"
+  AWS_ROLE_ARN = "arn:aws:iam::597088032164:role/rudder-fabric-control-v1"
+  RUDDER_FABRIC_DURABLE_STORE = "1"
+  RUDDER_CLOUD_DATA_DIR = "/tmp/rudder-cloud"
+  RUDDER_FLY_APP_NAME = "rudder-workers-exla"
+  RUDDER_FLY_REGION = "sjc"
+  RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:4.0.0-alpha.33"
+  RUDDER_IDLE_PAUSE_MS = "7200000"
+  RUDDER_PUBLIC_LOGIN_URL = "https://rudder.exla.ai/login"
+  GOOGLE_CLIENT_ID = "126214446123-b245olbglilh1edvnk0qu7sb2asbin2q.apps.googleusercontent.com"
+  GITHUB_CLIENT_ID = "Iv23liKY5Nx0Mc4EqByY"
+  RUDDER_SLACK_CHANNEL = "C0BFZGYE5FH"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 200
+    soft_limit = 100
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

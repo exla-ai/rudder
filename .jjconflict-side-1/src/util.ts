@@ -1,0 +1,549 @@
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+import type { JsonValue } from "./types.js";
+import { summarizeTask } from "./task-summary.js";
+import { resolveNativeBinaryPath } from "./native-binary.js";
+
+const DEFAULT_PATH = [
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+].join(":");
+
+export function nowIso(): string {
+  return new Date().toISOString();
+}
+
+export function isTty(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+export function rudderHome(): string {
+  return path.resolve(process.env.RUDDER_HOME?.trim() || path.join(os.homedir(), ".rudder"));
+}
+
+export function expandHome(value: string): string {
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith("~/")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
+}
+
+export function shortenHome(value: string): string {
+  const home = os.homedir();
+  return value === home || value.startsWith(`${home}${path.sep}`)
+    ? `~${value.slice(home.length)}`
+    : value;
+}
+
+export async function ensureDir(dir: string): Promise<void> {
+  await fsp.mkdir(dir, { recursive: true });
+}
+
+export async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fsp.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function pathExistsSync(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readJson<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Serializes JSON read/modify/write work both inside this process and across
+ * the detached board/worker processes. The directory lock is required for
+ * compare-and-swap writes such as worker-attempt ownership; atomic rename alone
+ * prevents torn JSON but cannot prevent a stale process from winning last. */
+const pathLocks = new Map<string, Promise<unknown>>();
+
+export function withPathLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(filePath);
+  const run = (pathLocks.get(key) ?? Promise.resolve()).then(
+    () => withFilesystemPathLock(key, fn),
+    () => withFilesystemPathLock(key, fn),
+  );
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  pathLocks.set(key, tail);
+  void tail.then(() => {
+    if (pathLocks.get(key) === tail) {
+      pathLocks.delete(key);
+    }
+  });
+  return run;
+}
+
+async function withFilesystemPathLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const lockDir = `${filePath}.lock`;
+  const deadline = Date.now() + 10_000;
+  await ensureDir(path.dirname(lockDir));
+  for (;;) {
+    try {
+      await fsp.mkdir(lockDir);
+      break;
+    } catch (error) {
+      const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+      if (code !== "EEXIST") throw error;
+      const age = await fsp.stat(lockDir).then((stat) => Date.now() - stat.mtimeMs).catch(() => null);
+      // JSON critical sections contain only a read + small temp-file rename;
+      // five seconds is safely beyond a live holder but still lets a restart
+      // recover a crashed lock within this call's ten-second deadline.
+      if (age !== null && age > 5_000) {
+        await fsp.rm(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for JSON lock: ${filePath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fsp.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function writeJsonRaw(
+  filePath: string,
+  value: JsonValue,
+  options?: { mode?: number },
+): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  // Unique temp name per write: two concurrent writes to the same path within
+  // the same millisecond must not share a temp file, or one rename consumes the
+  // other's temp and the loser throws ENOENT.
+  const temp = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+  await fsp.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: options?.mode ?? 0o644,
+  });
+  await fsp.rename(temp, filePath);
+  if (options?.mode !== undefined) {
+    await fsp.chmod(filePath, options.mode);
+  }
+}
+
+export function writeJson(
+  filePath: string,
+  value: JsonValue,
+  options?: { mode?: number },
+): Promise<void> {
+  return withPathLock(filePath, () => writeJsonRaw(filePath, value, options));
+}
+
+/**
+ * Atomically read, transform, and write a JSON file under the per-path lock so
+ * a concurrent writer cannot clobber fields between the read and the write.
+ */
+export function updateJson<T>(
+  filePath: string,
+  transform: (current: T | null) => JsonValue | undefined,
+): Promise<void> {
+  return withPathLock(filePath, async () => {
+    const current = await readJson<T>(filePath);
+    const next = transform(current);
+    if (next !== undefined) await writeJsonRaw(filePath, next);
+  });
+}
+
+let cachedRudderJj: string | null | undefined;
+
+/**
+ * Packaged `rudder-jj` (jj 0.40 plus Rudder's content-store backend and
+ * overlay working copy), next to rudder-native. `RUDDER_JJ_BIN` overrides it;
+ * an empty value disables it. Null means use stock `jj` from PATH.
+ */
+export function rudderJjPath(): string | null {
+  const override = process.env.RUDDER_JJ_BIN;
+  if (override !== undefined) return override && isExecutable(override) ? override : null;
+  if (cachedRudderJj !== undefined) return cachedRudderJj;
+  const native = resolveNativeBinaryPath();
+  const candidate = native ? path.join(path.dirname(native), process.platform === "win32" ? "rudder-jj.exe" : "rudder-jj") : null;
+  cachedRudderJj = candidate && isExecutable(candidate) ? candidate : null;
+  return cachedRudderJj;
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** The program to run for `jj`: rudder-jj when present, else stock jj. */
+export function jjProgram(): string {
+  return rudderJjPath() ?? "jj";
+}
+
+function resolveProgram(command: string): string {
+  return command === "jj" ? jjProgram() : command;
+}
+
+export function commandExists(command: string): boolean {
+  if (command === "jj" && rudderJjPath()) return true;
+  const result = spawnSync("sh", ["-c", `command -v ${shellQuote(command)}`], {
+    encoding: "utf8",
+    env: commandEnv(),
+  });
+  return result.status === 0 && result.stdout.trim().length > 0;
+}
+
+const TOOL_INSTALL_HINTS: Record<string, string> = {
+  claude: "Install with `npm install -g @anthropic-ai/claude-code` (see https://github.com/anthropics/claude-code).",
+  codex: "Install with `npm install -g @openai/codex` (see https://github.com/openai/codex).",
+  acpx: "Install with `npm install -g acpx@latest` or run `rudder onboard`.",
+  jj: "Rudder normally sets jj up on its own; run `rudder doctor` to retry, or install it with `brew install jj` or `cargo install jj-cli` (https://jj-vcs.github.io).",
+};
+
+export class MissingToolError extends Error {
+  readonly tool: string;
+  readonly hint: string;
+
+  constructor(tool: string, message?: string) {
+    const hint = TOOL_INSTALL_HINTS[tool] ?? "Please install it and ensure it is on your PATH.";
+    super(message ?? formatMissingToolMessage(tool, hint));
+    this.name = "MissingToolError";
+    this.tool = tool;
+    this.hint = hint;
+  }
+}
+
+export function formatMissingToolMessage(tool: string, hintOverride?: string): string {
+  const hint = hintOverride ?? TOOL_INSTALL_HINTS[tool] ?? "Please install it and ensure it is on your PATH.";
+  return `${tool} is not installed or not found on PATH. ${hint}`;
+}
+
+export function isMissingToolSpawnError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === "ENOENT";
+}
+
+export async function runCommand(
+  command: string,
+  args: string[],
+  options?: { cwd?: string; allowFailure?: boolean; env?: NodeJS.ProcessEnv; inheritStdio?: boolean },
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return await new Promise((resolve, reject) => {
+    // inheritStdio wires the child straight to this process's terminal so an
+    // INTERACTIVE command (e.g. `codex login`) can read stdin and show its prompts;
+    // its stdout/stderr are then not captured (they go to the terminal).
+    const child = spawn(resolveProgram(command), args, {
+      cwd: options?.cwd,
+      env: commandEnv(options?.env),
+      stdio: options?.inheritStdio ? "inherit" : ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const exitCode = code ?? 1;
+      if (exitCode !== 0 && !options?.allowFailure) {
+        reject(new Error(`${command} ${args.join(" ")} failed: ${stderr.trim() || stdout.trim()}`));
+        return;
+      }
+      resolve({ stdout, stderr, code: exitCode });
+    });
+  });
+}
+
+export function runCommandSync(
+  command: string,
+  args: string[],
+  options?: { cwd?: string; allowFailure?: boolean },
+): { stdout: string; stderr: string; code: number } {
+  const result = spawnSync(resolveProgram(command), args, {
+    cwd: options?.cwd,
+    env: commandEnv(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const code = result.status ?? 1;
+  if (code !== 0 && !options?.allowFailure) {
+    throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+  }
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    code,
+  };
+}
+
+export async function promptText(message: string, defaultValue?: string): Promise<string> {
+  const rl = readline.createInterface({ input, output });
+  try {
+    const suffix = defaultValue ? ` [${defaultValue}]` : "";
+    const answer = await rl.question(`${message}${suffix}: `);
+    const trimmed = answer.trim();
+    return trimmed || defaultValue || "";
+  } finally {
+    rl.close();
+  }
+}
+
+export async function promptSecret(message: string): Promise<string> {
+  if (!isTty()) {
+    return "";
+  }
+  const rl = readline.createInterface({ input, output });
+  output.write(`${message}: `);
+  const shouldDisableEcho = process.platform !== "win32";
+  try {
+    if (shouldDisableEcho) {
+      spawnSync("stty", ["-echo"], { stdio: ["inherit", "ignore", "ignore"] });
+    }
+    const answer = await rl.question("");
+    return answer.trim();
+  } finally {
+    if (shouldDisableEcho) {
+      spawnSync("stty", ["echo"], { stdio: ["inherit", "ignore", "ignore"] });
+    }
+    output.write("\n");
+    rl.close();
+  }
+}
+
+export async function promptConfirm(message: string, defaultValue = true): Promise<boolean> {
+  const defaultHint = defaultValue ? "Y/n" : "y/N";
+  const raw = await promptText(`${message} (${defaultHint})`);
+  if (!raw) {
+    return defaultValue;
+  }
+  return ["y", "yes", "true", "1"].includes(raw.toLowerCase());
+}
+
+export async function promptSelect<T extends string>(
+  message: string,
+  options: Array<{ value: T; label: string; hint?: string }>,
+  defaultValue: T,
+): Promise<T> {
+  console.log(message);
+  options.forEach((option, index) => {
+    const marker = option.value === defaultValue ? " [default]" : "";
+    const hint = option.hint ? ` - ${option.hint}` : "";
+    console.log(`  ${index + 1}. ${option.label}${marker}${hint}`);
+  });
+  const raw = await promptText("Choose", String(options.findIndex((o) => o.value === defaultValue) + 1));
+  const byIndex = options[Number(raw) - 1];
+  if (byIndex) {
+    return byIndex.value;
+  }
+  const byValue = options.find((option) => option.value === raw);
+  return byValue?.value ?? defaultValue;
+}
+
+export function slugify(inputValue: string, fallback = "task"): string {
+  const slug = inputValue
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+export function slugPrefix(inputValue: string, fallback = "task", maxChars = 40): string {
+  const slug = slugify(inputValue, fallback).slice(0, maxChars).replace(/-+$/g, "");
+  return slug || fallback;
+}
+
+const RUN_KEY_LEN = 5;
+const RUN_SLUG_WORDS = 4;
+const RUN_SLUG_CHARS = 32;
+const RUN_SLUG_FILLER = new Set([
+  "a", "an", "the", "to", "of", "in", "on", "for", "and", "with", "my", "our", "this",
+  "that", "it", "is", "be", "please",
+]);
+
+/**
+ * A run id is a few words of the task plus a short random key:
+ * `launch-video-k3f9q`. Mirrors native `new_run_id` (gitio.rs). It names the
+ * jj workspace (`rudder-<id>`), the workspace folder and the PR branch, so it
+ * has to read as words. Ids used to be `<YYYYMMDDHHMMSS>-<whole slug>-<uuid8>`;
+ * those stay valid opaque strings.
+ */
+export function newRunId(task: string): string {
+  let value = BigInt(`0x${randomUUID().replace(/-/g, "")}`);
+  let key = "";
+  for (let index = 0; index < RUN_KEY_LEN; index += 1) {
+    key += (value % 36n).toString(36);
+    value /= 36n;
+  }
+  return `${runIdSlug(task)}-${key}`;
+}
+
+function runIdSlug(task: string): string {
+  const all = slugify(summarizeTask(task), "task").split("-").filter(Boolean);
+  const kept = all.filter((word) => !RUN_SLUG_FILLER.has(word));
+  const words = (kept.length > 0 ? kept : all).slice(0, RUN_SLUG_WORDS);
+  let slug = "";
+  for (const word of words) {
+    if (slug && slug.length + 1 + word.length > RUN_SLUG_CHARS) {
+      break;
+    }
+    slug = slug ? `${slug}-${word}` : word;
+  }
+  return slug.slice(0, RUN_SLUG_CHARS) || "task";
+}
+
+/** Whether `id` has the words-plus-key shape `newRunId` makes. Mirrors native `is_readable_run_id`. */
+export function isReadableRunId(id: string): boolean {
+  const cut = id.lastIndexOf("-");
+  if (cut <= 0) {
+    return false;
+  }
+  const slug = id.slice(0, cut);
+  const key = id.slice(cut + 1);
+  return (
+    id.length <= RUN_SLUG_CHARS + 1 + RUN_KEY_LEN
+    && new RegExp(`^[a-z0-9]{${RUN_KEY_LEN}}$`).test(key)
+    && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)
+    && !/^\d{10,}$/.test(slug.split("-")[0] ?? "")
+  );
+}
+
+export function shortHash(value: string): string {
+  return createHash("sha1").update(value).digest("hex").slice(0, 10);
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function commandEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  const existingPath = env.PATH?.trim();
+  env.PATH = existingPath ? mergePath(existingPath, DEFAULT_PATH) : DEFAULT_PATH;
+  return env;
+}
+
+function mergePath(primary: string, fallback: string): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const item of `${primary}:${fallback}`.split(":")) {
+    if (!item || seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    parts.push(item);
+  }
+  return parts.join(":");
+}
+
+export function parseJsonLine(line: string): JsonValue | null {
+  try {
+    return JSON.parse(line) as JsonValue;
+  } catch {
+    return null;
+  }
+}
+
+export function lineSplitBuffer(
+  previous: string,
+  chunk: string,
+): { lines: string[]; rest: string } {
+  const joined = previous + chunk;
+  const parts = joined.split(/\r?\n/);
+  const rest = parts.pop() ?? "";
+  return { lines: parts, rest };
+}
+
+/** A plain object (not null, not an array). Narrowing guard for untyped JSON. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+/** Strip Rudder's prompt-injection wrappers ("USER TASK:" / "[RUDDER PROMPT
+ *  INJECTION]…[END…]") back to the bare prompt the user/orchestrator wrote, so a
+ *  follow-up never re-wraps an already-wrapped prompt. */
+export function stripRudderPromptWrappers(prompt: string): string {
+  const start = "[RUDDER PROMPT INJECTION]";
+  const endMarker = "[END RUDDER PROMPT INJECTION]";
+  let value = prompt.trimStart();
+  for (;;) {
+    if (value.startsWith("USER TASK:")) {
+      value = value.slice("USER TASK:".length).trimStart();
+      continue;
+    }
+    if (value.startsWith(start)) {
+      const afterStart = value.slice(start.length);
+      const end = afterStart.indexOf(endMarker);
+      if (end >= 0) {
+        const body = afterStart.slice(0, end).trim();
+        const rest = afterStart.slice(end + endMarker.length).trimStart();
+        value = rest.length ? rest : body;
+        continue;
+      }
+    }
+    return value;
+  }
+}
+
+/** Flatten an assistant message (string content, or an array of content blocks)
+ *  to its plain text. Tolerant of untyped shapes from either backend. */
+export function textFromAssistantMessage(message: unknown): string {
+  if (!isRecord(message)) {
+    return "";
+  }
+  const content = message.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((block) => {
+      if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
+        return block.text;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}

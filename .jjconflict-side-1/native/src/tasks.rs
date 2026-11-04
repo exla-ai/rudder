@@ -1,0 +1,2042 @@
+#![allow(unused_imports)]
+//! Prompt construction, task-summary generation, and rudder-plan parsing.
+use super::*;
+
+/// Parallel-work guidance every implementing agent gets (execute, main, one-off).
+/// A macro so it can be `concat!`ed into the `const` context blocks. Mirrored in
+/// TS as `PARALLEL_WORK_RULE` (src/brain.ts) for the daemon/headless contract.
+macro_rules! parallel_work_rule {
+    () => {
+        "- Batch independent reads and commands. Use subagents for big independent work; never let two edit the same file."
+    };
+}
+#[cfg(test)]
+pub(crate) const PARALLEL_WORK_RULE: &str = parallel_work_rule!();
+
+/// Waiting and reading cost context, not tool time (PLAN.md section 20): the
+/// measured v4 session had 866 empty polls, 523 clock checks and `sed -n`
+/// slabs worth about 15% of all input tokens. Codex accepts one `write_stdin`
+/// wait of up to `background_terminal_max_timeout` (300000 ms by default).
+macro_rules! wait_and_read_rule {
+    () => {
+        "- Run only the checks for what you changed. Wait for long commands in one blocking call (Codex: one `write_stdin` wait up to 300000 ms), not repeated polls. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology."
+    };
+}
+#[cfg(test)]
+pub(crate) const WAIT_AND_READ_RULE: &str = wait_and_read_rule!();
+
+/// Short planner/orchestrator version: shape the DAG for parallelism.
+pub(crate) const PARALLEL_PLAN_RULE: &str = "Favor independent nodes joined by soft edges so workers run in parallel; add a hard edge only for a real code dependency, never as a default chain.";
+
+/// Planning is a phase owned by the task, not a transfer of accountability to a
+/// read-only decomposer. Runtime enforcement lives in the versioned owner API.
+pub(crate) const PLANNING_OWNERSHIP_RULE: &str = "PLAN SCOPE: Plan only what the user asked for. Add a task only when the request cannot finish without it: no hardening, polish or follow-up phases. Keep the user's checkout, attachments and authorization as given; a changed plan is not new authority.";
+
+pub(crate) fn execution_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    const CONTEXT: &str = concat!(
+        "Rudder: you work in your own jj workspace. Stay in it. Do not commit, push or deploy; Rudder integrates your changes when your session ends.\n",
+        parallel_work_rule!(),
+        "\n",
+        wait_and_read_rule!(),
+        "\n- Never write secrets into files. End with a short summary of what changed and anything unfinished."
+    );
+    // Keep the objective block as the very first lines, but do NOT launch with a
+    // leading `/goal` slash command or a literal `Goal:` header. Claude Code can route
+    // goal-looking launch text through its goal condition machinery, so a long worker
+    // brief trips "Goal condition is limited to 4000 characters" even when the actual
+    // objective is short. User-typed `/goal` forwarding is still supported elsewhere.
+    if starts_goal_prompt(task.trim_start()) {
+        let (goal_block, rest) = split_leading_goal_block(&task);
+        return format!("{goal_block}\n\n{CONTEXT}\n\n{rest}");
+    }
+    format!("{task}\n\n{CONTEXT}")
+}
+
+/// Prompt for the default end-to-end owner. Unlike an isolated Execute worker,
+/// Main runs in the user's real checkout and is allowed to finish repository and
+/// delivery operations when the request explicitly includes them.
+pub(crate) fn main_task_prompt(task: &str) -> String {
+    if task.starts_with(DISCUSSION_PROMPT_PREFIX) {
+        return task.to_string();
+    }
+    let task = strip_rudder_prompt_wrappers(task);
+    const CONTEXT: &str = concat!(
+        "Rudder: you own this request in the user's checkout. Preserve unrelated edits.\n",
+        parallel_work_rule!(),
+        "\n",
+        wait_and_read_rule!(),
+        "\n- Ship only when asked, using the repo's release workflow. Never force-push or write secrets into files. End with a short summary of what changed and anything unfinished."
+    );
+    format!("{task}\n\n{CONTEXT}")
+}
+
+/// Split a goal-formatted prompt into its leading objective + `Done when: ...` block
+/// and the remaining body. Legacy inputs may lead with `/goal` or `Goal:`; normalize
+/// them to `Objective:` so process-launch prompts are never parsed as backend goals.
+fn split_leading_goal_block(task: &str) -> (String, String) {
+    let task = task.trim_start();
+    let mut lines = task.lines();
+    let mut block: Vec<String> = Vec::new();
+    if let Some(goal_line) = lines.next() {
+        block.push(cap_goal_command_line(goal_line));
+    }
+    // The optional Done-when line immediately follows the /goal line.
+    let mut rest_lines: Vec<&str> = Vec::new();
+    let mut consumed_done = false;
+    for line in lines {
+        if !consumed_done {
+            consumed_done = true;
+            if line
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("done when:")
+            {
+                block.push(cap_goal_command_line(line));
+                continue;
+            }
+        }
+        rest_lines.push(line);
+    }
+    let body = rest_lines
+        .iter()
+        .skip_while(|line| line.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    (block.join("\n"), body)
+}
+
+fn starts_goal_prompt(value: &str) -> bool {
+    value == "/goal"
+        || value
+            .strip_prefix("/goal")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        || value.to_ascii_lowercase().starts_with("objective:")
+        || value.to_ascii_lowercase().starts_with("goal:")
+}
+
+/// Cap a hoisted objective / `Done when: ...` line's ARGUMENT to
+/// MAX_GOAL_LINE_CHARS while keeping the label prefix intact.
+fn cap_goal_command_line(line: &str) -> String {
+    if line == "/goal" {
+        return "Objective: complete the task".to_string();
+    }
+    if let Some(rest) = line.strip_prefix("/goal") {
+        if rest.starts_with(char::is_whitespace) {
+            return format!(
+                "Objective: {}",
+                cap_goal_line(rest.trim_start().to_string())
+            );
+        }
+    }
+    if let Some(arg) = line.strip_prefix("Goal: ") {
+        return format!("Objective: {}", cap_goal_line(arg.to_string()));
+    }
+    for prefix in ["Objective: ", "Done when: "] {
+        if let Some(arg) = line.strip_prefix(prefix) {
+            return format!("{prefix}{}", cap_goal_line(arg.to_string()));
+        }
+    }
+    line.to_string()
+}
+
+pub(crate) fn plan_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    format!(
+        "Plan this task before implementation. Inspect the repository and relevant read-only context first. Ask follow-up questions if the plan cannot be made decision-complete from inspection alone.\n\n{task}"
+    )
+}
+
+/// Prompt for a ONE-OFF agent: a single conversational agent the user talks to in the
+/// MAIN checkout for a question or a small self-contained change — NOT a multi-step DAG.
+/// No /goal or isolated-workspace framing: edits land in the working tree directly and
+/// the agent should escalate to the planner if the work turns out big. It still files a
+/// completion note through the run-id sidecar so direct work has durable evidence.
+pub(crate) fn oneoff_prompt(task: &str) -> String {
+    const CONTEXT: &str = concat!(
+        "Rudder: work directly in the user's checkout on this focused question or small change. Preserve unrelated edits.\n",
+        parallel_work_rule!(),
+        "\n",
+        wait_and_read_rule!(),
+        "\n- Leave commits to the owner unless asked. End with a short summary."
+    );
+    format!("{task}\n\n{CONTEXT}")
+}
+
+pub(crate) fn rudder_plan_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    [
+        "You are Rudder's planning coordinator. You decompose one user request into a DAG of implementation tasks that a separate set of worker agents will implement in isolated jj workspaces. You inspect the repository in READ-ONLY mode. You do NOT implement anything yourself. PROJECT RULES: follow applicable CLAUDE.md/AGENTS.md rules once if not already loaded; when a rule affects implementation (build/test commands, style, architecture constraints), copy the relevant constraint into each affected task's `prompt` so workers inherit it. Reference private shared setup when a worker needs it; do not copy credentials into task prompts.".to_string(),
+        PLANNING_OWNERSHIP_RULE.to_string(),
+        format!("User request:\n{task}"),
+        format!("Process:\n1. Inspect the relevant files read-only to understand the work.\n2. You run TURN BY TURN, like plan mode: the user can reply and you resume with their answer, so treat this as a conversation. If something MATERIAL is missing or genuinely ambiguous — scope, approach, a key product/technical decision, a constraint, or what existing work to reuse vs rebuild — ask 1 to 4 concise, specific clarifying questions and STOP without emitting a DAG that turn. Output the questions wrapped EXACTLY in these markers, ONE question per line, so they render as a clean numbered prompt:\nRUDDER_QUESTIONS_START\nWhich time range: last 4 weeks, 6 months, or all time?\nReuse the existing module contract, or rebuild from scratch?\nRUDDER_QUESTIONS_END\nIf instead the request is clear enough to plan responsibly — including trivial or fully specified requests — emit the COMPLETE task DAG on this very turn and state the assumptions you made in the summary after the block. The user reviews and can refine the DAG before anything launches, so never ask a question whose answer would not change the DAG, and never ask just to confirm you may use your judgment. Do not ask pure trivia.\n3. Once the request is clear, decompose it into a DAG of tasks. Each task gets a short stable `id` (for example n0, n1, n2) and a `deps` array of typed edges to the task ids it depends on.\n4. Edge types: `hard` means the child's success condition CANNOT be met until the parent has merged. A task that CONSUMES another task's produced code is HARD on it: tests that import or exercise code another task writes, code that imports a module/function/type another task creates, or wiring that calls an API another task defines. The child can technically start, but it cannot SUCCEED (imports resolve, tests pass) until that code exists, so it must wait for the merge. `soft` means context-only: the parent's diff is delivered as background once it lands, but the child can succeed on its own in parallel (parallel features, doc updates, sibling modules that do not import each other). Use the MINIMAL set of hard edges: default to soft for independent work, but do NOT under-classify, if the child executes or imports the parent's code it is hard. Every hard edge needs a one-line `why`.\n5. Split into separate tasks ONLY where parallel execution across workspaces genuinely pays off: default to 1 to 4 tasks, and justify every task beyond that by work that is truly parallel and touches disjoint files. A SINGLE well-scoped task is the correct plan for most requests. Keep a feature's tests, docs, and config edits INSIDE that feature's task — splitting them out creates merge traffic without parallelism. Do NOT make every task independent when real ordering exists: model the ordering with hard/soft edges instead. Name the concrete files each task creates or edits in its `title` or `goal`. Never pad with busywork. {PARALLEL_PLAN_RULE}\n6. Each task must be self-contained, name the concrete files it creates or edits, and carry its own verification. Each worker runs in its OWN isolated workspace at a different filesystem path than this repository. In every `prompt`, `goal`, and `success`, refer to files by REPOSITORY-RELATIVE paths only (for example `mathutils.py`, `src/db/schema.ts`). NEVER embed an absolute filesystem path, this repository's location, or phrases like \"in the repository at <path>\" or \"cd into <path>\" — the worker is already in its workspace, and an absolute path sends the worker to the wrong directory and the task fails.\n7. Every task MUST carry both a `goal` and a `success`. `goal` is one line naming the single objective the worker should accomplish. `success` is the verifiable DONE-WHEN condition: the commands, artifacts, or criteria that mean the task is complete. Never omit either or leave them empty."),
+        "CONFLICT-SAFE DECOMPOSITION (critical — every parallel worker merges back into ONE tree, so structure the DAG to minimize merge collisions; this is as important as correctness):\n- FOUNDATION FIRST: put shared groundwork (project scaffold, shared schema / data-access layer, shared config, shared types) in early node(s) that every feature node HARD-depends on. Features must not begin until the foundation has merged, so they all branch from the SAME settled base instead of each re-creating it and colliding.\n- DISJOINT PATHS: scope each parallel feature to its OWN files/directories (its own route folder, its own module). Two sibling (soft-coupled) nodes must NOT edit the same source files. If two tasks would both edit one file, either merge them into a single node or make one HARD-depend on the other so they run sequentially, not concurrently.\n- SHARED MANIFESTS ARE OWNED, NOT SHARED: single-file manifests that every feature would otherwise touch (package.json, lock files, .gitignore, tsconfig, global config) should be ESTABLISHED COMPLETELY by the foundation node — including all dependencies the features will need. Do not spread edits to these across many parallel features; that produces a merge conflict on essentially every integration.\n- SUPERSEDE CLEANLY: if the build replaces existing draft/scaffold files, the foundation node must DELETE the superseded files authoritatively (name them in its prompt) so later feature merges never resurrect or re-delete them.\n- BROAD PASSES RUN LAST, ALONE: any whole-codebase pass (final polish, integration, cleanup, formatting, docs sweep) must be a SINGLE terminal node that HARD-depends on every feature node it touches, so it runs by itself after they have all merged — never as a sibling editing the same files concurrently with the features.".to_string(),
+        "YOUR ROLE: You are a read-only DECOMPOSER, not an implementer. Your tools are inspection-only, so you cannot and must not edit, write, or run code. Your only deliverable is the task DAG below. Do NOT implement the work and do NOT ask to proceed: a separate set of worker agents implements each task in its own isolated workspace, and Rudder shows the user this plan for approval before launching them. When the DAG is ready, print exactly the block below as a normal assistant message and then stop.".to_string(),
+        r#"Print exactly this block and no other JSON block:
+RUDDER_PLAN_TASKS_START
+{"tasks":[{"id":"n0","title":"short task title","prompt":"full implementation prompt for one worker agent","goal":"one-line objective for the worker","success":"verifiable done-when condition","deps":[]},{"id":"n1","title":"...","prompt":"...","goal":"...","success":"...","deps":[{"on":"n0","type":"hard","why":"edits the module n0 creates"}]}]}
+RUDDER_PLAN_TASKS_END
+
+After the block, add a short human summary of why this DAG is safe."#.to_string(),
+    ].join("\n\n")
+}
+
+/// Where the INTERACTIVE orchestrator writes its task DAG (a RUDDER_PLAN_TASKS block).
+/// The generated Rudder projection is wrapped in markers, and the orchestrator owns
+/// content outside those markers. Rudder merges its generated block so this file can
+/// be both the live context surface and the orchestrator's DAG/control channel.
+pub(crate) fn orchestrator_plan_path(repo_root: &std::path::Path) -> std::path::PathBuf {
+    repo_root.join("RUDDER.md")
+}
+
+/// Shared system prompt for the INTERACTIVE orchestrator. Unlike the headless
+/// decomposer it does not print a one-shot block to stdout; it writes the DAG to
+/// RUDDER.md, which Rudder reads to populate + render the DAG.
+fn orchestrator_system_prompt_for(
+    agent_name: &str,
+    memory_settings: &str,
+    action_help: &str,
+    writable_files: &str,
+) -> String {
+    vec![
+        format!("You are Rudder's INTERACTIVE orchestration agent, running as a normal {agent_name} session the user talks to directly."),
+        "Your job: converse with the user, inspect the repository READ-ONLY, and maintain the task DAG that a SEPARATE set of worker agents will implement in isolated workspaces. You do NOT implement product code yourself.".to_string(),
+        PLANNING_OWNERSHIP_RULE.to_string(),
+        format!("PROJECT RULES: the user's repo rules apply to YOU and to the plans you write. Before planning, follow applicable CLAUDE.md/AGENTS.md rules once if not already loaded, read linked references relevant to this plan, and honor {memory_settings}. When a rule affects implementation (build/test commands, style, architecture constraints, files to avoid), copy the relevant constraint INTO each affected task's `prompt` so the worker inherits it — workers only reliably see what their prompt carries."),
+        "Use private profiles/stores for credentials. Reference RUDDER_SHARED.md only when the assigned workers need its local setup. Never copy secrets into task prompts or RUDDER.md.".to_string(),
+        "Read RUDDER.md's generated Global job snapshot and agent rows for status and before controls. Active local Rudder agents are live or waiting; Ready local Rudder agents await review/integration; Completed local Rudder agents are history. Ground status in those rows, not stale chat memory.".to_string(),
+        "Ask concise clarifying questions in the conversation whenever the request is ambiguous (scope, approach, key decisions, what to reuse vs rebuild). This is a back-and-forth: the user replies and you continue.".to_string(),
+        "When the task DAG is ready, WRITE it to `RUDDER.md` OUTSIDE the `<!-- RUDDER_GENERATED_START -->` / `<!-- RUDDER_GENERATED_END -->` generated block, wrapped EXACTLY in these markers (one JSON object on its own lines), then tell the user it is ready for approval:\nRUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"n0\",\"title\":\"short title\",\"prompt\":\"full worker prompt\",\"goal\":\"one-line objective\",\"success\":\"verifiable done-when\",\"deps\":[]},{\"id\":\"n1\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[{\"on\":\"n0\",\"type\":\"hard\",\"why\":\"edits the module n0 creates\"}]}]}\nRUDDER_PLAN_TASKS_END".to_string(),
+        format!("Edge types: `hard` = the child cannot SUCCEED until the parent has merged (it imports/executes the parent's code); `soft` = context-only, can run in parallel. Use the minimal hard-edge set; every hard edge needs a one-line `why`. {PARALLEL_PLAN_RULE} Each task carries a `goal` and a verifiable `success`, and refers to files by REPOSITORY-RELATIVE paths only."),
+        "CONFLICT-SAFE DECOMPOSITION (every parallel worker merges back into ONE tree, so structure the DAG to minimize merge collisions): FOUNDATION FIRST — shared groundwork (scaffold, shared schema/data-access layer, shared config/types) goes in early node(s) that every feature HARD-depends on, so features branch from the same settled base. DISJOINT PATHS — scope each parallel feature to its OWN files/dirs; two soft-coupled siblings must not edit the same source file (merge them, or make one hard-depend on the other). SHARED MANIFESTS ARE OWNED — package.json, lock files, .gitignore, tsconfig and global config are established completely by the foundation node (including deps features will need), not edited by many parallel features. SUPERSEDE CLEANLY — if replacing draft/scaffold files, the foundation node deletes the superseded files authoritatively so later merges do not resurrect them. BROAD PASSES RUN LAST, ALONE — any whole-codebase pass (final polish, integration, cleanup, formatting) is a single terminal node that hard-depends on every feature it touches, never a concurrent sibling.".to_string(),
+        "Rudder renders the DAG in the pane ABOVE this terminal and reloads it LIVE from RUDDER.md. The plan is a LIVING document: whenever the user asks to ADD, CHANGE, REMOVE, reorder, re-scope, or re-split tasks at ANY point before they approve, UPDATE the DAG by re-writing the FULL RUDDER_PLAN_TASKS block in RUDDER.md to match - keep stable `id`s for unchanged nodes, add new ones with fresh ids, drop removed ones, and fix up `deps` so the edges stay correct. Always keep the block in sync with what you and the user have agreed; never describe a plan change only in chat without also writing it to the file.".to_string(),
+        "APPROVAL / LAUNCH: After - and ONLY after - the user has EXPLICITLY confirmed in the conversation that the plan is good to run (e.g. \"yes\", \"go\", \"approve\", \"launch it\"), signal Rudder to launch the workers by WRITING (Edit/Write) the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the RUDDER_PLAN_TASKS block in the file. Writing it into RUDDER.md (a structured Write) is the reliable channel; you MAY also print the same line in the chat as a fallback. Never write/print it preemptively, while you are still asking questions, or while you are revising the plan. When you merely need to REFER to the marker in prose, write it as RUDDER_APPROVE_PLAN_TEMPLATE so Rudder does not treat the mention as a launch trigger. Once you write RUDDER_APPROVE_PLAN, Rudder generates graph.json and launches the SEPARATE worker fleet, but this session stays alive as the high-level conductor. Keep talking with the user, explain status from RUDDER.md/graph state, and control workers only through RUDDER_* markers. Do not implement product code yourself.".to_string(),
+        "POST-APPROVAL CONDUCTOR ROLE: Follow-ups in your pane address this plan; plain task input starts separate isolated work. Resolve exact node/run ids from RUDDER.md. Use RUDDER_ADD_TASK <task> for additive DAG work, RUDDER_RUN <task> for one isolated worker without a DAG, RUDDER_MAIN <prompt> for work in the shared main checkout, and RUDDER_REPLAN <direction> for structural pivots.".to_string(),
+        "WORKER CONTROLS: RUDDER_INJECT <node-or-run-id> <message> sends an addressed follow-up to a live worker. For status, read the job snapshot; do not restart work to obtain a status check or send a generic keep-going message. RUDDER_STOP <node-or-run-id> pauses a worker. Use RUDDER_RESUME <node-or-run-id> <claude|codex> <model> [effort] [new direction] or RUDDER_REGOAL <node-or-run-id> <new goal> only for authorized resumption. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested model change, STOP then RESUME each named worker.".to_string(),
+        "INTEGRATION: Finished workers integrate automatically. RUDDER_MERGE <node-or-run-id> merges one completed worker by hand. Use RUDDER_CLOUD_MIGRATE for a requested current/active fleet move, not a single-run onload action.".to_string(),
+        "DELIVERY: When the user asked to ship, use RUDDER_MAIN <prompt> for the release/push/deploy workflow after all nodes are integrated; do not run those commands from the conductor.".to_string(),
+        "CONTROL RESULTS: a consumed marker line is not a success. Check RUDDER.md's \"Your last control markers, and what they did\" section before reporting an effect.".to_string(),
+        action_help.to_string(),
+        format!("Only ever Edit/Write {writable_files}. Treat all other files as read-only."),
+    ]
+    .join("\n\n")
+}
+
+/// System prompt for the Claude INTERACTIVE orchestrator.
+pub(crate) fn orchestrator_system_prompt() -> String {
+    orchestrator_system_prompt_for(
+        "Claude Code",
+        "your loaded Claude Code memory and settings",
+        "You have Rudder project skills available under `.claude/skills/rudder-*`. Use them for dashboard actions when the user asks from this orchestrator session. Those skills tell you which exact `RUDDER_*` control marker to write to RUDDER.md; Rudder consumes the marker and runs the dashboard action.",
+        "RUDDER.md, RUDDER_SHARED.md, and the generated `.claude/skills/rudder-*` SKILL.md files",
+    )
+}
+
+/// First-turn prompt for the interactive orchestrator (paired with the system prompt).
+pub(crate) fn rudder_orchestrator_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    // The launch system contract already carries role, scope, approval and
+    // control semantics. Claude appends it as system text; Codex joins it once.
+    if task.trim().is_empty() {
+        "Wait for the user's task.".to_string()
+    } else {
+        format!("User request:\n{task}")
+    }
+}
+
+/// Codex does not currently expose Claude's `--append-system-prompt` flag for the
+/// interactive TUI, so its conductor gets the full contract in the first user
+/// prompt. Subsequent turns keep the same session alive.
+pub(crate) fn codex_orchestrator_prompt(task: &str) -> String {
+    let system = orchestrator_system_prompt_for(
+        "Codex",
+        "your loaded Codex instructions and settings",
+        "When the user asks for dashboard actions from this orchestrator session, write the exact matching `RUDDER_*` control marker to RUDDER.md. Rudder consumes the marker and runs the dashboard action.",
+        "RUDDER.md and RUDDER_SHARED.md",
+    );
+    format!("{system}\n\n{}", rudder_orchestrator_prompt(task))
+}
+
+/// Default number of experiments a swarm runs at once. Experiments past it wait in
+/// the queue; `swarm.maxParallel` in config.json changes it.
+pub(crate) const DEFAULT_SWARM_MAX_PARALLEL: usize = 18;
+
+/// `/swarm [n] <task>`: an optional experiment count, then the task. A leading
+/// number counts as the count only when it is a plausible one (1 to
+/// `MAX_PLAN_TASKS`), so "/swarm 2024 rain data" keeps the year in the task.
+pub(crate) fn parse_swarm_args(rest: &str) -> std::result::Result<(Option<usize>, String), String> {
+    let usage = "usage: /swarm [n] <task>: run n competing experiments on one goal (leave n out and the swarm decides how many)";
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err(usage.to_string());
+    }
+    let (first, tail) = match rest.split_once(char::is_whitespace) {
+        Some((first, tail)) => (first, tail.trim()),
+        None => (rest, ""),
+    };
+    match first.parse::<usize>() {
+        Ok(count) if (1..=MAX_PLAN_TASKS).contains(&count) => {
+            if tail.is_empty() {
+                Err(usage.to_string())
+            } else {
+                Ok((Some(count), tail.to_string()))
+            }
+        }
+        _ => Ok((None, rest.to_string())),
+    }
+}
+
+/// The request the swarm orchestrator receives: the task with the experiment count
+/// stated on its first line, so the count survives into the plan's recorded origin.
+pub(crate) fn swarm_request(count: Option<usize>, task: &str) -> String {
+    match count {
+        Some(count) => format!("Experiments: {count}\n\n{}", task.trim()),
+        None => format!("Experiments: your choice\n\n{}", task.trim()),
+    }
+}
+
+/// What makes a swarm a swarm, shared by the interactive and headless planners.
+fn swarm_design_rules() -> String {
+    [
+        "A SWARM is not a plan to build one thing. It runs many COMPETING experiments at the SAME goal side by side, each worker in its own isolated workspace. Afterwards the experiments are compared and reconciled; most are thrown away and NONE is merged automatically. You design the experiments. You do not implement anything yourself.",
+        "HOW MANY: the request's first line says `Experiments: <n>` or `Experiments: your choice`. With a number, propose exactly that many experiments. With `your choice`, decide: enough to cover the genuinely distinct ideas worth testing, usually 4 to 20, and say why that many.",
+        "DISTINCT IDEAS: each experiment tests ONE hypothesis or variation (a different idea, model, rule, feature set or parameter region), never a copy of another. Spread them: include a plain baseline or control, careful variations of the most promising direction, and a few bold, out-of-the-box ideas. Use research and earlier results in the repo; do not re-run something the repo shows was already tested unless the user asks, and say which earlier work each experiment builds on.",
+        "ONE SCORER: every experiment is scored the SAME way so they can be ranked. Find how this repo measures results (a backtest, benchmark, eval or test command) and put the exact command, data or date windows, costs and metrics in every experiment's `success`. If the repo has no way to score yet, add ONE setup task with id `setup` that builds the shared scorer; every experiment HARD-depends on it, so they all start from it once it merges. `setup` is the only task that merges.",
+        "NO OVERFITTING: experiments tune only on the training data the repo defines. Held-out and out-of-sample data are for scoring, never for tuning; say which window is which in each experiment.",
+        "SELF-CONTAINED: each experiment's `prompt` says exactly what to change and how to score it, by REPOSITORY-RELATIVE paths only (never an absolute path). Experiments never merge, so they may touch the same files; still prefer one new file per experiment when the repo's layout allows, so the best ideas can be combined later. End every `prompt` by telling the worker to end with its scored results (each metric, the data window, how it was measured).",
+        "FORMAT: experiments get ids e1, e2, e3, ...; experiments never depend on each other; the only allowed edge is a `hard` dep on `setup`. Each task has a `title` naming the idea, a `goal`, and a `success` naming the scorer.",
+    ]
+    .join("\n\n")
+}
+
+const SWARM_TASKS_EXAMPLE: &str = "RUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"e1\",\"title\":\"baseline: the current rule unchanged\",\"prompt\":\"full prompt for this experiment's worker, ending with how to score it and what results to report\",\"goal\":\"one-line objective\",\"success\":\"the scoring command and metrics\",\"deps\":[]},{\"id\":\"e2\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[]}]}\nRUDDER_PLAN_TASKS_END";
+
+/// System prompt for the INTERACTIVE swarm orchestrator (Claude). Like the plan
+/// orchestrator it converses with the user and writes its task list to RUDDER.md,
+/// which Rudder renders above the terminal and launches on approval.
+fn swarm_orchestrator_system_prompt_for(agent_name: &str, writable_files: &str) -> String {
+    [
+        format!("You are Rudder's SWARM orchestrator, running as a normal {agent_name} session the user talks to directly."),
+        swarm_design_rules(),
+        "PROJECT RULES: follow applicable repository rules once if not already loaded. Read linked protocols and earlier results relevant to the experiments. Copy constraints that affect an experiment into its prompt. Read private shared setup only when needed; never copy credentials into experiment prompts or RUDDER.md.".to_string(),
+        format!("Ask concise clarifying questions only when something material is missing. When the experiment list is ready, WRITE it to `RUDDER.md` OUTSIDE the `<!-- RUDDER_GENERATED_START -->` / `<!-- RUDDER_GENERATED_END -->` block, wrapped EXACTLY in these markers (one JSON object on its own lines):\n{SWARM_TASKS_EXAMPLE}\nThen show the user a short table in the chat (id, idea, what it changes) and ask them to review it. Rudder pins the list above this terminal and reloads it LIVE from RUDDER.md: whenever the user asks to add, drop or change experiments, re-write the FULL block so it always matches what you agreed. Never describe a change only in chat."),
+        "LAUNCH: the user launches by pressing Enter in Rudder's task box, or by confirming in this conversation. Only after an explicit confirmation here (\"yes\", \"go\", \"launch it\"), write the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the task block. Never write it preemptively or while still revising. When you only need to mention the marker in prose, write RUDDER_APPROVE_PLAN_TEMPLATE instead.".to_string(),
+        "AFTER LAUNCH: stay in this session as the swarm's conductor. Answer status questions from RUDDER.md's generated block (Active, Ready and Completed agents). You may stop an experiment with `RUDDER_STOP <id>` or message it with `RUDDER_INJECT <id> <message>`, written into RUDDER.md. Never merge experiments: do not write RUDDER_MERGE unless the user explicitly names one experiment to merge. Rudder consumes marker lines and records what each did in RUDDER.md; re-read that before telling the user something happened.".to_string(),
+        format!("Only ever Edit/Write {writable_files}. Treat every other file as read-only."),
+    ]
+    .join("\n\n")
+}
+
+/// System prompt for the Claude interactive swarm orchestrator.
+pub(crate) fn swarm_orchestrator_system_prompt() -> String {
+    swarm_orchestrator_system_prompt_for("Claude Code", "RUDDER.md and RUDDER_SHARED.md")
+}
+
+/// First-turn prompt for the interactive swarm orchestrator.
+pub(crate) fn swarm_orchestrator_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    // As with the ordinary conductor, the bootstrap owns the contract once.
+    format!("Swarm request:\n{task}")
+}
+
+/// Codex has no `--append-system-prompt`, so its swarm conductor gets the whole
+/// contract in the first turn.
+pub(crate) fn codex_swarm_orchestrator_prompt(task: &str) -> String {
+    let system = swarm_orchestrator_system_prompt_for("Codex", "RUDDER.md and RUDDER_SHARED.md");
+    format!("{system}\n\n{}", swarm_orchestrator_prompt(task))
+}
+
+/// HEADLESS swarm planner (`claude -p` / `codex exec`, or with
+/// RUDDER_INTERACTIVE_ORCHESTRATOR=0): designs the experiments read-only and prints
+/// the task block, which goes through the same approval gate as a plan.
+pub(crate) fn swarm_plan_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    [
+        "You are Rudder's swarm planner. Inspect the repository read-only and implement nothing. Follow applicable repo rules once; read relevant linked references and shared setup on demand. Put applicable experiment constraints in each prompt, never credentials.".to_string(),
+        format!("Swarm request:\n{task}"),
+        swarm_design_rules(),
+        "If something MATERIAL is missing, ask 1 to 4 concise questions and stop without a task block, one question per line between these markers:\nRUDDER_QUESTIONS_START\nWhich data window should experiments tune on?\nRUDDER_QUESTIONS_END\nOtherwise emit the complete experiment list this turn; the user reviews it before anything launches.".to_string(),
+        format!("Print exactly this block and no other JSON block:\n{SWARM_TASKS_EXAMPLE}\n\nAfter the block, add a short table (id, idea, what it changes) and say how every experiment is scored."),
+    ]
+    .join("\n\n")
+}
+
+/// A swarm stops starting experiments while the machine has less memory free than
+/// this. Each agent CLI holds a few hundred MB, and a swarm's backtests need room too.
+pub(crate) const SWARM_MIN_FREE_BYTES: u64 = 1536 * 1024 * 1024;
+
+/// `MemAvailable` from `/proc/meminfo` text, in bytes.
+pub(crate) fn meminfo_available_bytes(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemAvailable:")?;
+        let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+        Some(kb * 1024)
+    })
+}
+
+/// The experiments of a swarm: every task no other task hard-depends on. A task
+/// something depends on is setup (the shared scorer), which merges like any plan
+/// node so the experiments start from it; experiments themselves never merge.
+pub(crate) fn swarm_experiment_ids(nodes: &[PlannedNode]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .filter(|node| {
+            !nodes
+                .iter()
+                .any(|other| other.deps.iter().any(|dep| dep == &node.id))
+        })
+        .map(|node| node.id.clone())
+        .collect()
+}
+
+/// Appended to an experiment worker's prompt: its place in the swarm and the rules
+/// that keep the comparison fair.
+pub(crate) fn swarm_experiment_brief(id: &str, total: usize) -> String {
+    format!(
+        "SWARM EXPERIMENT: this is experiment {id}, one of {total} competing experiments Rudder is running side by side on the same goal, each in its own isolated workspace. Your work is compared against the others and is NOT merged automatically; the user decides what, if anything, lands. Stay inside YOUR experiment: test its idea faithfully even if you suspect another idea is better, and do not drift into other variations. Score it exactly as the experiment says, tuning only on the training data it names, never on held-out or out-of-sample data. Report honestly: a clear negative result is as useful as a positive one. End with your scored results (each metric, the data window, how it was measured) and any new experiment idea.\n\n"
+    )
+}
+
+/// Build the RECONCILE planner prompt: a multi-agent plan is already in flight and
+/// the user is ADDING one task. The planner must emit exactly ONE node whose
+/// `deps` reference the existing frontier ids (never replace the plan). Mirrors the
+/// TS `reconcileSystemPrompt` shape in src/planner.ts. `frontier` is the list of
+/// `(id, title)` pairs for the current plan nodes the new task can depend on.
+pub(crate) fn rudder_reconcile_prompt(task: &str, frontier: &[(String, String)]) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    let existing = if frontier.is_empty() {
+        "(none: the plan currently has no in-flight nodes)".to_string()
+    } else {
+        frontier
+            .iter()
+            .map(|(id, title)| format!("- {id}: {title}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let existing_ids = frontier
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "You are Rudder's injection coordinator. A multi-agent plan is ALREADY in flight; a separate set of worker agents is implementing its nodes in isolated jj workspaces. The user is now ADDING one more task to that running plan. You inspect the repository in READ-ONLY mode. You do NOT implement anything yourself, and you do NOT re-plan or replace the existing work.\n\nExisting plan nodes (the frontier, in-flight, not yet merged):\n{existing}\n\nExisting node ids: [{existing_ids}]\n\nNew task the user is ADDING:\n{task}\n\nProcess:\n1. Inspect the relevant files read-only to understand how the new task relates to the in-flight nodes.\n2. Emit EXACTLY ONE node in the RUDDER_PLAN_TASKS block. Its `id` MUST be unique from every existing node id above. Its `deps` reference the existing frontier ids.\n3. Edge rules: add a `hard` dep only if the new task genuinely CANNOT start until that node merges (it edits that node's not-yet-merged code, or needs an interface that node defines) and justify it with a one-line `why`. Otherwise use `soft` deps for nodes the new task should be aware of, or no deps at all if the new task is fully independent. Prefer soft; a hard edge without a `why` is treated as soft.\n4. The node must be self-contained, name concrete files or modules to inspect when known, and carry both a `goal` (one-line objective the worker should accomplish) and a verifiable `success` (the DONE-WHEN condition). Never omit either. The worker runs in its OWN isolated workspace at a different filesystem path than this repository: refer to files by REPOSITORY-RELATIVE paths only, and NEVER embed an absolute path, the repository's location, or phrases like \"in the repository at <path>\" — an absolute path sends the worker to the wrong directory and the task fails.\n\nPLAN MODE: You are running in plan mode. Do NOT call ExitPlanMode. Do NOT implement, edit, or write any files. When the node is ready, print exactly the block below as a NORMAL assistant message and then stop. Rudder reads the block directly from your output; it does not need you to exit plan mode.\n\nPrint exactly this block and no other JSON block:\nRUDDER_PLAN_TASKS_START\n{{\"tasks\":[{{\"id\":\"new\",\"title\":\"short task title\",\"prompt\":\"full implementation prompt for one worker agent\",\"goal\":\"one-line objective for the worker\",\"success\":\"verifiable done-when condition\",\"deps\":[{{\"on\":\"<existing frontier id>\",\"type\":\"soft\",\"why\":\"context the new task should be aware of\"}}]}}]}}\nRUDDER_PLAN_TASKS_END\n\nAfter the block, add a short human summary of how the added node relates to the in-flight plan."
+    )
+}
+
+/// Dependency edge type. `hard` blocks the child from starting until the parent
+/// has merged; `soft` never blocks (the parent's diff is delivered as context once
+/// it lands). `soft` is the safe default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeType {
+    Hard,
+    Soft,
+}
+
+/// A typed dependency declared by a plan task: this task depends `on` another
+/// task id, with the given `edge` type and an optional justification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanEdge {
+    pub(crate) on: String,
+    pub(crate) edge: EdgeType,
+    pub(crate) why: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RudderPlanTask {
+    /// Stable node id. Synthesized as `n{i}` when the plan omits it so older flat
+    /// plans (no id, no deps) keep working as 0-dep roots.
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) prompt: String,
+    /// One-line OBJECTIVE for the launch Objective line. Optional in the parse for
+    /// backward compatibility; the worker prompt derives a default when absent.
+    pub(crate) goal: Option<String>,
+    /// Verifiable SUCCESS / DONE-WHEN condition for the launch prompt. Optional
+    /// in the parse for backward compatibility; defaulted in the worker prompt.
+    pub(crate) success: Option<String>,
+    /// Typed dependencies. Empty for a 0-dep root.
+    pub(crate) deps: Vec<PlanEdge>,
+    pub(crate) backend: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+}
+
+impl RudderPlanTask {
+    /// Ids this task hard-depends on (cannot start until these are merged).
+    pub(crate) fn hard_deps(&self) -> impl Iterator<Item = &str> {
+        self.deps
+            .iter()
+            .filter(|edge| edge.edge == EdgeType::Hard)
+            .map(|edge| edge.on.as_str())
+    }
+}
+
+/// A queued unit of plannable work that has not launched yet. The scheduler
+/// drains these into live `AgentRun`s as their hard deps merge and parallelism
+/// slots free. Created one-per-task when a planner agent completes; rendered in
+/// the Todo section until launched.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PlannedNode {
+    /// Stable node id (the plan task id). Becomes the launched `AgentRun.node_id`.
+    pub(crate) id: String,
+    /// The plan that owns this node (`PlanState::id`). Node ids repeat across concurrent
+    /// plans, so this is what resolves a node back to ITS plan. Empty on a node parsed
+    /// before the owning plan is known; the plan stamps it when the node is queued.
+    #[serde(default)]
+    pub(crate) plan_id: String,
+    pub(crate) title: String,
+    pub(crate) prompt: String,
+    pub(crate) goal: Option<String>,
+    /// Verifiable DONE-WHEN condition carried through to the worker launch prompt.
+    pub(crate) success: Option<String>,
+    /// Hard-dependency parent node ids: launch is gated until ALL are merged.
+    pub(crate) deps: Vec<String>,
+    /// Soft-dependency parent node ids: never gate launch (kept for nesting).
+    pub(crate) soft_deps: Vec<String>,
+    pub(crate) backend: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+}
+
+impl PlannedNode {
+    /// Build a queued node from a parsed plan task: hard-dep ids gate the launch;
+    /// soft-dep ids are retained only for nesting.
+    pub(crate) fn from_task(task: &RudderPlanTask) -> Self {
+        let mut task = task.clone();
+        preflight_plan_task_for_launch(&mut task);
+        let deps: Vec<String> = task.hard_deps().map(ToString::to_string).collect();
+        let soft_deps: Vec<String> = task
+            .deps
+            .iter()
+            .filter(|edge| edge.edge == EdgeType::Soft)
+            .map(|edge| edge.on.clone())
+            .collect();
+        Self {
+            id: task.id,
+            // Stamped by the plan that queues this node; a bare parse has no owner yet.
+            plan_id: String::new(),
+            title: task.title,
+            prompt: task.prompt,
+            goal: task.goal,
+            success: task.success,
+            deps,
+            soft_deps,
+            backend: task.backend,
+            model: task.model,
+            effort: task.effort,
+        }
+    }
+
+    /// View this queued node as a plan task so the orchestrator pane can render a
+    /// reconciled (post-launch) addition in the SAME DAG as the initial nodes. The
+    /// initial nodes live in the orchestrator's frozen plan block; reconciled nodes
+    /// live only here, so without this they would be invisible in the DAG.
+    pub(crate) fn to_task(&self) -> RudderPlanTask {
+        let mut deps: Vec<PlanEdge> = self
+            .deps
+            .iter()
+            .map(|on| PlanEdge {
+                on: on.clone(),
+                edge: EdgeType::Hard,
+                // A PlannedNode only reaches `deps` once its hard edge was
+                // accepted (LLM-justified at parse time, or user-typed in plan
+                // review). Re-serializing with why:None let the parser's
+                // "unjustified hard → soft" demotion silently erase the
+                // ordering on every RUDDER.md round-trip.
+                why: Some("recorded hard dependency".to_string()),
+            })
+            .collect();
+        deps.extend(self.soft_deps.iter().map(|on| PlanEdge {
+            on: on.clone(),
+            edge: EdgeType::Soft,
+            why: None,
+        }));
+        RudderPlanTask {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            prompt: self.prompt.clone(),
+            goal: self.goal.clone(),
+            success: self.success.clone(),
+            deps,
+            backend: self.backend.clone(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }
+    }
+
+    /// A planned node is launchable when every hard dep is satisfied: either the
+    /// dep id is in `merged_ids`, or it is not present in `plan_ids` (the set of
+    /// node ids known to this plan: still-queued nodes plus already-launched ones).
+    /// A dep outside `plan_ids` was never part of the plan and is treated as
+    /// satisfied so the DAG never deadlocks on a dangling reference.
+    pub(crate) fn is_ready(&self, merged_ids: &[String], plan_ids: &[String]) -> bool {
+        self.deps.iter().all(|dep| {
+            merged_ids.iter().any(|id| id == dep) || !plan_ids.iter().any(|id| id == dep)
+        })
+    }
+}
+
+/// Build the worker launch prompt for a planned node. Mirrors
+/// `rudder_plan_worker_prompt` but sources fields off the queued node rather than
+/// a freshly parsed `RudderPlanTask`.
+pub(crate) fn planned_node_worker_prompt(
+    planner_task: &str,
+    node: &PlannedNode,
+    depends_on: &str,
+) -> String {
+    let task = RudderPlanTask {
+        id: node.id.clone(),
+        title: node.title.clone(),
+        prompt: node.prompt.clone(),
+        goal: node.goal.clone(),
+        success: node.success.clone(),
+        deps: Vec::new(),
+        backend: node.backend.clone(),
+        model: node.model.clone(),
+        effort: node.effort.clone(),
+    };
+    // Backend is unused by the prompt builder; pass a placeholder.
+    rudder_plan_worker_prompt(planner_task, &task, depends_on, Backend::Claude)
+}
+
+/// Kahn topological sort over the hard edges only. Returns `Err` when a cycle is
+/// present so the TUI can surface it instead of deadlocking. Unknown ids are
+/// assumed already dropped by the caller.
+pub(crate) fn assert_no_hard_cycle(tasks: &[RudderPlanTask]) -> Result<()> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let ids: Vec<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
+    let known: HashSet<&str> = ids.iter().copied().collect();
+    let mut indegree: HashMap<&str, usize> = ids.iter().map(|id| (*id, 0usize)).collect();
+    // child -> list of parents it hard-depends on; edge parent -> child.
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for task in tasks {
+        for parent in task.hard_deps() {
+            // A hard dep on an id OUTSIDE this task set (a frontier / already-merged
+            // parent) is already satisfied and cannot form a cycle within the set.
+            // Counting it would leave the child permanently above indegree 0 (the
+            // out-of-set parent is never enqueued as a root), falsely reporting a
+            // cycle and rejecting the whole plan — this mirrors is_ready's permissive
+            // dangling-dep rule and keeps parity with the TS parser.
+            if !known.contains(parent) {
+                continue;
+            }
+            children.entry(parent).or_default().push(task.id.as_str());
+            *indegree.entry(task.id.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    let mut queue: VecDeque<&str> = indegree
+        .iter()
+        .filter(|(_, deg)| **deg == 0)
+        .map(|(id, _)| *id)
+        .collect();
+    let mut visited = 0usize;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        if let Some(kids) = children.get(node) {
+            for kid in kids {
+                let entry = indegree.entry(kid).or_insert(0);
+                *entry = entry.saturating_sub(1);
+                if *entry == 0 {
+                    queue.push_back(kid);
+                }
+            }
+        }
+    }
+
+    // Compare against the count of DISTINCT ids (indegree is keyed by id), not tasks.len():
+    // duplicate ids dedupe in the maps, so tasks.len() would over-count and falsely report a
+    // cycle, rejecting the whole plan. The TS daemon parser accepts duplicate ids, so this
+    // keeps the two parsers in parity (a real cycle still leaves a node unvisited).
+    if visited != indegree.len() {
+        bail!("rudder-plan tasks form a hard-dependency cycle");
+    }
+    Ok(())
+}
+
+pub(crate) fn rudder_plan_output_for_run(run: &AgentRun) -> String {
+    // The orchestrator streams JSON events now, so its raw PTY output_log is NDJSON,
+    // not plan text. `plan_stream` reconstructs the assistant text (and, for a refine,
+    // exposes only the CURRENT turn so a stale prior block is not re-captured). Prefer
+    // it whenever present; the raw PTY path is a pre-ingest fallback only.
+    //
+    // IMPORTANT: this helper is used by render and heartbeat code. It must stay purely
+    // in-memory. Codex's durable-session recovery walks ~/.codex/sessions and parses
+    // JSONL; putting that fallback here made every spinner redraw repeat the full tree
+    // scan until the first assistant text arrived (and after restored sessions), driving
+    // the dashboard to a full CPU core. Recovery belongs only in one-shot completion
+    // handling (`evaluate_completed_plan`).
+    if let Some(stream) = run.plan_stream.as_ref() {
+        // OFFICIAL capture: a real plan-mode `ExitPlanMode` plan is the authoritative
+        // text — it carries the RUDDER_PLAN_TASKS block even when the plan was written
+        // to the plan file rather than streamed as assistant text. Falls back to the
+        // reconstructed assistant text (headless decomposer / older flow).
+        if let Some(plan) = stream.exit_plan() {
+            return plan.to_string();
+        }
+        if stream.has_text() {
+            return stream.parse_text().to_string();
+        }
+    }
+    let output = run
+        .terminal
+        .as_ref()
+        .map(|terminal| terminal.output_log_snapshot().to_string())
+        .unwrap_or_default();
+    output
+}
+
+/// Parsed projection of a planner's current in-memory output. The live stream can be
+/// inspected many times between PTY bytes (polling, agents-pane labels, worker render),
+/// so parsing its JSON DAG at each inspection is unnecessary work. `Some(cache)` on an
+/// `AgentRun` also records a negative parse: while the planner is still thinking, callers
+/// reuse `tasks: None` instead of reparsing the same incomplete text every heartbeat.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RudderPlanOutputCache {
+    pub(crate) tasks: Option<Vec<RudderPlanTask>>,
+    pub(crate) summary: Option<String>,
+}
+
+pub(crate) fn parse_rudder_plan_output_cache(output: &str) -> RudderPlanOutputCache {
+    let tasks = extract_rudder_plan_tasks(output)
+        .ok()
+        .filter(|tasks| !tasks.is_empty());
+    let summary = extract_rudder_plan_summary(output);
+    RudderPlanOutputCache { tasks, summary }
+}
+
+/// Return parsed tasks from the per-run cache. The uncached fallback exists for restored
+/// legacy rows and tests whose raw PTY was populated before `poll_agents` had a chance to
+/// build a PlanStreamState; it is still in-memory and never scans Codex session files.
+pub(crate) fn rudder_plan_tasks_for_run(run: &AgentRun) -> Option<Vec<RudderPlanTask>> {
+    if let Some(cache) = run.plan_output_cache.as_ref() {
+        return cache.tasks.clone();
+    }
+    parse_rudder_plan_output_cache(&rudder_plan_output_for_run(run)).tasks
+}
+
+pub(crate) fn rudder_plan_summary_for_run(run: &AgentRun) -> Option<String> {
+    if let Some(cache) = run.plan_output_cache.as_ref() {
+        return cache.summary.clone();
+    }
+    parse_rudder_plan_output_cache(&rudder_plan_output_for_run(run)).summary
+}
+
+/// Slow, one-shot completion recovery for Codex planners whose PTY ring lost the final
+/// block. This is deliberately separate from `rudder_plan_output_for_run`: it walks the
+/// durable Codex session tree and therefore must never be called from render or heartbeat
+/// detection. Completion evaluators call it at most once for a finished planner.
+pub(crate) fn recover_completed_codex_rudder_plan_output(run: &AgentRun) -> String {
+    let output = rudder_plan_output_for_run(run);
+    if extract_rudder_plan_tasks(&output).is_ok_and(|tasks| !tasks.is_empty()) {
+        return output;
+    }
+    latest_codex_rudder_plan_output(run).unwrap_or(output)
+}
+
+/// Upper bound on tasks accepted from ONE plan block. This is NOT a feature limit
+/// (real plans are far smaller); it is a runaway/cost backstop: every task becomes
+/// a real worker agent (a Claude/Codex process), so an unbounded or hallucinated
+/// block could spawn hundreds of processes. 100 is far above any legitimate single
+/// plan, and a plan that exceeds it is surfaced (never silently truncated). Add
+/// more work incrementally by typing into the task pane (reconcile) rather than one
+/// giant block.
+pub(crate) const MAX_PLAN_TASKS: usize = 100;
+
+/// Extract the planner's clarifying questions from a `RUDDER_QUESTIONS_START..END` block
+/// (one question per line, leading numbering/bullets stripped). Empty when the planner did
+/// not ask. Used to render a clean numbered question prompt while the planner is paused.
+pub(crate) fn extract_rudder_questions(output: &str) -> Vec<String> {
+    const START: &str = "RUDDER_QUESTIONS_START";
+    const END: &str = "RUDDER_QUESTIONS_END";
+    let Some(start) = output.rfind(START) else {
+        return Vec::new();
+    };
+    let after = &output[start + START.len()..];
+    let body = match after.find(END) {
+        Some(end) => &after[..end],
+        None => after,
+    };
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.trim_start_matches(|c: char| {
+                c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | '*' | ' ' | '\t')
+            })
+            .trim()
+            .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .take(8)
+        .collect()
+}
+
+pub(crate) fn forced_planner_questions() -> Vec<String> {
+    vec![
+        "Before I build the DAG, what scope, constraints, approach preferences, or existing work should shape this plan? Reply with details, or say \"use your judgment\" to continue.".to_string(),
+    ]
+}
+
+pub(crate) fn planner_questions_or_forced(output: &str) -> Vec<String> {
+    let questions = extract_rudder_questions(output);
+    if questions.is_empty() {
+        forced_planner_questions()
+    } else {
+        questions
+    }
+}
+
+pub(crate) fn extract_rudder_plan_tasks(output: &str) -> Result<Vec<RudderPlanTask>> {
+    extract_rudder_plan_tasks_with_frontier(output, &[])
+}
+
+pub(crate) fn rudder_plan_tasks_block(tasks: &[RudderPlanTask]) -> String {
+    let tasks_json: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|task| {
+            let deps: Vec<serde_json::Value> = task
+                .deps
+                .iter()
+                .map(|edge| {
+                    let mut dep = serde_json::Map::new();
+                    dep.insert("on".to_string(), serde_json::json!(edge.on));
+                    dep.insert(
+                        "type".to_string(),
+                        serde_json::json!(match edge.edge {
+                            EdgeType::Hard => "hard",
+                            EdgeType::Soft => "soft",
+                        }),
+                    );
+                    if let Some(why) = edge.why.as_ref().filter(|why| !why.trim().is_empty()) {
+                        dep.insert("why".to_string(), serde_json::json!(why));
+                    }
+                    serde_json::Value::Object(dep)
+                })
+                .collect();
+            let mut item = serde_json::Map::new();
+            item.insert("id".to_string(), serde_json::json!(&task.id));
+            item.insert("title".to_string(), serde_json::json!(&task.title));
+            item.insert("prompt".to_string(), serde_json::json!(&task.prompt));
+            if let Some(goal) = task.goal.as_ref().filter(|value| !value.trim().is_empty()) {
+                item.insert("goal".to_string(), serde_json::json!(goal));
+            }
+            if let Some(success) = task
+                .success
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                item.insert("success".to_string(), serde_json::json!(success));
+            }
+            item.insert("deps".to_string(), serde_json::Value::Array(deps));
+            if let Some(backend) = task
+                .backend
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                item.insert("backend".to_string(), serde_json::json!(backend));
+            }
+            if let Some(model) = task.model.as_ref().filter(|value| !value.trim().is_empty()) {
+                item.insert("model".to_string(), serde_json::json!(model));
+            }
+            if let Some(effort) = task
+                .effort
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                item.insert("effort".to_string(), serde_json::json!(effort));
+            }
+            serde_json::Value::Object(item)
+        })
+        .collect();
+    let json = serde_json::to_string_pretty(&serde_json::json!({ "tasks": tasks_json }))
+        .unwrap_or_else(|_| "{\"tasks\":[]}".to_string());
+    format!("RUDDER_PLAN_TASKS_START\n{json}\nRUDDER_PLAN_TASKS_END")
+}
+
+/// The number of tasks the planner actually emitted in its block, BEFORE the
+/// `MAX_PLAN_TASKS` backstop. Lets the caller tell the user when a plan was
+/// truncated instead of silently dropping tasks. None if there is no valid block.
+pub(crate) fn rudder_plan_block_task_count(output: &str) -> Option<usize> {
+    const START: &str = "RUDDER_PLAN_TASKS_START";
+    const END: &str = "RUDDER_PLAN_TASKS_END";
+    let clean = strip_ansi_for_plan(output).replace('\r', "");
+    let start = clean.rfind(START)?;
+    let after_start = &clean[start + START.len()..];
+    let end = after_start.find(END)?;
+    let mut json = after_start[..end].trim();
+    json = json.strip_prefix("```json").unwrap_or(json).trim();
+    json = json.strip_prefix("```").unwrap_or(json).trim();
+    json = json.strip_suffix("```").unwrap_or(json).trim();
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+}
+
+/// Like `extract_rudder_plan_tasks`, but `frontier_ids` are ALSO treated as known
+/// ids so a RECONCILE node's `deps` referencing existing (out-of-block) frontier
+/// nodes are kept instead of dropped. The initial-plan path passes an empty slice,
+/// preserving its block-local resolution exactly.
+pub(crate) fn extract_rudder_plan_tasks_with_frontier(
+    output: &str,
+    frontier_ids: &[String],
+) -> Result<Vec<RudderPlanTask>> {
+    const START: &str = "RUDDER_PLAN_TASKS_START";
+    const END: &str = "RUDDER_PLAN_TASKS_END";
+
+    let clean = strip_ansi_for_plan(output).replace('\r', "");
+    let Some(start) = clean.rfind(START) else {
+        bail!("missing RUDDER_PLAN_TASKS_START");
+    };
+    let after_start = &clean[start + START.len()..];
+    let Some(end) = after_start.find(END) else {
+        bail!("missing RUDDER_PLAN_TASKS_END");
+    };
+    let mut json = after_start[..end].trim();
+    if let Some(stripped) = json.strip_prefix("```json") {
+        json = stripped.trim();
+    } else if let Some(stripped) = json.strip_prefix("```") {
+        json = stripped.trim();
+    }
+    if let Some(stripped) = json.strip_suffix("```") {
+        json = stripped.trim();
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(json).context("task block was not valid JSON")?;
+    let tasks = value
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .context("task block must contain a tasks array")?;
+
+    // Cap first, then synthesize ids by position so `deps` referencing dropped
+    // (beyond-cap) tasks are treated as unknown and dropped below.
+    let capped: Vec<&serde_json::Value> = tasks.iter().take(MAX_PLAN_TASKS).collect();
+
+    // Known ids across the capped block. An explicit id wins; otherwise the
+    // positional fallback `n{i}` is used (matching the synthesized id below). The
+    // reconcile frontier ids are merged in so cross-block deps on existing nodes
+    // survive `parse_plan_deps`.
+    let mut known_ids: std::collections::HashSet<String> = capped
+        .iter()
+        .enumerate()
+        .map(|(index, task)| plan_task_id(task, index))
+        .collect();
+    known_ids.extend(frontier_ids.iter().cloned());
+
+    let mut out = Vec::new();
+    // Ids emitted so far. Downstream readiness/merge/scheduling all match nodes by
+    // id STRING, so two tasks sharing an id would let one satisfy a dependency the
+    // other owns and silently drop the second node's work. Uniquify later collisions
+    // here (the reconcile/rebase path already does this via uniquify_node_id).
+    let mut emitted_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (index, task) in capped.iter().enumerate() {
+        let title = task
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("worker task")
+            .trim();
+        let prompt = task
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .context("each task needs a prompt")?
+            .trim();
+        if prompt.is_empty() {
+            continue;
+        }
+
+        let mut id = plan_task_id(task, index);
+        if !emitted_ids.insert(id.clone()) {
+            // Collision with an id already emitted this parse: rename the later
+            // duplicate so it stays a distinct node. Cross-references to the shared
+            // id continue to resolve to the FIRST occurrence (a malformed plan, but
+            // never silent work loss).
+            let mut n = 2;
+            let renamed = loop {
+                let candidate = format!("{id}-{n}");
+                if emitted_ids.insert(candidate.clone()) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            id = renamed;
+        }
+        let deps = parse_plan_deps(task, &id, &known_ids);
+
+        let mut plan_task = RudderPlanTask {
+            id,
+            title: if title.is_empty() {
+                "worker task".to_string()
+            } else {
+                title.to_string()
+            },
+            prompt: prompt.to_string(),
+            goal: plan_optional_str(task, "goal"),
+            success: plan_optional_str(task, "success"),
+            deps,
+            backend: plan_optional_str(task, "backend"),
+            model: plan_optional_str(task, "model"),
+            effort: plan_optional_str(task, "effort"),
+        };
+        preflight_plan_task_for_launch(&mut plan_task);
+        out.push(plan_task);
+    }
+
+    assert_no_hard_cycle(&out)?;
+
+    Ok(out)
+}
+
+/// The orchestrator's human-readable prose printed AFTER the RUDDER_PLAN_TASKS_END
+/// marker: its assumptions, why-this-is-safe, and any open questions. Shown under
+/// the DAG so the user knows what the planner assumed and what to discuss. Returns
+/// None when there is no trailing prose. ANSI-stripped, trimmed, and length-capped.
+pub(crate) fn extract_rudder_plan_summary(output: &str) -> Option<String> {
+    const END: &str = "RUDDER_PLAN_TASKS_END";
+    let clean = strip_ansi_for_plan(output).replace('\r', "");
+    let idx = clean.rfind(END)?;
+    let after = clean[idx + END.len()..].trim();
+    // Drop a stray closing fence if the whole reply was fenced.
+    let after = after.trim_start_matches("```").trim();
+    if after.is_empty() {
+        return None;
+    }
+    // Show the FULL human summary (the orchestrator pane scrolls it). A generous
+    // upper bound only guards against a pathological reply, not normal prose; the
+    // old 1500-char cap chopped real summaries off mid-sentence.
+    Some(after.chars().take(20_000).collect())
+}
+
+/// Build the composite request handed to the orchestrator when the user REFINES a
+/// pending plan: the original ask, the current DAG outline, and the user's
+/// feedback, framed so the planner revises the whole DAG (reusing stable ids)
+/// rather than starting over. This string is the orchestrator's task; the
+/// decomposer system prompt (`rudder_plan_prompt`) still wraps it.
+/// The SLIM follow-up prompt sent on a session-RESUMED refine. The resumed session
+/// already holds the prior plan + reasoning + the files it inspected, so we send
+/// only the feedback plus the one rule that is not re-applied on resume: re-emit the
+/// full RUDDER_PLAN_TASKS block. Used when there is a session to `--resume`.
+/// Resume framing when the planner PAUSED to ask a clarifying question and the user is
+/// ANSWERING (no plan exists yet). Distinct from build_refine_followup so the model is not
+/// told to revise "the plan you produced" and is allowed to ask once more if still unsure.
+pub(crate) fn build_clarification_answer_followup(answer: &str) -> String {
+    format!(
+        "Here is the user's answer to the clarifying question(s) you asked. Use it to finish planning. If something is STILL materially ambiguous you may ask 1 to 2 more concise questions and stop; otherwise emit the COMPLETE task DAG now as one block:\nRUDDER_PLAN_TASKS_START\n{{\"tasks\":[...]}}\nRUDDER_PLAN_TASKS_END\nAfter the block, add a short note of any assumptions you made.\n\nUser's answer:\n{answer}"
+    )
+}
+
+pub(crate) fn build_refine_followup(feedback: &str) -> String {
+    format!(
+        "The user reviewed the plan you just produced and wants changes. Apply this feedback directly — do not ask questions and do not re-explain the whole plan. Keep the parts that still make sense (reuse their ids), add, remove, or edit tasks and dependencies as needed, then RE-EMIT THE FULL UPDATED PLAN as one block exactly as before:\nRUDDER_PLAN_TASKS_START\n{{\"tasks\":[...]}}\nRUDDER_PLAN_TASKS_END\nAfter the block, add a short note on what changed.\n\nUser feedback:\n{feedback}"
+    )
+}
+
+pub(crate) fn build_refine_request(original: &str, current_plan: &str, feedback: &str) -> String {
+    format!(
+        "You previously produced the task DAG below for the original request. The user has reviewed it and wants changes. Produce the REVISED, COMPLETE task DAG with the changes applied: keep the parts that still make sense (reuse their ids), add, remove, or edit tasks and dependencies as needed, and re-emit the full plan. Apply the user's feedback directly and do not ask questions.\n\nOriginal request:\n{original}\n\nCurrent plan:\n{current_plan}\n\nUser feedback / requested changes:\n{feedback}"
+    )
+}
+
+/// Build the REBASE prompt: a structural mid-flight change while work is already in
+/// flight. Unlike refine (pre-launch), this re-decomposes against THREE live zones:
+/// MERGED work has already landed and is the baseline (build forward — do NOT re-plan
+/// it; reference its ids as satisfied deps); RUNNING work is in flight (keep its id to
+/// preserve the agent, change its goal to re-task it, or omit it to stop it); TODO work
+/// is unlaunched and may be replaced freely. Reuse stable ids so the diff can match
+/// nodes across the rewrite. The planner re-emits ONE full RUDDER_PLAN_TASKS block.
+pub(crate) fn build_rebase_request(
+    merged: &str,
+    running: &str,
+    todo: &str,
+    direction: &str,
+) -> String {
+    format!(
+        "The user is steering the project in a new direction MID-FLIGHT. Re-plan the work as a single complete task DAG that honours what has already happened. There are three zones; treat each differently and REUSE existing ids so the change can be applied surgically.\n\nMERGED (already landed — the baseline; do NOT re-plan these, build FORWARD on them; you may reference their ids as already-satisfied dependencies):\n{merged}\n\nRUNNING (in flight right now — keep an id to leave that agent working, restate its goal to re-task it, or omit it to stop it):\n{running}\n\nTODO (queued, not started — replace freely):\n{todo}\n\nNew direction from the user:\n{direction}\n\nRe-emit the FULL updated plan as one block exactly as before:\nRUDDER_PLAN_TASKS_START\n{{\"tasks\":[...]}}\nRUDDER_PLAN_TASKS_END\nApply the new direction directly — do not ask questions. After the block, add a short note on what changed and why.",
+    )
+}
+
+/// A running plan node as seen by the rebase differ: its stable id, its title (for the
+/// title-overlap fallback when the planner renames ids), and `context` — the text the
+/// agent is currently working from (its launch prompt / last goal). `context` is used
+/// only to decide whether the new plan's goal for this node is materially different
+/// (re-goal) or effectively the same (keep): if the new goal text is not already
+/// present in the agent's context, its objective changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunningNode {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) context: String,
+}
+
+/// The result of diffing a revised plan against the live RUNNING + TODO zones (MERGED
+/// is excluded — it is the immutable baseline). Drives the autonomous apply in
+/// `evaluate_completed_rebase`: running nodes are kept/re-goaled/stopped, the TODO queue
+/// is rebuilt from `todo`, and `added` is the subset of `todo` that is brand new.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlanDiff {
+    /// Running node ids the new plan keeps unchanged (matched, same objective).
+    pub(crate) kept: Vec<String>,
+    /// Running nodes whose objective changed: `(node_id, new_goal)` → re-goal.
+    pub(crate) regoaled: Vec<(String, String)>,
+    /// Running ids the new plan dropped + old TODO ids it no longer contains → stop/drop.
+    pub(crate) dropped: Vec<String>,
+    /// Brand-new planned nodes (in `todo` but with an id not previously queued).
+    pub(crate) added: Vec<PlannedNode>,
+    /// The full rebuilt TODO queue, in plan order, ready to REPLACE `planned_nodes`:
+    /// every new task that is not a running or merged node.
+    pub(crate) todo: Vec<PlannedNode>,
+}
+
+/// Normalize a title/goal for matching: lowercase, collapse runs of non-alphanumerics
+/// to single spaces, trim. So "Add Rate-Limiting!" and "add rate limiting" compare equal.
+pub(crate) fn norm_title(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut prev_space = true; // trims leading separators
+    for ch in value.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// The new plan's goal for a still-running node is a re-goal (objective changed) when
+/// it is non-empty AND not already contained in what the agent is working from. A
+/// planner that re-states the same objective produces a goal already present in the
+/// agent's launch context, so that stays a KEEP (no disruptive PTY respawn).
+pub(crate) fn goal_changed(context: &str, new_goal: &str) -> bool {
+    let goal = norm_title(new_goal);
+    if goal.is_empty() {
+        return false;
+    }
+    !norm_title(context).contains(&goal)
+}
+
+/// Pure structural diff of a revised plan against the live zones. MERGED ids are the
+/// baseline (their tasks are skipped — already landed). Each new task is matched to a
+/// RUNNING node by id, then by normalized title; a match is kept or re-goaled. Unmatched
+/// new tasks become TODO nodes (flagged `added` when their id was not already queued).
+/// Running nodes no match touched → dropped; old TODO ids absent from the new plan are
+/// also reported dropped (the queue is rebuilt regardless, but the diff stays visible).
+pub(crate) fn diff_plan(
+    running: &[RunningNode],
+    todo: &[PlannedNode],
+    merged_ids: &[String],
+    new_tasks: &[RudderPlanTask],
+) -> PlanDiff {
+    use std::collections::HashSet;
+    let merged: HashSet<&str> = merged_ids.iter().map(String::as_str).collect();
+    let old_todo_ids: HashSet<&str> = todo.iter().map(|n| n.id.as_str()).collect();
+
+    let mut diff = PlanDiff::default();
+    let mut matched_running: HashSet<String> = HashSet::new();
+
+    for task in new_tasks {
+        // Build-forward: a task that re-describes already-merged work is ignored.
+        if merged.contains(task.id.as_str()) {
+            continue;
+        }
+        // Match to a RUNNING node: id first, then normalized title (planner renamed id).
+        // Skip nodes already claimed by an earlier task this pass, or two new tasks with
+        // the same title would both bind one running node — wrongly stopping a distinct
+        // node and silently losing a planned task.
+        let run_match = running
+            .iter()
+            .find(|node| node.id == task.id && !matched_running.contains(&node.id))
+            .or_else(|| {
+                let nt = norm_title(&task.title);
+                running.iter().find(|node| {
+                    !matched_running.contains(&node.id) && norm_title(&node.title) == nt
+                })
+            });
+        if let Some(node) = run_match {
+            matched_running.insert(node.id.clone());
+            let new_goal = task.goal.clone().unwrap_or_default();
+            if goal_changed(&node.context, &new_goal) {
+                diff.regoaled.push((node.id.clone(), new_goal));
+            } else {
+                diff.kept.push(node.id.clone());
+            }
+            continue;
+        }
+        // Otherwise it is a TODO node (carried over or brand new).
+        let planned = PlannedNode::from_task(task);
+        if !old_todo_ids.contains(planned.id.as_str()) {
+            diff.added.push(planned.clone());
+        }
+        diff.todo.push(planned);
+    }
+
+    // Running nodes the new plan abandoned → stop.
+    for node in running {
+        if !matched_running.contains(&node.id) {
+            diff.dropped.push(node.id.clone());
+        }
+    }
+    // Old TODO ids absent from the new plan → dropped (visible in the diff).
+    let new_ids: HashSet<&str> = new_tasks.iter().map(|t| t.id.as_str()).collect();
+    for node in todo {
+        if !new_ids.contains(node.id.as_str()) {
+            diff.dropped.push(node.id.clone());
+        }
+    }
+    diff
+}
+
+/// Replacement verbs / phrases that signal a typed message is a STRUCTURAL pivot away
+/// from the current plan (re-plan the whole DAG) rather than an ADDITIVE request (fold
+/// one node in). Matched case-insensitively as substrings of the message.
+const STRUCTURAL_MARKERS: &[&str] = &[
+    "instead",
+    "scrap",
+    "rewrite",
+    "re-write",
+    "pivot",
+    "start over",
+    "start from scratch",
+    "throw out",
+    "throw away",
+    "ditch",
+    "abandon",
+    "rather than",
+    "no longer",
+    "forget the",
+    "forget about",
+    "drop everything",
+    "different approach",
+    "rethink",
+    "redo the",
+    "redo everything",
+    "overhaul",
+    "completely change",
+    "change the whole",
+    "change everything",
+    "replace the plan",
+    "replan",
+    "re-plan",
+];
+
+/// Stopwords excluded from the title-overlap heuristic so a shared common word does not
+/// make an additive request look structural.
+const TITLE_STOPWORDS: &[&str] = &[
+    "about", "after", "again", "their", "there", "these", "those", "which", "while", "would",
+    "could", "should", "with", "from", "into", "that", "this", "then", "them", "they", "have",
+    "your", "make", "code", "task", "node", "using", "based", "where",
+];
+
+/// Decide whether a typed message during CONDUCTING is a STRUCTURAL pivot (true → rebase
+/// the whole plan) or an ADDITIVE request (false → reconcile one node). Two cheap signals:
+/// (1) any replacement verb/phrase, or (2) the message references a MAJORITY of existing
+/// node titles (reshaping the plan wholesale, not adding to it). Pure + unit-tested; a
+/// misfire is cheaply reversible (a rebase that yields no changes pops the plan back).
+/// True if `needle` appears in `haystack` bounded by non-alphanumeric chars (or string
+/// edges) on both sides, so a marker like "instead" matches the word but not a longer
+/// word that merely contains it. Multi-word markers ("rather than") match as a phrase.
+fn contains_word_phrase(haystack: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let at = from + rel;
+        let before_ok = at == 0
+            || !haystack[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after = at + needle.len();
+        let after_ok = after >= haystack.len()
+            || !haystack[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
+
+pub(crate) fn is_structural_direction(input: &str, titles: &[String]) -> bool {
+    let lower = input.to_lowercase();
+    // Whole-word/phrase match so a marker inside a longer word (or an incidental
+    // substring) does not force a full plan rebase.
+    if STRUCTURAL_MARKERS
+        .iter()
+        .any(|marker| contains_word_phrase(&lower, marker))
+    {
+        return true;
+    }
+    if titles.len() < 2 {
+        return false;
+    }
+    let words: std::collections::HashSet<String> = norm_title(&lower)
+        .split(' ')
+        .filter(|w| w.len() >= 4)
+        .map(ToString::to_string)
+        .collect();
+    let referenced = titles
+        .iter()
+        .filter(|title| title_referenced(&words, title))
+        .count();
+    referenced * 2 > titles.len()
+}
+
+/// A title is "referenced" by the message when one of its distinctive tokens (length ≥ 5,
+/// not a stopword) appears as a whole word in the message.
+fn title_referenced(message_words: &std::collections::HashSet<String>, title: &str) -> bool {
+    norm_title(title)
+        .split(' ')
+        .filter(|w| w.len() >= 5 && !TITLE_STOPWORDS.contains(w))
+        .any(|w| message_words.contains(w))
+}
+
+/// Read a non-empty trimmed string field, or `None`.
+fn plan_optional_str(task: &serde_json::Value, key: &str) -> Option<String> {
+    task.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// The node id for a task: explicit `id` if non-empty, else synthesized `n{index}`.
+fn plan_task_id(task: &serde_json::Value, index: usize) -> String {
+    plan_optional_str(task, "id").unwrap_or_else(|| format!("n{index}"))
+}
+
+/// Parse `deps` into typed edges. Drops edges whose `on` is not a known id (and
+/// self-edges). Downgrades a `hard` edge with empty/missing `why` to `soft` so
+/// every hard dependency is justified.
+fn parse_plan_deps(
+    task: &serde_json::Value,
+    self_id: &str,
+    known_ids: &std::collections::HashSet<String>,
+) -> Vec<PlanEdge> {
+    let Some(deps) = task.get("deps").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for dep in deps {
+        // A BARE STRING dep ("n0") is a SOFT edge on that id (parity with the TS daemon's
+        // parseRawDeps; the Rust parser previously dropped these silently).
+        if let Some(bare) = dep.as_str().map(str::trim).filter(|v| !v.is_empty()) {
+            if bare != self_id && known_ids.contains(bare) {
+                out.push(PlanEdge {
+                    on: bare.to_string(),
+                    edge: EdgeType::Soft,
+                    why: None,
+                });
+            }
+            continue;
+        }
+        // Models phrase the parent id as either "on" or "from"; accept both.
+        let on = dep
+            .get("on")
+            .or_else(|| dep.get("from"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(on) = on else { continue };
+        // Drop edges to unknown ids and self-edges.
+        if on == self_id || !known_ids.contains(on) {
+            continue;
+        }
+        let why = dep
+            .get("why")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let declared_hard = dep
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| value.trim().eq_ignore_ascii_case("hard"))
+            .unwrap_or(false);
+        // hard requires a justification; downgrade to soft otherwise. soft is default.
+        let edge = if declared_hard && why.is_some() {
+            EdgeType::Hard
+        } else {
+            EdgeType::Soft
+        };
+        out.push(PlanEdge {
+            on: on.to_string(),
+            edge,
+            why,
+        });
+    }
+    out
+}
+
+/// The canonical default DONE-WHEN condition when the planner did not supply a
+/// `success`. Mirrors the TS `DEFAULT_SUCCESS` constant in src/goal.ts.
+pub(crate) const DEFAULT_GOAL_SUCCESS: &str =
+    "the task is implemented and its own verification passes";
+
+/// Collapse a value to a single launch objective line, trimmed for prompt budget.
+fn one_line(value: &str) -> String {
+    let joined = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = joined.trim();
+    truncate_chars(trimmed, 200)
+}
+
+/// The OBJECTIVE for a task's launch Objective line: the planner-supplied `goal`, else a
+/// default derived from the title (or the first line of the prompt).
+/// Keep launch goal lines under the backend's slash-command limit too, because legacy
+/// prompts can still be recovered from `/goal` and users can forward `/goal` manually.
+/// The full detail still rides along in the prompt body that follows.
+pub(crate) const MAX_GOAL_LINE_CHARS: usize = 3000;
+
+pub(crate) fn cap_goal_line(text: String) -> String {
+    if text.chars().count() <= MAX_GOAL_LINE_CHARS {
+        return text;
+    }
+    let truncated: String = text.chars().take(MAX_GOAL_LINE_CHARS - 1).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// The argument to forward for a slash command typed in the task bar. For `/goal` the
+/// backend rejects an argument longer than 4000 chars ("Goal condition is limited to
+/// 4000 characters"), so collapse the objective onto a SINGLE line (the slash command
+/// only reads up to the first newline anyway) and cap it under MAX_GOAL_LINE_CHARS — a
+/// long or pasted goal then never bounces; the full detail can ride in a normal
+/// follow-up message. Every other slash command passes its trimmed argument through.
+pub(crate) fn slash_command_arg(command: &str, rest: &str) -> String {
+    let trimmed = rest.trim();
+    if command == "/goal" {
+        cap_goal_line(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn goal_objective(task: &RudderPlanTask) -> String {
+    if let Some(goal) = task
+        .goal
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        return cap_goal_line(one_line(goal));
+    }
+    let title = task.title.trim();
+    if !title.is_empty() {
+        return cap_goal_line(one_line(title));
+    }
+    let first_line = task
+        .prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("complete the task");
+    cap_goal_line(one_line(first_line))
+}
+
+/// The verifiable DONE-WHEN condition for a task: the planner-supplied
+/// `success`, else the canonical default stopping condition.
+fn goal_success(task: &RudderPlanTask) -> String {
+    task.success
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(one_line)
+        .map(cap_goal_line)
+        .unwrap_or_else(|| DEFAULT_GOAL_SUCCESS.to_string())
+}
+
+/// Deterministic DAG preflight before approval/launch: every node gets a one-line,
+/// capped objective and done-when condition. This is deliberately local, not model
+/// driven, because character limits are mechanical and the transform is idempotent.
+pub(crate) fn preflight_plan_task_for_launch(task: &mut RudderPlanTask) {
+    task.goal = Some(goal_objective(task));
+    task.success = Some(goal_success(task));
+}
+
+/// Build a worker launch prompt in the canonical objective format. Every spawned agent
+/// leads with `Objective: <objective>` then a `Done when:` line so the worker has a
+/// clear objective and stopping condition. Do not use `/goal` or `Goal:` here:
+/// backends may parse the entire initial prompt as a goal condition.
+pub(crate) fn rudder_plan_worker_prompt(
+    planner_task: &str,
+    task: &RudderPlanTask,
+    depends_on: &str,
+    _backend: Backend,
+) -> String {
+    // `depends_on` (when non-empty) is a pre-formatted "Depends on:" block built by the
+    // caller from the live DAG + each parent's `rudder done` interfaces; it sits between
+    // the worker task line and the node prompt so the worker BUILDS ON its prerequisites.
+    let body = format!(
+        "Worker node: {}\n\nOriginal request:\n{planner_task}\n\nWorker task: {}\n\n{depends_on}{}",
+        task.id, task.title, task.prompt
+    );
+    format!(
+        "Objective: {}\nDone when: {}\n\n{}",
+        goal_objective(task),
+        goal_success(task),
+        body
+    )
+}
+
+/// Wrap a manual single-task spawn (no planner) in the canonical objective format.
+/// The objective is the task statement's first line; the success condition is
+/// the canonical default stopping condition. Idempotent: a prompt that already has
+/// a goal block is returned with any legacy `/goal` or `Goal:` prefix normalized to
+/// `Objective:`.
+pub(crate) fn manual_goal_prompt(task: &str) -> String {
+    let trimmed = task.trim_start();
+    if starts_goal_prompt(trimmed) {
+        let (goal_block, rest) = split_leading_goal_block(trimmed);
+        return if rest.is_empty() {
+            goal_block
+        } else {
+            format!("{goal_block}\n\n{rest}")
+        };
+    }
+    let objective = task
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(one_line)
+        .filter(|line| !line.is_empty())
+        .map(cap_goal_line)
+        .unwrap_or_else(|| "complete the task".to_string());
+    format!("Objective: {objective}\nDone when: {DEFAULT_GOAL_SUCCESS}\n\n{task}")
+}
+
+pub(crate) fn rudder_plan_worker_title_from_prompt(task: &str) -> Option<String> {
+    let mut lines = task.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("Worker task:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+        for title in lines.by_ref() {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn strip_ansi_for_plan(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            // CSI: ESC [ ... <final byte @-~> (colors, cursor moves).
+            Some('[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] ... terminated by BEL (\x07) or ST (ESC \). Claude emits
+            // OSC 777 desktop notifications ("Claude needs your permission"); without
+            // this their payload leaks into the output and can pollute the parse.
+            Some(']') => {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    if next == '\x07' {
+                        chars.next();
+                        break;
+                    }
+                    if next == '\x1b' {
+                        chars.next();
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            // Other ESC sequences (e.g. charset selection ESC ( B): drop ESC + the
+            // intermediate/final byte so a stray escape never breaks block parsing.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+pub(crate) fn strip_rudder_prompt_wrappers(task: &str) -> String {
+    const START: &str = "[RUDDER PROMPT INJECTION]";
+    const END: &str = "[END RUDDER PROMPT INJECTION]";
+
+    let mut value = task.trim().to_string();
+    loop {
+        let trimmed = value.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("USER TASK:") {
+            value = rest.trim_start().to_string();
+            continue;
+        }
+        if let Some(after_start) = trimmed.strip_prefix(START) {
+            if let Some(index) = after_start.find(END) {
+                let body = after_start[..index].trim();
+                let rest = after_start[index + END.len()..].trim_start();
+                value = if rest.is_empty() { body } else { rest }.to_string();
+                continue;
+            }
+        }
+        return trimmed.to_string();
+    }
+}
+
+pub(crate) fn short_task(task: &str) -> String {
+    const MAX: usize = 26;
+    truncate_chars(task, MAX)
+}
+
+pub(crate) fn summarize_task(task: &str) -> String {
+    summarize_task_to(task, 56)
+}
+
+pub(crate) fn spawn_task_summary_worker(
+    tx: mpsc::Sender<TaskSummaryResult>,
+    run_id: String,
+    task: String,
+) {
+    thread::spawn(move || {
+        let title = generate_task_summary_title(&task);
+        let _ = tx.send(TaskSummaryResult { run_id, title });
+    });
+}
+
+/// Build the prompt for the completion-note BACKSTOP: a finished worker filed no `rudder
+/// done` report, so a cheap one-shot summarizer reconstructs the note from the task + the
+/// worker's diff. Asks for the same CompletionNote shape `rudder done` records.
+pub(crate) fn build_completion_summary_prompt(task: &str, diff: &str) -> String {
+    let task = normalize_task_text(task);
+    let diff = if diff.trim().is_empty() {
+        "(no file changes detected)"
+    } else {
+        diff
+    };
+    format!(
+        "A coding agent finished the task below but did not file a structured report. From its TASK and the DIFF of what it changed, reconstruct a completion note. Return EXACTLY one JSON object and NO markdown:\n\
+{{\"summary\":\"1-2 sentence plain summary of what was done\",\"interfaces\":\"key files/types/functions it added or changed\"}}\n\n\n\
+TASK:\n{task}\n\nDIFF:\n{diff}"
+    )
+}
+
+/// Parse the backstop summarizer's stdout into a CompletionNote JSON value (the same
+/// completion-note shape, tolerant of surrounding prose/markdown.
+pub(crate) fn completion_note_from_summary_output(output: &str) -> Option<serde_json::Value> {
+    let trimmed = output.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&trimmed[start..=end]).ok()?;
+    value.is_object().then_some(value)
+}
+
+/// Spawn the completion-note BACKSTOP off-thread: a one-shot haiku summarizer over the
+/// worker's diff, sending the reconstructed note back over `tx`. Mirrors
+/// `spawn_task_summary_worker`. ALWAYS sends a result (note `None` on any failure) so the
+/// caller clears its pending flag and never re-spawns for the same run.
+pub(crate) fn spawn_completion_summary_worker(
+    tx: mpsc::Sender<CompletionSummaryResult>,
+    run_id: String,
+    node_id: String,
+    task: String,
+    diff: String,
+) {
+    thread::spawn(move || {
+        let note = generate_completion_summary(&task, &diff);
+        let _ = tx.send(CompletionSummaryResult {
+            run_id,
+            node_id,
+            note,
+        });
+    });
+}
+
+fn generate_completion_summary(task: &str, diff: &str) -> Option<serde_json::Value> {
+    let prompt = build_completion_summary_prompt(task, diff);
+    let output = Command::new("claude")
+        .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
+        .env("CLAUDE_CODE_NO_FLICKER", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    completion_note_from_summary_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub(crate) fn generate_task_summary_title(task: &str) -> Option<String> {
+    let task = normalize_task_text(&redact_secret_values(task));
+    if task.is_empty() {
+        return None;
+    }
+    let prompt = format!(
+        "Summarize this coding agent task for a compact sidebar label.\n\
+Return exactly one JSON object and no markdown: {{\"title\":\"5-8 word imperative title\"}}\n\
+Rules: no quotes inside the title, no trailing punctuation, do not mention Rudder unless it is the product being changed.\n\n\
+Task:\n{task}"
+    );
+    // A title needs no settings, hooks, plugins, MCP servers or tools, and
+    // loading the user's (LSP plugins, hooks) cost ~2s of a ~5s call that a new
+    // task waits on before it exists. A Claude Code too old for these flags
+    // fails at once, and the plain call below still names the workspace.
+    let run = |extra: &[&str]| {
+        Command::new("claude")
+            .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
+            .args(extra)
+            .env("CLAUDE_CODE_NO_FLICKER", "0")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+    };
+    let output = run(&[
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+    ])
+    .or_else(|| run(&[]))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    task_title_from_summary_output(&stdout)
+}
+
+pub(crate) fn task_title_from_summary_output(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(start) = trimmed.find('{') {
+        if let Some(end) = trimmed.rfind('}') {
+            if end >= start {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&trimmed[start..=end])
+                {
+                    if let Some(title) = value.get("title").and_then(|value| value.as_str()) {
+                        return clean_task_summary_title(title);
+                    }
+                }
+            }
+        }
+    }
+    clean_task_summary_title(trimmed)
+}
+
+pub(crate) fn clean_task_summary_title(raw: &str) -> Option<String> {
+    let mut title = raw
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '“' | '”' | '‘' | '’'))
+        .to_string();
+    title = strip_terminal_punctuation(&title);
+    title = normalize_task_text(&title);
+    if title.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&title, 56))
+}
+
+pub(crate) fn summarize_task_to(task: &str, max_chars: usize) -> String {
+    let original = normalize_task_text(&redact_secret_values(task));
+    if original.is_empty() {
+        return "agent".to_string();
+    }
+
+    let mut summary = strip_leading_scaffolding(&original);
+    summary = normalize_task_text(&summary)
+        .replace("lsited", "listed")
+        .replace("rihgt", "right")
+        .replace("the task that the user puts", "the user task")
+        .replace("the task that user puts", "the user task")
+        .replace("task that the user puts", "user task")
+        .replace("task that user puts", "user task")
+        .replace("and then that's what gets listed on", "for")
+        .replace("and then that is what gets listed on", "for");
+    summary = strip_trailing_context(&summary);
+    summary = first_sentence(&summary);
+    summary = strip_terminal_punctuation(&summary);
+    if summary.is_empty() {
+        summary = original;
+    }
+
+    if summary.chars().count() <= max_chars {
+        return summary;
+    }
+
+    compact_title(&summary, max_chars).unwrap_or_else(|| truncate_chars(&summary, max_chars))
+}
+
+pub(crate) fn normalize_task_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn strip_leading_scaffolding(value: &str) -> String {
+    let mut current = value.trim().to_string();
+    loop {
+        let lower = current.to_ascii_lowercase();
+        let mut next = None;
+        for prefix in [
+            "ok, ",
+            "okay, ",
+            "hey, ",
+            "ok ",
+            "okay ",
+            "hey ",
+            "also ",
+            "please ",
+            "can you ",
+            "could you ",
+            "would you ",
+            "can u ",
+            "could u ",
+            "would u ",
+            "can we ",
+            "could we ",
+            "would we ",
+            "i need you to ",
+            "i need to ",
+            "i want you to ",
+            "i want to ",
+            "need you to ",
+            "need to ",
+            "want you to ",
+            "want to ",
+            "we need to ",
+            "we should ",
+            "we have to ",
+            "another thing for you to work on is ",
+            "another thing is ",
+            "the task is ",
+        ] {
+            if lower.starts_with(prefix) {
+                next = Some(current[prefix.len()..].trim().to_string());
+                break;
+            }
+        }
+        match next {
+            Some(value) if value != current => current = value,
+            _ => break,
+        }
+    }
+    current
+}
+
+pub(crate) fn strip_trailing_context(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    for marker in [" right now", " currently", " at the moment", " for now"] {
+        if let Some(index) = lower.find(marker) {
+            return value[..index].trim().to_string();
+        }
+    }
+    value.trim().to_string()
+}
+
+pub(crate) fn first_sentence(value: &str) -> String {
+    let mut char_count = 0;
+    for (index, ch) in value.char_indices() {
+        char_count += 1;
+        if char_count >= 12 && matches!(ch, '.' | '!' | '?') {
+            return value[..index].trim().to_string();
+        }
+    }
+    value.trim().to_string()
+}
+
+pub(crate) fn compact_title(value: &str, max_chars: usize) -> Option<String> {
+    let mut selected = Vec::new();
+    for word in
+        value.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/' | '-')))
+    {
+        if word.is_empty() {
+            continue;
+        }
+        let lower = word.to_ascii_lowercase();
+        if is_task_summary_stop_word(&lower) {
+            continue;
+        }
+        selected.push(word.to_string());
+        if selected.join(" ").chars().count() >= max_chars.saturating_sub(1) || selected.len() >= 8
+        {
+            break;
+        }
+    }
+    let compact = strip_terminal_punctuation(&selected.join(" "));
+    if !compact.is_empty() && compact.chars().count() < value.chars().count() {
+        Some(truncate_chars(&compact, max_chars))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn is_task_summary_stop_word(value: &str) -> bool {
+    matches!(
+        value,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "but"
+            | "by"
+            | "for"
+            | "from"
+            | "gets"
+            | "have"
+            | "in"
+            | "is"
+            | "it"
+            | "its"
+            | "just"
+            | "of"
+            | "on"
+            | "or"
+            | "put"
+            | "puts"
+            | "putting"
+            | "right"
+            | "so"
+            | "than"
+            | "that"
+            | "the"
+            | "then"
+            | "this"
+            | "to"
+            | "user"
+            | "what"
+            | "when"
+            | "where"
+            | "with"
+            | "you"
+            | "your"
+    )
+}
+
+pub(crate) fn strip_terminal_punctuation(value: &str) -> String {
+    value
+        .trim_end_matches(|ch| matches!(ch, '.' | '!' | '?'))
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let short = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        if max_chars <= 3 {
+            ".".repeat(max_chars)
+        } else {
+            format!(
+                "{}...",
+                short.chars().take(max_chars - 3).collect::<String>()
+            )
+        }
+    } else {
+        short
+    }
+}
+
+pub(crate) fn preview_text(value: &str, max_chars: usize) -> String {
+    let normalized = redact_secret_values(value)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "\\\"");
+    let mut chars = normalized.chars();
+    let preview = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+pub(crate) fn redact_secret_values(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(redact_secret_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_secret_token(raw: &str) -> String {
+    let trimmed = raw.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+        )
+    });
+    if let Some((key, value)) = trimmed.split_once('=') {
+        if looks_like_secret_key(key)
+            && (looks_like_secret_value(value) || looks_like_plausible_secret_value(value))
+        {
+            return raw.replace(value, "[redacted]");
+        }
+    }
+    if looks_like_secret_value(trimmed) {
+        return raw.replace(trimmed, "[redacted]");
+    }
+    raw.to_string()
+}
+
+fn looks_like_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("secret")
+        || lower.contains("password")
+}
+
+fn looks_like_secret_value(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_secret_prefix = lower.contains("api_")
+        || lower.starts_with("sk-")
+        || lower.starts_with("xox")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("gho_")
+        || lower.starts_with("github_pat_");
+    let long_mixed = value.len() >= 24
+        && value.chars().any(|ch| ch.is_ascii_alphabetic())
+        && value
+            .chars()
+            .any(|ch| ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.'));
+    has_secret_prefix || long_mixed
+}
+
+fn looks_like_plausible_secret_value(value: &str) -> bool {
+    value.len() >= 10
+        && value.chars().any(|ch| ch.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .any(|ch| ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.' | '/'))
+}

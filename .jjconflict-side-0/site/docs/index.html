@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overview · Rudder docs</title>
+    <meta name="description" content="Run coding agents in parallel on one repo. Each works in its own copy, so they cannot collide." />
+    <link rel="canonical" href="https://rudder.exla.ai/docs" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://rudder.exla.ai/docs" />
+    <meta property="og:site_name" content="Rudder" />
+    <meta property="og:title" content="Overview · Rudder docs" />
+    <meta property="og:description" content="Run coding agents in parallel on one repo. Each works in its own copy, so they cannot collide." />
+    <meta property="og:image" content="https://rudder.exla.ai/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://rudder.exla.ai/og.png" />
+    <meta name="theme-color" content="#ffffff" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/docs.css" />
+    <script defer src="/analytics.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="page">
+      <header class="site-head">
+        <a class="brand" href="/">
+          <img src="/favicon.svg" alt="" />
+          <span>Rudder</span>
+        </a>
+        <nav class="site-nav" aria-label="Primary">
+          <a href="/docs" aria-current="page">Docs</a>
+          <a href="https://github.com/exla-ai/rudder">GitHub</a>
+          <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
+          <a href="/login">Sign in</a>
+        </nav>
+      </header>
+    </div>
+
+    <div class="docs">
+      <nav class="docs-nav" aria-label="Documentation">
+        <h2>get started</h2>
+        <ul>
+          <li><a href="/docs" aria-current="page">Overview</a></li>
+          <li><a href="/docs/setup">Set up (phone first)</a></li>
+          <li><a href="/docs/install">Install</a></li>
+          <li><a href="/docs/first-agent">Your first agent</a></li>
+        </ul>
+        <h2>core</h2>
+        <ul>
+          <li><a href="/docs/workspaces">Workspaces</a></li>
+          <li><a href="/docs/plans">Plans and the DAG</a></li>
+          <li><a href="/docs/gam">Generative Adversarial Model (GAM)</a></li>
+        </ul>
+        <h2>reference</h2>
+        <ul>
+          <li><a href="/docs/commands">Commands and keys</a></li>
+          <li><a href="/docs/faq">FAQ</a></li>
+        </ul>
+      </nav>
+
+      <main class="docs-main" id="main">
+        <h1>Overview</h1>
+        <p class="docs-lede">Run coding agents in parallel on one repo. Each works in its own copy, so they cannot collide.</p>
+<h2 id="start">Start in 60 seconds</h2>
+<pre><code><span class="prompt">$ </span>npm install -g @exla/rudder@latest
+<span class="prompt">$ </span>cd ~/code/your-project
+<span class="prompt">$ </span>rudder</code></pre>
+<p>Type a task into the box at the bottom and press Enter:</p>
+<pre><code>fix the login redirect losing the query string</code></pre>
+<p>That is it. One agent is now working in its own copy of the repo. Type another
+task and a second one starts beside it, unable to see or overwrite the first.</p>
+<p>When a row says <span class="state state--review">done</span>, press
+<kbd>m</kbd>. Rudder shows you the diff. Press <kbd>m</kbd> again and it lands.</p>
+
+<figure class="docs-shot">
+  <div class="screen">
+    <div class="screen-chrome"><span class="mono">rudder</span><span class="mono">~/code/api</span></div>
+    <div class="frame frame-static">
+      <div class="pane pane-list">
+        <div class="pane-label">agents</div>
+        <div class="row-group">/main<span>1 agent</span></div>
+        <div class="row"><span class="row-task">tag the release</span><span class="state state--running">running</span></div>
+        <div class="row-group">workspaces<span>3 agents</span></div>
+        <div class="row is-selected"><span class="row-task">rate-limit the public API</span><span class="state state--running">running</span></div>
+        <div class="row"><span class="row-task">port the settings screen</span><span class="state state--review">done</span></div>
+        <div class="row"><span class="row-task">drop the legacy session table</span><span class="state state--merged">merged</span></div>
+      </div>
+      <div class="pane pane-main">
+        <div class="pane-label">rate-limit the public API</div>
+        <pre class="tty"><span class="dim">workspace</span> .rudder-workspaces/rate-limit
+
+<span class="ok">●</span> Read src/server/middleware.ts
+<span class="ok">●</span> Edit src/server/rate-limit.ts <span class="add">+64</span>
+<span class="ok">●</span> Bash npm test <span class="dim">· 41 passed</span>
+
+<span class="run">▌</span> writing the burst-window test…</pre>
+      </div>
+    </div>
+  </div>
+  <figcaption>
+    Three agents in their own workspaces, one in your checkout, and the selected
+    agent's own terminal beside them.
+  </figcaption>
+</figure>
+
+<h2 id="the-loop">The whole loop</h2>
+<table class="docs-table">
+  <thead><tr><th>you do</th><th>what happens</th></tr></thead>
+  <tbody>
+    <tr><td>type a task</td><td>One isolated agent starts in its own workspace.</td></tr>
+    <tr><td>Option-1 / 2 / 3 / 4</td><td>Agents list · the agent's terminal · the task box · the diff panel.</td></tr>
+    <tr><td>j / k</td><td>Move between agents.</td></tr>
+    <tr><td>m</td><td>Show me the diff. Then: land it.</td></tr>
+    <tr><td>u</td><td>Undo that.</td></tr>
+    <tr><td>x</td><td>Stop an agent.</td></tr>
+  </tbody>
+</table>
+<p>Everything else in these docs is detail on top of those six lines.</p>
+
+<div class="note">
+  <span class="field-label">the one thing to know</span>
+  <p><strong>Nothing lands that you have not been shown.</strong> The first
+  <kbd>m</kbd> opens the diff; the second one lands it. On a repo with a GitHub
+  remote, landing means a draft pull request rather than a local merge - and
+  Rudder asks once, naming the remote, before it ever pushes.</p>
+</div>
+
+<h2 id="what-it-is">What it is</h2>
+<p>Rudder is a terminal dashboard that starts, watches, reviews and merges coding
+agents. It drives <strong>Claude Code</strong>, <strong>Codex</strong> and
+<strong>opencode</strong>: it does not replace them. Each agent runs in its own real
+terminal, with its own native prompts, inside a pane you can talk to.</p>
+<p>What Rudder adds is everything around the agent: where it works, what it can
+touch, how you see what it did, and how that reaches your main branch.</p>
+
+<h2 id="the-problem">Why isolation</h2>
+<p>Running one agent is easy. Running four on the same repository is where it falls
+apart: they stash over each other, leave half-finished edits in your working tree,
+and you lose track of which branch holds what.</p>
+<p>Rudder's answer is a <strong>jj workspace</strong> per agent: a private copy of the
+repo, gitignored, beside your checkout and never in it. Four agents editing the same
+file are four separate trees. Nothing merges until you say so, and your own checkout
+stays exactly where you left it the whole time.</p>
+
+<h2 id="requirements">Requirements</h2>
+<ul>
+  <li>macOS or Linux</li>
+  <li>Node 18 or newer</li>
+  <li>A git repository</li>
+  <li><a href="https://jj-vcs.github.io/jj/latest/">jj</a>, installed for you on
+  first install if it is missing</li>
+  <li>At least one of the Claude Code, Codex or opencode CLIs, signed in</li>
+</ul>
+<p>Next: <a href="/docs/first-agent">walk through your first agent</a>, or read
+<a href="/docs/workspaces">how the isolation works</a>.</p>
+      <nav class="docs-pager" aria-label="Pagination">
+        <a class="next" href="/docs/setup"><span class="field-label">next</span>Set up Rudder</a>
+      </nav>
+        <div class="docs-foot">
+          <a href="/">Rudder home</a>
+          <a href="https://github.com/exla-ai/rudder">GitHub</a>
+          <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
+          <a href="https://github.com/exla-ai/rudder/issues">Report an issue</a>
+        </div>
+      </main>
+
+      <aside class="docs-toc">
+        <h2>on this page</h2>
+        <ul>
+            <li><a href="#start">Start in 60 seconds</a></li>
+            <li><a href="#the-loop">The whole loop</a></li>
+            <li><a href="#what-it-is">What it is</a></li>
+            <li><a href="#the-problem">Why isolation</a></li>
+            <li><a href="#requirements">Requirements</a></li>
+        </ul>
+      </aside>
+    </div>
+  </body>
+</html>

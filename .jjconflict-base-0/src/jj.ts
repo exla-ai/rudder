@@ -1,0 +1,1164 @@
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type { RunRecord } from "./types.js";
+import {
+  commandExists,
+  MissingToolError,
+  pathExistsSync,
+  runCommand,
+  runCommandSync,
+  isReadableRunId,
+  shortHash,
+} from "./util.js";
+import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./state.js";
+import { DECISIONS_HEADER } from "./surfaces.js";
+import { withIntegrationLock } from "./rudder-md.js";
+import { managedJjInstallError } from "./jj-binary.js";
+import { createForkWorkspace, removeForkState } from "./warm-snapshot.js";
+
+// Minimum jj version we are confident in. Older releases may lack flags we use
+// (e.g. `jj workspace add -r`); we warn rather than throw so an older jj still
+// works through the documented fallbacks.
+const MIN_JJ = "0.21.0";
+
+export type MergeNodeResult = {
+  mergeChangeId: string;
+  opId: string;
+  conflictedFiles: string[];
+};
+
+/**
+ * Hard requirement: jj must be installed. Throws MissingToolError otherwise.
+ */
+export function ensureJj(): void {
+  if (!commandExists("jj")) {
+    const reason = managedJjInstallError();
+    throw new MissingToolError("jj", reason ? `jj is not installed, and Rudder could not set it up (${reason}). ${TOOL_JJ_FALLBACK}` : undefined);
+  }
+}
+
+const TOOL_JJ_FALLBACK = "Install it yourself with `brew install jj` or `cargo install jj-cli` (https://jj-vcs.github.io), then run rudder again.";
+
+/**
+ * Parse `jj --version`. Returns the version string (e.g. "0.40.0") or "".
+ * Warns (does not throw) when below MIN_JJ.
+ */
+export async function jjVersion(): Promise<string> {
+  const result = await runCommand("jj", ["--version"], { allowFailure: true });
+  const match = result.stdout.match(/(\d+)\.(\d+)\.(\d+)/);
+  const version = match ? match[0] : "";
+  if (version && compareVersions(version, MIN_JJ) < 0) {
+    console.warn(
+      `[rudder] jj ${version} is older than the recommended ${MIN_JJ}; some workspace flags may fall back.`,
+    );
+  }
+  return version;
+}
+
+/**
+ * Idempotently colocate a jj repo with the git repo at repoRoot. If already a
+ * jj repo, no-op. Otherwise runs `jj git init --colocate`.
+ */
+export async function ensureColocated(repoRoot: string): Promise<void> {
+  // Every jj command snapshots the working copy by default, including `jj
+  // root`. Install the exclusions before even probing repository state.
+  await ensureProjectRuntimeIgnored(repoRoot);
+  ensureJj();
+  if (!isJjRepo(repoRoot)) {
+    const refusal = colocateRefusal(repoRoot);
+    if (refusal) throw new Error(refusal);
+    await runCommand("jj", ["git", "init", "--colocate"], { cwd: repoRoot });
+  }
+  await untrackLegacyRudderState(repoRoot);
+}
+
+/**
+ * Why Rudder must not add jj to `dir`, or null when it may. Rudder only ever
+ * colocates jj beside an EXISTING git repo whose root is `dir`: it never creates
+ * a repository, so a folder that is not one stays that way. And a folder that
+ * holds other repos (~/code) or the home folder is refused even when someone
+ * ran `git init` there by mistake: jj would snapshot every project below it.
+ */
+export function colocateRefusal(dir: string): string | null {
+  const resolved = path.resolve(dir);
+  const shown = resolved.replace(os.homedir(), "~");
+  if (samePath(resolved, os.homedir()) || resolved === path.parse(resolved).root) {
+    return `Rudder will not set up version control in ${shown}. Open Rudder inside a project folder instead.`;
+  }
+  const top = runCommandSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolved, allowFailure: true });
+  if (top.code !== 0 || !top.stdout.trim() || !samePath(top.stdout.trim(), resolved)) {
+    return `${shown} isn't a git repo, so Rudder can't give agents isolated workspaces here. Run \`git init\` in it if you want that; agents can still work directly in the folder.`;
+  }
+  const nested = nestedRepoNames(resolved);
+  if (nested.length >= 2) {
+    return `${shown} holds other projects (${nested.slice(0, 3).join(", ")}${nested.length > 3 ? ", ..." : ""}), so Rudder will not manage it as one repo. Open Rudder inside one of them.`;
+  }
+  return null;
+}
+
+function nestedRepoNames(dir: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .filter((e) => {
+      try {
+        return fs.statSync(path.join(dir, e.name, ".git")).isDirectory();
+      } catch {
+        return false;
+      }
+    })
+    .map((e) => e.name);
+}
+
+/** Remove runtime files snapshotted by older Rudder versions while preserving
+ * them on disk. Ignore rules alone do not untrack a path already present in @. */
+async function untrackLegacyRudderState(repoRoot: string): Promise<void> {
+  const tracked = await runCommand(
+    "jj",
+    ["file", "list", "--ignore-working-copy", "-r", "@", ".rudder"],
+    { cwd: repoRoot, allowFailure: true },
+  );
+  if (tracked.code !== 0 || !tracked.stdout.trim()) return;
+  await runCommand("jj", ["file", "untrack", ".rudder"], { cwd: repoRoot });
+}
+
+export function isJjRepo(cwd: string): boolean {
+  if (!commandExists("jj")) {
+    return false;
+  }
+  const result = runCommandSync("jj", ["root"], { cwd, allowFailure: true });
+  if (result.code === 0 && result.stdout.trim()) {
+    return samePath(result.stdout.trim(), cwd);
+  }
+  return hasLocalJjMarker(cwd);
+}
+
+export function findJjRoot(cwd: string): string {
+  if (commandExists("jj")) {
+    const result = runCommandSync("jj", ["root"], { cwd, allowFailure: true });
+    if (result.code === 0 && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
+  }
+  const marker = findJjMarker(cwd);
+  return marker ? path.dirname(marker) : path.resolve(cwd);
+}
+
+/**
+ * jj refuses to operate on a STALE workspace — one whose working-copy commit was
+ * moved by a concurrent operation in another workspace (every command in any
+ * workspace advances the shared op log). The command exits non-zero with a
+ * "working copy is stale" message and a hint to run `jj workspace update-stale`.
+ * In a multi-worker run this happens routinely, so any jj read against a worker
+ * workspace must be able to recover instead of falsely reporting "no changes"
+ * (which marks a good run failed) or failing a merge.
+ */
+function isStaleWorkingCopy(text: string): boolean {
+  return /working copy is stale|stale working copy/i.test(text);
+}
+
+/**
+ * Re-point a stale workspace at its recorded working-copy commit. jj snapshots
+ * the on-disk working copy as part of this, so a worker's changes are preserved.
+ * Returns true when the workspace is no longer stale afterwards.
+ */
+async function recoverStaleWorkspace(workspacePath: string): Promise<boolean> {
+  const result = await runCommand("jj", ["workspace", "update-stale"], {
+    cwd: workspacePath,
+    allowFailure: true,
+  });
+  return result.code === 0;
+}
+
+/**
+ * Run a read-only jj command in a workspace, transparently recovering once from a
+ * stale working copy. This keeps the verifier's change-detection and the merge's
+ * change-id reads honest while workers run concurrently in sibling workspaces.
+ */
+async function jjReadInWorkspace(
+  workspacePath: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  let result = await runCommand("jj", args, { cwd: workspacePath, allowFailure: true });
+  if (result.code !== 0 && isStaleWorkingCopy(result.stderr)) {
+    await recoverStaleWorkspace(workspacePath);
+    result = await runCommand("jj", args, { cwd: workspacePath, allowFailure: true });
+  }
+  return result;
+}
+
+/**
+ * The same recovery for a jj command that WRITES.
+ *
+ * Reads had this and writes did not, which left the main checkout able to wedge
+ * every launch in a repo: `jj workspace add` snapshots the workspace it is run
+ * FROM, so once a sibling worker's operation left the main checkout stale, every
+ * new agent — a typed task, a plan node, a `/resume`, review-all — died on
+ * "The working copy is stale" until the user ran `update-stale` by hand. The
+ * recovery is exactly what jj's own hint says to do, and it snapshots the
+ * working copy rather than discarding it, so nothing on disk is lost.
+ */
+export async function jjWriteWithStaleRecovery(
+  cwd: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  let result = await runCommand("jj", args, { cwd, allowFailure: true });
+  // jj reports staleness on stderr, but check both: the message has moved
+  // between jj releases and a missed match reintroduces the wedge.
+  if (result.code !== 0 && isStaleWorkingCopy(`${result.stderr}\n${result.stdout}`)) {
+    if (await recoverStaleWorkspace(cwd)) {
+      result = await runCommand("jj", args, { cwd, allowFailure: true });
+    }
+  }
+  return result;
+}
+
+/**
+ * The change id of `@` (the working-copy commit) in the given workspace.
+ */
+export async function currentJjChangeId(workspacePath: string): Promise<string> {
+  const result = await jjReadInWorkspace(workspacePath, ["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+  return result.code === 0 ? result.stdout.trim().split(/\s+/)[0] ?? "" : "";
+}
+
+/** The immutable commit id of a workspace's current revision. Prefer this when
+ * feeding a finished workspace into a merge: concurrent jj snapshots can make
+ * its stable change id divergent, while the workspace's @ commit remains an
+ * unambiguous revision. */
+export async function currentJjCommitId(workspacePath: string): Promise<string> {
+  const result = await jjReadInWorkspace(workspacePath, ["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+  return result.code === 0 ? result.stdout.trim().split(/\s+/)[0] ?? "" : "";
+}
+
+export async function jjStatus(workspacePath: string): Promise<string[]> {
+  const result = await jjReadInWorkspace(workspacePath, ["status"]);
+  return result.code === 0 ? parseJjStatus(result.stdout) : [];
+}
+
+export function parseJjStatus(stdout: string): string[] {
+  const lines: string[] = [];
+  let inConflictSection = false;
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    if (/^working copy changes:?$/i.test(line)) {
+      inConflictSection = false;
+      continue;
+    }
+    if (/^(conflicts|unresolved conflicts|there are unresolved conflicts)(:|$)/i.test(line)) {
+      inConflictSection = true;
+      continue;
+    }
+    if (isJjStatusMetadata(line)) {
+      continue;
+    }
+    const statusPath = statusPathFromSummaryLine(line);
+    if (statusPath) {
+      if (!isRudderMetadataPath(statusPath)) {
+        lines.push(line);
+      }
+      continue;
+    }
+    if (inConflictSection) {
+      const conflictPath = line.replace(/^[-*]\s+/, "").replace(/^conflict in\s+/i, "").trim();
+      if (conflictPath && !isRudderMetadataPath(conflictPath)) {
+        lines.push(`C ${conflictPath}`);
+      }
+    }
+  }
+  return lines;
+}
+
+export async function jjDiff(workspacePath: string): Promise<string> {
+  const status = await jjStatus(workspacePath);
+  // A sibling workspace can make this one stale mid-verification; an unrecovered
+  // read returns an empty diff and the verifier flags a healthy run.
+  const stat = await jjReadInWorkspace(workspacePath, ["diff", "--stat"]);
+  const patch = await jjReadInWorkspace(workspacePath, ["diff", "--git"]);
+  return [
+    status.length ? `status:\n${status.join("\n")}` : "",
+    stat.stdout.trim(),
+    patch.stdout.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * Create a new empty change parented on the given changes. Reads the new change
+ * id back by querying a unique marker embedded in the description, never by
+ * scraping stdout. Returns the new change id.
+ */
+export async function createEmptyChange(params: {
+  repoRoot: string;
+  parents: string[];
+  description: string;
+}): Promise<string> {
+  ensureJj();
+  const marker = `rudder-node:${shortHash(`${params.description}:${Date.now()}:${Math.random()}`)}`;
+  const description = `${marker} ${params.description}`.trim();
+  const args = ["new", ...params.parents.filter(Boolean), "-m", description, "--no-edit"];
+  // Same stale exposure as `workspace add`: the scheduler creates a node's base
+  // change in the main checkout moments before its workspace, so one stale main
+  // checkout would fail the plan a step earlier instead.
+  const created = await jjWriteWithStaleRecovery(params.repoRoot, args);
+  if (created.code !== 0) {
+    throw new Error(created.stderr.trim() || created.stdout.trim() || "jj new failed.");
+  }
+  // jj normalizes descriptions to end with a trailing newline, and
+  // `description(exact:...)` matches the full stored description, so the revset
+  // literal must include the trailing "\n".
+  const exact = JSON.stringify(`${description}\n`);
+  const result = await runCommand(
+    "jj",
+    ["log", "--no-graph", "-r", `description(exact:${exact})`, "-T", "change_id"],
+    { cwd: params.repoRoot, allowFailure: true },
+  );
+  let changeId = result.stdout.trim().split(/\s+/)[0] ?? "";
+  if (!changeId) {
+    // Fallback: match on the unique marker as a substring.
+    const bySubstring = await runCommand(
+      "jj",
+      ["log", "--no-graph", "-r", `description(substring:${JSON.stringify(marker)})`, "-T", "change_id"],
+      { cwd: params.repoRoot, allowFailure: true },
+    );
+    changeId = bySubstring.stdout.trim().split(/\s+/)[0] ?? "";
+  }
+  if (!changeId) {
+    throw new Error(`Could not read back the change id for the new empty change (${marker}).`);
+  }
+  return changeId;
+}
+
+export async function describeChange(repoRoot: string, changeId: string, message: string): Promise<void> {
+  await runCommand("jj", ["describe", changeId, "-m", message], { cwd: repoRoot });
+}
+
+/**
+ * Create a jj workspace for a node/run, named by `workspaceNameFor`. If
+ * `atChangeId` is given, parent the working-copy commit on it; falls back to
+ * `jj workspace add` + `jj edit <atChangeId>` if `-r` is unsupported.
+ */
+export async function createNodeWorkspace(params: {
+  repoRoot: string;
+  nodeId?: string;
+  runId?: string;
+  task?: string;
+  atChangeId?: string;
+}): Promise<{ workspaceName: string; path: string }> {
+  ensureJj();
+  // jj snapshots the main checkout while adding a workspace. Runtime state
+  // must already be excluded at that exact point.
+  await ensureProjectRuntimeIgnored(params.repoRoot);
+  const id = params.nodeId ?? params.runId;
+  if (!id) {
+    throw new Error("createNodeWorkspace requires nodeId or runId.");
+  }
+  const workspaceName = workspaceNameFor(id);
+  const targetPath = workspacePath(params.repoRoot, params.runId ?? id, params.task);
+  await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+
+  // Fast path: an overlay fork of the warm snapshot (no file copies, deps and
+  // build outputs already there). Falls back to a full jj checkout.
+  if (!params.atChangeId) {
+    const fork = await createForkWorkspace({
+      repoRoot: params.repoRoot,
+      targetPath,
+      workspaceName,
+      description: workspaceDescription(params, "running"),
+    });
+    if ("snapshot" in fork) {
+      process.stderr.write(`[rudder] workspace ${workspaceName}: overlay fork of warm snapshot ${fork.snapshot.key}\n`);
+      return { workspaceName, path: targetPath };
+    }
+    process.stderr.write(`[rudder] workspace ${workspaceName}: full jj checkout (${fork.reason})\n`);
+  }
+  const baseArgs = ["workspace", "add", targetPath, "--name", workspaceName];
+  let added = await jjWriteWithStaleRecovery(
+    params.repoRoot,
+    params.atChangeId ? [...baseArgs, "-r", params.atChangeId] : baseArgs,
+  );
+  if (added.code !== 0 && params.atChangeId) {
+    // Older jj without `workspace add -r`: add, then edit onto the change.
+    added = await jjWriteWithStaleRecovery(params.repoRoot, baseArgs);
+    if (added.code === 0) {
+      await runCommand("jj", ["edit", params.atChangeId], { cwd: targetPath, allowFailure: true });
+    }
+  }
+  if (added.code !== 0) {
+    throw new Error(
+      added.stderr.trim() || added.stdout.trim() || `jj ${baseArgs.join(" ")} failed.`,
+    );
+  }
+  // Describe the workspace's OWN working-copy change (@) so `jj log` shows what
+  // this agent is doing instead of "(no description set)". Rudder agents read
+  // each other's jj descriptions to coordinate; RUDDER.md stays the aggregate
+  // human snapshot. Best-effort — a missing description must never fail a launch.
+  await runCommand("jj", ["describe", "-m", workspaceDescription(params, "running")], {
+    cwd: targetPath,
+    allowFailure: true,
+  });
+  return { workspaceName, path: targetPath };
+}
+
+/** jj working-copy description for a Rudder agent's workspace. */
+function workspaceDescription(
+  params: { nodeId?: string; task?: string },
+  status: string,
+): string {
+  const label = params.nodeId ? `rudder[${params.nodeId}]` : "rudder";
+  const task = (params.task ?? "").trim().replace(/\s+/g, " ");
+  const summary = task.length > 72 ? `${task.slice(0, 71)}…` : task;
+  return summary ? `${label}: ${summary} [${status}]` : `${label} [${status}]`;
+}
+
+/**
+ * Phase-1 entry point used by run-manager. Delegates to createNodeWorkspace.
+ */
+export async function createRunJjWorkspace(params: {
+  repoRoot: string;
+  runId: string;
+  task: string;
+}): Promise<{ workspaceName: string; path: string }> {
+  return await createNodeWorkspace({
+    repoRoot: params.repoRoot,
+    runId: params.runId,
+    task: params.task,
+  });
+}
+
+/**
+ * `rudder-<id>` for a words-plus-key run id (`rudder-launch-video-k3f9q`), which
+ * is unique and readable by itself. Anything else (a plan node id like `n0`, an
+ * old timestamped run id) keeps the original `rudder-<id.slice(0,14)>-<hash6>`,
+ * so a record without a stored name still derives the name its workspace has.
+ * The `rudder-` prefix is what the native workspace GC trusts as Rudder's own.
+ */
+export function workspaceNameFor(id: string): string {
+  if (isReadableRunId(id)) {
+    return `rudder-${id}`;
+  }
+  return `rudder-${id.slice(0, 14)}-${shortHash(id).slice(0, 6)}`;
+}
+
+/**
+ * Merge a run's jj change into the current (main) workspace `@`. Captures the
+ * operation id before the merge and records it on merge.operationId. On
+ * conflict sets merge.status="conflict" + conflictedFiles + mergeChangeId.
+ */
+export async function mergeJjRunIntoCurrentWorkspace(
+  run: RunRecord,
+  allowDirty = false,
+  options: { abortOnConflict?: boolean } = {},
+): Promise<RunRecord> {
+  // Integration is one-at-a-time ACROSS PROCESSES: a `rudder merge` CLI call
+  // and a daemon tick are separate processes sharing the same @, and a second
+  // merge starting mid-flight would stack a merge change on a moving target.
+  return withIntegrationLock(run.repoRoot, async () => {
+    const opBefore = options.abortOnConflict ? await currentOpId(run.repoRoot) : "";
+    const merged = await mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty);
+    if (options.abortOnConflict && merged.merge?.status === "conflict" && opBefore) {
+      // Automatic integration never leaves a conflicted merge in the main
+      // checkout: restore the pre-merge operation and leave the run for the user.
+      await undoToOp(run.repoRoot, opBefore);
+      merged.merge = {
+        ...merged.merge,
+        mergeChangeId: undefined,
+        error: "merge into the main change conflicts; nothing was merged",
+      };
+      await saveRunRecord(merged);
+    }
+    return merged;
+  });
+}
+
+async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: boolean): Promise<RunRecord> {
+  if (!run.workspace.workspaceName) {
+    throw new Error("Run has no jj workspace name to merge.");
+  }
+  ensureJjRepo(run.repoRoot);
+  ensureJjRepo(run.workspace.path);
+  // A resolver edits the already-created merge change in place. Once its
+  // conflicts are gone, finalize that transaction instead of creating a second
+  // merge change on top of it.
+  if (run.merge?.status === "conflict" && run.merge.mergeChangeId) {
+    const remaining = await jjConflictedFiles(run.repoRoot);
+    if (remaining.length > 0) {
+      run.merge = { ...run.merge, status: "conflict", conflictedFiles: remaining };
+      await saveRunRecord(run);
+      return run;
+    }
+    return await finalizeJjIntegration(run, run.merge.mergeChangeId);
+  }
+  // Rudder writes its own files (.rudder/ is already filtered by jjStatus; RUDDER.md
+  // and DECISIONS.md are the live coordination surfaces) into the main workspace
+  // continuously, so they must not count as "dirty" and block a merge.
+  if (!allowDirty) {
+    const dirty = (await jjStatus(run.repoRoot)).filter((line) => !isMergeIgnorablePath(line));
+    if (dirty.length > 0) {
+      throw new Error("Target workspace is dirty. Squash/abandon changes or pass --allow-dirty.");
+    }
+  }
+  // --allow-dirty (which the TUI always passes) skips the dirty gate above, but a
+  // merge parented on a still-conflicted @ (e.g. the user declined the resolver
+  // after a previous conflicted merge) nests conflicts, so this guard is
+  // unconditional.
+  // PRE-FLIGHT. A conflicted integration workspace refuses EVERY later merge, so
+  // one unresolved DECISIONS.md used to strand an entire plan: finished nodes sat
+  // in review and everything hard-depending on them stayed unlaunchable. Settle
+  // what needs no judgment first; only a real product conflict should ever stop
+  // integration.
+  const preexistingConflicts = await autoResolveMechanicalConflicts(run.repoRoot);
+  if (preexistingConflicts.length > 0) {
+    const error = `integration workspace already has unresolved conflicts (${preexistingConflicts.join(", ")}); resolve them before merging another run`;
+    await markMergeFailed(run, error);
+    throw new Error(error);
+  }
+  const opIdBefore = await currentOpId(run.repoRoot);
+  run.merge = {
+    status: "not-started",
+    attemptedAt: new Date().toISOString(),
+    targetBranch: (await currentJjChangeId(run.repoRoot)) || "@",
+    operationId: opIdBefore || undefined,
+  };
+  await saveRunRecord(run);
+
+  const sourceChangeId = await currentJjChangeId(run.workspace.path);
+  if (!sourceChangeId) {
+    await markMergeFailed(run, "Could not determine jj change id for run workspace.");
+    throw new Error("Could not determine jj change id for run workspace.");
+  }
+  const message = `rudder: ${run.task.slice(0, 72)}`;
+  const merge = await mergeNode({
+    repoRoot: run.repoRoot,
+    nodeChangeId: sourceChangeId,
+    intoChangeId: "@",
+    message,
+  });
+  if (!merge.mergeChangeId) {
+    const error = "jj merge failed.";
+    await markMergeFailed(run, error);
+    throw new Error(error);
+  }
+
+  if (merge.conflictedFiles.length === 0) {
+    // KEEP the pre-merge operationId captured above: it is the undo waypoint.
+    // Overwriting it with the POST-merge op id (as this used to) made
+    // `rudder undo <op>` restore to the state after the merge — a perfect
+    // no-op that reported success while changing nothing.
+    return await finalizeJjIntegration(run, merge.mergeChangeId);
+  }
+
+  run.status = "merge-conflict";
+  run.hadMergeConflict = true;
+  run.merge = {
+    ...run.merge,
+    status: "conflict",
+    conflictedFiles: merge.conflictedFiles,
+    mergeChangeId: merge.mergeChangeId,
+    // Pre-merge op stays the undo waypoint (see the clean-merge path above).
+    error: "jj merge created conflicts.",
+  };
+  await saveRunRecord(run);
+  return run;
+}
+
+async function finalizeJjIntegration(run: RunRecord, mergeChangeId: string): Promise<RunRecord> {
+  const targetBookmark = await integrationBookmark(run.repoRoot, run.targetBranch);
+  await createBookmark(run.repoRoot, targetBookmark, mergeChangeId);
+  await exportToGit(run.repoRoot);
+  const localCommit = await gitRevision(run.repoRoot, targetBookmark);
+  const pushed = localCommit
+    ? await remoteContainsCommit(run.repoRoot, targetBookmark, localCommit)
+    : false;
+  run.status = "merged";
+  run.merge = {
+    ...run.merge,
+    status: "merged",
+    targetBranch: targetBookmark,
+    mergeChangeId,
+    localCommit: localCommit || undefined,
+    pushed,
+    pushedAt: pushed ? new Date().toISOString() : undefined,
+    conflictedFiles: undefined,
+    conflictKind: undefined,
+    error: undefined,
+  };
+  await saveRunRecord(run);
+  return run;
+}
+
+export async function closestLocalBookmark(repoRoot: string): Promise<string> {
+  const result = await runCommand(
+    "jj",
+    ["log", "--no-graph", "-r", "heads(::@ & bookmarks())", "-T", "bookmarks ++ \"\\n\""],
+    { cwd: repoRoot, allowFailure: true },
+  );
+  if (result.code !== 0) return "";
+  const names = result.stdout
+    .split(/\s+/)
+    .map((name) => name.trim().replace(/\*$/, ""))
+    .filter((name) => name && !name.includes("@"));
+  return names.find((name) => name === "main")
+    ?? names.find((name) => name === "master")
+    ?? names[0]
+    ?? "";
+}
+
+async function integrationBookmark(repoRoot: string, recordedTarget: string): Promise<string> {
+  const candidate = recordedTarget.trim();
+  if (candidate && candidate !== "HEAD" && !/^[a-z]{12,}$/i.test(candidate) && !/^[0-9a-f]{12,}$/i.test(candidate)) {
+    return candidate;
+  }
+  return (await closestLocalBookmark(repoRoot)) || "main";
+}
+
+async function gitRevision(repoRoot: string, ref: string): Promise<string> {
+  const result = await runCommand("git", ["rev-parse", ref], { cwd: repoRoot, allowFailure: true });
+  return result.code === 0 ? result.stdout.trim() : "";
+}
+
+async function remoteContainsCommit(repoRoot: string, bookmark: string, commit: string): Promise<boolean> {
+  const remote = `origin/${bookmark}`;
+  const exists = await runCommand("git", ["rev-parse", "--verify", remote], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  if (exists.code !== 0) return false;
+  const contains = await runCommand("git", ["merge-base", "--is-ancestor", commit, remote], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  return contains.code === 0;
+}
+
+/**
+ * Merge two changes into a new change. Captures the op id (after the merge),
+ * returns the new merge change id and any conflicted files. jj merges never
+ * fail on conflict; the conflict is recorded in the merge change.
+ */
+export async function mergeNode(params: {
+  repoRoot: string;
+  nodeChangeId: string;
+  intoChangeId: string;
+  message: string;
+}): Promise<MergeNodeResult> {
+  ensureJjRepo(params.repoRoot);
+  const merge = await runCommand(
+    "jj",
+    ["new", params.intoChangeId, params.nodeChangeId, "-m", params.message],
+    { cwd: params.repoRoot, allowFailure: true },
+  );
+  if (merge.code !== 0) {
+    throw new Error(merge.stderr.trim() || merge.stdout.trim() || "jj merge failed.");
+  }
+  const mergeChangeId = await currentJjChangeId(params.repoRoot);
+  const opId = await currentOpId(params.repoRoot);
+  const conflictedFiles = await jjConflictedFiles(params.repoRoot);
+  return { mergeChangeId, opId, conflictedFiles };
+}
+
+export async function jjConflictedFiles(workspacePath: string): Promise<string[]> {
+  // Stale-recovering read: a stale failure here would falsely report "no
+  // conflicts" to the merge/sync paths.
+  const result = await jjReadInWorkspace(workspacePath, ["resolve", "--list"]);
+  return result.code === 0 ? parseJjConflictedFiles(result.stdout) : [];
+}
+
+/**
+ * Alias matching the plan's API name.
+ */
+export async function listConflicts(workspacePath: string): Promise<string[]> {
+  return await jjConflictedFiles(workspacePath);
+}
+
+export function parseJjConflictedFiles(stdout: string): string[] {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s+/, "").replace(/^conflict in\s+/i, "").trim())
+    // `jj resolve --list` prints "path/to/file    2-sided conflict" (and
+    // "... including 1 deletion"). Everything downstream treats these as PATHS:
+    // they are joined into merge errors, stored on run.merge.conflictedFiles, and
+    // fed to the mechanical resolver, which keys on the file NAME. Leaving the
+    // descriptor attached makes every one of those miss. Split on the run of
+    // whitespace jj uses as the separator so paths containing single spaces
+    // survive intact.
+    .map((line) => line.replace(/\s{2,}\d+-sided conflict.*$/, "").trim())
+    .filter((line) => line && !isRudderMetadataPath(line));
+}
+
+/**
+ * The id of the latest operation in the op log. Recovers once from a stale
+ * workspace; if the id still cannot be read, warns and returns "" instead of
+ * throwing — merges must proceed, they just lose their undo waypoint.
+ */
+export async function currentOpId(repoRoot: string): Promise<string> {
+  const result = await jjReadInWorkspace(repoRoot, ["op", "log", "--no-graph", "-n", "1", "-T", "id.short()"]);
+  const opId = result.code === 0 ? result.stdout.trim().split(/\s+/)[0] ?? "" : "";
+  if (!opId) {
+    console.warn("rudder: could not capture jj op id; this merge will not be undoable via rudder undo");
+  }
+  return opId;
+}
+
+/**
+ * Restore the repo to an earlier operation. One call rewinds all workspaces and
+ * refs atomically (op restore is global).
+ */
+export async function undoToOp(repoRoot: string, opId: string): Promise<void> {
+  await runCommand("jj", ["op", "restore", opId], { cwd: repoRoot });
+}
+
+export async function undoLast(repoRoot: string): Promise<void> {
+  await runCommand("jj", ["undo"], { cwd: repoRoot });
+}
+
+/**
+ * Export jj changes to the colocated git repo. Call after each merge, before
+ * opening a diff review, and before a PR.
+ */
+export async function exportToGit(repoRoot: string): Promise<void> {
+  await runCommand("jj", ["git", "export"], { cwd: repoRoot });
+}
+
+export async function createBookmark(repoRoot: string, name: string, atChangeId: string): Promise<void> {
+  const create = await runCommand("jj", ["bookmark", "create", name, "-r", atChangeId], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  if (create.code !== 0) {
+    // Bookmark may already exist; move it to the target change.
+    await runCommand("jj", ["bookmark", "set", name, "-r", atChangeId, "--allow-backwards"], {
+      cwd: repoRoot,
+    });
+  }
+}
+
+export async function pushBookmark(repoRoot: string, name: string): Promise<void> {
+  const push = await runCommand("jj", ["git", "push", "--bookmark", name, "--allow-new"], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  if (push.code !== 0) {
+    // jj 0.40 drops `--allow-new`; a plain `--bookmark` push handles new bookmarks.
+    await runCommand("jj", ["git", "push", "--bookmark", name], { cwd: repoRoot });
+  }
+}
+
+/**
+ * Forget a jj workspace and remove its directory.
+ */
+export async function forgetWorkspace(params: {
+  repoRoot: string;
+  workspaceName: string;
+  workspacePath: string;
+}): Promise<void> {
+  if (commandExists("jj")) {
+    await runCommand("jj", ["workspace", "forget", params.workspaceName], {
+      cwd: params.repoRoot,
+      allowFailure: true,
+    }).catch(() => undefined);
+  }
+  await removeForkState(params.workspacePath);
+  await fsp.rm(params.workspacePath, { recursive: true, force: true });
+}
+
+export async function removeRunWorkspace(run: RunRecord): Promise<void> {
+  if (!run.workspace.enabled) {
+    return;
+  }
+  if (!run.workspace.workspaceName) {
+    throw new Error("Run has no jj workspace name to remove.");
+  }
+  await forgetWorkspace({
+    repoRoot: run.repoRoot,
+    workspaceName: run.workspace.workspaceName,
+    workspacePath: run.workspace.path,
+  });
+}
+
+/**
+ * Rebase a run's node change onto the trunk. jj records conflicts in place and
+ * never blocks, so there is no rebase-in-progress dance.
+ */
+export async function syncRunWorkspace(run: RunRecord, baseBranch: string): Promise<RunRecord> {
+  if (!run.workspace.workspaceName) {
+    throw new Error("Run has no jj workspace to sync.");
+  }
+  ensureJjRepo(run.repoRoot);
+  const nodeChange = run.workspace.jjChangeId || (await currentJjChangeId(run.workspace.path));
+  if (!nodeChange) {
+    run.sync = {
+      ...run.sync,
+      status: "failed",
+      attemptedAt: new Date().toISOString(),
+      baseBranch,
+      error: "Could not determine jj change id for run workspace.",
+    };
+    await saveRunRecord(run);
+    return run;
+  }
+  const trunk = baseBranch && baseBranch !== "HEAD" ? baseBranch : run.targetBranch || "@";
+  run.sync = {
+    status: "not-started",
+    attemptedAt: new Date().toISOString(),
+    baseBranch: trunk,
+  };
+  await saveRunRecord(run);
+
+  const rebase = await runCommand("jj", ["rebase", "-s", nodeChange, "-d", trunk], {
+    cwd: run.repoRoot,
+    allowFailure: true,
+  });
+  if (rebase.code !== 0) {
+    // jj 0.40 replaced `-d`/`--destination` with `-o`/`--onto`.
+    const onto = await runCommand("jj", ["rebase", "-s", nodeChange, "--onto", trunk], {
+      cwd: run.repoRoot,
+      allowFailure: true,
+    });
+    if (onto.code !== 0) {
+      run.sync = {
+        ...run.sync,
+        status: "failed",
+        error: onto.stderr.trim() || onto.stdout.trim() || `Rebase onto ${trunk} failed.`,
+      };
+      await saveRunRecord(run);
+      return run;
+    }
+  }
+
+  const conflicted = await jjConflictedFiles(run.workspace.path);
+  if (conflicted.length) {
+    run.hadMergeConflict = true;
+  }
+  run.sync = {
+    ...run.sync,
+    status: conflicted.length ? "conflict" : "synced",
+    conflictedFiles: conflicted,
+  };
+  await saveRunRecord(run);
+  return run;
+}
+
+function ensureJjRepo(cwd: string): void {
+  if (!commandExists("jj")) {
+    throw new MissingToolError("jj");
+  }
+  const result = runCommandSync("jj", ["root"], { cwd, allowFailure: true });
+  if (result.code !== 0 || !result.stdout.trim()) {
+    throw new Error(`Expected ${cwd} to be inside a jj repository.`);
+  }
+}
+
+function hasLocalJjMarker(cwd: string): boolean {
+  const marker = path.join(path.resolve(cwd), ".jj");
+  try {
+    return fs.statSync(marker).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function findJjMarker(cwd: string): string | null {
+  let current = path.resolve(cwd);
+  while (true) {
+    const marker = path.join(current, ".jj");
+    if (pathExistsSync(marker)) {
+      try {
+        if (fs.statSync(marker).isDirectory()) {
+          return marker;
+        }
+      } catch {
+        // Keep walking if the marker cannot be inspected.
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalize = (value: string) => {
+    const resolved = path.resolve(value);
+    try {
+      return fs.realpathSync(resolved);
+    } catch {
+      return resolved;
+    }
+  };
+  return normalize(left) === normalize(right);
+}
+
+function isJjStatusMetadata(line: string): boolean {
+  return (
+    /^the working copy has no changes\.?$/i.test(line) ||
+    /^the working copy is clean\.?$/i.test(line) ||
+    /^no changes\.?$/i.test(line) ||
+    /^working copy\s*:/i.test(line) ||
+    /^parent commit\s*:/i.test(line) ||
+    /^current operation\s*:/i.test(line) ||
+    /^no conflicts found\.?$/i.test(line)
+  );
+}
+
+function statusPathFromSummaryLine(line: string): string | null {
+  const match = line.match(/^[A-Z?]{1,2}\s+(.+)$/);
+  return match?.[1]?.trim() || null;
+}
+
+function isRudderMetadataPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^["']|["']$/g, "");
+  return normalized === ".rudder" || normalized.startsWith(".rudder/");
+}
+
+/// A jj-status line that names a Rudder-managed file (a status path or a `C path`
+/// conflict line), which should never count toward the target-dirty merge gate.
+function isMergeIgnorablePath(line: string): boolean {
+  const path = line.replace(/^[ACMDR?]\s+/, "").replace(/^C\s+/, "").trim();
+  return (
+    isRudderMetadataPath(path) ||
+    path === "RUDDER.md" ||
+    path === "DECISIONS.md" ||
+    path.endsWith("/RUDDER.md") ||
+    path.endsWith("/DECISIONS.md")
+  );
+}
+
+async function markMergeFailed(run: RunRecord, error: string): Promise<void> {
+  run.merge = {
+    ...run.merge,
+    status: "failed",
+    error,
+  };
+  await saveRunRecord(run);
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) {
+      return diff < 0 ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Mechanical conflict resolution.
+//
+// A conflict in one of Rudder's own coordination files is never a real product
+// disagreement, and neither is a lockfile: they are the dominant cause of the
+// N-sided pileups that used to wedge integration. The native side pre-flights
+// the same classes before every interactive merge; this is the same rule for
+// the scheduler/daemon path, which had none and so could still freeze a whole
+// plan behind one DECISIONS.md conflict.
+// ---------------------------------------------------------------------------
+
+const CONFLICT_MARKER = /^(<{7}|={7}|>{7}|%{7}|\+{7})/;
+
+export function containsConflictMarkers(content: string): boolean {
+  return content.split(/\r?\n/).some((line) => CONFLICT_MARKER.test(line));
+}
+
+/** The parent revisions of `@`; a merge has two or more. */
+export async function jjParentRevs(repoRoot: string): Promise<string[]> {
+  const result = await jjReadInWorkspace(repoRoot, [
+    "log",
+    "--no-graph",
+    "--no-pager",
+    "-r",
+    "@-",
+    "-T",
+    'change_id.short() ++ "\\n"',
+  ]);
+  if (result.code !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+async function jjFileShow(repoRoot: string, rev: string, filePath: string): Promise<string> {
+  const result = await runCommand("jj", ["file", "show", "-r", rev, filePath], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  return result.code === 0 ? result.stdout : "";
+}
+
+/** Union of `- ` bullet entries across every side, order-preserving and deduped. */
+export function mergeDecisionsSides(sides: string[]): string | undefined {
+  const seen = new Set<string>();
+  const entries: string[] = [];
+  for (const side of sides) {
+    for (const entry of side.split(/\n(?=- )/)) {
+      const normalized = entry.trim();
+      if (!normalized.startsWith("- ") || containsConflictMarkers(normalized)) {
+        continue;
+      }
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        entries.push(normalized);
+      }
+    }
+  }
+  if (!entries.length) {
+    return longestCleanSide(sides);
+  }
+  return `${DECISIONS_HEADER}\n\n${entries.join("\n\n")}\n`;
+}
+
+function longestCleanSide(sides: string[]): string | undefined {
+  return sides
+    .filter((side) => !containsConflictMarkers(side))
+    .sort((a, b) => b.length - a.length)[0];
+}
+
+/** Deep-union of dependency/script maps; scalar ties keep the earlier side. */
+export function mergePackageJsonSides(sides: string[]): string | undefined {
+  const parsed: Array<Record<string, unknown>> = [];
+  for (const side of sides) {
+    if (!side.trim()) {
+      continue;
+    }
+    try {
+      const value = JSON.parse(side) as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return undefined;
+      }
+      parsed.push(value as Record<string, unknown>);
+    } catch {
+      // A side that is not valid JSON means this is not a mechanical conflict.
+      return undefined;
+    }
+  }
+  if (!parsed.length) {
+    return undefined;
+  }
+  const merged = parsed.reduce((acc, value) => deepMergePreferringFirst(acc, value));
+  return `${JSON.stringify(merged, null, 2)}\n`;
+}
+
+function deepMergePreferringFirst(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    const existing = out[key];
+    if (existing === undefined) {
+      out[key] = value;
+    } else if (isPlainObject(existing) && isPlainObject(value)) {
+      out[key] = deepMergePreferringFirst(existing, value);
+    }
+    // Scalar/array collision: keep the earlier side, matching the native rule.
+  }
+  return out;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Union of non-empty lines, order-preserving. */
+function unionLines(sides: string[]): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const side of sides) {
+    for (const line of side.split(/\r?\n/)) {
+      if (containsConflictMarkers(line)) {
+        continue;
+      }
+      const key = line.trim();
+      if (key && seen.has(key)) {
+        continue;
+      }
+      if (key) {
+        seen.add(key);
+      }
+      lines.push(line);
+    }
+  }
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+/**
+ * The mechanical resolution for one conflicted path, or undefined to leave it to
+ * the LLM resolver. Keyed on file NAME so it works at any depth.
+ */
+export function mechanicalMergeFor(fileName: string, sides: string[]): string | undefined {
+  switch (fileName) {
+    case "DECISIONS.md":
+      return mergeDecisionsSides(sides);
+    case "RUDDER.md":
+    case "RUDDER_SHARED.md":
+      // Regenerated by the orchestrator right after the merge.
+      return longestCleanSide(sides);
+    case ".gitignore":
+      return unionLines(sides);
+    case "package.json":
+      return mergePackageJsonSides(sides);
+    case "package-lock.json":
+    case "pnpm-lock.yaml":
+    case "yarn.lock":
+      // Regenerable: take the most complete side, install rebuilds it.
+      return longestCleanSide(sides);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Resolve every conflict Rudder can settle without judgment, and return what is
+ * left. Never writes content that still carries conflict markers.
+ */
+export async function autoResolveMechanicalConflicts(repoRoot: string): Promise<string[]> {
+  const conflicted = await jjConflictedFiles(repoRoot);
+  if (!conflicted.length) {
+    return [];
+  }
+  const parents = await jjParentRevs(repoRoot);
+  if (parents.length < 2) {
+    return conflicted;
+  }
+  let resolvedAny = false;
+  for (const filePath of conflicted) {
+    const fileName = path.basename(filePath);
+    const sides = await Promise.all(parents.map((rev) => jjFileShow(repoRoot, rev, filePath)));
+    const merged = mechanicalMergeFor(fileName, sides);
+    // Never snapshot a "resolution" that still carries markers: it would commit
+    // literal <<<<<<< lines into history for every agent to read.
+    if (merged === undefined || containsConflictMarkers(merged)) {
+      continue;
+    }
+    await fsp.writeFile(path.join(repoRoot, filePath), merged, "utf8").then(
+      () => {
+        resolvedAny = true;
+      },
+      () => undefined,
+    );
+  }
+  if (!resolvedAny) {
+    return conflicted;
+  }
+  // jj is the source of truth for what is still conflicted after the writes.
+  return await jjConflictedFiles(repoRoot);
+}

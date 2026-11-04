@@ -9,9 +9,67 @@ use jj_lib::workspace::WorkingCopyFactories;
 enum BridgeCommand {
     /// Show qualified adapter capabilities; this does not enable a VFS profile.
     RudderCapabilities,
+    /// Add a workspace whose working copy is an overlay fork (rudder-overlay)
+    /// with `--lower` (a directory already holding the revision's tree, e.g. a
+    /// warm snapshot) as its read-only lower layer. No file is copied.
+    #[command(hide = true)]
+    RudderForkAdd(ForkAddArgs),
     #[cfg(feature = "local-development")]
     /// Explicit development scanner profile, using private colocated metadata.
     RudderInitLocal,
+}
+
+#[derive(clap::Args, Clone, Debug)]
+struct ForkAddArgs {
+    destination: std::path::PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long, short = 'r')]
+    revision: String,
+    #[arg(long)]
+    lower: std::path::PathBuf,
+    #[arg(long)]
+    lowers_root: std::path::PathBuf,
+    #[arg(long, short = 'm', default_value = "")]
+    message: String,
+}
+
+async fn fork_add(ui: &mut Ui, helper: &CommandHelper, args: &ForkAddArgs) -> Result<(), CommandError> {
+    use jj_cli::command_error::{internal_error, user_error};
+    use jj_lib::ref_name::WorkspaceNameBuf;
+    use jj_lib::repo::Repo as _;
+    use jj_lib::workspace::Workspace;
+    use rudder_engine::jj_working_copy::{OverlayWorkingCopyFactory, link_lower};
+    let old = helper.workspace_helper(ui)?;
+    let name = WorkspaceNameBuf::from(args.name.clone());
+    if old.repo().view().get_wc_commit_id(&name).is_some() {
+        return Err(user_error(format!("Workspace named '{}' already exists", args.name)));
+    }
+    let destination = helper.cwd().join(&args.destination);
+    std::fs::create_dir_all(&destination).map_err(internal_error)?;
+    let parent_id = old
+        .resolve_single_rev(ui, &jj_cli::cli_util::RevisionArg::from(args.revision.clone()))
+        .await?
+        .id()
+        .clone();
+    let parent = old.repo().store().get_commit(&parent_id)?;
+    let tree = parent.tree();
+    link_lower(&args.lowers_root, &tree, &args.lower).map_err(internal_error)?;
+    let factory = OverlayWorkingCopyFactory { lowers_root: Some(args.lowers_root.clone()) };
+    let (workspace, repo) =
+        Workspace::init_workspace_with_existing_repo(&destination, old.repo_path(), old.repo(), &factory, name)
+            .await?;
+    let mut new_command = helper.for_workable_repo(ui, workspace, repo)?;
+    let mut tx = new_command.start_transaction();
+    let commit = tx
+        .repo_mut()
+        .new_commit(vec![parent_id], tree)
+        .set_description(&args.message)
+        .write()
+        .await?;
+    tx.edit(&commit)?;
+    tx.finish(ui, format!("create overlay fork workspace {}", args.name)).await?;
+    Ok(())
 }
 
 async fn command(
@@ -20,6 +78,7 @@ async fn command(
     command: BridgeCommand,
 ) -> Result<(), CommandError> {
     match command {
+        BridgeCommand::RudderForkAdd(args) => fork_add(ui, helper, &args).await?,
         BridgeCommand::RudderCapabilities => {
             let _ = helper;
             writeln!(
@@ -129,8 +188,15 @@ fn run() -> anyhow::Result<u8> {
             })
             .run());
     }
-    #[allow(unused_mut)]
+    // Behaves like stock jj for normal repos; additionally loads repos on the
+    // Rudder content store and rudder-overlay (fork) working copies.
     let mut factories = WorkingCopyFactories::new();
+    factories.insert(
+        rudder_engine::jj_working_copy::OverlayWorkingCopy::name().to_owned(),
+        Box::new(rudder_engine::jj_working_copy::OverlayWorkingCopyFactory { lowers_root: None }),
+    );
+    let mut store_factories = jj_lib::repo::StoreFactories::empty();
+    rudder_engine::jj_store::register(&mut store_factories);
     #[cfg(feature = "local-development")]
     factories.insert(
         rudder_vcs_bridge::local_development::TYPE_NAME.into(),
@@ -141,6 +207,7 @@ fn run() -> anyhow::Result<u8> {
     Ok(CliRunner::init()
         .name("rudder-jj")
         .version(command_transport::ADAPTER_VERSION)
+        .add_store_factories(store_factories)
         .add_working_copy_factories(factories)
         .add_subcommand(command)
         .run())

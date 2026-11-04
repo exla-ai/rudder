@@ -8,6 +8,7 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import type { JsonValue } from "./types.js";
 import { summarizeTask } from "./task-summary.js";
+import { resolveNativeBinaryPath } from "./native-binary.js";
 
 const DEFAULT_PATH = [
   "/opt/homebrew/bin",
@@ -179,7 +180,43 @@ export function updateJson<T>(
   });
 }
 
+let cachedRudderJj: string | null | undefined;
+
+/**
+ * Packaged `rudder-jj` (jj 0.40 plus Rudder's content-store backend and
+ * overlay working copy), next to rudder-native. `RUDDER_JJ_BIN` overrides it;
+ * an empty value disables it. Null means use stock `jj` from PATH.
+ */
+export function rudderJjPath(): string | null {
+  const override = process.env.RUDDER_JJ_BIN;
+  if (override !== undefined) return override && isExecutable(override) ? override : null;
+  if (cachedRudderJj !== undefined) return cachedRudderJj;
+  const native = resolveNativeBinaryPath();
+  const candidate = native ? path.join(path.dirname(native), process.platform === "win32" ? "rudder-jj.exe" : "rudder-jj") : null;
+  cachedRudderJj = candidate && isExecutable(candidate) ? candidate : null;
+  return cachedRudderJj;
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** The program to run for `jj`: rudder-jj when present, else stock jj. */
+export function jjProgram(): string {
+  return rudderJjPath() ?? "jj";
+}
+
+function resolveProgram(command: string): string {
+  return command === "jj" ? jjProgram() : command;
+}
+
 export function commandExists(command: string): boolean {
+  if (command === "jj" && rudderJjPath()) return true;
   const result = spawnSync("sh", ["-c", `command -v ${shellQuote(command)}`], {
     encoding: "utf8",
     env: commandEnv(),
@@ -229,7 +266,7 @@ export async function runCommand(
     // inheritStdio wires the child straight to this process's terminal so an
     // INTERACTIVE command (e.g. `codex login`) can read stdin and show its prompts;
     // its stdout/stderr are then not captured (they go to the terminal).
-    const child = spawn(command, args, {
+    const child = spawn(resolveProgram(command), args, {
       cwd: options?.cwd,
       env: commandEnv(options?.env),
       stdio: options?.inheritStdio ? "inherit" : ["ignore", "pipe", "pipe"],
@@ -261,7 +298,7 @@ export function runCommandSync(
   args: string[],
   options?: { cwd?: string; allowFailure?: boolean },
 ): { stdout: string; stderr: string; code: number } {
-  const result = spawnSync(command, args, {
+  const result = spawnSync(resolveProgram(command), args, {
     cwd: options?.cwd,
     env: commandEnv(),
     encoding: "utf8",

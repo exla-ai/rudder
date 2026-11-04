@@ -1,0 +1,328 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { renderContract } from "../dist/brain.js";
+import { parseDecisions } from "../dist/board/daemon.js";
+import { summarizeTask } from "../dist/task-summary.js";
+import {
+  DECISIONS_HEADER,
+  PROPAGATION_RULES,
+  appendCompletionNote,
+  appendDecision,
+  appendSharedContext,
+  ensureDecisionsFile,
+  extractSharedContextSnippet,
+  parseCompletionNoteArg,
+  redactSharedSecretValues,
+  SHARED_CONTEXT_FILE,
+  writeCompletionNoteFile,
+} from "../dist/surfaces.js";
+import { readdir } from "node:fs/promises";
+import { buildResolverPrompt, resolverShouldFinalize } from "../dist/scheduler.js";
+import { latestRudderPlanBlock, mergeGeneratedRudderMd } from "../dist/rudder-md.js";
+
+// ---------------------------------------------------------------------------
+// DECISIONS.md bullet parser (pure). text/owner/ts extraction.
+// ---------------------------------------------------------------------------
+
+test("parseDecisions: plain bullet yields text only", () => {
+  const entries = parseDecisions("# Decisions\n\n- plain decision without metadata\n");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "plain decision without metadata");
+  assert.equal(entries[0].owner, undefined);
+  assert.equal(entries[0].ts, undefined);
+});
+
+test("parseDecisions: extracts owner and ts from (owner: X, <iso>) suffix", () => {
+  const raw = "- the parser owns the token budget  (owner: r-a1, 2026-05-30T12:00:00.000Z)\n";
+  const entries = parseDecisions(raw);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "the parser owns the token budget");
+  assert.equal(entries[0].owner, "r-a1");
+  assert.equal(entries[0].ts, "2026-05-30T12:00:00.000Z");
+});
+
+test("parseDecisions: owner-only suffix sets owner, no ts", () => {
+  const entries = parseDecisions("* keep config flat  (owner: cli)\n");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "keep config flat");
+  assert.equal(entries[0].owner, "cli");
+  assert.equal(entries[0].ts, undefined);
+});
+
+test("parseDecisions: ignores the header and non-bullet lines", () => {
+  const raw = `${DECISIONS_HEADER}\n\nsome prose line\n- a real decision  (owner: cli, 2026-01-01T00:00:00.000Z)\n`;
+  const entries = parseDecisions(raw);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, "a real decision");
+});
+
+test("parseDecisions: empty / absent content yields no entries", () => {
+  assert.deepEqual(parseDecisions(""), []);
+  assert.deepEqual(parseDecisions("\n\n"), []);
+});
+
+test("mergeGeneratedRudderMd preserves orchestrator content and ignores template plan markers", () => {
+  const existing = [
+    "<!-- RUDDER_GENERATED_START -->",
+    "old generated",
+    "<!-- RUDDER_GENERATED_END -->",
+    "",
+    "## Orchestrator notes",
+    "- keep",
+  ].join("\n");
+  const merged = mergeGeneratedRudderMd(existing, "new generated\n");
+  assert.match(merged, /new generated/);
+  assert.doesNotMatch(merged, /old generated/);
+  assert.match(merged, /## Orchestrator notes\n- keep/);
+
+  const template = [
+    "RUDDER_PLAN_TASKS_START_TEMPLATE",
+    "{\"tasks\":[{\"id\":\"fake\",\"title\":\"fake\",\"prompt\":\"p\"}]}",
+    "RUDDER_PLAN_TASKS_END_TEMPLATE",
+  ].join("\n");
+  assert.equal(latestRudderPlanBlock(template), null);
+});
+
+// ---------------------------------------------------------------------------
+// ensureDecisionsFile + appendDecision (IO-light, temp dir).
+// ---------------------------------------------------------------------------
+
+test("ensureDecisionsFile creates a tracked DECISIONS.md with the header", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-decisions-"));
+  try {
+    const file = await ensureDecisionsFile(dir);
+    assert.equal(file, path.join(dir, "DECISIONS.md"));
+    const content = await readFile(file, "utf8");
+    assert.ok(content.startsWith(DECISIONS_HEADER), "header is the first line");
+    // It is NOT gitignored: a .gitignore should not be created listing it.
+    const gitignore = await readFile(path.join(dir, ".gitignore"), "utf8").catch(() => "");
+    assert.ok(!gitignore.includes("DECISIONS.md"), "DECISIONS.md must not be gitignored");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureDecisionsFile is idempotent and never clobbers existing content", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-decisions-"));
+  try {
+    await ensureDecisionsFile(dir);
+    await writeFile(path.join(dir, "DECISIONS.md"), `${DECISIONS_HEADER}\n\n- existing entry\n`, "utf8");
+    await ensureDecisionsFile(dir);
+    const content = await readFile(path.join(dir, "DECISIONS.md"), "utf8");
+    assert.ok(content.includes("- existing entry"), "existing content preserved");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("appendDecision appends a parseable (owner, ts) bullet", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-decisions-"));
+  try {
+    await appendDecision(dir, "use jj for isolation");
+    const content = await readFile(path.join(dir, "DECISIONS.md"), "utf8");
+    const entries = parseDecisions(content);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].text, "use jj for isolation");
+    assert.equal(entries[0].owner, "cli");
+    assert.ok(entries[0].ts, "ts is populated");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("extractSharedContextSnippet captures secret-like lines without token-budget prose", () => {
+  const snippet = extractSharedContextSnippet(
+    "use APIFY_TOKEN=abc1234567 for the scrape\nplease keep token budget low",
+  );
+  assert.match(snippet ?? "", /APIFY_TOKEN=abc1234567/);
+  assert.doesNotMatch(snippet ?? "", /token budget/);
+});
+
+test("appendSharedContext writes gitignored RUDDER_SHARED.md", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-shared-"));
+  try {
+    const wrote = await appendSharedContext(dir, "APIFY_TOKEN=abc1234567", "test");
+    assert.equal(wrote, true);
+    const content = await readFile(path.join(dir, SHARED_CONTEXT_FILE), "utf8");
+    const gitignore = await readFile(path.join(dir, ".gitignore"), "utf8");
+    assert.match(content, /APIFY_TOKEN=abc1234567/);
+    assert.match(gitignore, new RegExp(`^${SHARED_CONTEXT_FILE}$`, "m"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("redactSharedSecretValues hides tokens in generated previews", () => {
+  const redacted = redactSharedSecretValues(
+    "apify token store this somewhere rdrtest_abc1234567890abcdef",
+  );
+  assert.match(redacted, /\[redacted\]/);
+  assert.doesNotMatch(redacted, /rdrtest_abc/);
+  assert.equal(
+    redactSharedSecretValues("APIFY_TOKEN=abc1234567"),
+    "APIFY_TOKEN=[redacted]",
+  );
+  assert.equal(
+    redactSharedSecretValues("API_TOKEN=abc1234567"),
+    "API_TOKEN=[redacted]",
+  );
+});
+
+test("summarizeTask redacts token values from local labels", () => {
+  const summary = summarizeTask("scrape data with API_TOKEN=abc1234567");
+  assert.match(summary, /\[redacted\]/);
+  assert.doesNotMatch(summary, /abc1234567/);
+});
+
+test("appendCompletionNote writes a DONE bullet with interfaces + scoped follow-ups", async () => {
+  // The worker side of the completion pathway: `rudder done` records what the agent
+  // did (summary + interfaces) and what it thinks is left (follow-ups, in/out of lane)
+  // to DECISIONS.md, so siblings AND the orchestrator can read it.
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-done-"));
+  try {
+    await appendCompletionNote(
+      dir,
+      {
+        node: "n3",
+        summary: "built the auth module",
+        interfaces: "added login() and a Session type",
+        followups: [
+          { title: "wire login into the router", why: "login needs a caller", scope: "in" },
+          { title: "rate-limit the login endpoint", scope: "out" },
+        ],
+      },
+      "worker",
+    );
+    const content = await readFile(path.join(dir, "DECISIONS.md"), "utf8");
+    // The headline bullet is owned by the node id and parses like any decision
+    // (the indented follow-up bullets also parse as entries, so find by owner).
+    const entries = parseDecisions(content);
+    const headline = entries.find((e) => e.owner === "n3");
+    assert.ok(headline, "a decision entry owned by the node id");
+    assert.match(headline.text, /built the auth module/);
+    // The structured detail the orchestrator reads back (new ## block format).
+    assert.match(content, /\*\*Interfaces:\*\* added login\(\) and a Session type/);
+    assert.match(content, /wire login into the router/);
+    assert.match(content, /\[out of lane\]/, "out-of-lane follow-up is flagged");
+    assert.match(content, /login needs a caller/, "the why is recorded");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("parseCompletionNoteArg handles objects, fenced JSON, arrays, and freeform prose", () => {
+  // A bare JSON object is a structured note.
+  const obj = parseCompletionNoteArg('{"summary":"did x","followups":[{"title":"t","scope":"in"}]}');
+  assert.equal(obj.summary, "did x");
+  assert.equal(obj.followups[0].title, "t");
+
+  // A ```json fenced block (models love fences) is unwrapped and parsed.
+  const fenced = parseCompletionNoteArg('```json\n{"summary":"fenced","followups":[]}\n```');
+  assert.equal(fenced.summary, "fenced");
+  assert.deepEqual(fenced.followups, []);
+
+  // A JSON ARRAY is NOT a note: it falls back to freeform so followups aren't lost-cast.
+  const arr = parseCompletionNoteArg('[1,2,3]');
+  assert.equal(arr.summary, "[1,2,3]");
+  assert.equal(arr.followups, undefined);
+
+  // A primitive likewise.
+  const prim = parseCompletionNoteArg("42");
+  assert.equal(prim.summary, "42");
+
+  // Freeform prose becomes the summary (so the backstop later mines the diff for it).
+  const prose = parseCompletionNoteArg("did the thing, still need to wire it up");
+  assert.equal(prose.summary, "did the thing, still need to wire it up");
+  assert.equal(prose.followups, undefined);
+});
+
+test("writeCompletionNoteFile drops machine-readable JSON the orchestrator reads off disk", async () => {
+  // The robust, terminal-independent channel: rudder done writes this file; the
+  // orchestrator reads it directly instead of scraping the PTY.
+  const dir = await mkdtemp(path.join(tmpdir(), "rudder-donefile-"));
+  try {
+    // Nested path that does not exist yet: the helper must mkdir -p.
+    const doneFile = path.join(dir, ".rudder", "done", "n3.json");
+    const note = {
+      node: "n3",
+      summary: "built it",
+      followups: [{ title: "add docs", scope: "in" }],
+    };
+    const ok = await writeCompletionNoteFile(doneFile, note);
+    assert.equal(ok, true, "write succeeds");
+
+    const parsed = JSON.parse(await readFile(doneFile, "utf8"));
+    assert.equal(parsed.node, "n3");
+    assert.equal(parsed.followups[0].title, "add docs");
+
+    // The write is atomic (temp + rename): no .tmp file is left for the reader to trip on.
+    const leftover = (await readdir(path.dirname(doneFile))).filter((f) => f.endsWith(".tmp"));
+    assert.equal(leftover.length, 0, "the atomic temp file was renamed away");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// renderContract includes the shared propagation rules.
+// ---------------------------------------------------------------------------
+
+test("renderContract injects the propagation rules incl. the adapt-on-change rule", () => {
+  const spec = {
+    runId: "r1",
+    task: "do the thing",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    repo: { root: "/tmp/repo", branch: "main", baseCommit: "abc", status: [] },
+    instructionsFiles: [],
+    acceptanceCriteria: ["criterion"],
+    suggestedTests: [],
+  };
+  const contract = renderContract(spec);
+  assert.ok(PROPAGATION_RULES.length >= 2);
+  for (const rule of PROPAGATION_RULES) {
+    assert.ok(contract.includes(rule), `contract is missing rule: ${rule}`);
+  }
+  assert.ok(PROPAGATION_RULES.some((rule) => /secrets/.test(rule)), "a no-secrets rule must be present");
+  // No em dashes in the rules (project constraint).
+  for (const rule of PROPAGATION_RULES) {
+    assert.ok(!rule.includes("—"), "propagation rule must not contain an em dash");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Resolver: prompt builder + the pure finalize decision.
+// ---------------------------------------------------------------------------
+
+test("buildResolverPrompt names both titles, the change, and the conflicted files", () => {
+  const prompt = buildResolverPrompt({
+    mergeChangeId: "mzzz",
+    intoTitle: "integration trunk",
+    nodeTitle: "wire parser into CLI",
+    conflictedFiles: ["src/a.ts", "src/b.ts"],
+  });
+  assert.ok(prompt.includes("mzzz"));
+  assert.ok(prompt.includes("integration trunk"));
+  assert.ok(prompt.includes("wire parser into CLI"));
+  assert.ok(prompt.includes("src/a.ts, src/b.ts"));
+  assert.ok(prompt.includes("preserving BOTH intents"));
+  assert.ok(prompt.includes("no remaining conflicts"));
+  assert.ok(!prompt.includes("—"), "no em dashes in the prompt");
+  // The resolver agent is spawned in objective format too: objective = resolve the
+  // conflict preserving both intents; success = no markers and jj resolve empty.
+  assert.ok(prompt.split("\n")[0].startsWith("Objective: "));
+  assert.ok(prompt.split("\n")[0].includes("resolve the merge conflict"));
+  assert.ok(prompt.includes("Done when: no conflict markers remain and `jj resolve --list` is empty"));
+});
+
+test("resolverShouldFinalize: true only for a resolver run with no remaining conflicts", () => {
+  // Resolver run, conflicts cleared -> finalize.
+  assert.equal(resolverShouldFinalize({ resolverFor: "r-a1", remainingConflicts: [] }), true);
+  // Resolver run, conflicts remain -> do not finalize (held blocked).
+  assert.equal(resolverShouldFinalize({ resolverFor: "r-a1", remainingConflicts: ["src/a.ts"] }), false);
+  // Not a resolver run -> never finalize via this path.
+  assert.equal(resolverShouldFinalize({ resolverFor: undefined, remainingConflicts: [] }), false);
+});

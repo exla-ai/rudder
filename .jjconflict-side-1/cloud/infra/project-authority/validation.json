@@ -1,0 +1,52 @@
+{
+  "checkedAt": "2026-10-30T22:20:08.854Z",
+  "scope": "Only new proposal paths; no resources or account API; no provider/transport/SQL bootstrap qualification",
+  "sourceSha256": {
+    "cloud/infra/project-authority/README.md": "2a1b11c2394f494a9bed3a65314322eb00fcb63614a0efd902c5e8a09c59d3f4",
+    "cloud/infra/project-authority/bootstrap-roles.sql": "540459a2241cbc4f3dc806e159070b524a10268a616e74d9387673619ad61b9e",
+    "cloud/infra/project-authority/capture-prices.py": "3994a31d94cd2cb9f33aedafbc8dbe39defaef2609a9bd62ff915488ee87d43f",
+    "cloud/infra/project-authority/pricing-us-east-1.json": "bda4442f2e3f71abdbd06ab6d234ee3facf992cfdb22347a6e42ca10ff8d178d",
+    "cloud/infra/project-authority/private-rds.cfn.json": "9c93a03eff141bcdc99787e528d93f8170c2a10c80cad902c6a9ef76d57ee963",
+    "cloud/infra/project-authority/rollout.example.json": "8e26a8ef19ef9f1a8da2c5fd704f577421d806917d216d0d2c90c99f91372d7d",
+    "cloud/infra/project-authority/stack-policy.json": "95ede5ff1acc767269fa8a76c383d9486448e669b6e4f11be5bb0aa561c3813f",
+    "cloud/infra/project-authority/template.mjs": "545b2a7375890dc2017baa915575bed78f82ef2f0d581dcc3db8fe27e7720df7",
+    "cloud/infra/project-authority/validate.mjs": "789231fe5f78bf49cb762e464832656bd328568800248e05797545d0c38dc128",
+    "docs/architecture/authority-provider-rollout.md": "ff4744c14159cedf53488830c3c995c77a956d46cfc6130fc5e6d1892a7b33b9"
+  },
+  "offline": {
+    "scope": "offline only; no resources, credentials, production activation or HA qualification",
+    "resourcesDisabledByDefault": 19,
+    "unsafeMutationsRejected": 11,
+    "estimatedUSD730Hours": {
+      "smallPrivateFoundation": 54.85,
+      "largePrivateFoundation": 253.41,
+      "twoSsmRelaysAdditional": 14.71,
+      "proposedVpcApiAdditionalAt100kRequests": 14.93,
+      "smallWithProposedVpcApi": 69.78
+    }
+  },
+  "cfnLint": {
+    "version": "1.59.0",
+    "region": "us-east-1",
+    "exitCode": 0,
+    "findings": []
+  },
+  "whitespace": {
+    "files": 10,
+    "gitDiffCheck": "passed; HEAD diff and each new file against /dev/null"
+  },
+  "secretLiteralAudit": {
+    "files": 10,
+    "matches": 0
+  },
+  "unrun": [
+    "AWS ValidateTemplate and change set",
+    "RDS orderability and actual parameter availability",
+    "IAM policy evaluation",
+    "RDS bootstrap SQL/migration",
+    "runtime secret installation and rotation",
+    "Fly transport and OIDC role for authority",
+    "provider failover/partition/PITR drills",
+    "production activation"
+  ]
+}

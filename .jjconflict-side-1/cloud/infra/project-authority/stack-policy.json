@@ -1,0 +1,18 @@
+{
+  "Statement": [
+    { "Effect": "Allow", "Action": "Update:*", "Principal": "*", "Resource": "*" },
+    {
+      "Effect": "Deny",
+      "Action": ["Update:Replace", "Update:Delete"],
+      "Principal": "*",
+      "Resource": [
+        "LogicalResourceId/Database", "LogicalResourceId/StorageKey", "LogicalResourceId/SecretsKey",
+        "LogicalResourceId/RuntimeSecret", "LogicalResourceId/Vpc", "LogicalResourceId/PrivateSubnetA",
+        "LogicalResourceId/PrivateSubnetB", "LogicalResourceId/PrivateRoutes", "LogicalResourceId/PrivateRouteAssociationA",
+        "LogicalResourceId/PrivateRouteAssociationB", "LogicalResourceId/DatabaseSubnets", "LogicalResourceId/DatabaseParameters",
+        "LogicalResourceId/DatabaseSecurityGroup", "LogicalResourceId/RuntimeClientSecurityGroup", "LogicalResourceId/OperatorClientSecurityGroup",
+        "LogicalResourceId/RuntimeDatabaseIngress", "LogicalResourceId/OperatorDatabaseIngress"
+      ]
+    }
+  ]
+}

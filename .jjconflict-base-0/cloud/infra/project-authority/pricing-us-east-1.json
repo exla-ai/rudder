@@ -1,0 +1,663 @@
+{
+  "capturedAt": "2026-10-30T22:18:05.157816+00:00",
+  "region": "us-east-1",
+  "currency": "USD",
+  "monthlyHours": 730,
+  "scope": "Public on-demand catalogs; no account, discount, tax or spend API",
+  "catalogs": [
+    {
+      "service": "AmazonRDS",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/us-east-1/index.json",
+      "version": "20261029070635",
+      "publicationDate": "2026-10-29T07:06:35Z",
+      "bytes": 30937790,
+      "sha256": "474e3c635ed5aded38e1ff5e2123cff00cecd659fb923a232a8b763c83792d02",
+      "selected": [
+        {
+          "sku": "5SY529FVXY3EARD8",
+          "productFamily": "Database Instance",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "instanceType": "db.t4g.small",
+            "currentGeneration": "Yes",
+            "instanceFamily": "General purpose",
+            "vcpu": "2",
+            "physicalProcessor": "AWS Graviton2",
+            "memory": "2 GiB",
+            "storage": "EBS Only",
+            "networkPerformance": "Up to 5 Gigabit",
+            "processorArchitecture": "64-bit",
+            "engineCode": "14",
+            "databaseEngine": "PostgreSQL",
+            "licenseModel": "No license required",
+            "deploymentOption": "Multi-AZ",
+            "usagetype": "Multi-AZUsage:db.t4g.small",
+            "operation": "CreateDBInstance:0014",
+            "instanceTypeFamily": "T4G",
+            "normalizationSizeFactor": "2",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service",
+            "unbundledLicensing": "FALSE"
+          },
+          "prices": [
+            {
+              "rateCode": "5SY529FVXY3EARD8.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Hrs",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0650000000",
+              "description": "$ 0.065 per RDS db.t4g.small Multi-AZ instance hour (or partial hour) running PostgreSQL",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "6W8ECRFVDATCER7J",
+          "productFamily": "Storage Snapshot",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "storageMedia": "AmazonS3",
+            "engineCode": "14",
+            "databaseEngine": "PostgreSQL",
+            "deploymentOption": "Single-AZ",
+            "usagetype": "RDS:ChargedBackupUsage",
+            "operation": "CreateDBInstance:0014",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "6W8ECRFVDATCER7J.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "GB-Mo",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0950000000",
+              "description": "$0.095 per additional GB-month of backup storage exceeding free allocation running PostgreSQL",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "7GYUVAA992PFJPCB",
+          "productFamily": "Database Storage",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "storageMedia": "SSD",
+            "volumeType": "General Purpose-Aurora",
+            "minVolumeSize": "10 GB",
+            "maxVolumeSize": "64 TB",
+            "engineCode": "21",
+            "databaseEngine": "Aurora PostgreSQL",
+            "deploymentOption": "Single-AZ",
+            "usagetype": "Aurora:StorageUsage",
+            "operation": "CreateDBInstance:0021",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "7GYUVAA992PFJPCB.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "GB-Mo",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.1000000000",
+              "description": "$0.10 per GB-month of consumed storage (Aurora PostgreSQL)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "7JDSZP38DMKT9B86",
+          "productFamily": "System Operation",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "engineCode": "21",
+            "databaseEngine": "Aurora PostgreSQL",
+            "group": "Aurora I/O Operation",
+            "groupDescription": "Input/Output Operation",
+            "usagetype": "Aurora:StorageIOUsage",
+            "operation": "CreateDBInstance:0021",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "7JDSZP38DMKT9B86.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "IOs",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0000002000",
+              "description": "$0.20 per 1 million I/O requests (Aurora PostgreSQL)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "AVKW7ZJP8D72HNQC",
+          "productFamily": "ServerlessV2",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "engineCode": "21",
+            "databaseEngine": "Aurora PostgreSQL",
+            "usagetype": "Aurora:ServerlessV2Usage",
+            "operation": "CreateDBInstance:0021",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "AVKW7ZJP8D72HNQC.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "ACU-Hr",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.1200000000",
+              "description": "USD 0.12 per Aurora Capacity Unit hour running Aurora PostgreSQL Serverless v2",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "DXW9ERDR4STYT9D7",
+          "productFamily": "CPU Credits",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "instanceFamily": "T4G",
+            "engineCode": "14",
+            "databaseEngine": "PostgreSQL",
+            "usagetype": "CPUCredits:db.t4g",
+            "operation": "CreateDBInstance:0014",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "DXW9ERDR4STYT9D7.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "vCPU-Hours",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0750000000",
+              "description": "USD 0.075 per vCPU-Hour of T4g CPU Credits",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "J7S7KD4WFDNQWKNX",
+          "productFamily": "Database Storage",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "storageMedia": "SSD",
+            "volumeType": "General Purpose-GP3",
+            "minVolumeSize": "5 GB",
+            "maxVolumeSize": "16 TB",
+            "engineCode": "14",
+            "databaseEngine": "PostgreSQL",
+            "deploymentOption": "Multi-AZ",
+            "usagetype": "RDS:Multi-AZ-GP3-Storage",
+            "operation": "CreateDBInstance:0014",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service"
+          },
+          "prices": [
+            {
+              "rateCode": "J7S7KD4WFDNQWKNX.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "GB-Mo",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.2300000000",
+              "description": "$0.23 per GB-month of provisioned GP3 storage for Multi-AZ deployments running PostgreSQL",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "Z8HB5KU2V54F7ATT",
+          "productFamily": "Database Instance",
+          "attributes": {
+            "servicecode": "AmazonRDS",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "instanceType": "db.m7g.large",
+            "currentGeneration": "Yes",
+            "instanceFamily": "General purpose",
+            "vcpu": "2",
+            "physicalProcessor": "AWS Graviton3",
+            "memory": "8 GiB",
+            "storage": "EBS Only",
+            "networkPerformance": "Up to 12.5 Gigabit",
+            "processorArchitecture": "64-bit",
+            "engineCode": "14",
+            "databaseEngine": "PostgreSQL",
+            "licenseModel": "No license required",
+            "deploymentOption": "Multi-AZ",
+            "usagetype": "Multi-AZUsage:db.m7g.large",
+            "operation": "CreateDBInstance:0014",
+            "instanceTypeFamily": "M7G",
+            "normalizationSizeFactor": "8",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Relational Database Service",
+            "unbundledLicensing": "FALSE"
+          },
+          "prices": [
+            {
+              "rateCode": "Z8HB5KU2V54F7ATT.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Hrs",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.3370000000",
+              "description": "$ 0.337 per RDS db.m7g.large Multi-AZ instance hour (or partial hour) running PostgreSQL",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "AmazonVPC",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonVPC/current/us-east-1/index.json",
+      "version": "20261016224321",
+      "publicationDate": "2026-10-16T22:43:21Z",
+      "bytes": 80535,
+      "sha256": "85367cb441bc050ea66796736a4605b4a937f9b2a8639a7103270c7eac941a1c",
+      "selected": [
+        {
+          "sku": "4GQUNXTFWVSGPUZK",
+          "productFamily": null,
+          "attributes": {
+            "servicecode": "AmazonVPC",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "VPCPublicIPv4Address",
+            "groupDescription": "Hourly charge for In-use Public IPv4 Addresses",
+            "usagetype": "USE1-PublicIPv4:InUseAddress",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Virtual Private Cloud"
+          },
+          "prices": [
+            {
+              "rateCode": "4GQUNXTFWVSGPUZK.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Hrs",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0050000000",
+              "description": "$0.005 per In-use public IPv4 address per hour",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "EN2N5TATXE673A3B",
+          "productFamily": "VpcEndpoint",
+          "attributes": {
+            "servicecode": "AmazonVPC",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "endpointType": "PrivateLink",
+            "group": "VPCE:VpcEndpoint",
+            "groupDescription": "Hourly charge for VPC Endpoints",
+            "usagetype": "USE1-VpcEndpoint-Hours",
+            "operation": "VpcEndpoint",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon Virtual Private Cloud"
+          },
+          "prices": [
+            {
+              "rateCode": "EN2N5TATXE673A3B.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Hrs",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0100000000",
+              "description": "$0.01 per VPC Endpoint Hour",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "AWSSecretsManager",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSSecretsManager/current/us-east-1/index.json",
+      "version": "20260911124610",
+      "publicationDate": "2026-09-11T12:46:10Z",
+      "bytes": 2904,
+      "sha256": "496d97748defb355700e90a56d999d9170be82b1e8afa6a099b3998accf113b3",
+      "selected": [
+        {
+          "sku": "4MDZ5VNEJPMUTG9B",
+          "productFamily": "API Request",
+          "attributes": {
+            "servicecode": "AWSSecretsManager",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "AWSSecretsManager-APIRequest",
+            "usagetype": "USE1-AWSSecretsManagerAPIRequest",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Secrets Manager"
+          },
+          "prices": [
+            {
+              "rateCode": "4MDZ5VNEJPMUTG9B.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "API Requests",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0000050000",
+              "description": "$0.05 per 10000 API Requests",
+              "effectiveDate": "2025-07-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "BJ3PQ9BYGU6P632F",
+          "productFamily": "Secret",
+          "attributes": {
+            "servicecode": "AWSSecretsManager",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "AWSSecretsManager-Secret",
+            "usagetype": "USE1-AWSSecretsManager-Secrets",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Secrets Manager"
+          },
+          "prices": [
+            {
+              "rateCode": "BJ3PQ9BYGU6P632F.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Secrets",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.4000000000",
+              "description": "$0.40 per Secret",
+              "effectiveDate": "2025-07-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "awskms",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/awskms/current/us-east-1/index.json",
+      "version": "20261026201814",
+      "publicationDate": "2026-10-26T20:18:14Z",
+      "bytes": 12905,
+      "sha256": "5b6b455caa82e93edae97bca175e48ee30b9fa7d7e254210cb707c039ba1d9d3",
+      "selected": [
+        {
+          "sku": "MFEBZPX8NHM5FY7Z",
+          "productFamily": "API Request",
+          "attributes": {
+            "servicecode": "awskms",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "awskms-APIRequest-All",
+            "groupDescription": "All AWS KMS API requests",
+            "usagetype": "us-east-1-KMS-Requests",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Key Management Service"
+          },
+          "prices": [
+            {
+              "rateCode": "MFEBZPX8NHM5FY7Z.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Requests",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0000030000",
+              "description": "$0.03 per 10000 KMS requests in US East (N. Virginia)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "U553K98XGDXCYHWS",
+          "productFamily": "Encryption Key",
+          "attributes": {
+            "servicecode": "awskms",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "usagetype": "us-east-1-KMS-Keys",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Key Management Service"
+          },
+          "prices": [
+            {
+              "rateCode": "U553K98XGDXCYHWS.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Keys",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "1.0000000000",
+              "description": "$1 per customer managed KMS key version in US East (N. Virginia)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "AmazonApiGateway",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonApiGateway/current/us-east-1/index.json",
+      "version": "20261013003044",
+      "publicationDate": "2026-10-13T00:30:44Z",
+      "bytes": 20292,
+      "sha256": "0bdd35785508b1a116cec8df403951d2d68ee036d2f7c9f486fd8ca499b738bc",
+      "selected": [
+        {
+          "sku": "FC2TWT2UEPTBKVBX",
+          "productFamily": "API Calls",
+          "attributes": {
+            "servicecode": "AmazonApiGateway",
+            "description": "HTTP API Requests",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "usagetype": "USE1-ApiGatewayHttpRequest",
+            "operation": "ApiGatewayHttpApi",
+            "regionCode": "us-east-1",
+            "servicename": "Amazon API Gateway"
+          },
+          "prices": [
+            {
+              "rateCode": "FC2TWT2UEPTBKVBX.JRTCKXETXF.9NXBCPDZYR",
+              "unit": "Requests",
+              "begin": "0",
+              "end": "300000000",
+              "usd": "0.0000010000",
+              "description": "$1/million requests - API Gateway HTTP API (first 300 million)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            },
+            {
+              "rateCode": "FC2TWT2UEPTBKVBX.JRTCKXETXF.Y5DREYKEMT",
+              "unit": "Requests",
+              "begin": "300000000",
+              "end": "Inf",
+              "usd": "0.0000009000",
+              "description": "$0.9/million requests - API Gateway HTTP API (more than 300 million)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "AWSLambda",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AWSLambda/current/us-east-1/index.json",
+      "version": "20261022183959",
+      "publicationDate": "2026-10-22T18:39:59Z",
+      "bytes": 723525,
+      "sha256": "d0fc94179f8e546998c2e39ed739a41b2f5758728994366809bb4d1b45ba4e6e",
+      "selected": [
+        {
+          "sku": "GU2ZS9HVP6QTQ7KE",
+          "productFamily": "Serverless",
+          "attributes": {
+            "servicecode": "AWSLambda",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "AWS-Lambda-Requests",
+            "groupDescription": "Invocation call for a Lambda function",
+            "usagetype": "Request",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Lambda"
+          },
+          "prices": [
+            {
+              "rateCode": "GU2ZS9HVP6QTQ7KE.JRTCKXETXF.6YS6EN2CT7",
+              "unit": "Requests",
+              "begin": "0",
+              "end": "Inf",
+              "usd": "0.0000002000",
+              "description": "AWS Lambda - Total Requests - US East (Northern Virginia)",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        },
+        {
+          "sku": "TG3M4CAGBA3NYQBH",
+          "productFamily": "Serverless",
+          "attributes": {
+            "servicecode": "AWSLambda",
+            "location": "US East (N. Virginia)",
+            "locationType": "AWS Region",
+            "group": "AWS-Lambda-Duration",
+            "groupDescription": "Invocation duration weighted by memory assigned to function, measured in GB-s",
+            "usagetype": "Lambda-GB-Second",
+            "operation": "",
+            "regionCode": "us-east-1",
+            "servicename": "AWS Lambda"
+          },
+          "prices": [
+            {
+              "rateCode": "TG3M4CAGBA3NYQBH.JRTCKXETXF.CUKFZ388N3",
+              "unit": "Lambda-GB-Second",
+              "begin": "0",
+              "end": "6000000000",
+              "usd": "0.0000166667",
+              "description": "AWS Lambda - Total Compute - US East (Northern Virginia)-Tier-1",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            },
+            {
+              "rateCode": "TG3M4CAGBA3NYQBH.JRTCKXETXF.QZE2SB4KVB",
+              "unit": "Lambda-GB-Second",
+              "begin": "6000000000",
+              "end": "15000000000",
+              "usd": "0.0000150000",
+              "description": "AWS Lambda - Total Compute - US East (Northern Virginia)-Tier-2",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            },
+            {
+              "rateCode": "TG3M4CAGBA3NYQBH.JRTCKXETXF.V7R92EXG27",
+              "unit": "Lambda-GB-Second",
+              "begin": "15000000000",
+              "end": "Inf",
+              "usd": "0.0000133334",
+              "description": "AWS Lambda - Total Compute - US East (Northern Virginia)-Tier-3",
+              "effectiveDate": "2026-10-01T00:00:00Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "service": "AmazonEC2",
+      "url": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.csv",
+      "version": "20261029175634",
+      "publicationDate": "2026-10-29T17:56:34Z",
+      "bytes": 302903252,
+      "sha256": "cce748e4a6eaa35e349e2590ef36a957071b1e01b316369aaccaf51d270abe33",
+      "selected": [
+        {
+          "SKU": "DU8E8NJG743V3F8M",
+          "OfferTermCode": "JRTCKXETXF",
+          "RateCode": "DU8E8NJG743V3F8M.JRTCKXETXF.6YS6EN2CT7",
+          "TermType": "OnDemand",
+          "PriceDescription": "$0.0042 per On Demand Linux t4g.nano Instance Hour",
+          "EffectiveDate": "2026-10-01",
+          "StartingRange": "0",
+          "EndingRange": "Inf",
+          "Unit": "Hrs",
+          "PricePerUnit": "0.0042000000",
+          "Currency": "USD",
+          "Product Family": "Compute Instance",
+          "serviceCode": "AmazonEC2",
+          "Location": "US East (N. Virginia)",
+          "Location Type": "AWS Region",
+          "Instance Type": "t4g.nano",
+          "Current Generation": "Yes",
+          "Instance Family": "General purpose",
+          "vCPU": "2",
+          "Physical Processor": "AWS Graviton2 Processor",
+          "Clock Speed": "2.5 GHz",
+          "Memory": "0.5 GiB",
+          "Storage": "EBS only",
+          "Network Performance": "Up to 5 Gigabit",
+          "Processor Architecture": "64-bit",
+          "Tenancy": "Shared",
+          "Operating System": "Linux",
+          "License Model": "No License required",
+          "usageType": "BoxUsage:t4g.nano",
+          "operation": "RunInstances",
+          "AvailabilityZone": "NA",
+          "CapacityStatus": "Used",
+          "ClassicNetworkingSupport": "false",
+          "Dedicated EBS Throughput": "Up to 2085 Mbps",
+          "Dedicated EBS Throughput Description": "43 Mbps",
+          "ECU": "NA",
+          "Enhanced Networking Supported": "No",
+          "GPU Memory": "NA",
+          "Instance Family Category": "General Purpose",
+          "Intel AVX2 Available": "No",
+          "Intel AVX Available": "No",
+          "Intel Turbo Available": "No",
+          "MarketOption": "OnDemand",
+          "Normalization Size Factor": "0.25",
+          "Pre Installed S/W": "NA",
+          "Region Code": "us-east-1",
+          "serviceName": "Amazon Elastic Compute Cloud",
+          "VPCNetworkingSupport": "true"
+        },
+        {
+          "SKU": "JG3KUJMBRGHV3N8G",
+          "OfferTermCode": "JRTCKXETXF",
+          "RateCode": "JG3KUJMBRGHV3N8G.JRTCKXETXF.6YS6EN2CT7",
+          "TermType": "OnDemand",
+          "PriceDescription": "$0.08 per GB-month of General Purpose (gp3) provisioned storage - US East (N. Virginia)",
+          "EffectiveDate": "2026-10-01",
+          "StartingRange": "0",
+          "EndingRange": "Inf",
+          "Unit": "GB-Mo",
+          "PricePerUnit": "0.0800000000",
+          "Currency": "USD",
+          "Product Family": "Storage",
+          "serviceCode": "AmazonEC2",
+          "Location": "US East (N. Virginia)",
+          "Location Type": "AWS Region",
+          "Storage Media": "SSD-backed",
+          "Volume Type": "General Purpose",
+          "Max Volume Size": "64 TiB",
+          "Max IOPS/volume": "80000",
+          "Max throughput/volume": "2000 MiB/s",
+          "usageType": "EBS:VolumeUsage.gp3",
+          "Region Code": "us-east-1",
+          "serviceName": "Amazon Elastic Compute Cloud",
+          "Volume API Name": "gp3"
+        }
+      ]
+    }
+  ]
+}

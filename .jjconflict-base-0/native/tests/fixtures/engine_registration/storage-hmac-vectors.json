@@ -1,0 +1,595 @@
+{
+  "version": 1,
+  "scope": "SYNTHETIC_TEST_DATA_ONLY_NO_AUTHORITY",
+  "binding_fields": [
+    "account_id",
+    "home_id",
+    "app_id",
+    "app_name",
+    "network_name",
+    "network_cidr",
+    "machine_id",
+    "instance_id",
+    "image",
+    "config_sha256",
+    "machine_config_sha256",
+    "store_id",
+    "incarnation",
+    "provision_nonce",
+    "epoch",
+    "native_sha256",
+    "launcher_sha256",
+    "service_sha256",
+    "node_sha256",
+    "sidecar_policy_sha256",
+    "runtime_manifest_sha256"
+  ],
+  "derived_engine_credential_sha256": "f98ebf711854737c7452f0227806c27c62a4206f137e61a0f07a25b7bdd56704",
+  "vectors": [
+    {
+      "phase": "begin",
+      "domain": "rudder_engine_registration_begin_v1\u0000",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "body": {
+        "version": 1,
+        "kind": "begin",
+        "home_id": "test-home",
+        "incarnation": "test-incarnation",
+        "config_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        }
+      },
+      "canonical_utf8": "{\"config_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"begin\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"version\":1}",
+      "mac_hex": "3ee8742f41ffd3fa65d61de55131cd12e3f5e4f6b74b8c8cc1ee10180bba3dc7",
+      "body_sha256": "3ff9246fcc05977efa57547da1e63ed174c4861808e63988ef53317e40b370e5"
+    },
+    {
+      "phase": "challenge",
+      "domain": "rudder_engine_registration_challenge_v1\u0000",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "body": {
+        "version": 1,
+        "kind": "challenge",
+        "challenge_id": "77777777-7777-4777-8777-777777777777",
+        "challenge_nonce": "abababababababababababababababababababababababababababababababab",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "binding": {
+          "account_id": "test-account",
+          "home_id": "test-home",
+          "app_id": "test-app-id",
+          "app_name": "test-app",
+          "network_name": "test-network",
+          "network_cidr": "fdaa:1::/48",
+          "machine_id": "test-machine",
+          "instance_id": "test-instance",
+          "image": "registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "config_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "machine_config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "store_id": "test-store",
+          "incarnation": "test-incarnation",
+          "provision_nonce": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "epoch": "1",
+          "native_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "launcher_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "service_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "node_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "sidecar_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "runtime_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        }
+      },
+      "canonical_utf8": "{\"binding\":{\"account_id\":\"test-account\",\"app_id\":\"test-app-id\",\"app_name\":\"test-app\",\"config_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"image\":\"registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"incarnation\":\"test-incarnation\",\"instance_id\":\"test-instance\",\"launcher_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"machine_config_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"machine_id\":\"test-machine\",\"native_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"network_cidr\":\"fdaa:1::/48\",\"network_name\":\"test-network\",\"node_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"provision_nonce\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"runtime_manifest_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"service_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sidecar_policy_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"store_id\":\"test-store\"},\"challenge_id\":\"77777777-7777-4777-8777-777777777777\",\"challenge_nonce\":\"abababababababababababababababababababababababababababababababab\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"kind\":\"challenge\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"version\":1}",
+      "mac_hex": "7ad0ab71ee29f8248c7a7dc8e40b70a2366e295d9bbedb9aab8b39192c06a96d",
+      "body_sha256": "3aae2ef7f06ea9052299af340d1fd982e501e30126bade358a89157b9e205cdc"
+    },
+    {
+      "phase": "proof",
+      "domain": "rudder_engine_registration_proof_v1\u0000",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "body": {
+        "version": 1,
+        "kind": "proof",
+        "challenge_id": "77777777-7777-4777-8777-777777777777",
+        "challenge_nonce": "abababababababababababababababababababababababababababababababab",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "binding": {
+          "account_id": "test-account",
+          "home_id": "test-home",
+          "app_id": "test-app-id",
+          "app_name": "test-app",
+          "network_name": "test-network",
+          "network_cidr": "fdaa:1::/48",
+          "machine_id": "test-machine",
+          "instance_id": "test-instance",
+          "image": "registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "config_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "machine_config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "store_id": "test-store",
+          "incarnation": "test-incarnation",
+          "provision_nonce": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "epoch": "1",
+          "native_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "launcher_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "service_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "node_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "sidecar_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "runtime_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "evidence": {
+          "boot_id": "66666666-6666-4666-8666-666666666666",
+          "root": {
+            "pid": 101,
+            "start_ticks": "9007199254740993",
+            "image_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "exe": {
+              "device": "9007199254740993",
+              "inode": "9007199254740994"
+            },
+            "namespaces": {
+              "mnt": {
+                "device": "4",
+                "inode": "9007199254741000"
+              },
+              "user": {
+                "device": "4",
+                "inode": "9007199254741001"
+              },
+              "net": {
+                "device": "4",
+                "inode": "9007199254741002"
+              },
+              "pid": {
+                "device": "4",
+                "inode": "9007199254741003"
+              }
+            }
+          },
+          "engine": {
+            "pid": 102,
+            "start_ticks": "9007199254740993",
+            "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "exe": {
+              "device": "9007199254740993",
+              "inode": "9007199254740994"
+            },
+            "namespaces": {
+              "mnt": {
+                "device": "4",
+                "inode": "9007199254741000"
+              },
+              "user": {
+                "device": "4",
+                "inode": "9007199254741001"
+              },
+              "net": {
+                "device": "4",
+                "inode": "9007199254741002"
+              },
+              "pid": {
+                "device": "4",
+                "inode": "9007199254741003"
+              }
+            }
+          },
+          "service": {
+            "pid": 103,
+            "start_ticks": "9007199254740993",
+            "image_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "exe": {
+              "device": "9007199254740993",
+              "inode": "9007199254740994"
+            },
+            "namespaces": {
+              "mnt": {
+                "device": "4",
+                "inode": "9007199254741000"
+              },
+              "user": {
+                "device": "4",
+                "inode": "9007199254741001"
+              },
+              "net": {
+                "device": "4",
+                "inode": "9007199254741002"
+              },
+              "pid": {
+                "device": "4",
+                "inode": "9007199254741003"
+              }
+            }
+          },
+          "host_worker_tid": 104,
+          "host_worker_start_ticks": "9007199254740997",
+          "root_client_authenticated": true,
+          "parent_authentication_accepted": true,
+          "host_worker_ack_authenticated": true
+        }
+      },
+      "canonical_utf8": "{\"binding\":{\"account_id\":\"test-account\",\"app_id\":\"test-app-id\",\"app_name\":\"test-app\",\"config_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"image\":\"registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"incarnation\":\"test-incarnation\",\"instance_id\":\"test-instance\",\"launcher_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"machine_config_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"machine_id\":\"test-machine\",\"native_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"network_cidr\":\"fdaa:1::/48\",\"network_name\":\"test-network\",\"node_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"provision_nonce\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"runtime_manifest_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"service_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sidecar_policy_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"store_id\":\"test-store\"},\"challenge_id\":\"77777777-7777-4777-8777-777777777777\",\"challenge_nonce\":\"abababababababababababababababababababababababababababababababab\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"evidence\":{\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"engine\":{\"exe\":{\"device\":\"9007199254740993\",\"inode\":\"9007199254740994\"},\"image_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"namespaces\":{\"mnt\":{\"device\":\"4\",\"inode\":\"9007199254741000\"},\"net\":{\"device\":\"4\",\"inode\":\"9007199254741002\"},\"pid\":{\"device\":\"4\",\"inode\":\"9007199254741003\"},\"user\":{\"device\":\"4\",\"inode\":\"9007199254741001\"}},\"pid\":102,\"start_ticks\":\"9007199254740993\"},\"host_worker_ack_authenticated\":true,\"host_worker_start_ticks\":\"9007199254740997\",\"host_worker_tid\":104,\"parent_authentication_accepted\":true,\"root\":{\"exe\":{\"device\":\"9007199254740993\",\"inode\":\"9007199254740994\"},\"image_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"namespaces\":{\"mnt\":{\"device\":\"4\",\"inode\":\"9007199254741000\"},\"net\":{\"device\":\"4\",\"inode\":\"9007199254741002\"},\"pid\":{\"device\":\"4\",\"inode\":\"9007199254741003\"},\"user\":{\"device\":\"4\",\"inode\":\"9007199254741001\"}},\"pid\":101,\"start_ticks\":\"9007199254740993\"},\"root_client_authenticated\":true,\"service\":{\"exe\":{\"device\":\"9007199254740993\",\"inode\":\"9007199254740994\"},\"image_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"namespaces\":{\"mnt\":{\"device\":\"4\",\"inode\":\"9007199254741000\"},\"net\":{\"device\":\"4\",\"inode\":\"9007199254741002\"},\"pid\":{\"device\":\"4\",\"inode\":\"9007199254741003\"},\"user\":{\"device\":\"4\",\"inode\":\"9007199254741001\"}},\"pid\":103,\"start_ticks\":\"9007199254740993\"}},\"kind\":\"proof\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"version\":1}",
+      "mac_hex": "aa987dbd9bb8975574df45caa5045ce9b900336a712489ca4bd66ab79ed7d941",
+      "body_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89"
+    },
+    {
+      "phase": "ack",
+      "domain": "rudder_engine_registration_ack_v1\u0000",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "body": {
+        "version": 1,
+        "kind": "ack",
+        "challenge_id": "77777777-7777-4777-8777-777777777777",
+        "challenge_nonce": "abababababababababababababababababababababababababababababababab",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "binding": {
+          "account_id": "test-account",
+          "home_id": "test-home",
+          "app_id": "test-app-id",
+          "app_name": "test-app",
+          "network_name": "test-network",
+          "network_cidr": "fdaa:1::/48",
+          "machine_id": "test-machine",
+          "instance_id": "test-instance",
+          "image": "registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "config_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "machine_config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "store_id": "test-store",
+          "incarnation": "test-incarnation",
+          "provision_nonce": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "epoch": "1",
+          "native_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "launcher_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "service_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "node_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "sidecar_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "runtime_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89"
+      },
+      "canonical_utf8": "{\"binding\":{\"account_id\":\"test-account\",\"app_id\":\"test-app-id\",\"app_name\":\"test-app\",\"config_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"image\":\"registry.fly.io/test-image@sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"incarnation\":\"test-incarnation\",\"instance_id\":\"test-instance\",\"launcher_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"machine_config_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"machine_id\":\"test-machine\",\"native_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"network_cidr\":\"fdaa:1::/48\",\"network_name\":\"test-network\",\"node_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"provision_nonce\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"runtime_manifest_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"service_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"sidecar_policy_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"store_id\":\"test-store\"},\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"challenge_id\":\"77777777-7777-4777-8777-777777777777\",\"challenge_nonce\":\"abababababababababababababababababababababababababababababababab\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"kind\":\"ack\",\"proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"version\":1}",
+      "mac_hex": "635839022451a7f43637885bc17a808895513f3df1cf336e170630b272f9e78e",
+      "body_sha256": "15b8914c96fa5d06c476487cd1d623b28aaa7411c24cff2e792932fd87c62c97"
+    },
+    {
+      "phase": "credential",
+      "domain": "rudder_engine_registration_credential_v1\u0000",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "body": {
+        "challenge_id": "77777777-7777-4777-8777-777777777777",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "root_nonce": "11111111-1111-4111-8111-111111111111"
+      },
+      "canonical_utf8": "{\"challenge_id\":\"77777777-7777-4777-8777-777777777777\",\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\"}",
+      "mac_hex": "b8b11c6f3fe74b9ecead2224ca73b45ea2e016c3d2f0bec3b87cf77f58e5d8da",
+      "body_sha256": "3d2c579b6369d0e170d6cf12c2ce9a6f51c08088bf1d692937fba4e653a53d16"
+    },
+    {
+      "phase": "operation_request",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "55555555-5555-4555-8555-555555555555",
+        "command_key": "test-stable-client-key",
+        "operation": {
+          "op": "PrepareFreshProjectV1",
+          "workspace_id": "test-workspace"
+        },
+        "payload_sha256": "26b862e0e9c682fae5bc2874e5337c7c653dce1df37492025ad80c0389bfd764",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 12000
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"test-stable-client-key\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"op\":\"PrepareFreshProjectV1\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"26b862e0e9c682fae5bc2874e5337c7c653dce1df37492025ad80c0389bfd764\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":12000,\"request_nonce\":\"55555555-5555-4555-8555-555555555555\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "015c0b8d4f0aba128ebd3d8000e2ebf722a251b282fdd614028732d3e70c4f27",
+      "body_sha256": "6972772d6ecf6c6d33b580a379339ced579eb87b43ac8edd5a161857f03a471e"
+    },
+    {
+      "phase": "operation_ack",
+      "domain": "rudder_engine_operation_ack_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation_ack",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "55555555-5555-4555-8555-555555555555",
+        "command_key": "test-stable-client-key",
+        "operation": {
+          "op": "PrepareFreshProjectV1",
+          "workspace_id": "test-workspace"
+        },
+        "payload_sha256": "26b862e0e9c682fae5bc2874e5337c7c653dce1df37492025ad80c0389bfd764",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "request_sha256": "6972772d6ecf6c6d33b580a379339ced579eb87b43ac8edd5a161857f03a471e",
+        "result": {
+          "scope": "fresh-preparation-only",
+          "state": "preparation_reserved",
+          "account_id": "test-account",
+          "home_id": "test-home",
+          "store_id": "test-store",
+          "incarnation": "test-incarnation",
+          "project_id": "22222222-2222-4222-8222-222222222222",
+          "workspace_id": "test-workspace",
+          "project_key": "fresh-v4:22222222-2222-4222-8222-222222222222",
+          "prepare": {
+            "request_id": "44444444-4444-4444-8444-444444444444",
+            "namespace": {
+              "format_version": 1,
+              "project_id": "22222222-2222-4222-8222-222222222222",
+              "home": "/workspace/test-home",
+              "journal": "/workspace/test-home/fabric/journal.sqlite",
+              "repository": "/workspace/test-checkout",
+              "directory": "/workspace/test-home/fabric/managed-projects/b454f82c5857ebabf342b7258e5cf7def78b7cd975814119462973de9a38df10"
+            }
+          },
+          "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+          "boot_id": "66666666-6666-4666-8666-666666666666",
+          "assignment_epoch": "0"
+        },
+        "error": null
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"test-stable-client-key\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"error\":null,\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation_ack\",\"operation\":{\"op\":\"PrepareFreshProjectV1\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"26b862e0e9c682fae5bc2874e5337c7c653dce1df37492025ad80c0389bfd764\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"request_nonce\":\"55555555-5555-4555-8555-555555555555\",\"request_sha256\":\"6972772d6ecf6c6d33b580a379339ced579eb87b43ac8edd5a161857f03a471e\",\"result\":{\"account_id\":\"test-account\",\"assignment_epoch\":\"0\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"prepare\":{\"namespace\":{\"directory\":\"/workspace/test-home/fabric/managed-projects/b454f82c5857ebabf342b7258e5cf7def78b7cd975814119462973de9a38df10\",\"format_version\":1,\"home\":\"/workspace/test-home\",\"journal\":\"/workspace/test-home/fabric/journal.sqlite\",\"project_id\":\"22222222-2222-4222-8222-222222222222\",\"repository\":\"/workspace/test-checkout\"},\"request_id\":\"44444444-4444-4444-8444-444444444444\"},\"project_id\":\"22222222-2222-4222-8222-222222222222\",\"project_key\":\"fresh-v4:22222222-2222-4222-8222-222222222222\",\"scope\":\"fresh-preparation-only\",\"state\":\"preparation_reserved\",\"store_id\":\"test-store\",\"workspace_id\":\"test-workspace\"},\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "e007bc65ceb94e55fd31e3eaf13bcb6a63a65650962e7f2755006b1e37c7d495",
+      "body_sha256": "bad111c7e451b6385137ed05977194bb2f0d1f4489eec43018bd661e7589a847"
+    },
+    {
+      "phase": "storage_BeginFreshRootsV1",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "0000000a-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "command_key": "storage-test-0",
+        "operation": {
+          "op": "BeginFreshRootsV1",
+          "workspace_id": "test-workspace",
+          "prepare_id": "66666666-6666-4666-8666-666666666666",
+          "export_id": "77777777-7777-4777-8777-777777777777",
+          "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": {
+            "kind": "source_root",
+            "algorithm": "sha256",
+            "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+            "size_bytes": 123
+          },
+          "environment": {
+            "kind": "environment_root",
+            "algorithm": "sha256",
+            "digest": "2222222222222222222222222222222222222222222222222222222222222222",
+            "size_bytes": 123
+          }
+        },
+        "payload_sha256": "0370c99457e39aee4b6d96bd513ba534772f20110dec2371f4c89294c137c67f",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 12000
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"storage-test-0\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"environment\":{\"algorithm\":\"sha256\",\"digest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"kind\":\"environment_root\",\"size_bytes\":123},\"export_id\":\"77777777-7777-4777-8777-777777777777\",\"head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"op\":\"BeginFreshRootsV1\",\"prepare_id\":\"66666666-6666-4666-8666-666666666666\",\"source\":{\"algorithm\":\"sha256\",\"digest\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"kind\":\"source_root\",\"size_bytes\":123},\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"0370c99457e39aee4b6d96bd513ba534772f20110dec2371f4c89294c137c67f\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":12000,\"request_nonce\":\"0000000a-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "9ac624068a1cc188000252326eae1999bfe583012cd1fded4b8dc4ab3da663c4",
+      "body_sha256": "48555700a6c26defb903bff600c0af694f77a6f92bb78273a7ff5fd397061667"
+    },
+    {
+      "phase": "storage_PublishFreshRootsV1",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "0000000b-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "command_key": "storage-test-1",
+        "operation": {
+          "op": "PublishFreshRootsV1",
+          "workspace_id": "test-workspace",
+          "transfer_id": "55555555-5555-4555-8555-555555555555"
+        },
+        "payload_sha256": "0eb2315198c9228125518a51a90fad37be1357814102c482be5837b20cfd2cbe",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 12000
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"storage-test-1\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"op\":\"PublishFreshRootsV1\",\"transfer_id\":\"55555555-5555-4555-8555-555555555555\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"0eb2315198c9228125518a51a90fad37be1357814102c482be5837b20cfd2cbe\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":12000,\"request_nonce\":\"0000000b-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "2fc4615b4018940bba3acc2ae0a2b7b14a3d4e7aa67fccc6eb19851e39113d9d",
+      "body_sha256": "40bf090731b74393ee64b357901e90e515eefb553223eddf462c141b6e40a09c"
+    },
+    {
+      "phase": "storage_AcquireFreshOwnerV1",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "0000000c-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "command_key": "storage-test-2",
+        "operation": {
+          "op": "AcquireFreshOwnerV1",
+          "workspace_id": "test-workspace",
+          "transfer_id": "55555555-5555-4555-8555-555555555555",
+          "acquire_key": "test-stable-acquire-1",
+          "expected_owner_epoch": "1"
+        },
+        "payload_sha256": "6b72ac4dfc50d7e7b9f13b5f4cca7ae9bdff43a6291fc4245e36f3296a1d2e66",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 30000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 12000
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"storage-test-2\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":30000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"acquire_key\":\"test-stable-acquire-1\",\"expected_owner_epoch\":\"1\",\"op\":\"AcquireFreshOwnerV1\",\"transfer_id\":\"55555555-5555-4555-8555-555555555555\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"6b72ac4dfc50d7e7b9f13b5f4cca7ae9bdff43a6291fc4245e36f3296a1d2e66\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":12000,\"request_nonce\":\"0000000c-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "d4b3a7ce7cb9f94c67287f15cd1f236fc572d346408124c86e15e4f68a99d543",
+      "body_sha256": "3f10103a021d4376cd29a84614fb8baa416fd52f82b91bc4302f0e0bc61a87b1"
+    },
+    {
+      "phase": "storage_BeginImagePreseedV1",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "0000000d-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "command_key": "storage-test-3",
+        "operation": {
+          "op": "BeginImagePreseedV1",
+          "workspace_id": "test-workspace",
+          "manifest": {
+            "kind": "blob",
+            "algorithm": "sha256",
+            "digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "size_bytes": 123
+          },
+          "installer_input": {
+            "kind": "directory",
+            "algorithm": "sha256",
+            "digest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "size_bytes": 123
+          },
+          "image_receipt_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        "payload_sha256": "afb6913feae5275660a384d958ccf4edd2c5739c5f87d8bad7f34c13d7d3377d",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 300000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 299999
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"storage-test-3\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":300000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"image_receipt_sha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"installer_input\":{\"algorithm\":\"sha256\",\"digest\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"kind\":\"directory\",\"size_bytes\":123},\"manifest\":{\"algorithm\":\"sha256\",\"digest\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"kind\":\"blob\",\"size_bytes\":123},\"op\":\"BeginImagePreseedV1\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"afb6913feae5275660a384d958ccf4edd2c5739c5f87d8bad7f34c13d7d3377d\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":299999,\"request_nonce\":\"0000000d-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "4100db50f9a41f26614039ed44de4bb5392dfeecb0a67a7694390126b168541d",
+      "body_sha256": "d26189d04a38dd10c337e6d9e47d4de03296a4a98f6d72d854ee48f95e39b582"
+    },
+    {
+      "phase": "storage_PublishImagePreseedV1",
+      "domain": "rudder_engine_operation_request_v1\u0000",
+      "key_hex": "726472655f62386231316336663366653734623965636561643232323463613733623435656132653031366333643266306265633362383763663737663538653564386461",
+      "body": {
+        "version": 1,
+        "kind": "engine_operation",
+        "account_id": "test-account",
+        "home_id": "test-home",
+        "store_id": "test-store",
+        "incarnation": "test-incarnation",
+        "engine_instance_id": "88888888-8888-4888-8888-888888888888",
+        "boot_id": "66666666-6666-4666-8666-666666666666",
+        "credential_id": "99999999-9999-4999-8999-999999999999",
+        "epoch": "1",
+        "root_nonce": "11111111-1111-4111-8111-111111111111",
+        "registration_proof_sha256": "d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89",
+        "request_nonce": "0000000e-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "command_key": "storage-test-4",
+        "operation": {
+          "op": "PublishImagePreseedV1",
+          "workspace_id": "test-workspace",
+          "transfer_id": "55555555-5555-4555-8555-555555555555"
+        },
+        "payload_sha256": "942f1a387bae4d619e4ae11103ba0ac18d239ef2bf9d5425693078c2e47cf955",
+        "constraint": {
+          "format_version": 1,
+          "maximum_milliseconds": 300000,
+          "boottime_deadline_nanoseconds": "9007199254740993123"
+        },
+        "remaining_milliseconds": 299999
+      },
+      "canonical_utf8": "{\"account_id\":\"test-account\",\"boot_id\":\"66666666-6666-4666-8666-666666666666\",\"command_key\":\"storage-test-4\",\"constraint\":{\"boottime_deadline_nanoseconds\":\"9007199254740993123\",\"format_version\":1,\"maximum_milliseconds\":300000},\"credential_id\":\"99999999-9999-4999-8999-999999999999\",\"engine_instance_id\":\"88888888-8888-4888-8888-888888888888\",\"epoch\":\"1\",\"home_id\":\"test-home\",\"incarnation\":\"test-incarnation\",\"kind\":\"engine_operation\",\"operation\":{\"op\":\"PublishImagePreseedV1\",\"transfer_id\":\"55555555-5555-4555-8555-555555555555\",\"workspace_id\":\"test-workspace\"},\"payload_sha256\":\"942f1a387bae4d619e4ae11103ba0ac18d239ef2bf9d5425693078c2e47cf955\",\"registration_proof_sha256\":\"d0616abcff47232d3dfc73590fdbb2c2b12b2b7dd260de4bc665beb4aa697d89\",\"remaining_milliseconds\":299999,\"request_nonce\":\"0000000e-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"root_nonce\":\"11111111-1111-4111-8111-111111111111\",\"store_id\":\"test-store\",\"version\":1}",
+      "mac_hex": "ff9e1605724c5f628d9c3e665a5f3a2a57cd8da7528109bf7085c6ddd0c9115f",
+      "body_sha256": "351585e1be6c3d2a647e4854227a5d658308fbfe1272905f54f1db0ccc595a7e"
+    }
+  ]
+}

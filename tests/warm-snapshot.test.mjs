@@ -6,7 +6,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { createNodeWorkspace, forgetWorkspace } from "../dist/jj.js";
-import { buildWarmSnapshot, currentBaseCommit, warmCommands } from "../dist/warm-snapshot.js";
+import { buildWarmSnapshot, currentBaseCommit, seedFromPrevious, warmCommands } from "../dist/warm-snapshot.js";
+import { rudderJjPath } from "../dist/util.js";
 
 const FILES = 3000;
 const FORKS = 10;
@@ -35,7 +36,29 @@ test("warmCommands reads rudder.toml and detects lockfiles", () => {
   }
 });
 
-test("ten agents fork the warm snapshot in seconds without copying files", { skip: process.platform !== "linux" }, async (t) => {
+test("seedFromPrevious copies only untracked outputs from the previous snapshot", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-warm-seed-"));
+  try {
+    const prev = path.join(root, "prev");
+    const next = path.join(root, "next");
+    fs.mkdirSync(path.join(prev, "node_modules", "dep"), { recursive: true });
+    fs.mkdirSync(path.join(prev, ".jj"));
+    fs.mkdirSync(next);
+    fs.writeFileSync(path.join(prev, "node_modules", "dep", "index.js"), "dep\n");
+    fs.writeFileSync(path.join(prev, "src.txt"), "old\n");
+    fs.writeFileSync(path.join(next, "src.txt"), "new\n");
+    return seedFromPrevious(prev, next).then(() => {
+      assert.equal(fs.readFileSync(path.join(next, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
+      assert.equal(fs.readFileSync(path.join(next, "src.txt"), "utf8"), "new\n");
+      assert.equal(fs.existsSync(path.join(next, ".jj")), false);
+    }).finally(() => fs.rmSync(root, { recursive: true, force: true }));
+  } catch (error) {
+    fs.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+});
+
+test("ten agents fork the warm snapshot in seconds without copying files", { skip: process.platform !== "linux" || !rudderJjPath() }, async (t) => {
   // OverlayFS needs a real disk for upper layers (Cloud's /tmp is not one).
   const scratch = process.env.RUDDER_TEST_DISK ?? (fs.existsSync("/workspace/rudder-scratch") ? "/workspace/rudder-scratch" : os.tmpdir());
   const root = fs.mkdtempSync(path.join(scratch, "rudder-warm-"));
@@ -77,13 +100,21 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   for (const fork of forks) {
     // Only jj metadata on disk; no source file was copied.
     assert.deepEqual(fs.readdirSync(fork.workspacePath), [".jj"]);
-    assert.equal(countFiles(`${fork.workspacePath}.fork/upper`), 0);
+    assert.equal(countFiles(`${fork.workspacePath}/.jj/working_copy/upper`), 0);
   }
 
   const inFork = (i, script) => spawnSync(enter(i), ["sh", "-ec", script], { cwd: forks[i].workspacePath, env, encoding: "utf8" });
   const edit = inFork(0, "echo changed > src/f1.txt; echo new > new.txt; cat node_modules/dep/index.js; jj commit -m agentwork");
   assert.equal(edit.status, 0, edit.stderr);
   assert.match(edit.stdout, /dep/);
+
+  // rudder-overlay snapshot reads only the upper layer: exactly the changed paths.
+  const changed = inFork(2, "echo x > src/f7.txt; rm src/f8.txt; echo y > added.txt; echo z > node_modules/dep/extra.js");
+  assert.equal(changed.status, 0, changed.stderr);
+  const snapStarted = Date.now();
+  const summary = sh(forks[2].workspacePath, rudderJjPath(), ["diff", "--summary"]);
+  t.diagnostic(`fork snapshot (jj diff) took ${Date.now() - snapStarted} ms`);
+  assert.deepEqual(summary.trim().split("\n").sort(), ["A added.txt", "D src/f8.txt", "M src/f7.txt"]);
 
   const other = inFork(1, "cat src/f1.txt; ls new.txt 2>/dev/null || echo absent; cat node_modules/dep/index.js; id -u; jj status");
   assert.equal(other.status, 0, other.stderr);

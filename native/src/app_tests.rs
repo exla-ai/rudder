@@ -16555,11 +16555,19 @@ fn forget_jj_workspace_refuses_paths_outside_rudder_workspaces() {
         .join("proj")
         .join("node-abc");
     std::fs::create_dir_all(&ok_path).unwrap();
+    // Overlay fork state: `<ws>.fork/` and mode-000 OverlayFS work dirs.
+    let fork = repo.join(".rudder-workspaces").join("proj").join("node-abc.fork");
+    for locked in [fork.join("work/work"), ok_path.join(".jj/working_copy/work/work")] {
+        std::fs::create_dir_all(locked.join("x")).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
     let _ = forget_jj_workspace(&repo, "rudder-y", &ok_path);
     assert!(
         !ok_path.exists(),
         "an in-tree workspace directory is removed"
     );
+    assert!(!fork.exists(), "the fork state directory is removed");
     let _ = std::fs::remove_dir_all(&repo);
 }
 

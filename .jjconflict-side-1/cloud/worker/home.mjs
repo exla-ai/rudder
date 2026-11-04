@@ -1,0 +1,1831 @@
+#!/usr/bin/env node
+// Rudder home machine supervisor.
+//
+// One long-lived machine per account holds every repo under ~/code (cloned from
+// GitHub, which stays the source of truth) and runs one Rudder dashboard per
+// repo. This process:
+//   1. writes the vault (credentials, config) and persists agent state on the
+//      volume so conversations survive a stop/start,
+//   2. joins the user's tailnet (when the vault has TS_AUTHKEY) and publishes
+//      any dev server an agent starts as an HTTPS preview,
+//   3. keeps one control socket to the control plane: the repo list comes down,
+//      project state goes up, and the phone app's requests arrive as RPCs,
+//   4. bridges each repo's dashboard PTY to its workspace channel, so
+//      `rudder cloud` in that repo on a laptop attaches to it.
+
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { WebSocket } from "ws";
+import pty from "node-pty";
+import { writeTerminalColors } from "./theme.mjs";
+
+import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
+import { readAsks, askDecision, isAskId } from "./asks.mjs";
+import { statusFields } from "./agent-status.mjs";
+import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
+import { createLoginRunner } from "./logins.mjs";
+import { collectDigestRuns } from "./digest.mjs";
+import { readProjectPlan } from "./plan.mjs";
+import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
+import { createTerminalTransport } from "./terminal-transport.mjs";
+import { ensureCodexTrust } from "./codex-trust.mjs";
+
+let projectFiles;
+async function fileService() {
+  if (!projectFiles) {
+    const { HomeProjectFiles } = await import("/opt/rudder/dist/project-files/home.js");
+    projectFiles ??= new HomeProjectFiles();
+  }
+  return projectFiles;
+}
+
+const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
+const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
+const workerToken = (process.env.RUDDER_WORKER_TOKEN || "").trim();
+const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
+
+// Overridable so the boot can be tested off a real machine.
+const VOLUME = process.env.RUDDER_HOME_VOLUME || "/workspace";
+const CODE_DIR = path.join(VOLUME, "code");
+
+// Every path ever trusted here, re-applied on each call: the vault carries the
+// laptop's ~/.claude.json and rewriting it (boot, and every vault refresh) used
+// to drop this machine's trust entries, so a resumed agent sat on Claude's
+// "Do you trust this folder?" dialog with nobody to answer it.
+const trustedPaths = new Set();
+
+// CLIs the image does not carry (AWS, SSM plugin) install here, on the volume.
+const TOOLS_DIR = path.join(VOLUME, "tools");
+const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
+const PERSIST_HOME = path.join(VOLUME, "home");
+const HOME = os.homedir() || process.env.HOME || "/home/rudder";
+const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
+const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
+// 1.5s: a prompt an agent is blocked on should reach the phone quickly.
+const STATE_INTERVAL_MS = 1500;
+
+// Set by configureGitCredentials, which runs during boot: declared up here so
+// boot never reaches it uninitialized (2.16.5 crashed on exactly that).
+let githubCredentials = null;
+const PORT_SCAN_INTERVAL_MS = 5000;
+// All module state lives up here, above the boot sequence below: boot calls
+// into functions that read it, and a `let` declared further down is not
+// initialized yet when they do (a ReferenceError that kills the machine).
+let credentials = null;
+let credentialsRunning = false;
+let credentialsAgain = false;
+let vaultRefreshedAt = 0;
+const lastMessageCache = new Map(); // runId -> { mtime, text }
+let privatePreviews;
+async function privatePreviewService() {
+  if (!privatePreviews) {
+    const [{ HomePrivatePreviews }, { PrivatePreviewDirectory }] = await Promise.all([
+      import("/opt/rudder/dist/private-access/home.js"), import("/opt/rudder/dist/private-access/previews.js"),
+    ]);
+    privatePreviews ??= new HomePrivatePreviews(homeId, new PrivatePreviewDirectory({
+      execute: async (args, signal) => {
+        signal.throwIfAborted();
+        return runTailnetCommand(args, { socket: TS_SOCKET, timeoutMs: 1500 });
+      },
+      processMatches: (item) => privatePreviews?.processMatches(item) ?? Promise.resolve(false),
+      ownedPorts: readPreviewPorts(),
+      onOwnedPorts: writePreviewPorts,
+    }));
+  }
+  return privatePreviews;
+}
+
+if (!homeId || !cloudUrl || !workerToken) {
+  console.error("home supervisor: RUDDER_WORKSPACE_ID, RUDDER_CLOUD_URL and RUDDER_WORKER_TOKEN are required");
+  process.exit(2);
+}
+
+log(`home ${homeId} starting`);
+fs.mkdirSync(CODE_DIR, { recursive: true });
+persistHomeDirs();
+linkCodeDir();
+
+const vault = await fetchVaultSecrets();
+const deferredRepoFiles = [];
+if (vault) {
+  writeVaultFiles(vault.files, deferredRepoFiles);
+  configureGitCredentials(vault);
+}
+acceptClaudeDialogs([]);
+
+const tailnet = { hostname: TS_HOSTNAME, dnsName: null, online: false, https: null, error: null };
+function tailnetOffline(message) {
+  Object.assign(tailnet, { online: false, error: message });
+  lastStateJson = "";
+  scheduleStateSoon();
+}
+
+const baseChildEnv = buildChildEnv(vault?.env ?? {});
+
+// Claude Code and Codex sign-ins started from the phone (cloud/worker/logins.mjs).
+const logins = createLoginRunner({
+  spawnPty: pty.spawn,
+  env: baseChildEnv,
+  dir: path.join(os.tmpdir(), "rudder-logins"),
+  cwd: HOME,
+  log,
+  onChange: (provider, session) => {
+    lastStateJson = "";
+    scheduleStateSoon();
+    if (session.status === "done") {
+      void credentialsAfterLogin(provider);
+    }
+  },
+});
+
+/** @type {Map<string, Project>} */
+const projects = new Map();
+let controlSocket = null;
+let lastStateJson = "";
+let ports = []; // [{ port, pid, label, workspaceId|null }]
+
+connectControl();
+void startTailscale(vault?.env ?? {}).then(() => scanPorts()).catch((error) => {
+  tailnetOffline(`Tailscale could not start: ${error.code || "unavailable"}`);
+});
+void checkCredentials();
+void ensureRustToolchain().then(() => ensureGoToolchain());
+void ensureAwsTooling().then(() => checkCredentials());
+setInterval(() => void checkCredentials(), 30 * 60 * 1000);
+setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
+setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
+setInterval(reportHeartbeat, 30_000);
+reportHeartbeat();
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    log(`received ${signal}; stopping dashboards`);
+    logins.dispose();
+    for (const project of projects.values()) {
+      project.stop();
+    }
+    // Dashboards persist Paused rows on SIGTERM; give them a moment (Fly waits
+    // 10s), then send the state once more so the app reads Paused, not the
+    // Working it last heard, while the machine is down.
+    setTimeout(() => {
+      lastStateJson = "";
+      void publishState()
+        .catch((error) => log(`state: ${error.message}`))
+        .finally(() => setTimeout(() => process.exit(0), 300).unref());
+    }, 4000).unref();
+    setTimeout(() => process.exit(0), 6000).unref();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Projects: one per repo, each a dashboard PTY bridged to its own channel.
+// ---------------------------------------------------------------------------
+
+class Project {
+  constructor(descriptor) {
+    this.descriptor = descriptor;
+    this.workspaceId = descriptor.workspaceId;
+    this.name = descriptor.name;
+    this.dir = path.join(CODE_DIR, descriptor.name);
+    this.status = "starting";
+    this.error = null;
+    this.term = null;
+    this.ws = null;
+    this.stopped = false;
+    this.restarts = [];
+    this.io = createTerminalTransport({
+      writeInput: (text) => this.term?.write(text),
+      pauseOutput: () => this.term?.pause(),
+      resumeOutput: () => this.term?.resume(),
+      requestRepaint: () => this.repaint(),
+      onError: (_error, socket) => { try { socket.terminate(); } catch { /* closed */ } },
+    });
+    this.cols = 120;
+    this.rows = 32;
+  }
+
+  async start() {
+    try {
+      await this.ensureClone();
+    } catch (error) {
+      this.status = "failed";
+      const reason = firstLine(error.message);
+      this.error = !githubCredentials && /could not read Username|Authentication failed|Repository not found/i.test(reason)
+        ? "can't clone: the cloud vault has no GitHub token. Run `rudder cloud` in this repo on your laptop to add one."
+        : this.local ? `couldn't create the project: ${reason}` : `git clone failed: ${reason}`;
+      log(`${this.name}: ${this.error}`);
+      return;
+    }
+    writeDeferredRepoFiles(this.name, this.dir);
+    acceptClaudeDialogs([this.dir]);
+    this.connect();
+    this.spawnDashboard();
+  }
+
+  // A local project (`local:<name>`, made from the app without GitHub): a
+  // fresh git repo with one empty commit for jj and the dashboard to stand on.
+  get local() {
+    return String(this.descriptor.remote || "").startsWith("local:");
+  }
+
+  async ensureClone() {
+    if (fs.existsSync(path.join(this.dir, ".git"))) {
+      if (!this.local) shSoft(`git -C ${q(this.dir)} fetch --all -q`);
+      return;
+    }
+    if (this.local) {
+      log(`${this.name}: new local project`);
+      fs.mkdirSync(this.dir, { recursive: true });
+      await run(`git -C ${q(this.dir)} init -q -b main`);
+      shSoft(`git -C ${q(this.dir)} config user.email >/dev/null 2>&1 || git -C ${q(this.dir)} config user.email "rudder-cloud@local"`);
+      shSoft(`git -C ${q(this.dir)} config user.name >/dev/null 2>&1 || git -C ${q(this.dir)} config user.name "Rudder Cloud"`);
+      await run(`git -C ${q(this.dir)} commit -q --allow-empty -m "New project"`);
+      return;
+    }
+    this.status = "cloning";
+    const ref = this.descriptor.ref ? `--branch ${q(this.descriptor.ref)} ` : "";
+    log(`${this.name}: cloning ${this.descriptor.remote}`);
+    await run(`git clone ${ref}${q(this.descriptor.remote)} ${q(this.dir)}`);
+    shSoft(`git -C ${q(this.dir)} config user.email >/dev/null 2>&1 || git -C ${q(this.dir)} config user.email "rudder-cloud@local"`);
+    shSoft(`git -C ${q(this.dir)} config user.name >/dev/null 2>&1 || git -C ${q(this.dir)} config user.name "Rudder Cloud"`);
+  }
+
+  spawnDashboard() {
+    if (this.stopped) {
+      return;
+    }
+    // A repo cloned since the last vault write has no Codex trust entry yet.
+    ensureCodexTrust({ configPath: path.join(HOME, ".codex", "config.toml"), codeDir: CODE_DIR, log });
+    const env = {
+      ...baseChildEnv,
+      RUDDER_WORKSPACE_ID: this.workspaceId,
+      RUDDER_REPO_NAME: this.name,
+      RUDDER_CLOUD_RUNTIME: "home",
+      // No GitHub behind a local project: merges stay on the machine.
+      ...(this.local ? { RUDDER_CLOUD_WORKER: "0" } : {}),
+    };
+    this.term = pty.spawn("rudder", [], { name: "xterm-256color", cols: this.cols, rows: this.rows, cwd: this.dir, env });
+    this.status = "running";
+    this.error = null;
+    const term = this.term;
+    term.onData((data) => {
+      if (this.term === term && !this.stopped) this.io.writeOutput(data);
+    });
+    term.onExit(({ exitCode, signal }) => {
+      if (this.term !== term) {
+        return;
+      }
+      this.term = null;
+      if (this.stopped) {
+        this.status = "stopped";
+        return;
+      }
+      // The dashboard is what hosts this repo's agents, so it comes back. A
+      // dashboard that keeps dying is reported instead of restarted forever.
+      const now = Date.now();
+      this.restarts = this.restarts.filter((at) => now - at < 60_000).concat(now);
+      if (this.restarts.length > 5) {
+        this.status = "failed";
+        this.error = `dashboard keeps exiting (last code ${exitCode ?? signal})`;
+        log(`${this.name}: ${this.error}`);
+        return;
+      }
+      log(`${this.name}: dashboard exited (${exitCode ?? signal}); restarting`);
+      this.status = "starting";
+      setTimeout(() => this.spawnDashboard(), 2000).unref();
+    });
+  }
+
+  connect() {
+    if (this.stopped) {
+      return;
+    }
+    const url = `${cloudUrl.replace(/^http/, "ws")}/api/rudder/workspace/${encodeURIComponent(this.workspaceId)}/worker`;
+    const socket = new WebSocket(url, {
+      headers: { authorization: `Bearer ${workerToken}` },
+      handshakeTimeout: 10_000,
+    });
+    socket.binaryType = "nodebuffer";
+    this.ws = socket;
+    socket.on("open", () => {
+      if (this.stopped || this.ws !== socket) {
+        socket.close();
+        return;
+      }
+      try { socket._socket?.setNoDelay?.(true); } catch { /* ignore */ }
+      socket.send(JSON.stringify({ type: "hello", cols: this.cols, rows: this.rows, sessionKind: "workspace", sessionId: this.workspaceId }));
+      this.io.attach(socket);
+      // The relay starts a fresh replay buffer for this socket: begin it with
+      // a whole picture, so the next laptop to attach sees one.
+      this.repaint();
+    });
+    socket.on("message", (data, isBinary) => {
+      if (!this.io.isCurrent(socket)) return;
+      if (isBinary && Buffer.isBuffer(data)) {
+        this.io.writeInput(socket, data);
+        return;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
+      } catch {
+        return;
+      }
+      if (payload?.type === "resize" && Number.isFinite(payload.cols) && Number.isFinite(payload.rows)) {
+        this.cols = clamp(Math.floor(payload.cols), 20, 500);
+        this.rows = clamp(Math.floor(payload.rows), 5, 200);
+        try { this.term?.resize(this.cols, this.rows); } catch { /* ignore */ }
+      } else if (payload?.type === "probe") {
+        this.io.sendControl({ type: "probe-reply", id: payload.id ?? null });
+      } else if (payload?.type === "repaint") {
+        this.repaint();
+      } else if (payload?.type === "theme") {
+        try { writeTerminalColors(payload); } catch (error) { log(`theme: ${error.message}`); }
+      }
+      // "signal" (Ctrl+C from a detaching laptop) is deliberately ignored: the
+      // dashboard here outlives any one terminal attached to it.
+    });
+    const retry = () => {
+      if (this.ws !== socket) return;
+      this.io.detach(socket);
+      this.ws = null;
+      if (!this.stopped) {
+        setTimeout(() => this.connect(), 2000).unref();
+      }
+    };
+    socket.on("close", retry);
+    socket.on("error", () => {
+      try { socket.terminate(); } catch { /* ignore */ }
+    });
+  }
+
+  // A laptop came back and wants every cell again. SIGWINCH makes the
+  // dashboard redraw the whole screen without changing its size (a same-size
+  // resize never reaches it: the kernel drops it).
+  repaint() {
+    signalRepaint(this.term?.pid);
+  }
+
+  stop() {
+    this.stopped = true;
+    this.io.dispose();
+    // The whole process group: the dashboard (rudder-native) pauses its live
+    // agents on SIGTERM, which turns into resumable rows after a restart.
+    try {
+      if (this.term?.pid) process.kill(-this.term.pid, "SIGTERM");
+    } catch {
+      try { this.term?.kill("SIGTERM"); } catch { /* ignore */ }
+    }
+    try { this.ws?.close(1000, "closed"); } catch { /* ignore */ }
+  }
+
+  agents() {
+    // Only a running dashboard hosts agents: while it is down (restarting,
+    // stopped by SIGTERM, failed) no row is working, whatever run.json says.
+    return readAgents(this.dir, { dashboardRunning: this.status === "running" && !!this.term && !this.stopped });
+  }
+}
+
+// The dashboard is the PTY's session leader; its process group is the
+// rudder launcher and rudder-native (agents run in PTYs of their own).
+function signalRepaint(pid) {
+  if (!pid) {
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGWINCH");
+  } catch {
+    try { process.kill(pid, "SIGWINCH"); } catch { /* ignore */ }
+  }
+}
+
+function reconcileProjects(descriptors) {
+  const wanted = new Map(descriptors.map((descriptor) => [descriptor.workspaceId, descriptor]));
+  for (const [id, project] of projects) {
+    if (!wanted.has(id)) {
+      log(`${project.name}: removed`);
+      project.stop();
+      projectFiles?.close(project.dir);
+      projects.delete(id);
+    }
+  }
+  for (const descriptor of descriptors) {
+    if (!descriptor?.workspaceId || !descriptor.name || !descriptor.remote) {
+      continue;
+    }
+    if (projects.has(descriptor.workspaceId)) {
+      const existing = projects.get(descriptor.workspaceId);
+      // A project that failed to clone gets another try when the list arrives again.
+      if (existing.status === "failed" && !existing.term) {
+        existing.status = "starting";
+        void existing.start();
+      }
+      continue;
+    }
+    const project = new Project(descriptor);
+    projects.set(descriptor.workspaceId, project);
+    void project.start();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Control socket + RPCs.
+// ---------------------------------------------------------------------------
+
+function connectControl() {
+  const url = `${cloudUrl.replace(/^http/, "ws")}/api/rudder/home/${encodeURIComponent(homeId)}/control`;
+  const socket = new WebSocket(url, { headers: { authorization: `Bearer ${workerToken}` } });
+  socket.on("open", () => {
+    controlSocket = socket;
+    lastStateJson = "";
+    log("control connected");
+    void publishState();
+  });
+  socket.on("message", (data) => {
+    let message;
+    try {
+      message = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
+    } catch {
+      return;
+    }
+    if (message?.type === "repos" && Array.isArray(message.repos)) {
+      // The list is re-sent whenever a laptop runs `rudder cloud`, which may
+      // have just put a repo's .env files in the vault: pick those up first.
+      void refreshVaultRepoFiles().finally(() => {
+        reconcileProjects(message.repos);
+        lastStateJson = "";
+      });
+      return;
+    }
+    if (message?.type === "rpc" && typeof message.id === "string") {
+      void handleRpc(message.method, message.params ?? {})
+        .then((result) => sendControl({ type: "rpc-result", id: message.id, result: result ?? null }))
+        .catch((error) => sendControl({ type: "rpc-result", id: message.id, error: error?.message || String(error) }));
+    }
+  });
+  const retry = (code) => {
+    if (controlSocket === socket) {
+      controlSocket = null;
+    }
+    if (code === 4410 || code === 1008) {
+      log(`control closed (${code}); not reconnecting`);
+      return;
+    }
+    setTimeout(connectControl, 3000).unref();
+  };
+  socket.on("close", (code) => retry(code));
+  socket.on("error", () => {
+    try { socket.terminate(); } catch { /* ignore */ }
+  });
+}
+
+function sendControl(message) {
+  if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
+    controlSocket.send(JSON.stringify(message));
+  }
+}
+
+async function handleRpc(method, params) {
+  if (method === "close") {
+    const project = projects.get(params.workspaceId);
+    if (project) {
+      project.stop();
+      projectFiles?.close(project.dir);
+      projects.delete(params.workspaceId);
+      if (params.removeClone) {
+        fs.rmSync(project.dir, { recursive: true, force: true });
+      }
+    }
+    return { ok: true };
+  }
+  if (method === "repos") {
+    return await listGithubRepos();
+  }
+  if (method === "models") {
+    return await listModels();
+  }
+  if (method === "createRepo") {
+    return await createGithubRepo(params);
+  }
+  if (method === "adopt") {
+    // Before the project lookup below: a laptop moving agents may have just
+    // opened this repo, so its project can still be cloning.
+    return await adoptMovedAgents(params);
+  }
+  if (method === "deleteRuns") {
+    // A laptop deleting agents it moved here (or a delete queued while this
+    // machine was asleep): its dashboard deletes them like dd, which also
+    // takes them off the phone. Queued, so a dashboard still starting gets it.
+    const target = await waitForClone(String(params.workspaceId || ""), 8 * 60_000);
+    const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
+    for (const runId of runIds) {
+      queueSteer(target, { kind: "delete", taskId: runId, instruction: "delete" });
+    }
+    return { queued: runIds.length };
+  }
+  if (method === "runs") {
+    // Which of these runs exist here: the laptop drops its rows for the rest.
+    // Unknown (not "gone") while the project is not open, or still cloning.
+    const target = projects.get(params.workspaceId);
+    if (!target || target.status === "cloning" || !fs.existsSync(path.join(target.dir, ".git"))) {
+      return { known: false };
+    }
+    const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
+    const existing = runIds.filter((id) => fs.existsSync(path.join(target.dir, ".rudder", "runs", id, "run.json")));
+    return { known: true, existing };
+  }
+  if (method === "digest") {
+    // The morning digest: what each open project's agents did in the window.
+    const until = Number(params.until) || Date.now();
+    const since = Number(params.since) || until - 24 * 3600_000;
+    const list = [];
+    for (const project of projects.values()) {
+      if (project.status === "cloning") {
+        continue;
+      }
+      list.push({
+        workspaceId: project.workspaceId,
+        name: project.name,
+        repo: project.descriptor.repo,
+        runs: collectDigestRuns(project.dir, { since, until }),
+      });
+    }
+    return { since, until, projects: list };
+  }
+  if (method === "loginStart") {
+    return await logins.start(String(params.provider || ""), { device: params.device === true });
+  }
+  if (method === "loginFinish") {
+    return await logins.finish(String(params.provider || ""), String(params.id || ""), {
+      callback: typeof params.callback === "string" ? params.callback : undefined,
+      code: typeof params.code === "string" ? params.code : undefined,
+    });
+  }
+  if (method === "loginCancel") {
+    return logins.cancel(String(params.provider || ""), String(params.id || "")) ?? { ok: true };
+  }
+  const project = projects.get(params.workspaceId);
+  if (!project) {
+    throw new Error("that project is not open on the home machine");
+  }
+  if (method === "projectFileScopes") {
+    return (await fileService()).scopes(project.dir);
+  }
+  if (method === "projectFiles") {
+    return (await fileService()).dispatch(project.dir, params.request);
+  }
+  if (method === "transcript") {
+    return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });
+  }
+  if (method === "send") {
+    return await steer(project, { kind: "steer", taskId: String(params.runId || ""), instruction: String(params.text || "") });
+  }
+  if (method === "task") {
+    return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });
+  }
+  if (method === "keys") {
+    return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
+  }
+  if (method === "previewRegister") {
+    const service = await privatePreviewService();
+    const result = await service.register(project, params.request);
+    await scanPorts();
+    return result;
+  }
+  if (method === "previews") {
+    await scanPorts();
+    return (await privatePreviewService()).snapshot(project.workspaceId);
+  }
+  if (method === "screen") {
+    const { projectEngineAuthority } = await import("/opt/rudder/dist/engine-authority.js");
+    if (projectEngineAuthority(project.dir) === "fabric") {
+      const { readOwnedScreen } = await import("/opt/rudder/dist/terminal-screen.js");
+      const runId = String(params.runId || "");
+      const frame = await readOwnedScreen(project.dir, runId);
+      return frame.type === "terminal-history"
+        ? { ...readScreen(project, runId, false), type: "terminal-history", owner: frame.owner }
+        : frame;
+    }
+    return readScreen(project, String(params.runId || ""));
+  }
+  if (method === "upload") {
+    return await receiveUpload(project, params);
+  }
+  if (method === "answer") {
+    return await answerAsk(project, params);
+  }
+  if (method === "sync") {
+    // `rudder cloud sync`: the same checkout sync the laptop runs, in this clone.
+    if (project.status === "cloning" || !fs.existsSync(path.join(project.dir, ".git"))) {
+      throw new Error("still cloning");
+    }
+    return await syncProject(project, params);
+  }
+  if (method === "pull") {
+    // `rudder cloud pull`: one agent's work comes back to a laptop.
+    if (project.status === "cloning" || !fs.existsSync(path.join(project.dir, ".git"))) {
+      throw new Error("still cloning");
+    }
+    return await pullRun(project, params);
+  }
+  if (method === "action") {
+    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : params.action === "approve" ? "approve" : null;
+    if (!kind) {
+      throw new Error("unknown action");
+    }
+    // Approve names a plan, not a run: the web's Approve button on a plan
+    // waiting for its go-ahead (empty = the one plan waiting).
+    const taskId = kind === "approve" ? String(params.planId || "") : String(params.runId || "");
+    return await steer(project, { kind, taskId, instruction: kind });
+  }
+  throw new Error(`unknown method ${method}`);
+}
+
+// A photo or file sent from the phone. The control plane holds the bytes and
+// this machine fetches them with its worker token. They land in the repo's
+// git-excluded .rudder/uploads, and the message carries the path.
+async function receiveUpload(project, params) {
+  const uploadPath = String(params.uploadPath || "");
+  if (!/^\/api\/rudder\/home\/[^/]+\/uploads\/[^/]+$/.test(uploadPath)) {
+    throw new Error("bad upload path");
+  }
+  if (!fs.existsSync(path.join(project.dir, ".git"))) {
+    throw new Error("the project is still cloning; try again in a moment");
+  }
+  const response = await fetch(`${cloudUrl}${uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  if (!response.ok) {
+    throw new Error(`could not fetch the file (HTTP ${response.status})`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const dir = path.join(project.dir, ".rudder", "uploads");
+  fs.mkdirSync(dir, { recursive: true });
+  const name = uploadName(params.name);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  let file = path.join(dir, `${stamp}-${name}`);
+  for (let n = 2; fs.existsSync(file); n += 1) {
+    file = path.join(dir, `${stamp}-${n}-${name}`);
+  }
+  fs.writeFileSync(file, bytes);
+  log(`${project.name}: saved an upload from the phone (${bytes.length} bytes)`);
+  return { path: file, name, size: bytes.length };
+}
+
+// The control plane already cleaned the name; this keeps the file inside
+// .rudder/uploads whatever arrives.
+function uploadName(raw) {
+  const cleaned = String(raw || "").split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100);
+  return cleaned || "file";
+}
+
+// `rudder cloud sync` in this clone. Work the laptop sent (a bundle waiting on
+// the control plane, see src/checkout-sync.ts) is taken first, and this side's
+// own unpushed work is bundled and uploaded for the laptop to take.
+const SYNC_PATH_RE = /^\/api\/rudder\/home\/[^/]+\/syncs\/[^/]+$/;
+async function syncProject(project, params) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-sync-"));
+  try {
+    const env = { ...baseChildEnv };
+    const incoming = params.incoming && typeof params.incoming === "object" ? params.incoming : null;
+    if (incoming) {
+      if (!SYNC_PATH_RE.test(String(incoming.path || ""))) {
+        throw new Error("bad sync path");
+      }
+      const response = await fetch(`${cloudUrl}${incoming.path}`, { headers: { authorization: `Bearer ${workerToken}` } });
+      if (!response.ok) {
+        throw new Error(`could not fetch the laptop's work (HTTP ${response.status})`);
+      }
+      const file = path.join(dir, "in.bundle");
+      fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+      Object.assign(env, { RUDDER_SYNC_IN: file, RUDDER_SYNC_IN_HEAD: String(incoming.head || ""), RUDDER_SYNC_FROM: "laptop" });
+    }
+    const uploadPath = String(params.uploadPath || "");
+    const out = path.join(dir, "out.bundle");
+    if (SYNC_PATH_RE.test(uploadPath)) {
+      env.RUDDER_SYNC_OUT = out;
+    }
+    const result = await captureAll("rudder", ["__sync-checkout"], { env, cwd: project.dir, timeoutMs: 110_000 });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{")) || "";
+    let report;
+    try {
+      report = JSON.parse(line);
+    } catch {
+      throw new Error(firstLine(result.stderr || result.stdout) || `sync exited ${result.code}`);
+    }
+    if (report.work?.sent && fs.existsSync(out)) {
+      const response = await fetch(`${cloudUrl}${uploadPath}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/octet-stream" },
+        body: fs.readFileSync(out),
+      });
+      if (!response.ok) {
+        report.work.sent.error = `upload failed (HTTP ${response.status})`;
+      }
+    }
+    return report;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// `rudder cloud pull <run>` on a laptop: bundle one agent's jj change (its
+// working copy included, minus what GitHub has) for that laptop to continue.
+// `rudder __pull-export` (src/cloud-pull.ts) builds it in this clone; the bytes
+// go up to the control plane with the worker token, like sync's.
+async function pullRun(project, params) {
+  const runId = String(params.runId || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(runId) || runId.startsWith(".")) {
+    throw new Error("bad run id");
+  }
+  const uploadPath = String(params.uploadPath || "");
+  if (!SYNC_PATH_RE.test(uploadPath)) {
+    throw new Error("bad upload path");
+  }
+  if (!fs.existsSync(path.join(project.dir, ".rudder", "runs", runId, "run.json"))) {
+    throw new Error("that agent is not on the home machine");
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-pull-"));
+  try {
+    const out = path.join(dir, "pull.bundle");
+    const result = await captureAll("rudder", ["__pull-export", "--repo", project.dir, "--run", runId, out], {
+      env: { ...baseChildEnv },
+      cwd: project.dir,
+      timeoutMs: 110_000,
+    });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+    if (result.code !== 0 || !line || !fs.existsSync(out)) {
+      throw new Error(firstLine(result.stderr || result.stdout) || "rudder __pull-export failed");
+    }
+    const exported = JSON.parse(line);
+    const response = await fetch(`${cloudUrl}${uploadPath}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/octet-stream" },
+      body: fs.readFileSync(out),
+    });
+    if (!response.ok) {
+      throw new Error(`upload failed (HTTP ${response.status})`);
+    }
+    log(`${project.name}: bundled ${runId} for a laptop`);
+    return exported;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A laptop moving its agents here (`rudder cloud move`, H in its dashboard).
+// The bundle carries each agent's jj change and conversation; `rudder
+// __adopt-moved` stages them in this repo's clone (src/move-home.ts), and the
+// repo's dashboard resumes each one when its "adopt" request reaches the steer
+// inbox. Requests are queued rather than awaited, so a dashboard that is still
+// starting picks them up on its first poll.
+async function adoptMovedAgents(params) {
+  const project = await waitForClone(String(params.workspaceId || ""), 8 * 60_000);
+  const bundlePath = String(params.bundlePath || "");
+  if (!/^\/api\/rudder\/home\/[^/]+\/moves\/[^/]+\/bundle$/.test(bundlePath)) {
+    throw new Error("bad bundle path");
+  }
+  const response = await fetch(`${cloudUrl}${bundlePath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  if (!response.ok) {
+    throw new Error(`could not fetch the moved agents (HTTP ${response.status})`);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-move-"));
+  try {
+    const archive = path.join(dir, "move.tgz");
+    fs.writeFileSync(archive, Buffer.from(await response.arrayBuffer()));
+    const result = await captureAll("rudder", ["__adopt-moved", "--repo", project.dir, archive], {
+      env: { ...baseChildEnv },
+      cwd: project.dir,
+      timeoutMs: 5 * 60_000,
+    });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+    if (result.code !== 0 || !line) {
+      throw new Error(firstLine(result.stderr || result.stdout) || "rudder __adopt-moved failed");
+    }
+    const adopted = JSON.parse(line);
+    const agents = Array.isArray(adopted.adopted) ? adopted.adopted : [];
+    acceptClaudeDialogs(agents.map((agent) => agent.workspacePath).filter(Boolean));
+    // Every adopted run, retried ones included: the dashboard resumes a run at
+    // most once, and a retry is exactly when the first resume may not have run.
+    for (const agent of agents) {
+      queueSteer(project, { kind: "adopt", taskId: agent.runId, instruction: "adopt" });
+    }
+    lastStateJson = "";
+    log(`${project.name}: adopted ${agents.length} moved agent(s)${adopted.failed?.length ? `, ${adopted.failed.length} failed` : ""}`);
+    return adopted;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function waitForClone(workspaceId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const project = projects.get(workspaceId);
+    if (project?.status === "failed" && !project.term) {
+      throw new Error(project.error || "the project failed to start on the home machine");
+    }
+    if (project && project.status !== "cloning" && fs.existsSync(path.join(project.dir, ".git"))) {
+      return project;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(project ? `the clone is still ${project.status}` : "that project is not open on the home machine");
+    }
+    await sleep(1000);
+  }
+}
+
+// Resolve on "close", after the output streams end: callers parse stdout,
+// and "exit" can fire before the last chunk arrives.
+function captureAll(command, args, { env, cwd, timeoutMs }) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn(command, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ code: -1, stdout: "", stderr: error.message });
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      // A descendant can inherit these pipes after the CLI exits. Keep the
+      // capture deadline bounded even when those descriptors never close.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve({ code: -1, stdout, stderr: stderr || "command output exceeded its deadline" });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: error.message }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
+  });
+}
+
+// `/model` on the phone: what the dashboard's own picker would offer (the
+// models.dev and Codex caches, read by `rudder __models`), plus the current
+// default. Cached briefly: the lists move on the order of days.
+let modelsCache = null;
+async function listModels() {
+  if (modelsCache && Date.now() - modelsCache.at < 10 * 60_000) {
+    return modelsCache.value;
+  }
+  const result = await captureAll("rudder", ["__models"], { env: { ...baseChildEnv }, cwd: HOME, timeoutMs: 30_000 });
+  const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+  if (result.code !== 0 || !line) {
+    throw new Error(firstLine(result.stderr || result.stdout) || "could not list models");
+  }
+  const value = JSON.parse(line);
+  modelsCache = { at: Date.now(), value };
+  return value;
+}
+
+// "Add project" on the phone: the repos this GitHub login can open (its own,
+// collaborations and its orgs'), newest first, plus where a new one can go.
+async function listGithubRepos() {
+  const env = { ...baseChildEnv };
+  const [user, orgs, repos] = await Promise.all([
+    capture("gh", ["api", "user", "--jq", ".login"], { env, timeoutMs: 20_000 }),
+    capture("gh", ["api", "user/orgs", "--jq", ".[].login"], { env, timeoutMs: 20_000 }),
+    capture("gh", ["api", "--paginate", "user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+      "--jq", ".[] | {repo: .full_name, description: .description, private: .private, updatedAt: .pushed_at, archived: .archived}"], { env, timeoutMs: 60_000 }),
+  ]);
+  if (user.code !== 0) {
+    throw new Error(githubCredentials ? `GitHub said: ${firstLine(user.stderr)}` : "the cloud vault has no GitHub token; run `rudder cloud` in a repo on your laptop to add one");
+  }
+  const open = new Set(Array.from(projects.values()).map((project) => project.descriptor.repo.toLowerCase()));
+  const list = repos.stdout.split("\n").filter(Boolean).map((line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  }).filter((repo) => repo && !repo.archived).slice(0, 300).map((repo) => ({ ...repo, open: open.has(String(repo.repo).toLowerCase()) }));
+  const owners = [user.stdout.trim(), ...orgs.stdout.split("\n").map((line) => line.trim()).filter(Boolean)];
+  return { owners, repos: list };
+}
+
+async function createGithubRepo(params) {
+  const owner = String(params.owner || "").trim();
+  const name = String(params.name || "").trim();
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(owner) || !/^[A-Za-z0-9._-]{1,100}$/.test(name)) {
+    throw new Error("use a plain repository name (letters, digits, . _ -)");
+  }
+  const args = ["repo", "create", `${owner}/${name}`, params.private === false ? "--public" : "--private", "--add-readme"];
+  const description = String(params.description || "").trim().slice(0, 300);
+  if (description) {
+    args.push("--description", description);
+  }
+  const result = await capture("gh", args, { env: { ...baseChildEnv }, timeoutMs: 60_000 });
+  if (result.code !== 0) {
+    throw new Error(firstLine(result.stderr || result.stdout) || "GitHub refused to create the repository");
+  }
+  return { repo: `${owner}/${name}` };
+}
+
+// The phone's terminal view: mark the agent as watched (the dashboard mirrors
+// its visible screen to screen.txt for ~20s after each touch) and return the
+// latest mirror.
+function readScreen(project, runId, watchLive = true) {
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
+    throw new Error("agent not found");
+  }
+  const dir = path.join(project.dir, ".rudder", "runs", runId);
+  if (!fs.existsSync(dir)) {
+    throw new Error("agent not found");
+  }
+  const watch = path.join(dir, "screen.watch");
+  if (watchLive) {
+    fs.writeFileSync(watch, "");
+    const now = new Date();
+    fs.utimesSync(watch, now, now);
+  }
+  try {
+    const file = path.join(dir, "screen.txt");
+    return { text: fs.readFileSync(file, "utf8"), updatedAt: fs.statSync(file).mtimeMs };
+  } catch {
+    return { text: null, updatedAt: null };
+  }
+}
+
+// Drop one request into the dashboard's steer inbox. The dashboard consumes it
+// on its next poll, so a request queued while it is still starting is not lost.
+function queueSteer(project, { kind, taskId, instruction }) {
+  const requestId = randomUUID();
+  const inbox = path.join(project.dir, ".rudder", "steer");
+  fs.mkdirSync(inbox, { recursive: true });
+  const safeId = (taskId || "conductor").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 64) || "conductor";
+  const name = `${String(Date.now()).padStart(13, "0")}-${String(process.hrtime.bigint()).padStart(20, "0")}-${safeId}-${requestId}.json`;
+  const file = path.join(inbox, name);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ requestId, kind, taskId, instruction, ts: new Date().toISOString() }));
+  fs.renameSync(tmp, file);
+  return requestId;
+}
+
+// Requests go through the dashboard's own steer inbox (.rudder/steer), the same
+// channel the web board uses: the dashboard is the single writer of its agents,
+// so the phone never touches a PTY or run.json directly. The receipt says
+// whether it was delivered.
+async function steer(project, { kind, taskId, instruction }) {
+  if (!instruction.trim()) {
+    throw new Error("message is empty");
+  }
+  if (!project.term) {
+    throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
+  }
+  const requestId = queueSteer(project, { kind, taskId, instruction });
+  const receipts = path.join(project.dir, ".rudder", "steer-receipts");
+  const receiptPath = path.join(receipts, `${requestId}.json`);
+  const deadline = Date.now() + 12_000;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    try {
+      const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+      if (receipt.status === "delivered") {
+        lastStateJson = "";
+        return { ok: true, status: "delivered" };
+      }
+      if (receipt.status === "failed") {
+        throw new Error(receipt.error || "the dashboard could not deliver it");
+      }
+    } catch (error) {
+      if (error && error.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw error;
+      }
+    }
+  }
+  return { ok: true, status: "queued" };
+}
+
+// ---------------------------------------------------------------------------
+// State: what the phone app shows.
+// ---------------------------------------------------------------------------
+
+async function publishState() {
+  if (!controlSocket) {
+    return;
+  }
+  const list = [];
+  for (const project of projects.values()) {
+    list.push({
+      workspaceId: project.workspaceId,
+      name: project.name,
+      repo: project.descriptor.repo,
+      path: project.dir,
+      dashboard: project.status,
+      error: project.error,
+      agents: project.status === "cloning" ? [] : project.agents(),
+      plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
+      // The engine-proven role, PID token and attempt travel with every URL.
+      // Control-plane authorization binds these to this authenticated Home.
+      previews: privatePreviews?.snapshot(project.workspaceId) ?? [],
+      ports: (privatePreviews?.snapshot(project.workspaceId) ?? [])
+        .map(({ port, url, id }) => ({ port, label: "Project preview", url, https: true, access: "tailnet", previewId: id })),
+    });
+  }
+  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot() };
+  const json = JSON.stringify(state);
+  if (json === lastStateJson) {
+    return;
+  }
+  lastStateJson = json;
+  sendControl(state);
+}
+
+function scheduleStateSoon() {
+  setTimeout(() => void publishState().catch((error) => log(`state: ${error.message}`)), 150).unref();
+}
+
+function readAgents(repoDir, options = {}) {
+  const runsDir = path.join(repoDir, ".rudder", "runs");
+  let entries = [];
+  try {
+    entries = fs.readdirSync(runsDir);
+  } catch {
+    return [];
+  }
+  const agents = [];
+  for (const id of entries) {
+    let record;
+    try {
+      record = JSON.parse(fs.readFileSync(path.join(runsDir, id, "run.json"), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!record || typeof record !== "object" || record.id !== id) {
+      continue;
+    }
+    agents.push(agentSummary(record, options));
+  }
+  // A task typed a moment ago has no run record until its workspace is named;
+  // dashboards before 3.9.6 list those here so the phone shows them at once.
+  // Newer ones launch at once and never write the file, so an old entry is a
+  // leftover, never a task still starting.
+  try {
+    const pending = JSON.parse(fs.readFileSync(path.join(repoDir, ".rudder", "pending-tasks.json"), "utf8"));
+    for (const task of Array.isArray(pending?.tasks) ? pending.tasks : []) {
+      if (!task || typeof task.id !== "string" || typeof task.task !== "string") {
+        continue;
+      }
+      const at = toMillis(task.queuedAt) ?? Date.now();
+      if (Date.now() - at > 60_000) {
+        continue;
+      }
+      agents.push({
+        id: task.id,
+        title: userTask(task.task).slice(0, 200),
+        task: userTask(task.task).slice(0, 2000),
+        status: "starting",
+        pending: true,
+        createdAt: at,
+        updatedAt: at,
+        lastMessage: null,
+      });
+    }
+  } catch {
+    // no tasks waiting
+  }
+  agents.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  return agents.slice(0, 60);
+}
+
+
+function agentSummary(record, options = {}) {
+  const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
+  let lastMessage = null;
+  let remoteUrl = null;
+  try {
+    const cached = lastMessageCache.get(record.id);
+    const text = lastAssistantText(record, { home: HOME, cache: cached });
+    if (text) {
+      lastMessageCache.set(record.id, text.cacheEntry);
+      lastMessage = text.text;
+      remoteUrl = text.remoteUrl ?? null;
+    }
+  } catch {
+    // a preview is a nicety
+  }
+  return {
+    id: record.id,
+    title: (record.taskSummary || userTask(record.task) || record.id || "").toString().slice(0, 200),
+    task: userTask(record.task).slice(0, 2000),
+    // status, phase, attention, conflict, notInTrunk, pr (agent-status.mjs);
+    // the control plane derives needsYou + reason from these and the asks.
+    ...statusFields(record, options),
+    backend: record.backend ?? "claude",
+    model: record.model ?? null,
+    mode: record.mode ?? null,
+    createdAt: toMillis(record.createdAt),
+    updatedAt,
+    lastMessage,
+    summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
+    nodeId: record.nodeId ?? null,
+    planId: record.planId ?? null,
+    remoteUrl,
+    asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Prompts the phone answers (permission_hook.mjs, written by the dashboard into
+// the run's Claude settings). Each pending prompt is <signals>/<run>.asks/<id>.json,
+// held open by a hook process; the phone's answer becomes <id>.answer.json,
+// which the hook prints as Claude's decision.
+// ---------------------------------------------------------------------------
+function asksDir(runId) {
+  return path.join(HOME, ".rudder", "signals", `${runId}.asks`);
+}
+
+async function answerAsk(project, params) {
+  const runId = String(params.runId || "");
+  const askId = String(params.askId || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(runId) || !isAskId(askId)) {
+    throw new Error("unknown prompt");
+  }
+  const dir = asksDir(runId);
+  let request;
+  try {
+    request = JSON.parse(fs.readFileSync(path.join(dir, `${askId}.json`), "utf8"));
+  } catch {
+    throw new Error("that prompt was already answered");
+  }
+  const decision = askDecision(request, params.answer);
+  if (decision.keys) {
+    // The hook withdraws the request when the plan's result lands.
+    return await steer(project, { kind: "keys", taskId: runId, instruction: decision.keys });
+  }
+  const file = path.join(dir, `${askId}.answer.json`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, decision.output);
+  fs.renameSync(tmp, file);
+  scheduleStateSoon();
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Explicit current-owner preview registrations become private tailnet previews.
+// ---------------------------------------------------------------------------
+
+async function scanPorts() {
+  const service = await privatePreviewService();
+  // Concurrent discovery callers await the same fresh reconciliation, including
+  // exact-current native custody checks around each asynchronous readiness probe.
+  await service.reconcile([...projects.values()].filter(project => project.status !== "cloning"));
+  ports = [...projects.values()].flatMap(project => service.snapshot(project.workspaceId));
+  // Read-only status does not share the superseded Serve writer or infer roles.
+  const status = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET, timeoutMs: 1500 });
+  let value = null; try { value = JSON.parse(status.stdout); } catch { /* offline */ }
+  Object.assign(tailnet, tailnetStatus(value, TS_HOSTNAME), { https: ports.length ? true : null });
+}
+
+// ---------------------------------------------------------------------------
+// Credentials: can this machine act as the user, as the same accounts? A login
+// file existing proves nothing (an expired Claude login still has one), so each
+// tool makes one tiny real request, and reports which account it is.
+// ---------------------------------------------------------------------------
+
+
+async function checkCredentials() {
+  if (credentialsRunning) {
+    // A login just finished mid-check: look again once this one is done, or
+    // the app keeps showing the old answer for half an hour.
+    credentialsAgain = true;
+    return;
+  }
+  credentialsRunning = true;
+  credentialsAgain = false;
+  try {
+    const env = { ...baseChildEnv };
+    const [github, claude, codex, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkAws(env)]);
+    credentials = { github, claude, codex, aws, checkedAt: new Date().toISOString() };
+    // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
+    // look again shortly instead of reporting a broken login for 30 minutes.
+    if ([github, claude, codex, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
+      setTimeout(() => void checkCredentials(), 60_000).unref();
+    }
+    lastStateJson = "";
+    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"}`);
+  } catch (error) {
+    log(`credential check: ${error.message}`);
+  } finally {
+    credentialsRunning = false;
+    if (credentialsAgain) {
+      void checkCredentials();
+    }
+  }
+}
+
+// A sign-in from the phone just finished: say so at once (from the CLI's own
+// status, which needs no model call), then run the full check, which proves
+// the login works with one real request.
+async function credentialsAfterLogin(provider) {
+  const env = { ...baseChildEnv };
+  const quick = provider === "claude" ? await claudeStatus(env) : await codexStatus(env);
+  if (quick.loggedIn) {
+    credentials = {
+      ...(credentials ?? {}),
+      [provider]: { ok: true, account: quick.account, plan: quick.plan, detail: null, checking: true },
+      checkedAt: new Date().toISOString(),
+    };
+    lastStateJson = "";
+    scheduleStateSoon();
+  }
+  await checkCredentials();
+}
+
+async function claudeStatus(env) {
+  const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
+  try {
+    const parsed = JSON.parse(status.stdout);
+    return { loggedIn: Boolean(parsed.loggedIn), account: parsed.email || null, plan: claudePlan(parsed) };
+  } catch {
+    return { loggedIn: false, account: null, plan: null };
+  }
+}
+
+async function codexStatus(env) {
+  const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
+  const { account, plan } = codexAccount();
+  return { loggedIn: status.code === 0, account, plan };
+}
+
+// "max", "pro", ... for a subscription; "API" for a Console login.
+function claudePlan(status) {
+  if (typeof status.subscriptionType === "string" && status.subscriptionType) {
+    return status.subscriptionType;
+  }
+  return status.authMethod && status.authMethod !== "claude.ai" ? "API" : null;
+}
+
+// Which AWS principal the vault's ~/.aws resolves to (default profile).
+async function checkAws(env) {
+  if (!fs.existsSync(path.join(HOME, ".aws", "credentials")) && !fs.existsSync(path.join(HOME, ".aws", "config"))) {
+    return { ok: false, account: null, detail: "no ~/.aws in the vault" };
+  }
+  const result = await capture("aws", ["sts", "get-caller-identity", "--query", "Arn", "--output", "text"], { env, timeoutMs: 30_000 });
+  return result.code === 0 && result.stdout.trim().startsWith("arn:")
+    ? { ok: true, account: result.stdout.trim(), detail: null }
+    : { ok: false, account: null, detail: firstLine(result.stderr || result.stdout) || `exit ${result.code}` };
+}
+
+async function checkGithub(env) {
+  if (!env.GH_TOKEN && !env.GITHUB_TOKEN) {
+    return { ok: false, account: null, detail: "no GitHub token in the vault" };
+  }
+  const result = await capture("gh", ["api", "user", "--jq", ".login"], { env, timeoutMs: 20_000 });
+  return result.code === 0 && result.stdout.trim()
+    ? { ok: true, account: result.stdout.trim(), detail: null }
+    : { ok: false, account: null, detail: firstLine(result.stderr || result.stdout) || "GitHub rejected the token" };
+}
+
+async function checkClaude(env) {
+  const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
+  let account = null;
+  let plan = null;
+  try {
+    const parsed = JSON.parse(status.stdout);
+    account = parsed.email || null;
+    plan = claudePlan(parsed);
+    if (!parsed.loggedIn) {
+      return { ok: false, account, plan, detail: "not logged in" };
+    }
+  } catch {
+    // fall through to the real request
+  }
+  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
+  const text = `${probe.stdout}\n${probe.stderr}`;
+  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
+    return { ok: true, account, plan, detail: null };
+  }
+  const detail = /login expired|please run \/login|invalid.*(token|api key)|not logged in|authentication/i.test(text)
+    ? "login expired"
+    : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account, plan, detail };
+}
+
+async function checkCodex(env) {
+  const { account, plan } = codexAccount();
+  const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
+  if (status.code !== 0) {
+    return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
+  }
+  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
+    return { ok: true, account, plan, detail: null };
+  }
+  const text = `${probe.stdout}\n${probe.stderr}`;
+  const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account, plan, detail };
+}
+
+// The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API
+// key login has neither.
+function codexAccount() {
+  try {
+    const auth = JSON.parse(fs.readFileSync(path.join(HOME, ".codex", "auth.json"), "utf8"));
+    const payload = String(auth?.tokens?.id_token || "").split(".")[1];
+    if (!payload) {
+      return { account: null, plan: auth?.OPENAI_API_KEY ? "API" : null };
+    }
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return { account: claims.email || null, plan: claims["https://api.openai.com/auth"]?.chatgpt_plan_type || null };
+  } catch {
+    return { account: null, plan: null };
+  }
+}
+
+function capture(command, args, { env, cwd, timeoutMs }) {
+  return captureAll(command, args, { env, cwd, timeoutMs });
+}
+
+// ---------------------------------------------------------------------------
+// Toolchains: Rust is not in the worker image (it would double its size), so
+// the home machine installs it once onto the persistent volume, in the
+// background, and every later boot finds it there.
+// ---------------------------------------------------------------------------
+
+async function ensureRustToolchain() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  if (fs.existsSync(path.join(HOME, ".cargo", "bin", "cargo"))) {
+    return;
+  }
+  log("installing the Rust toolchain onto the volume (first boot)");
+  const result = await capture("sh", ["-c", "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path"], {
+    env: { ...process.env, HOME },
+    cwd: HOME,
+    timeoutMs: 15 * 60 * 1000,
+  });
+  log(result.code === 0 ? "Rust toolchain installed" : `Rust toolchain install failed: ${firstLine(result.stderr || result.stdout)}`);
+}
+
+// Go, the same way: a release tarball onto the volume, linked into TOOLS_BIN.
+// ~/go (modules, `go install` binaries) is persisted by persistHomeDirs.
+async function ensureGoToolchain() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  if (fs.existsSync(path.join(TOOLS_BIN, "go"))) {
+    return;
+  }
+  log("installing Go onto the volume (first boot)");
+  fs.mkdirSync(TOOLS_BIN, { recursive: true });
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const result = await capture("sh", ["-c", `set -e
+    version=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -1)
+    case "$version" in go1.*) ;; *) echo "unexpected Go version: $version" >&2; exit 1 ;; esac
+    dir=$(mktemp -d)
+    curl -fsSL "https://go.dev/dl/$version.linux-${arch}.tar.gz" -o "$dir/go.tgz"
+    rm -rf "${TOOLS_DIR}/go"
+    tar -xzf "$dir/go.tgz" -C "${TOOLS_DIR}"
+    rm -rf "$dir"
+    ln -sf "${TOOLS_DIR}/go/bin/go" "${TOOLS_BIN}/go"
+    ln -sf "${TOOLS_DIR}/go/bin/gofmt" "${TOOLS_BIN}/gofmt"`], {
+    env: { ...process.env, HOME },
+    cwd: TOOLS_DIR,
+    timeoutMs: 10 * 60 * 1000,
+  });
+  log(result.code === 0 ? "Go installed" : `Go install failed: ${firstLine(result.stderr || result.stdout)}`);
+}
+
+// AWS CLI v2 and the Session Manager plugin (SSH over SSM), so agents reach the
+// same AWS the laptop does with the credentials from the vault (~/.aws).
+async function ensureAwsTooling() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  fs.mkdirSync(TOOLS_BIN, { recursive: true });
+  const env = { ...process.env, HOME, PATH: `${TOOLS_BIN}:${process.env.PATH || ""}` };
+  if (!fs.existsSync(path.join(TOOLS_BIN, "aws"))) {
+    log("installing the AWS CLI onto the volume");
+    // No unzip in the image: python extracts, keeping the executable bits the
+    // installer needs.
+    const result = await capture("sh", ["-c", `set -e
+      dir=$(mktemp -d); cd "$dir"
+      curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o aws.zip
+      python3 -c 'import zipfile,os,sys
+z=zipfile.ZipFile("aws.zip")
+for i in z.infolist():
+    p=z.extract(i)
+    m=(i.external_attr>>16)&0o777
+    if m: os.chmod(p,m)'
+      ./aws/install -i "${TOOLS_DIR}/aws-cli" -b "${TOOLS_BIN}" --update
+      cd /; rm -rf "$dir"`], { env, cwd: TOOLS_DIR, timeoutMs: 10 * 60 * 1000 });
+    log(result.code === 0 ? "AWS CLI installed" : `AWS CLI install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
+  if (!fs.existsSync(path.join(TOOLS_BIN, "session-manager-plugin"))) {
+    const result = await capture("sh", ["-c", `set -e
+      dir=$(mktemp -d); cd "$dir"
+      curl -fsSL https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb -o ssm.deb
+      dpkg-deb -x ssm.deb "${TOOLS_DIR}/ssm"
+      ln -sf "${TOOLS_DIR}/ssm/usr/local/sessionmanagerplugin/bin/session-manager-plugin" "${TOOLS_BIN}/session-manager-plugin"
+      cd /; rm -rf "$dir"`], { env, cwd: TOOLS_DIR, timeoutMs: 5 * 60 * 1000 });
+    log(result.code === 0 ? "Session Manager plugin installed" : `Session Manager plugin install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
+  // Deploy CLIs agents reach for (logins: see persistHomeDirs and the vault).
+  if (!fs.existsSync(path.join(TOOLS_BIN, "vercel")) || !fs.existsSync(path.join(TOOLS_BIN, "netlify"))) {
+    const result = await capture("npm", ["install", "-g", "--prefix", TOOLS_DIR, "vercel", "netlify-cli"], { env, cwd: TOOLS_DIR, timeoutMs: 10 * 60 * 1000 });
+    log(result.code === 0 ? "Vercel and Netlify CLIs installed" : `Vercel/Netlify CLI install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tailscale.
+// ---------------------------------------------------------------------------
+
+function writePreviewPorts(owned) {
+  const file = path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(owned), { mode: 0o600 });
+  fs.renameSync(temporary, file);
+}
+
+function readPreviewPorts() {
+  try { return JSON.parse(fs.readFileSync(path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json"), "utf8")); }
+  catch { return []; }
+}
+
+async function startTailscale(env) {
+  const authKey = (env.TS_AUTHKEY || "").trim();
+  const stateDir = path.join(PERSIST_HOME, ".tailscale");
+  const hasState = fs.existsSync(stateDir) && fs.readdirSync(stateDir).length > 0;
+  if (!authKey && !hasState) {
+    tailnetOffline("Add TS_AUTHKEY to the vault to enable private previews");
+    return;
+  }
+  if (!commandExists("tailscaled")) {
+    tailnet.error = "tailscale is not installed in this image";
+    log("tailscale: not installed");
+    return;
+  }
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const daemon = spawn("tailscaled", [
+    "--tun=userspace-networking",
+    `--statedir=${stateDir}`,
+    `--socket=${TS_SOCKET}`,
+    "--port=41641",
+  ], { stdio: ["ignore", "ignore", "pipe"], detached: false });
+  daemon.stderr.on("data", () => undefined);
+  daemon.on("error", () => tailnetOffline("tailscaled could not start"));
+  daemon.on("exit", (code) => {
+    tailnetOffline(`tailscaled exited (${code})`);
+    log(`tailscaled exited (${code})`);
+  });
+  for (let attempt = 0; attempt < 50 && !fs.existsSync(TS_SOCKET); attempt += 1) {
+    await sleep(100);
+  }
+  // The node key persists on the volume, so after the first boot this rejoins
+  // as the same device without spending the auth key again.
+  const existing = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET });
+  let authenticated = false;
+  try { authenticated = JSON.parse(existing.stdout)?.BackendState === "Running"; } catch { /* no login yet */ }
+  if (!authenticated && !authKey) {
+    tailnetOffline("Tailscale needs login; refresh TS_AUTHKEY in the vault");
+    return;
+  }
+  const up = await runTailnetCommand([
+    "up",
+    ...(authKey ? [`--authkey=${authKey}`] : []),
+    `--hostname=${TS_HOSTNAME}`,
+    "--accept-dns=false",
+  ], { socket: TS_SOCKET, timeoutMs: 60_000 });
+  if (up.code !== 0) {
+    const detail = firstLine(up.stderr || up.stdout || "tailscale up failed");
+    tailnet.error = authKey ? detail.replaceAll(authKey, "[redacted]") : detail;
+    log(`tailscale up failed: ${tailnet.error}`);
+    return;
+  }
+  // Serve publication is performed only by the registered-process directory.
+  await scanPorts();
+  log(`tailscale up as ${tailnet.dnsName || tailnet.hostname}`);
+}
+
+// ---------------------------------------------------------------------------
+// Boot helpers.
+// ---------------------------------------------------------------------------
+
+// $HOME is on the machine's ephemeral root disk. Conversations (~/.claude,
+// ~/.codex) and Rudder's own state (~/.rudder) must survive a stop/start, or
+// every agent would come back with no memory and nothing to resume.
+function persistHomeDirs() {
+  fs.mkdirSync(PERSIST_HOME, { recursive: true });
+  // .cargo/.rustup: the Rust toolchain (installed on first boot, see
+  // ensureRustToolchain) lives on the volume too, so it survives restarts.
+  // com.vercel.cli: the cloud's own `vercel login` (its refresh token rotates,
+  // so it cannot be a copy of the laptop's).
+  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go"]) {
+    const live = path.join(HOME, name);
+    const stored = path.join(PERSIST_HOME, name);
+    fs.mkdirSync(stored, { recursive: true });
+    let stat = null;
+    try {
+      stat = fs.lstatSync(live);
+    } catch {
+      stat = null;
+    }
+    if (stat?.isSymbolicLink()) {
+      continue;
+    }
+    if (stat?.isDirectory()) {
+      // Whatever the image put there (installers, defaults) joins the stored
+      // copy without overwriting what a previous boot saved.
+      fs.cpSync(live, stored, { recursive: true, force: false, errorOnExist: false });
+      fs.rmSync(live, { recursive: true, force: true });
+    }
+    fs.mkdirSync(path.dirname(live), { recursive: true });
+    fs.symlinkSync(stored, live);
+  }
+}
+
+function linkCodeDir() {
+  const link = path.join(HOME, "code");
+  try {
+    if (fs.lstatSync(link).isSymbolicLink()) {
+      return;
+    }
+    fs.rmSync(link, { recursive: true, force: true });
+  } catch {
+    // absent
+  }
+  fs.symlinkSync(CODE_DIR, link);
+}
+
+async function fetchVaultSecrets() {
+  const url = `${cloudUrl}/api/rudder/workspace/${encodeURIComponent(homeId)}/secrets`;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const res = await fetch(url, { headers: { authorization: `Bearer ${workerToken}` } });
+      if (res.ok) {
+        const data = await res.json();
+        const env = data && typeof data.env === "object" && data.env && !Array.isArray(data.env) ? data.env : {};
+        const files = Array.isArray(data?.files) ? data.files : [];
+        log(`vault: ${Object.keys(env).length} env and ${files.length} file secret(s)`);
+        return { env, files };
+      }
+      log(`vault: HTTP ${res.status}`);
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        break;
+      }
+    } catch (error) {
+      log(`vault: ${error?.message || error}`);
+    }
+    await sleep(1000 * (attempt + 1));
+  }
+  log("vault: continuing without secrets");
+  return null;
+}
+
+function writeVaultFiles(files, deferred) {
+  for (const file of files || []) {
+    if (typeof file?.path !== "string" || typeof file?.contentBase64 !== "string" || !file.path.startsWith("~/")) {
+      continue;
+    }
+    const segments = file.path.slice(2).split("/");
+    if (segments.some((part) => part === "" || part === "." || part === "..")) {
+      continue;
+    }
+    // Repo-scoped files (~/code/<repo>/.env.local) can only be written once the
+    // repo is cloned; writing first would make the clone target non-empty.
+    if (segments[0] === "code" && segments.length >= 3) {
+      deferred.push({ repo: segments[1], rest: segments.slice(2), file });
+      continue;
+    }
+    const target = path.join(HOME, ...segments);
+    if (keepFresherLogin(target, file)) {
+      continue;
+    }
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(target, Buffer.from(file.contentBase64, "base64"), { mode: file.mode || 0o600 });
+    } catch (error) {
+      log(`vault file ${file.path}: ${error?.message || error}`);
+    }
+  }
+  // settings.json is rewritten from the vault every boot, so its hooks are
+  // fixed every boot too: laptop paths become this home, and hooks whose
+  // program is still missing are dropped. Last, so ~/.claude/hooks is on disk.
+  sanitizeHomeHookConfigs(HOME, log);
+  // The vault's ~/.codex/config.toml is the laptop's and knows nothing of this
+  // home's repos; without these entries every Codex resume stops at a trust menu.
+  ensureCodexTrust({ configPath: path.join(HOME, ".codex", "config.toml"), codeDir: CODE_DIR, log });
+}
+
+// Claude and Codex refresh their OAuth tokens in place, and a refresh can
+// invalidate the old refresh token. These files live on the volume, so after the
+// first boot the copy here is usually NEWER than the vault's: overwriting it on
+// every boot would log the agents out. Keep whichever expires later.
+function keepFresherLogin(target, file) {
+  const kind = target.endsWith(path.join(".claude", ".credentials.json"))
+    ? "claude"
+    : target.endsWith(path.join(".codex", "auth.json"))
+      ? "codex"
+      : null;
+  if (!kind || !fs.existsSync(target)) {
+    return false;
+  }
+  try {
+    const current = JSON.parse(fs.readFileSync(target, "utf8"));
+    const incoming = JSON.parse(Buffer.from(file.contentBase64, "base64").toString("utf8"));
+    const freshness = (value) =>
+      kind === "claude"
+        ? Number(value?.claudeAiOauth?.expiresAt ?? 0)
+        : Date.parse(value?.last_refresh ?? "") || 0;
+    return freshness(current) >= freshness(incoming);
+  } catch {
+    return false;
+  }
+}
+
+
+async function refreshVaultRepoFiles() {
+  if (Date.now() - vaultRefreshedAt < 5000) {
+    return;
+  }
+  vaultRefreshedAt = Date.now();
+  const fresh = await fetchVaultSecrets();
+  if (!fresh) {
+    return;
+  }
+  deferredRepoFiles.length = 0;
+  writeVaultFiles(fresh.files, deferredRepoFiles);
+  acceptClaudeDialogs([]);
+  // A GitHub token added since boot takes effect now; failed clones retry when
+  // the repo list is reconciled right after this.
+  configureGitCredentials(fresh);
+  // Same filtering as at boot (no machine credentials reach agents).
+  Object.assign(baseChildEnv, buildChildEnv(fresh.env ?? {}));
+  void checkCredentials();
+  for (const project of projects.values()) {
+    if (fs.existsSync(path.join(project.dir, ".git"))) {
+      writeDeferredRepoFiles(project.name, project.dir);
+    }
+  }
+}
+
+function writeDeferredRepoFiles(repoName, repoDir) {
+  for (const entry of deferredRepoFiles) {
+    if (entry.repo !== repoName) {
+      continue;
+    }
+    const target = path.join(repoDir, ...entry.rest);
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, Buffer.from(entry.file.contentBase64, "base64"), { mode: entry.file.mode || 0o600 });
+    } catch (error) {
+      log(`vault file ${entry.file.path}: ${error?.message || error}`);
+    }
+  }
+}
+
+// A token in the vault wins. A synced ~/.config/gh/hosts.yml usually has NO
+// token in it (gh keeps it in the laptop's keychain), so trusting the file made
+// every private clone die at git's username prompt.
+function configureGitCredentials(secrets) {
+  const token = secrets?.env?.GH_TOKEN || secrets?.env?.GITHUB_TOKEN || "";
+  if (token) {
+    fs.writeFileSync(path.join(HOME, ".git-credentials"), `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+    shSoft("git config --global --unset-all credential.https://github.com.helper 2>/dev/null; git config --global credential.helper store");
+    // For the supervisor's own git/gh calls; agents get it through the vault env.
+    process.env.GH_TOKEN = token;
+    githubCredentials = "token";
+    return;
+  }
+  const hosts = path.join(HOME, ".config", "gh", "hosts.yml");
+  if (fs.existsSync(hosts) && /oauth_token:/.test(fs.readFileSync(hosts, "utf8"))) {
+    shSoft("command -v gh >/dev/null 2>&1 && gh auth setup-git 2>/dev/null");
+    githubCredentials = "gh";
+    return;
+  }
+  githubCredentials = null;
+  log("no GitHub token in the vault; private repos can't be cloned (run `rudder cloud` in a repo on your laptop)");
+}
+
+
+// Nobody is at this machine's keyboard: answer Claude's one-time questions up
+// front. Every repo here came from the user's own GitHub; Remote Control is the
+// point of the machine.
+function acceptClaudeDialogs(paths) {
+  for (const projectPath of paths) {
+    trustedPaths.add(projectPath);
+  }
+  const configPath = path.join(HOME, ".claude.json");
+  let config = {};
+  try {
+    config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    config = {};
+  }
+  config.remoteDialogSeen = true;
+  config.hasCompletedOnboarding = true;
+  if (!config.projects || typeof config.projects !== "object") {
+    config.projects = {};
+  }
+  for (const projectPath of [CODE_DIR, ...trustedPaths]) {
+    config.projects[projectPath] = { ...(config.projects[projectPath] || {}), hasTrustDialogAccepted: true };
+  }
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  } catch (error) {
+    log(`claude config: ${error.message}`);
+  }
+}
+
+function buildChildEnv(vaultEnv) {
+  const env = {
+    ...process.env,
+    ...vaultEnv,
+    // Rust and Go (installed onto the volume on first boot) for agents
+    // building native code, Rudder's own included; ~/.local/bin for
+    // `pip install --user` and uv tools, ~/go/bin for `go install`.
+    PATH: `${TOOLS_BIN}:${path.join(HOME, ".cargo", "bin")}:${path.join(HOME, "go", "bin")}:${path.join(HOME, ".local", "bin")}:${process.env.PATH || ""}`,
+    HOME,
+    TERM: "xterm-256color",
+    COLORTERM: "truecolor",
+    RUDDER_HEADLESS: "0",
+    RUDDER_CLOUD_WORKER: "1",
+    RUDDER_REMOTE_CONTROL: process.env.RUDDER_REMOTE_CONTROL ?? "1",
+    RUDDER_DISABLE_AUTO_UPDATE: "1",
+    RUDDER_DISABLE_UPDATE_CHECK: "1",
+    RUDDER_DISABLE_ONBOARD_INSTALL: "1",
+    RUDDER_CODEX_BIN: process.env.RUDDER_CODEX_BIN || "codex",
+  };
+  // Nothing an agent runs should be able to read the machine's own credentials.
+  for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN", "TS_AUTHKEY", "TS_API_KEY", "RUDDER_HOME"]) {
+    delete env[secret];
+  }
+  return env;
+}
+
+function reportHeartbeat() {
+  let activeAgents = 0;
+  for (const project of projects.values()) {
+    activeAgents += project.agents().filter((agent) => agent.status === "working").length;
+  }
+  fetch(`${cloudUrl}/api/rudder/workspace/${encodeURIComponent(homeId)}/heartbeat`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${workerToken}` },
+    body: JSON.stringify({ state: "running", machineId: flyMachineId || undefined, activeAgents }),
+  }).catch(() => undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Small utilities.
+// ---------------------------------------------------------------------------
+
+function run(command) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("sh", ["-c", command], { stdio: ["ignore", "inherit", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      process.stderr.write(chunk);
+    });
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `exit ${code}`))));
+    child.on("error", reject);
+  });
+}
+
+function shSoft(command) {
+  spawnSync("sh", ["-c", command], { stdio: "inherit" });
+}
+
+function commandExists(name) {
+  return spawnSync("sh", ["-c", `command -v ${name}`], { stdio: "ignore" }).status === 0;
+}
+
+function q(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function firstLine(text) {
+  return String(text || "").trim().split("\n").filter(Boolean).pop()?.slice(0, 300) ?? "";
+}
+
+function toMillis(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  if (Number.isFinite(number)) {
+    return number;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function log(message) {
+  console.log(`[home] ${message}`);
+}

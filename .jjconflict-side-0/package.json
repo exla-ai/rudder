@@ -1,0 +1,72 @@
+{
+  "name": "@exla/rudder",
+  "version": "4.0.0-alpha.34",
+  "description": "Run Claude Code and Codex locally or in Rudder Cloud, with one dashboard for tasks and agent communication.",
+  "keywords": [
+    "tui",
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "opencode",
+    "ai-agents",
+    "jujutsu",
+    "terminal",
+    "cli"
+  ],
+  "license": "Elastic-2.0",
+  "homepage": "https://rudder.exla.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exla-ai/rudder.git"
+  },
+  "type": "module",
+  "bin": {
+    "rudder": "dist/index.js"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json && npm run build-board && npm run build-native && npm run copy-native && npm run chmod-cli",
+    "build-board": "esbuild src/board/ui/index.tsx --bundle --minify --format=esm --jsx=automatic --jsx-import-source=preact --outfile=dist/board/board.js && esbuild src/board/ui/board.css --bundle --minify --outfile=dist/board/board.css",
+    "build-native": "node scripts/build-native.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && npm run chmod-cli && node --test tests/*.test.mjs",
+    "test:tui": "node --test tests/tui/*.test.mjs",
+    "test:worker-scroll": "cargo test --manifest-path native/Cargo.toml top_origin_scroll_region_history_scrolls_like_terminal_scrollback && cargo test --manifest-path native/Cargo.toml worker_wheel && cargo test --manifest-path native/Cargo.toml wheel_scroll && cargo test --manifest-path native/Cargo.toml worker_page && cargo test --manifest-path native/Cargo.toml codex_alternate_screen_page_key",
+    "copy-native": "node scripts/copy-native.mjs",
+    "chmod-cli": "node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
+    "prepack": "npm run build",
+    "postinstall": "node scripts/postinstall.mjs",
+    "start": "node dist/index.js",
+    "test:tui:report": "rm -rf .tui-report tui-report.html && node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tui-integration-tests/reporter --test-reporter-destination=tui-report.html tests/tui/*.test.mjs",
+    "mutate:tui": "node tests/tui/mutate.mjs"
+  },
+  "files": [
+    "dist/",
+    "assets/",
+    "scripts/copy-native.mjs",
+    "scripts/native-artifacts.mjs",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.314",
+    "@types/node": "^22.15.3",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.0",
+    "preact": "^10.25.0",
+    "preact-render-to-string": "^6.7.0",
+    "tui-integration-tests": "^0.6.1",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@xterm/headless": "^6.0.0",
+    "ws": "^8.18.0"
+  }
+}

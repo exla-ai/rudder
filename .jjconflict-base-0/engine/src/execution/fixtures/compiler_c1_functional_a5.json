@@ -1,0 +1,273 @@
+{
+  "formatVersion": 1,
+  "scope": "actual C1 functional compilation in disposable VM, no SDK role",
+  "name": "rudder-c1-functional-481b0ea62322",
+  "image": "registry.fly.io/rudder-workers-exla@sha256:1e89df04d2cfa419b5b6fc088cd188e5c74136350a4449fd79ace1f591740d7d",
+  "nonce": "481b0ea6232240c7922c0fc4a009992a",
+  "sourceManifestSha256": "cc70c76139eea42b1053c60728c3ad873bf21b2253d6968d41a4b47fd16af310",
+  "steps": [
+    {
+      "label": "initial-inventory",
+      "exitCode": 0
+    },
+    {
+      "label": "create-once",
+      "exitCode": 0
+    },
+    {
+      "label": "observe-owned",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "read-result",
+      "exitCode": 0
+    },
+    {
+      "label": "recover-stdout",
+      "exitCode": 0
+    },
+    {
+      "label": "recover-stderr",
+      "exitCode": 0
+    },
+    {
+      "label": "cleanup-inventory",
+      "exitCode": 0
+    },
+    {
+      "label": "cleanup-destroy",
+      "exitCode": 0
+    },
+    {
+      "label": "cleanup-absence",
+      "exitCode": 0
+    },
+    {
+      "label": "cleanup-absence",
+      "exitCode": 0
+    }
+  ],
+  "componentPassed": true,
+  "cleanupVerified": true,
+  "normalDaemonRetirement": false,
+  "sdkRoleQualified": false,
+  "productionActivation": false,
+  "machineId": "891260b6406668",
+  "instanceId": "01M6C99BEJ12JXQ0JWXEDCMZT4",
+  "guest": {
+    "actualWorkloadPid": 615,
+    "artifactRoot": {
+      "gid": 0,
+      "mode": 365,
+      "uid": 0
+    },
+    "elapsedMs": 168435,
+    "exitCode": 0,
+    "expired": false,
+    "formatVersion": 1,
+    "functional": {
+      "Buck2_CXX_action": true,
+      "C_CXX": true,
+      "Rudder_repository_build": false,
+      "TypeScript": true,
+      "artifact_manifest_sha256": "bb70f8795da717a73f9d9ded535149f1fb4abff84374b12188361f1cc4a8106a",
+      "cargo_offline_build_script": true,
+      "daemon_retirement_proven": false,
+      "foreground_children": [
+        {
+          "exit": 0,
+          "label": "C-executable",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "C-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "CXX-executable",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "CXX-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "C-static-object",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "C-archive",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Rust-executable",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Rust-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Cargo-offline-build-script",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Cargo-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "SQLite-C-link",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "SQLite-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "TypeScript-compile",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "TypeScript-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Buck2-CXX-build",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Buck2-CXX-output",
+          "stderr_eof": true,
+          "stdout_eof": true
+        },
+        {
+          "exit": 0,
+          "label": "Buck2-shutdown-request",
+          "stderr_eof": true,
+          "stdout_eof": true
+        }
+      ],
+      "format_version": 1,
+      "physical_Root_Native_SDK_grant": false,
+      "production_activation": false,
+      "profile_id": "rudder-linux-rust-cxx-typescript-c1",
+      "rust_executable": true,
+      "scope": "C1-fixed-build-container-functional-component-only",
+      "system_sqlite_C": true,
+      "third_party_cargo_cache_included": false
+    },
+    "logs": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 2610,
+        "sha256": "d9a3b6bb670e35c7e7f43682fdbf25b987c5ac2bd095d7ae0661980faa64b676"
+      }
+    },
+    "normalDaemonRetirement": false,
+    "overflow": false,
+    "passed": true,
+    "productionActivation": false,
+    "scope": "disposable C1 toolchain functional component, not SDK admission",
+    "sdkRoleQualified": false,
+    "stderrEof": true,
+    "stdoutEof": true,
+    "supervisorUid": 0
+  },
+  "rawLogsMatched": true,
+  "protectedHomeRetained": true,
+  "providerCalls": 25,
+  "verifiedAt": "2026-11-01T19:30:42.845592+00:00"
+}

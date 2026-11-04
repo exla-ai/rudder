@@ -1,0 +1,13 @@
+{
+  "adapters": {
+    "codex": "pending",
+    "claude": "pending"
+  },
+  "schemaVersion": 1,
+  "taskSetSha256": "3cf3361867a42b409a289ec1488dbaacaee5526ea5dd402de2b2811d6ef2dd5a",
+  "sourceRevision": "017d76ed18c33d23b1c85dc9a9e9db0443d132a2",
+  "status": "pending",
+  "comparisons": [],
+  "actualAdapterSamples": 0,
+  "limitation": "No automatic launch-policy change. Fixtures and session correlations do not establish model speed or platform qualification. Baseline settings are experiment-only; production keeps one launch policy."
+}

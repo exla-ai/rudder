@@ -1,0 +1,128 @@
+/* Motion: one idea, "the sheet is live".
+ *
+ * On load the hero's lines ink in, the laptop settles and the phone rises in
+ * front of it. Below the fold each block inks in once as it arrives. Inside the
+ * pictures, the things that are live in the product move: running rows breathe,
+ * the worker streams, spinners turn, god's view's focus walks the grid, /sync
+ * prints its report a line at a time.
+ *
+ * Content is visible by default. Hiding-before-reveal only applies under
+ * `html.motion`, which site.js sets when scripting runs AND the visitor has not
+ * asked for reduced motion, so a headless render, a failed script or a reduced
+ * motion preference all ship the complete, still page.
+ */
+
+@keyframes ink-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(36px) rotate(calc(var(--tilt, 2.2deg) * 2));
+  }
+  to {
+    opacity: 1;
+    transform: rotate(var(--tilt, 2.2deg));
+  }
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-copy > * {
+    animation: ink-in 640ms var(--ease-expo) both;
+  }
+  .hero-copy > :nth-child(2) {
+    animation-delay: 70ms;
+  }
+  .hero-copy > :nth-child(3) {
+    animation-delay: 140ms;
+  }
+  .hero-copy > :nth-child(4) {
+    animation-delay: 210ms;
+  }
+  .hero-copy > :nth-child(5) {
+    animation-delay: 260ms;
+  }
+
+  .laptop {
+    animation: settle 820ms var(--ease-expo) 160ms both;
+  }
+
+  .phone--hero {
+    animation: rise 1000ms var(--ease-expo) 420ms both;
+  }
+
+  /* Scroll reveal, opted into by site.js. */
+  html.motion [data-reveal] {
+    transition: opacity 700ms var(--ease-expo), transform 700ms var(--ease-expo);
+  }
+  html.motion [data-reveal]:not(.is-in) {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  html.motion .phone-step[data-reveal]:nth-child(2) {
+    transition-delay: 90ms;
+  }
+  html.motion .phone-step[data-reveal]:nth-child(3) {
+    transition-delay: 180ms;
+  }
+
+  /* /sync prints its report a line at a time once it is on screen. */
+  html.motion [data-lines] > span {
+    transition: opacity 260ms var(--ease-quint);
+    transition-delay: calc(var(--i, 0) * 110ms + 300ms);
+  }
+  html.motion [data-lines]:not(.is-printed) > span {
+    opacity: 0;
+  }
+
+  /* The worker's newest line inks in as it streams. */
+  .stream-line {
+    animation: ink-in 360ms var(--ease-expo) both;
+  }
+
+  .phone-step .phone {
+    transition: transform 420ms var(--ease-expo);
+  }
+  .phone-step:hover .phone {
+    transform: translateY(-6px);
+  }
+
+  @keyframes pulse-mark {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* Running and needs-you rows breathe, because those rows are live. */
+  .state--running::before,
+  .state--needs::before {
+    animation: pulse-mark 2.1s var(--ease-quint) infinite;
+  }
+
+  .hero-tag-dot {
+    animation: pulse-mark 2.4s var(--ease-quint) infinite;
+  }
+}

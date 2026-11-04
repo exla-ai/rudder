@@ -1,0 +1,4153 @@
+# Rudder v4 implementation and restart record
+
+> **Superseded scope (2026-11-04).** The direction is locked in `PLAN.md` section 0
+> and current status is in `docs/v4-handoff.md`. This file is kept as evidence.
+
+
+Updated: 2026-11-03. Read with [the plan](../../PLAN.md),
+[research](research.md), [gates](experiments.md) and repository `AGENTS.md`.
+This file preserves the working agreement across context compaction. An entry
+here is not deployment proof; record exact checks and delivery identities below.
+
+## Current continuation, 2026-11-03
+
+The `9aea4c94` hardware run expired in the SDK stage before helper
+qualification; runtime and ordinary were not reached. Exact-machine process
+and I/O observations show storage setup reading about 20.9 GB through 14.6
+million read calls before the helper started. The four runtime executables
+are read through the mounted store first. Each small filesystem range reread
+and hashed a complete immutable 4 MiB blob, then discarded it with that
+request's session. This is a separate storage amplification problem from the
+previous helper namespace errors. No helper failure frame was observed.
+
+Operator cleanup completed at 2026-11-03T23:26:56Z with 40 calls, verified
+resource absence and an unchanged protected home. The original supervisor
+reaped its controller at 23:27:11Z after cleanup; the temporary token's
+revocation was acknowledged. The retained report is
+`/workspace/rudder-one-capture-execution-9aea4c94/lifecycle/control-run/operator-cleanup-v1/report.json`.
+This teardown does not establish normal retirement or stage qualification.
+
+The mounted composed store now retains at most 64 MiB and 32 entries of
+fully verified baked blob bytes across read sessions. Hits recheck the same
+captured file, named leaf, source identity and caller fence; writable-local
+reads retain precedence. Range reads copy only the requested bytes. All 46
+focused composed/baked checks passed in 10.74 seconds after a 51.98-second
+incremental compile, with one existing ignored case. Six new real-CAS tests
+include 64 fresh 64 KiB sessions verifying a single 4 MiB blob once, eviction,
+corruption, replacement and expired/cancelled callers. This local result does
+not establish a hardware speedup or SDK qualification; a new image run is next.
+
+The 23:02 fresh-volume attempt retained an original machine ID but Fly's CLI
+reported startup failure. Exact-machine logs show a 72.5-second cold image pull
+and successful startup at 23:03:42Z. The verifier held before cleanup because it
+treated that failed startup acknowledgement as an unknown create, despite the
+retained ID. Root reconciled the exact original ID, nonce, config, instance and
+volume, destroyed those two resources once each, and verified two absences and
+the unchanged protected home at 23:07:39Z. The failed original then exited143
+after an explicit pidfd stop; it supplies no passing volume receipt. Private
+evidence is `/workspace/rudder-volume-create-failure-9aea4c94/cleanup-report.json`.
+The verifier now reconciles a settled failed CLI response using its original
+machine ID, exact configuration and unchanged workload deadline. It records
+the failed CLI acknowledgement separately; only an observed started instance,
+the existing guest filesystem proof and verified cleanup can pass. Unknown IDs
+or changed bindings still refuse. Bounded stderr and exact-machine failure logs
+are retained without stranding cleanup. Twenty-five pure checks pass, including
+a 78-second cold start and an expired workload that cleans up without probing.
+
+A subsequent fresh-volume request was explicitly rejected by Fly for insufficient
+CPU capacity in `sjc`. No ID was returned and two inventories found neither
+original nonce nor volume name; the protected home stayed unchanged. Root
+settled the held original after that rejection at 23:14Z. This failure supplies
+no volume receipt. The verifier now handles that exact settled rejection with
+two absence checks and a failed terminal result, while unknown errors retain
+the hold. An explicit region option allows a new isolated attempt in `iad`;
+29 pure verifier checks pass. The traditional remote builder also completed its original
+push, but the wrapper rejected its different log format. The parser now binds
+that format's exact tag digest, completed push and full image name; its self-test
+and the retained traditional and Depot logs pass. This changes future parsing,
+without promoting the failed wrapper or rebuilding an image.
+
+Alpha.34 Cloud is deployed from `17939790dd111acb0b7f4401ace41920f500a82b`.
+Fly release177 `JLxbo4k22JZxnTvbbXQo22yG7`, control machine
+`8911d61a434978`, instance `01M6FGP37GQFGBFXWD8DFAAG5T`, runs control image
+`sha256:9d5b20bf3b6851ab9606be4cc2e876c1752a6183c4bb144987bdb7901dbddf80`.
+Its worker setting is the separately built image
+`sha256:c3422372125197468cf58b3f7ec59764648d1d35c6edf1c8d5cdca90ba7d891d`.
+[Delivery evidence](verification-alpha34-working.json) records the actual target.
+Registry manifest/config digests and source labels match. At
+2026-11-03T01:35:41Z, the canonical app and both canonical/provider health
+endpoints returned HTTP200; Fly reported its machine health check passing.
+The active home was not restarted. Idle adoption remains separate from deployment.
+The first alpha.34 release-check built all three native platforms, then failed
+one JS fixture that calls Linux `/proc/uptime` on macOS (1,044 passed). The
+fixture now explicitly requires Linux; all 14 lifecycle tests pass on Linux.
+The corrected release candidate `368c72f2e53962fe730f33de5a8b4d4126be7331`
+passed all three native platform builds and the qualification suite in
+[CI run 41566733699](https://github.com/exla-ai/rudder/actions/runs/41566733699).
+Its main commit and annotated `v4.0.0-alpha.34` tag were pushed atomically
+without force at 2026-11-03T22:11:11Z. The
+[release workflow](https://github.com/exla-ai/rudder/actions/runs/41728551815)
+reuses the exact revision's qualified artifacts instead of compiling again.
+The release workflow passed at 2026-11-03T22:14:12Z. Both npm publishes acknowledged processing before availability; public registry availability and installation verification remain pending. The
+test-only follow-up does not change the deployed Cloud product.
+Its isolated stock worker smoke passed Root startup and
+UID1500 command checks, then verified destruction and two inventories of absence.
+
+The deployed fixes rebase retained SDK mount descriptors after entering the
+helper mount namespace and fence idle worker token rotation before asynchronous
+provider reads. They reuse the pending token instead of minting a second token
+while its first update is uncertain. They do not revoke an already-open socket.
+
+New source adds bounded typed SDK operation/error text to the original Root
+failure frame and collects fixed failure frames from the exact SDK machine.
+The driver fails as soon as it receives that frame. Collection retains its
+original child and clock, accepts only the disposable machine from original
+custody, bounds output, and never exports arbitrary raw provider logs or
+credential-bearing error chains. Forty focused Rust diagnostic checks passed;
+11 Node diagnostic cases passed, including the retained actual Fly line format.
+Actual attempt6/7 custody objects satisfy the disposable-target predicate.
+
+The explicit Linux helper harness passed two cases in 1.33 seconds as UID1500.
+It runs the real helper namespace/mount path, checks zero capabilities and
+no-new-privileges, readonly source and durable output, and waits for the actual
+child. A stand-in Root parent and static payload replace the compiler, so this
+is local helper verification, not SDK admission. Native fixture exporters now
+compile each harness once per test process on the canonical Cargo feature/profile
+graph and run exports directly; cold compilation has its own bounded allowance.
+The real broker and MCP fixture exports passed all eight Node tests in 10.19
+seconds. Heavy image builds use Fly with its compiler cache. Only one local
+Cargo runs.
+
+The next candidate uses one committed archive for the managed+C1 image and
+controller JavaScript. Its receipt binds the revision, generated module map,
+actual build wait and immutable image. Separate per-layer review receipts and
+repeated source-qualification compilation are removed. Physical filesystem,
+boot, completion and resource-cleanup checks remain required.
+
+Access-only Codex OAuth snapshots and explicit positive Open/Start/Stop ingress
+are implemented in source. OAuth snapshots contain no refresh token and use the
+pinned Codex experimental protocol. The optional private snapshot is transferred
+over stdin to the same newly provisioned ordinary home before Open/Start. The
+transfer requires its original current route, committed socket and machine
+instance, and an existing private UID1500 home. An exclusive access-only store
+is separate from the normal OAuth store; invalid or mismatched imports refuse
+without refresh or fallback. Nine store/CLI checks and nine retained-transfer
+cases pass; entry/positive/diagnostic integration passed 26 cases. Stop targets the retained original Start
+receipt/fence and App control. Enrollment, checkpoint and physical join are
+separate observations; missing custody remains unknown. Genuine SDK admission,
+runtime admission, ordinary OAuth task execution and normal retirement remain
+unqualified. The earlier continuation below preserves historical evidence.
+
+The access-snapshot validators now accept the provider's observed multiday token
+lifetime with a 14-day input sanity bound; they still require matching JWT
+expiry, account and selected profile. Six Native snapshot checks and 17 Cloud
+import/entry checks passed. No refresh token is transferred and the normal
+profile store is unchanged. Fourteen retained-import checks also cover the
+startup race where the transport commits before Native creates the home. The
+same remote process waits only for absence, validates the private home and then
+invokes the actual CLI once; the original deadline covers both steps. Linux
+tests use UID/GID1500 and the actual emitted CLI/store. The controller image installs the pinned Fly ELF at
+the path used by diagnostics and the private import process. Generated JavaScript
+and the source archive are retained without repeating source qualification or
+per-layer review receipts. The shared capture includes the controller readiness fix. The first remote build
+completed native compilation in 6m20s, then correctly refused unreadable generated
+CLI files: the private capture umask had reached the Docker payload. The builder
+now normalizes generated code to readable file/directory modes while keeping its
+capture parent and logs private. The local regression and all 11 volume-input
+checks pass; the unchanged native Docker layer can be reused.
+
+Capture `f48e076e59466c0a44c79d017faf6deb46e4c603` also normalizes
+archived source permissions and checks the actual worker payload locally before
+any remote build. Python 3.11 preserved Git archive group-write modes, which the
+image correctly refused. A probe using the previous real archive and generated
+CLI passed in 0.75 seconds after normalization; an injected mutable script was
+refused locally. The managed and managed+C1 image layout checks now pass on Fly.
+The original worker build exited zero and published
+`sha256:af78998375eb9b8d37a0817cdf0fb3be062c533afeade6d737d8368e0896a35b`.
+Actual registry manifest/config bytes and the revision label match. A first
+registry read refused without a useful error; subsequent immutable reads passed.
+The isolated SDK attempt failed before runtime admission. The exact machine
+reported `root_storage/serve_runtime: SdkProcessOriginal` at 02:29:58Z, about
+31 seconds after bootstrap. The automatic Fly log child exited one without a
+failure frame; a separate retained exact-machine read exited zero and recovered
+that frame. The controller driver has no HOME, and the pinned Fly ELF reproduces
+the same exit/output sizes locally when HOME is absent. Native source also
+applies the ordinary 30-second finalization budget to complete compiler
+qualification. The log child now uses its existing private input directory as
+HOME and cwd, checks the held directory identity, and retains bounded exit
+diagnostics. Compiler qualification has an explicit
+`compiler_sdk_qualification_v1` domain with one original 240-second deadline;
+ordinary finalization retains its three-field constraint and 30-second limit.
+The deadline is carried unchanged through the fixed helper, ready evidence,
+Native export and signed acknowledgment. Qualification checks actual completed
+registration and current physical owners instead of reusing its expired startup
+clock. The Cloud build, 48 focused protocol/relay/diagnostic tests and TypeScript
+checking pass. Native verification passed seven Engine budget tests, 112 runtime
+tests (12 ignored), 16 role/signing tests and three explicitly selected Linux
+cases: two actual UID1500 helper carriers and one actual sealed-reader case.
+The helper carriers use stand-in payloads, so these results do not authenticate
+a genuine compiler capsule or establish SDK qualification. Local review also found that
+the ready evidence's 4 KiB limit cannot contain either SDK catalog. Its shared
+sealed writer/reader bound is now 16 KiB, with finite A2/C1 payload and oversize
+regressions. No admission is claimed. [Attempt evidence](verification-managed-single-capture-working.json)
+records actual builds, the fresh volume pass and the failed stage. Cleanup
+completed with 40 calls, the protected home unchanged, original controller
+reaped and temporary token revocation acknowledged.
+The same-capture controller was pushed as
+`sha256:3d5419bb228c8ba60658bb7061a0c2023f25fcdd7f67645cc704219ac4cf5f6b`.
+Its original remote child exited zero, but the wrapper failed afterward without
+retaining a useful error. A separate read verified actual registry manifest and
+config bytes, the exact revision label and unchanged context; no rebuild was run.
+
+The next captured source, `2117ed70a63732e02a16c2565972896da86483b0`,
+corrects a stale qualification script SHA in the managed asset policy. All six
+sidecar source pins are now checked locally before dependency installation or
+remote builds. The previous `5ca1a8b0` worker build failed inside the generic
+asset chain; its retained output cannot identify the first failing command.
+The old captured source-policy mismatch reproduces locally, and real Codex/ws
+archive downloads passed full integrity and extraction checks. Asset failures
+now retain fixed command, artifact, phase, validation check and HTTP/OS codes.
+Seventeen Python checks pass, two Root-only checks are skipped, and the builder's
+local self-check passes. The corrected remote worker/controller builds exited
+zero. The previous controller did publish; a later immutable read verified
+its original digest without rebuilding it. No hardware admission follows from
+that build proof.
+
+Runtime qualification now uses the same retained exact-machine diagnostic
+reader as SDK qualification; all 165 finite Native bootstrap check spellings
+are accepted. Both stage timers settle only when the registry returns its
+actual original activation permit. Queued or sent ACKs do not settle them;
+live expiry, the same original clock and later genuine owner failures remain
+checked. This prevents a completed early stage expiring during ordinary task
+verification. Cloud compilation and 44 focused Node checks pass, including
+actual driver timer callbacks across both stages. Hardware qualification is
+still pending.
+
+The final common capture is `9aea4c947c87d8e4d15d85cff0e95b4920a150e4`,
+which includes the published alpha.34 ancestry. Its worker build exited zero
+and the exporter reported digest
+`sha256:8bbdb64ed9734cd3bd40fe916c49b52568437f43821ab892c84091bf6ee391e8`.
+Native build steps reused the existing result. The controller's actual registry
+bytes verify digest
+`sha256:66216a50a0f8bf16a448a69b267606137e5381a4023e4db07861bb27f741a030`
+and the same revision. At 22:45Z, the worker manifest still returned HTTP404.
+Direct checks found its config and 54 unique layer blobs, with two layer blobs
+also returning HTTP404. The earlier `2117ed70` worker has the same publication
+failure. An exporter success is therefore insufficient registry delivery proof.
+Both original builds and their logs are retained; no new qualification machine,
+temporary token or managed lifecycle has been started. Publication recovery is
+under investigation before the next hardware run.
+The builder now accepts an explicit service choice, recorded in its original
+intent and receipt and checked against the exact command. The traditional Fly
+service avoids Depot's publication path; its cache is separate. Thirteen pure
+volume receipt checks and the builder self-check pass. This enables a separate
+fallback build, with the earlier publication failures retained.
+
+At 22:54:12Z the original `9aea4c94` worker's immutable manifest and config
+became available and verified, about 15 minutes after its build completed.
+The next filesystem check refused before any resource creation: the protected
+home had legitimately adopted the deployed alpha.34 worker at 03:01:46Z.
+Both retained reads show instance `01M6FNM2N7HR0SYWYCSYK9MQJM` and the deployed
+`c3422372...` image. Its old hard-coded instance was therefore stale. No
+qualification VM, volume or token was created. The failed original was reaped;
+its failed report is retained.
+
+The operator verifier now accepts an explicit protected instance/image while
+keeping the app/machine and all pre/post guards fixed. It uses archive-verified
+builder/probe bytes from the unchanged image capture and records the operator
+source separately. Lifecycle derivation changes only the expected identity
+literals before hashing its generated sources; its boot/completion predicates
+are unchanged. Nineteen pure volume and five derive checks pass. A settled
+preflight failure before any create now exits one while preserving its failed
+report; uncertain effects still retain their original owners. These operator
+changes do not require rebuilding the worker or controller.
+
+The requested project file/document viewer is queued in PLAN.md section 18.5.
+It covers project files and task outputs, rendered documents and website files,
+and private access to Cloud files. It is not implemented yet.
+
+## Current state, 2026-11-01
+
+The shipped Cloud release is alpha.33, Fly release176, product revision
+`50771f8964f4ad2e04ee9533be0d9db56b64da7b`. Both npm `next` packages
+passed fresh installation, executable, revision and cross-platform manifest
+checks. Their package metadata is identical apart from the package name. [Release evidence](verification-alpha33.json)
+records those distinct facts and the unchanged original live home. The full v4
+rewrite remains incomplete. Entries below describe earlier checkpoints and
+unreleased work; their older version numbers are historical.
+
+Latest continuation: alpha.32 remains unpublished. All three native builds,
+JavaScript qualification and its actual stock Fly worker smoke passed. macOS
+Rust qualification run 41323038312 then passed 102 cases and failed one fixture
+that assumed a 10ms releaser thread would close SQLite inside the original
+100ms startup window. The five related fixture scheduling assumptions are now
+separated from post-release API semantics. Actual contention, original callback
+deadline decisions, marker/epoch refusal, restored ordinary policy and zero
+mutation remain checked. Run 271 passed all eight cases with normal parallel
+execution. Production startup policy is unchanged. Alpha.33 subsequently passed
+all three native platforms and complete final-source release qualification;
+no alpha.29 through alpha.32 tag was pushed or retagged.
+
+Alpha.33 connects the genuine optional Root runtime
+client to the original task barrier before the independent seed acknowledgment.
+It retains the same helper, clock and cancellation through off-App enrollment,
+App adoption and recovery. The inherited service FD snapshot occurs before any
+constructor allocations. The actual post-exec transport uses SO_PEERPIDFD and
+a new protected connection. Default absence preserves existing paths; selected
+baked genesis still refuses the old host-imported environment until genuine
+backed preparation exists. Normal runtime retirement remains unavailable.
+
+Current local checks passed: engine/native libraries run 262, 503 cases; full
+native binary run 266, 1,318 cases; JavaScript run 268, 928 with ten skipped;
+fresh-binary TUI run 272, all 59; full workspace compile 273. Full Rust run 274
+stopped on the managed handoff fixture opening `/proc/self/environ` after the
+receiver's required non-dumpable protection. The fixture was corrected to
+retain actual pre-handoff proc descriptors and assert both descriptor CLOEXEC
+and unchanged protection. Focused run 275 passed all five handoff cases, then
+complete run 276 passed 2,365 tests with zero failures and 65 ignored across 65
+suites at 16:43:15Z. The original failed full run remains retained. These results
+qualify their stated local scopes. Final-source CI run41327838616 then passed
+the Linux, Apple Silicon and Intel macOS builds and full release qualification.
+Tag run41331075052 authenticated and reused those exact artifacts for npm.
+The actual stock worker smoke and deployed control checks are recorded in the
+alpha.33 evidence; configured runtime-floor qualification remains separate.
+
+The uncommitted batch now connects retained baked preparation and a shared
+Environment boundary through initial source, selected task resources, checkpoint
+retention and accepted successors. Its nine storage cases pass. The original full
+Rudder-history composition failed because 597MB of reconstructed Git history
+exceeds the old 384MiB raw importer. The explicit PackedHistoryV2 path now passes
+the actual full-history plus 1.975GB runtime component: 12,260 Git objects become
+51,047,059 encoded bytes, with 724,831,675 bytes of bounded verification work.
+Source/seed/runnable preparation takes 11.866s inside its original 30 seconds;
+typed capture, environment preparation and dependency derivation are separately
+bounded phases, not one combined startup measurement. Eleven selected format,
+process, Git and jj tests pass. The explicitly selected repetitive-history
+debug stress test expires its original deadline; that failure and the original
+raw-history refusal remain in [composition evidence](verification-environment-dependency-working.json).
+The optimized full-repository result does not qualify 50 forks, cold storage,
+actual agent launch or normal filesystem retirement.
+
+Automatic mailbox notices now use the existing durable effect ledger and wake
+only qualified idle sessions. Thirteen Journal tests and six Native checks pass;
+notices do not acknowledge mail. Native library regressions pass 245 cases with
+21 ignored. The new SDK Cloud code compiles, its 23 protocol checks pass, and
+the [actual PostgreSQL SDK-role qualification](verification-sdk-role-pg-working.json)
+passes again with the SDK semantic v2 schema at 19:36:41Z, with restricted roles,
+TLS, commit loss, socket closure, expiry and exact
+owned cleanup. Root/compiler evidence in that database run is explicitly fixture
+data. The actual C1 [artifact](verification-compiler-c1-working.json) and
+[CAS producer](verification-compiler-c1-cas-working.json) built successfully;
+the current A6 bake produced 6,430 objects / 1,174,586,558 bytes in 24.299s.
+After adding only the signed-package public CA bundle, the actual disposable
+Linux VM passed C/C++, Rust executable, offline Cargo build script, SQLite,
+TypeScript and Buck2 C++ action/output checks. Exact owned VM cleanup and the
+unchanged live home were verified at 19:30:42Z. [Functional evidence](verification-compiler-c1-functional-working.json)
+is separate from actual Root SDK admission and normal daemon retirement.
+
+A source review found two concrete SDK cache-input gaps: compilers can read
+unkeyed job metadata and kernel `/proc` values. Local SDK warm reuse is now
+disabled. Per-run artifacts/evidence remain retained; their receipts include the
+execution nonce and explicitly prohibit reusable-cache admission. Enforced
+hermetic reads/effects are required before reuse can return. The review and
+new cache guard still require full integration/physical regression qualification.
+
+Successful per-job resource disposal is locally connected through the existing
+canonical worker pool. Run 356 compiles all Native targets; runs 357/358 pass
+eleven new Child, socket, descriptor, actual thread/TLS join, real CAS and serial
+component cases. Full genuine SDK disposal/capacity reuse is unverified. Routine
+terminal helper failures still need a separate authenticated failed-job outcome
+and disposal path. That v2 is now integrated without inventing artifact success;
+run 364 passes 25 SDK component cases, including bounded real diagnostics and
+terminal-failure retention. Runs 365–367 pass ten current-source policy, actual
+Engine/Journal/Git/jj owner and two-worker/TLS cleanup cases. Actual ordinary
+SourceOnly trigger wiring and positive SDK execution remain unverified.
+
+The first payload-read isolation implementation required Landlock. Actual
+`6.12.114-fly` kernel configuration has `CONFIG_SECURITY_LANDLOCK` disabled;
+the real syscall refuses with ENOSYS. Two Linux filesystem tests therefore fail
+and two descriptor/policy tests pass. This is an unsupported mechanism on the
+current Fly kernel, not physical SDK readiness. Cache reuse stays disabled while
+an explicit proc-less view and compiler-only seccomp replace it. The five actual
+Fly kernel component tests now pass, including fresh-PID proc-FD isolation,
+recursive mounts, read-only inputs, writable private outputs, descriptor closure,
+ordinary threads/forks and x32 refusal. Two Rust policy checks pass after adding
+the missing PermissionsExt trait import. Actual SDK Python/Rust/TypeScript
+execution still requires the newly built configured worker. No unconfined retry
+or live-home restart occurs.
+
+The complete Native binary run 353 passed 1,351 cases with 21 ignored before
+the subsequent catalogue/isolation changes. C1 catalogue Engine run 354 passes
+nine cases, Cloud compiles, and fourteen catalogue/protocol/semantic Node cases
+pass. These do not qualify the later configured worker or its compiler role.
+
+Canonical gate production is locally connected; run 348 passed sixteen selected
+Native canonical/legacy cases, including twelve new policy/repository/worker
+checks. The new Journal and retained-input tests remain a separate check.
+Complete SDK execution qualification, enforced cache inputs, actual multi-agent execution,
+restart recovery and normal runtime drain remain unfinished. These working checks are separate from alpha.33's
+deployed revision and default-absent bootstrap smoke.
+
+The new compiler CAS producer passed all seven real Root0 Bookworm tests and
+baked the actual pinned 852MB A2 compiler artifact in 14.466s under its unchanged
+300s budget. The complete CAS verification and two-pin acknowledgment produced
+1,320 objects and 853,092,522 encoded bytes. An initial Fly exporter 403 failed
+after successful bake; an exact immutable build-graph retry pushed digest
+`sha256:fdb88bde30c78585e9c932c434bf8ed5c82f47ceac41c0ff23fbe9962147860f`.
+This proves the build-only compiler data producer, not mounted compiler
+execution, REAPI hits or production activation.
+
+The new same-source runtime image contains its four freshly built executables
+before baking its complete immutable graph. Digest
+`sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336`
+is a working-source component image, not stock alpha.32. The first physical
+default-absent verifier stopped before launcher execution because it read the
+checksummed retention envelope at the wrong level. Its exact VM was destroyed
+and two inventories confirmed absence. The corrected verifier checks actual
+`state`/`checksum`, raw inventory/manifest/pin bindings and installed executable
+records. A provider inventory timeout in the next attempt also left no qualified
+guest result; that owned VM was destroyed and absence checked. The subsequent
+run passed the actual installed default-absent bootstrap, all four fresh ELF
+bindings and original process custody, with exact VM destruction and two absence
+checks in 15 provider calls. [Evidence](verification-managed-runtime-bootstrap-working.json)
+keeps the failed attempts separate. No configured-ready result is inferred from
+these data checks.
+
+The independent [communication and product-flow audit](communication-status.md)
+keeps the rest of v4 explicit: automatic mailbox delivery and interruption
+settlement, unified durable task routing/command migration, and trusted previews
+with sequenced terminal recovery and real-device qualification remain open.
+
+Current working source is unreleased. The full JavaScript run passed 928 with
+zero failures and 10 skipped at 12:20:28Z. The complete Rust checkpoint 225 passed
+2,257 tests and TUI 226 passed 59; these precede the later image backing components.
+After that integration, engine/VFS 241 passed 385 with zero failures and 13 ignored,
+native source-owner 242 passed 9, and VCS/projection 243 passed 57 with five ignored.
+The full native binary 220 passed 1,306 with zero failures and 21 ignored before
+these last changes. The complete release matrix must qualify the final versioned
+source before publication. Full repository run 245 passed cold preparation,
+accepted edits, unchanged warm reuse and two private logical CoW views. Cold was
+10.73s, acceptance 3.31s and warm reuse 46.8ms with zero seed file payload reads.
+The two logical forks took 14.6/15.9ms. This is not Cloud agent launch latency.
+
+Alpha.29 candidate `05eef52` failed its release check before publication: both
+Mac builds found three comparisons between captured u32 modes and Darwin's
+u16 file-type constants. Linux native compilation passed. The lossless u32
+normalization passed 27 focused seed tests with three large fixtures ignored;
+the next complete release candidate is alpha.30. Alpha.29's tag stays local and
+unchanged. Origin/main, npm and the production deployment still contain alpha.28.
+
+Alpha.30 passed all three native builds and its actual stock-worker Fly smoke
+check, including original process/pipe settlement and exact VM destruction plus
+absence. Release qualification then found one portable test calling the
+Linux-only managed registry factory on macOS. The configuration assertions now
+run on every platform; Linux constructs/closes the lazy factory and other
+platforms assert its expected refusal. All five cases pass locally in the real
+Linux branch and a separate simulated Darwin negative branch. Real macOS and
+the full final-source matrix must still pass. Alpha.30 stays unpublished;
+the next candidate is alpha.31.
+
+Alpha.31 also stays unpublished. Its three native builds and JavaScript checks
+passed, but macOS Rust qualification run41320051819 failed with 20 retained
+preparation failures and one startup-budget test failure. The index canonicalized
+its root but retained a lock-directory path through macOS's temporary-directory
+ancestor alias. Both child paths now derive from the same canonical root. The
+existing redirect and actual SQLite replacement checks remain required. Focused
+Linux run 252 passed 26 cases with one subprocess fixture ignored; new cases cover
+successful preparation through an ancestor alias and refusal of a replaced lock
+directory. Run 254 also passed all 14 build-index regressions.
+The startup-budget callback keeps its original absolute deadline. The failing
+test inferred renewal from a scheduler-sensitive elapsed-time assertion. Its
+replacement observes the actual installed callback on two real contended SQL
+statements and requires the later statement to use the same expired deadline,
+request zero sleep and leave no mutation. Callback observations are test-only;
+the original 100ms policy and maximum 1ms sleep are unchanged. Engine library
+run 255 passed all 302 cases with zero failures and 12 ignored, including the
+real two-statement callback observations. macOS qualification remains pending.
+The next candidate is alpha.32.
+No candidate 29, 30 or 31 has been published, deployed or retagged.
+
+The final alpha.31 Linux workspace run 249 passed 2,331 tests with zero failures
+and 61 ignored at 15:35:28Z. Its preceding run 248 stopped at the original disk
+floor and is not a passing result. Fresh-binary TUI run 250 passed 58 and failed
+one transient `working` screen observation after both workers had already merged.
+The unchanged isolated run 251 passed. Test-only run 253 then passed the revised
+journey that binds both actual node/run/workspace identities, exact worker output
+bytes, completion and both durable merges. Approval keystrokes and all existing
+deadlines remain unchanged. These results do not waive macOS qualification.
+
+The actual-scale readonly image VFS component passed on an owned Fly VM at
+15:20:51Z. Metadata admission took 5,979ms for 22,175 baked objects representing
+1,974,041,724 encoded bytes and an 18,990-file manifest. Five complete verified
+file reads took 237ms, including the pinned 20.7MB Git FileNode and genuine hardlink
+aliases; the local CAS remained empty. The first attempt selected Debian's Git
+instead of the recipe's pinned Git and remains failed evidence. The corrected
+attempt retained actual original-process exit/pipe/pidfd proof and verified exact
+VM cleanup. This qualifies the readonly DATA component; it does not prove a
+runtime mount, compiler execution, agent launch or production enablement.
+
+The real S3/OIDC cache probe and all three physical Root FUSE metadata component
+tests pass, with original child/IO settlement and exact local/VM cleanup. The new
+complete runtime image built from frozen source 4d0 and printed its actual four
+ELF hashes and full-image pins. Installed full-tree/kernel qualification remains
+pending; neither component result enables the production managed runtime.
+
+The large 4,096-object history fixture failed its read-reuse assertion after both
+original 30s seed phases succeeded. Investigation confirmed that the production
+projection and mandatory verifier rewrite identical loose Git blobs, changing
+their inode/stamps and correctly invalidating the source cache. A bounded verified
+Git-object reuse producer fix and stronger fixture witnesses are integrated.
+All five new actual Git/CAS checks and 50 library/projection/provider regressions
+pass. The large rerun passed at 12:12:47Z with all 4,097 actual FileId/inode/full-stamp
+witnesses, >4,096 skipped file reads, retained old pins and isolated private writes.
+Its 507.806s whole debug fixture includes setup and is not launch latency. [Evidence](verification-managed-git-object-reuse-working.json)
+keeps these post4d0 sources distinct from the already-built qualification image.
+Do not weaken the assertion or claim production warm acceptance from a fixture
+that merely supplies a prior projection record.
+
+The former JavaScript 189 MCP startup failure is retained below. Its stdin EPIPE
+hid the original stderr; diagnostics now retain actual process/pipe completion.
+A separate bounded 100ms SQLite WAL startup fix passed eight real lock/expiry
+cases and twelve concurrent startup pairs. Both later full JS runs passed.
+
+## Authorized scope and accepted direction
+
+The user authorized implementing the plan and shipping to main, with tighter
+Tailscale integration and smoother Cloud terminal text/buffering. The full
+rewrite is Rudder v4 and spans multiple engineering milestones. Preserve the
+main checkout and unrelated changes; do not restart live production agents to
+force image adoption. Follow the version/tag/CI npm workflow and the separate
+Fly worker/control-plane workflow.
+
+Accepted architecture:
+
+- Rudder owns immutable source/environment roots, persistent workspace metadata,
+  private writes, checkpoints and distributed CAS/hydration. Qualify actual
+  materializers before selecting or forking a VFS implementation.
+- Keep jj history/conflicts/Git exchange behind a pinned adapter; a narrow fork
+  is acceptable if required. CoW alone does not require a new VCS.
+- Prefer a supported Buck2 Cloud profile, with REAPI interoperability for Bazel.
+  Stock Buck2 does not automatically share one graph across divergent branches.
+- One persistent Rust machine engine owns execution; SQLite is local journal,
+  transactional project authority is the fleet truth. Fenced ownership and
+  version-checked integration protect source and accepted knowledge.
+- Direct durable agent mailboxes, first-class Codex app-server and Claude
+  Channels adapters, authenticated provenance, active steer/interrupt/resume and
+  explicit acknowledgments. Messages and accepted decisions are distinct.
+- Native Mac remains supported. Filesystem/source snapshots, build actions,
+  conversation forks and process-memory snapshots are distinct contracts.
+- Ordinary input chooses discussion, direct work or decomposition automatically.
+  Decisions is an optional bounded classifier, not a planner or authority.
+  Sunset standalone `/gam` and `/nudge`; retain `/plan` only as compatibility.
+- Private previews reuse Tailscale identity and live project/process attribution.
+  The existing relay remains available; direct networking does not replace
+  authorization. Responsive terminal transport has bounded queues/recovery.
+
+## Execution efficiency, 2026-10-31
+
+Read the independent agent-efficiency README and session report in the research
+worktree (research/agent-efficiency, local commit e684468). Apply short edit/check
+loops, bounded output, scoped fresh worker briefs and one result handoff. Avoid
+repeated unchanged-input checks, polling-only turns and speculative expansion.
+Finish the current integration batch before adding another lane. The research
+worktree stays on its own branch and is not edited by this implementation owner.
+
+## Current local batch after alpha.15
+
+The combined pre-join Rust check passed 1,276 tests with zero failures. Context2
+passed 12 focused tests after using a joined refresh owner only during fixture
+startup. StopV4 carries the original parent deadline through queueing, framed I/O
+and finalization phases. The verifier uses one status decision; its 16 regression
+cases passed.
+
+## Owner change and launch policy, alpha.17
+
+At 07:19 UTC on 2026-10-31 the user moved this job from the Codex owner to a
+Claude owner. The Codex owner stopped at a clean checkout with `39ca500` and
+`3179f71` unpushed and the local `v4.0.0-alpha.16` tag unpushed. Its unapplied
+binding4 readiness patch and interrupted managed-source preparation stay outside
+the checkout; Runtime5 remains refused. Alpha.17 ships those two commits plus
+the single Codex launch policy (PLAN.md section 20): effort `high` when unset,
+compaction at 150K tokens and tool output at 6K tokens. These shipped before
+E14 and are unproven; E14 decides whether each value stays.
+
+The next merged changes add an opaque provisional source receipt, actual helper
+exit custody and a fresh off-App issuer query. They also add a local build DATA
+helper/client using the retained RunnableRoot, snapshot profile, preparation
+index and existing Buck2 adapter. Their 62 focused Rust checks and 22 TS/client regressions passed. The actual-source qualification passed for `src/agent-attention.ts`: cold execution1,
+fresh-scratch REAPI restore1 with no execution, identical outputs and independent
+compiler/behavior checks. Debug walls75.502s/71.689s expose setup/verification
+costs; this is neither a full-app nor production-speed result. Runtime5 is still refused; do not
+count these interfaces as default migration or complete v4 delivery.
+
+## Release gate and wait rule, alpha.18
+
+Alpha.12 through alpha.17 built their native binaries but failed the macOS
+release tests, so npm `next` stayed at alpha.7. Alpha.17 failed only because
+macOS adds `__CF_USER_TEXT_ENCODING` to every process environment; the build
+client test now ignores that key on macOS. The Release workflow also runs on
+`release-check/**` branches with publication skipped, and a version is tagged
+only after that run passes. Alpha.18 adds one wait-and-read rule to every agent
+prompt (PLAN.md section 20) and fixes Codex session pinning: a `session_meta`
+line is about 22 KB because it carries the base instructions, and the old 8 KB
+head read could not parse it, so current Codex runs did not record a session id.
+
+## Resumed ownership after alpha.18
+
+Opus handed the checkout and unfinished runtime patches back to Sol. Alpha.18
+commit `243728b` contains the launch policy, wait/read prompt rule, full Codex
+session pinning and the release-check branch gate. Release run41189571495 passed;
+both npm next tags now resolve to alpha.18. Both registry packages also passed
+isolated installation, CLI/native/jj checks and archive/manifest verification at
+2026-10-31T10:21Z. Cloud release168 passed fresh app,
+health and authentication smoke checks on 2026-10-31T10:12Z. The live home was
+not restarted. See [delivery](delivery-alpha18.json) for exact identities.
+
+## Owned source execution, alpha.19
+
+This milestone adds Binding4 readiness and helper custody, source preparation,
+context2 writer/runtime APIs, bounded startup and grant expiry, and explicit
+owned Runtime5 dispatch. The source-preparation checks
+cover endpoint authority layout, broker projection/validation order and pending
+activation. One original startup budget bounds preparation and activation;
+the source grant covers execution plus finalization. The combined affected
+suite passed 69 tests with zero failures, including an actual parent/helper
+source exchange. The normal Native helper also builds successfully.
+
+Binding4 readiness passed on a fresh Fly worker with actual private USER/NET
+descriptors, a live backend pidfd, all five capability sets zero, no-new-privs,
+and old-family rejection. Machine destruction and independent absence checks
+passed. See the [kernel evidence](../../examples/execution/evidence/2026-10-31-readiness4/README.md).
+Generic helpers still refuse Runtime5; the explicit owned entry requires the
+current managed controller and separated source services. Actual HTTPS/FUSE,
+mapped-write checkpoint readback, StopV4, successful helper exit, fresh issuer
+join and source callback settlement passed on Fly at 12:21:58.470Z, including
+a four-second idle source-freshness window. The actual
+test machine and temporary credential were removed with independent absence
+checks. Twenty inventories retained the same live home instance and image.
+See the [source5 evidence](../../examples/execution/evidence/2026-10-31-source5/README.md).
+
+Bounded local probes corrected the harness CLI entrypoint (`dist/index.js`),
+its executable file mode, and a legacy flat-directory fixture. The passing
+graph has eight objects with current paged directories. The stage diagnostics
+retain trusted startup names while removing private error causes. Captured
+delta/evidence retention was checked locally before VM destruction; remote
+publication and stronger consistency are not established by this case. The
+default App path, connected models and accepted jj history remain separate gates.
+
+Final review found that source preparation after helper activation could outlast
+the original startup allowance. Spec5 now carries that original suspend-aware
+deadline and wall-clock bound through helper preparation, namespace entry,
+actual exec and parent readiness. The child exec guard uses an immutable clock
+snapshot and clock syscalls. No handoff renews the allowance or extends a grant.
+The first immediate-stop proof is preserved as historical evidence; the current
+case runs the carried constraint and idle window.
+
+Full Rust verification passed 1,752 tests with zero failures and 28 explicitly
+ignored cases. Earlier attempts stopped at the disk guard; unused incremental
+state and debug symbols in inactive generated executables were reclaimed while
+retaining runtime bytes and dependency caches. The JavaScript suite encountered
+the known cold broker-fixture compile timeout. After one serialized prebuild,
+the full JavaScript suite passed 762 tests with zero failures and nine skips.
+The real Native terminal suite passed 59 tests with zero failures. TypeScript
+checking and the Cloud build also passed. The pre-tag release-check matrix
+passed. Cloud release169 runs the tagged alpha.19 control image and pins the
+verified stock alpha.19 worker. Its seven UID1500 smoke commands passed and
+the test VM was destroyed with two fresh absence checks. The canonical app,
+health, authentication boundary, runtime code hashes and database passed at
+13:35:07.936Z. The live home instance and alpha.7 image stayed unchanged.
+The tag release matrix, Mac, iOS and TUI workflows passed. Both npm next tags
+name alpha.19; stable stays 3.9.13. Both packages passed isolated fresh installs,
+CLI/native/jj smoke and all-platform artifact/revision checks at13:55:43.717Z.
+See the [delivery record](delivery-alpha19.json).
+
+## Owned checkpoint DATA durability, alpha.20
+
+The opt-in source5 fixture now prepares retained checkpoint DATA from its actual
+joined Record2, persists the original Q/template/intent, reconciles a lost local
+ACK and supplies the actual managed CAS to the normal transfer RPC. A lost
+successful Cloud publication response reconciled with GETs and zero uploads.
+After producer destruction, an independent readback continuation verified all
+14 objects, original evidence, mapped write and inherited file bytes through
+HTTPS at14:14:46.837Z. The first readback failed without a useful diagnostic;
+its original run remains unqualified and the successful continuation is recorded
+separately. Both synthetic credentials were removed with independent absence
+checks. The live home stayed unchanged. See the
+[evidence](../../examples/execution/evidence/2026-10-31-source5-publication/README.md).
+
+The affected Rust build and RPC tests passed. All 30 local transfer, checkpoint,
+Cloud validation and HTTP recovery tests passed with the current native helper.
+
+This is current working-tree qualification, not a product deployment or default
+launch change. The normal RPC uses the same session loop with a host-selected
+store; no request can choose a store. Connected model execution, App adoption,
+accepted jj history, fleet and migration remain open.
+
+The next run exercised production source records in one complete case at
+2026-10-31T14:29:47.174Z. It persisted assignment2, original recovery inputs and the opaque
+current-DATA receipt, then passed upload/reconciliation, producer destruction,
+independent HTTPS readback and credential cleanup. The original source DATA is
+portable to macOS recovery; only Linux can execute this profile. Managed-state
+verification passed76 tests with zero failures and four explicit ignores. The
+normal native helper also built successfully. The full local release gate passed:
+1,762 Rust tests, 762 JavaScript tests and 59 terminal tests, with zero failures;
+TypeScript and Cloud build also passed. The full pre-tag and tag matrices passed; Cloud and both npm packages are
+verified. See [verification](verification-alpha20.json).
+
+Cloud release170 runs tagged alpha.20 revision85168a9. The exact stock worker
+passed seven UID1500 smoke commands and was destroyed with independent absence
+checks. Canonical app, health/auth, database and code-hash checks passed at
+15:41:34.918Z; the active home instance and image stayed unchanged. The full tag
+matrix, Mac, iOS and TUI workflows passed. Both npm next tags name alpha.20;
+stable stays 3.9.13. Both packages passed isolated installs, CLI/native/jj smoke
+and all-platform artifact/revision checks at 2026-10-31T16:11:35.964957Z. See
+[delivery](delivery-alpha20.json).
+
+## Source ownership in App, alpha.21
+
+The explicit Linux source App adapter retains preparation, helper, Journal and
+checkpoint ownership through bounded worker and join supervision. Two reserved
+lifetime slots survive cancellation, lost notifications, stale rows, failed
+cleanup and thread-local teardown. Actual joins run off App; the App alone owns
+and reaps PTYs. Guest revocation and callback settlement use the original StopV4
+budget. A shutdown guard refuses to discard unresolved source ownership.
+
+Capability issuance now has a retained one-shot owner before the Journal write.
+A lost issuance acknowledgment can be inspected and retired with its original
+custody; a current database observation cannot reconstruct the original ACK.
+The source writer opens the actual held database without CREATE, migration or
+permission repair. Broker admission reaps actual completed request threads and
+bounds currently unjoined handlers instead of imposing a lifetime request cap.
+
+The original checkpointed Record2 is canonical, immutable and fsynced before
+source retirement. This recovery DATA remains separate from join authority,
+retention acknowledgments, publication and accepted history. Completed worker
+results retain the actual exit packet and checkpoint through supervisor
+adoption, including queue refusal and stale rows.
+
+Real App qualification exposed a race that unit coverage had missed: source
+activation saw a PENDING helper witness before descriptor transfer completed.
+App now observes the successful handoff receipt before requesting activation.
+Two real PTY regressions exercise delayed transfer and early child exit without
+extending the original startup constraint.
+
+The corrected disposable UID1500 source5 run passed actual App readiness,
+StopV4, durable checkpoint readback, helper exit, source retirement, off-App
+joins and Cloud transfer. Its first independent reader refused a stale harness
+module pin. The original run remains unqualified as a whole; a separately
+recorded continuation verified the same retained publication after two fresh
+producer-absence checks at 2026-10-31T16:54:26.760Z. All 14 objects, mapped write,
+inherited file and original Q matched. Both credentials were removed with
+independent checks, and the live home stayed unchanged. See the
+[App evidence](../../examples/execution/evidence/2026-10-31-source5-app/README.md).
+
+The local release gate passed 1,797 Rust tests, 762 JavaScript tests and all 59
+terminal tests, with zero failures. TypeScript and the Cloud build also passed.
+The JavaScript run first exposed a fixture socket-readiness race; its connector
+now waits for the actual WebSocket connection under the original five-second
+bound, and the focused and full reruns passed. See
+[verification](verification-alpha21.json).
+
+Alpha.21 shipped at `20942911a060e41bb97e480b5177ae147db7992e`. The exact-tag
+Release workflow passed on attempt2 after the first attempt exposed the legacy
+broker cancellation fixture's fixed-delay race. Both npm names are available on
+`next`; fresh private Linux installs, CLI/native/jj smoke checks and all three
+platform manifests passed at 2026-10-31T19:01:24.735285Z. Alias binaries and
+metadata match apart from the package name. Registry availability was delayed
+after CI publication; a later local verifier attempt refused low disk space.
+Both earlier outcomes remain in the private release receipts.
+
+Rudder Cloud is deployed on Fly.io at https://rudder.exla.ai/app, release171,
+deployment `1RNM1g3ppxjNQHy7eORBepwq`, verified 2026-10-31T18:18:27.326Z. App,
+health, unauthenticated state/Fabric boundaries, runtime hashes, database
+integrity and the disposable UID1500 worker smoke passed. The active alpha.7
+home retained its exact instance and image; it was not restarted. Image digests
+and the complete delivery checks are in the verification record.
+
+Normal managed-project startup still requires its explicit migration and
+ownership gates; the legacy startup guard remains.
+The qualified source profile is offline-command-v1 with Immediate startup.
+Connected Codex/Claude execution, authenticated transport attachment, accepted
+jj history, normal source selection, fleet and full shutdown/recovery routing
+remain open. The independent CONNECT prototype still needs a trusted inventory
+covering public/NAT addresses and an expiry-bound authorization interface before
+managed model activation.
+
+## Retained CONNECT authority, alpha.22 working batch
+
+CONNECT validation now retains the exact Engine query created before its callback,
+the actual authority guard, and the original grant, inventory and producer bounds.
+A late callback cannot renew those bounds. Engine admission remains bounded at
+200 ms and staleness at 500 ms; the native adapter preserves its stricter original
+250 ms producer cutoff. The accept worker independently closes sockets when
+validation expires, including when an authority callback stalls.
+
+The native adapter holds the original prepared capability issuance and actual
+Engine lease. Its dedicated finite grant binds project, owner/run epochs, attempt
+and network identity. A database observation cannot recreate the original issue
+acknowledgment. Normal clock-mutex contention serializes the short clock read;
+poison, clock regression and expired authority remain failures. The trusted
+inventory type deliberately has no production constructor yet.
+
+Proxy startup installs an owner in the caller's retained slot before spawning.
+Partial resolver/relay startup keeps every actual worker. Settlement observes
+actual joins under one deadline, retains the same observer on timeout and keeps
+panic uncertainty explicit while attempting cleanup of the other workers. The
+standalone qualifier now also attempts settlement after failed startup/readiness.
+Owned broker handlers join their nested API workers, including TLS teardown,
+before releasing capacity. Shared backend command preparation preserves selected
+credentials, Codex host-key startup and Claude's Immediate startup contract.
+
+Focused checks passed: 181 Engine tests, ten native authority tests, seven owned
+broker tests and five relay lifecycle regressions. The full Rust workspace gate
+then passed 1,828 tests with zero failures and 29 ignored across 60 suites. Its
+first attempt stopped at the disk floor; that outcome and the subsequent generated
+debug-symbol cleanup remain audited. The successful retry uses local dev/test
+debug-symbol level0 and one compiler queue. JavaScript passed 762 tests with nine
+skipped, and all 59 terminal tests passed against the sealed release native.
+
+The frozen-input release build and disposable CONNECT canary passed. The actual
+UID1500 worker qualified public certificate-verified TLS, guest/resolver reaping
+and proxy settlement at 2026-10-31T19:33:37.227Z. Its two independent cleanup
+inventories passed. The exact base-plus-patch reconstruction matches all 272
+compiler inputs after restoring the recorded file modes. See the
+[transport evidence](../../examples/execution/evidence/2026-10-31-alpha22-connected/README.md)
+and [verification](verification-alpha22.json). This remains standalone transport
+evidence: physical expiry/fencing, native App execution, managed connected models,
+normal source startup and accepted history remain unqualified.
+
+The first macOS qualification failed when a completed Status was followed by a
+Diff that found the canonical writer still busy. The server briefly duplicated
+the writer with an inheritable FD; a concurrent CLI fork could retain that lock
+after the intended child exited. The duplicate is now atomically CLOEXEC in the
+parent and cleared only in the designated child immediately before exec. Actual
+process regressions reproduce the old leak, exclude unrelated execs after the
+fix, and preserve the fence through synchronous descendants. The full VCS package
+checks passed, including the original failing RPC case. The initial CI failure
+remains recorded. Renewed complete qualification passed at `b78fd62`; main and
+`v4.0.0-alpha.22` were pushed at `d660d32bc308e65f03fc9f1ad63c69d4e7a79067`.
+Cloud alpha.22 is deployed on Fly.io, release172, deployment
+`nRqjnzJmmaOq8HzPvDL29bk26`, at https://rudder.exla.ai/app. Runtime hashes,
+health/auth boundaries, database integrity and the actual UID1500 stock-worker
+smoke passed at 2026-10-31T21:07:15.681Z. The live alpha.7 home retained its exact
+instance/image. Exact-tag Release CI passed on its first attempt; both package
+names are available on npm next. Fresh private Linux installs, CLI/native/jj
+smoke checks and all three platform manifests passed at
+2026-10-31T21:37:08.560356Z. Alias binaries and package metadata match apart from
+the name. Initial registry lookups lagged successful publication; no republish
+was attempted. The full v4 rewrite remains incomplete.
+
+## Cloud session ownership and exact-source reuse, alpha.23
+
+Home-control RPCs now retain their authenticated home and exact live socket
+session. A stale or foreign socket cannot acknowledge another session's request
+or update its state. Replacement and close fail only their own pending calls
+with an unknown-effect result. Serialization finishes before the final original
+deadline/current-owner check; expired requests are not dispatched. The existing
+worker7/BYOC wire and bearer authentication remain unchanged, with no automatic
+mutation replay or new native/Fly attestation claim.
+
+The Machine-lease module retains the trusted transport, private acquisition nonce
+and original session deadline. Short provider leases can renew within that fixed
+cap; older observations keep their own expiry. Lost acknowledgments stay
+uncertain. A direct late release acknowledgment records cleanup without restoring
+custody. This module is not wired to a production transport/clock and grants no
+egress permission. The kernel inventory similarly retains actual current process,
+boot, NET and address-dump custody without claiming Fly outer-VM, public/NAT or
+routing authority. These components still need a real combined bootstrap owner.
+
+The release workflow qualifies the final local version commit before tag push.
+A tag may reuse only a complete successful qualification at that identical SHA.
+Producer archive digests, qualified native seals and source revisions are checked
+before certification and again at publication. Missing or uncertain eligibility
+runs the full pipeline. The older native/test origin remains explicit in artifact
+provenance. All three native builds passed in the first Actions attempt, but
+qualification failed before its test steps. The output validator rejected the
+required `proof_sha256` key because its name contained digits. The correction
+permits digits after the first character and adds an output-file regression;
+all nineteen release fixtures pass. Corrected commit
+`ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87` passed the complete qualification in
+run `41246904136`. Its immutable tag reused those exact artifacts in publication
+run `41249990378`; the second matrix and qualification were skipped. Both npm
+aliases are available on `next`, and fresh Linux installs, all three platform
+manifests and CLI/native/jj smoke checks passed at 22:57:17 UTC. The stable
+`latest` tag remains 3.9.13. Mac, iOS and TUI CI passed.
+
+Cloud release **173**, deployment `l8w0PB4QQoOwMT9eKM3O3MONj`, is verified at
+22:52:53 UTC on [the canonical app URL](https://rudder.exla.ai/app). Running
+revision/image and ten source/emitted runtime hashes match the frozen source;
+health, unauthenticated-route refusal and SQLite integrity passed. The active
+home retained its original instance/image. The stock worker and a separate
+[root-storage canary](../../examples/execution/evidence/2026-10-31-alpha23-root-storage/README.md)
+passed with exact owned VM cleanup and independent absence checks. The latter
+proved global-namespace read-only storage works before the existing UID/capability
+drop; it did not implement or qualify a production seed producer.
+
+The local combined gate passed 1,841 Rust tests, 812 JavaScript tests and all 59
+terminal tests, with zero failures. Cloud compilation passed; thirty Rust fixtures
+were ignored and nine existing JavaScript cases skipped. Earlier private review
+found and fixed concurrent kernel fencing, archive-substitution, dispatch-deadline
+and late-cleanup-ACK defects before integration. See
+[verification](verification-alpha23.json).
+
+The next product milestone is one actual Codex or Claude agent completing a task
+through v4, then two agents sharing caches, steering each other and safely
+integrating verified changes. Production bootstrap/routing custody, connected
+model profiles, accepted jj history/current source selection, fleet migration and
+measured normal-path distributed-cache performance remain required. This release
+does not switch normal agent startup to v4 or complete the rewrite.
+
+The shorter opt-in milestone uses the existing managed-local Spec3/Binding2 path
+with ordinary worker networking. Task admission, immutable preparation reuse and
+checkpoint-to-jj acceptance remain private and are not wired into startup. Their
+combined managed-runtime suite passed 124 tests, zero failures and five existing
+ignored fixtures. Internal seed export passed seven tests, exact Git import eight
+and selected-profile pipe handoff eight. A local prototype measured fresh manager
+prepare/fork versus validated cached fork at 10,000 files: median 1,684 ms versus
+36 ms, with eleven independent live views. That excludes source import, mounts,
+backend/VCS setup, remote transfer and builds; it is not launch latency or a
+production speed claim. Next is the retained seed producer and actual bootstrap.
+Current selected user profiles use OAuth; this path currently accepts only API
+keys and must not silently switch billing. Hosted ChatGPT-plan support needs the
+separate [Sign in with ChatGPT integration](https://developers.openai.com/siwc);
+the user confirmed that Rudder has no registered client ID yet. This external
+dependency does not block engine/cache implementation, and local/OSS CLI auth
+has a separate adapter and refresh/writeback qualification gate.
+
+## Managed task composition, alpha.27
+
+The reviewed task admission, preparation cache, checkpoint acceptance, exact Git
+import, internal seed export, selected-profile handoff and actual worker joins
+are included in alpha.27. Default startup still follows the legacy path.
+Main TypeScript checking, eight actual-pipe handoff cases and the targeted VCS
+seed/import suites pass. The latest full native binary regression suite passed
+1,234 tests with zero failures and 18 ignored. The combined managed task suite
+passed 178 focused tests. The full Linux engine and native library suites also
+passed 198 and 58 tests respectively. Full release qualification passed;
+enabled managed startup remains a separate gate.
+
+The new initial-source producer preserves exact Git object/history preimages,
+sets and verifies the private Git HEAD, creates the jj integration bookmark and
+operation, materializes and verifies source bytes/modes, and pins runnable and
+VCS seed closures. Seven tests pass, including original owner/budget loss, missing
+environment retention, and overlapping/aliased export refusal. These are source
+preparation facts; the caller still needs its held Engine/Journal authority.
+
+The frozen root seed producer passed on a disposable Fly VM at 23:17:50 UTC:
+Root and UID1500 EROFS, two independent metadata forks, actual child reap,
+live-reader/EBUSY cleanup refusal, normal unmount, owned pin removal and exact VM
+destruction with two absence checks. That fixture uses synthetic valid history
+identities. A second exact-source disposable Fly run passed at 23:44:30 UTC with
+real accepted Git/jj history: two UID1500 forks reopen the same baseline and
+operation, only the first writes a new private commit/operation, and the second
+stays unchanged and cannot read that new object. Root/UID1500 EROFS, actual reap,
+EBUSY retention, normal unmount and all fixture pins/VM cleanup also passed. The
+run does not provide Engine/Journal acceptance, production IPC, Spec3 or model
+execution evidence. Its frozen source/ELF/image identities are recorded below.
+
+The Native initial-source owner now captures the actual Fabric source lease,
+held Journal writer, managed namespace and current accepted head. It retains
+CAS/project/integration directory descriptors and rejects replacement or owner
+retirement. Six real Git/Fabric tests pass, including unknown final ACK retaining
+the actual workspace/pins without readback promotion. Initial capability issuance
+and active peer/expiry refresh now share the retained projection owner. Unknown
+publication or retirement retains both grants and refuses a third issuance.
+Those cases pass locally; actual guest refresh still needs physical qualification.
+
+[Real-history Fly evidence](../../examples/execution/evidence/2026-10-31-real-history-seed/README.md)
+binds the exact working source, libtest ELF, derived image, history/kernel receipt
+and owned VM cleanup. It is component qualification, not a new product release.
+
+The explicit managed App constructor now takes supplied display/selection DATA
+without reading legacy tasks, config, session files or implicit checkout state.
+Its pane loop drains selected/bounded background PTY output without legacy
+hooks, discovery, scheduling, filesystem housekeeping or process-exit completion.
+Three Linux checks pass, including actual inotify watches and real PTY output.
+The normal run loop still uses the legacy constructor/guard; this is not enabled
+managed startup or backend lifecycle proof.
+
+The managed task lifetime supervisor now retains actual preparation, broker,
+control, runtime and TLS joins. Worker admission remains held through actual
+join, and transferring a completed task to acceptance keeps the supervisor
+shutdown hold. The checkpoint acceptor can own that genuine joined capsule and
+requires its exact durable Published intent before task cleanup. The retaining
+PTY path, closed helper start barrier and acceptance bridge compile together.
+The borrowed enrollment hook, genuine Root ACK adapter and shared immutable
+template Arc are integrated. The combined 178 managed checks, seven PTY checks
+and seven activation checks pass.
+Root storage IPC passed 11 transport/codec/cancellation tests;
+five actual helper pidfd tests also pass. These do not qualify cross-process
+Root bootstrap, the closed helper start gate, typed actor-drain retirement or
+normal storage cleanup. No connected model run is claimed. The Cloud
+Docker build now includes the fixed root storage executable with root ownership
+and mode 0555. Its existing native build/package suite passes all 38 checks; the
+updated image itself has not been built or deployed.
+
+The separate Root IPC component passed on a disposable Fly VM at 00:50:37 UTC
+on 2026-11-01. Actual Root service/UID1500 engine bootstrap authenticated original
+pidfds, proc-exe witnesses and SCM credentials. Verified transfer published an
+independent Root CAS/seed pin and one read-only mount. Two actual enrolled helper
+children reopened real history, made isolated private forks and successfully
+reaped with pipe EOF; Root observed the first exit without releasing its sibling.
+A cancelled second preparation retained original owners. The successful run used
+17 provider calls, destroyed only its exact-owned VM and verified absence twice.
+The first attempt's polling-limit failure and successful VM cleanup are retained.
+
+This does not qualify the production launcher, managed App activation, Spec3,
+models or accepted Journal authority. Normal retirement remains blocked: actual
+service/engine storage owners remained alive until VM teardown. The
+[Root IPC evidence](../../examples/execution/evidence/2026-11-01-root-storage-ipc/README.md)
+binds the frozen source, ELF, image, actual receipt and bounded harness.
+
+The first combined release candidate, alpha.25, remains unpublished. All three
+native builds passed, but macOS JS qualification failed eight pipe tests because
+the credential writer deliberately supports Linux while the fixture used Linux
+`os.pipe2`. Those integration cases now run in Linux CI; portable metadata and
+unsupported-host refusal remain macOS checks. A separate broker cancellation
+test exposed an eight-connection saturation/drop edge. Its correction must
+preserve bounded connects and actual worker/TLS ownership before a fresh release
+candidate is qualified. Alpha.25 images and the stock worker smoke passed, but
+neither image was deployed. Production remained alpha.23 at that checkpoint.
+
+The correction reserves the original eight broker connection slots before
+accept, keeps each slot/socket through actual worker/TLS join, and uses bounded
+nonblocking ordinary/cancellation connects. It adds no capacity/time and does
+not reinterpret an uncertain disconnect as busy. All 19 broker Rust tests pass,
+including three actual socket/TLS/backlog regressions. The full Linux JS suite
+passes 822 tests with zero failures and 10 skipped. The following candidates
+qualify these changes on the complete release matrix before publication.
+
+Alpha.26 passed all three native builds and the macOS JS suite, then failed
+three `initial_source` integration tests. Its temporary directory used an
+aliased ancestor, which the production source API correctly refuses. The same
+failure was reproduced on Linux with a symlinked TMPDIR. The fixture now
+canonicalizes its root before deriving destinations; all seven cases pass both
+normally and with that aliased TMPDIR. The added case verifies that explicit
+private-directory and seed-parent aliases are still refused before any jj
+initialization or new pin. Production validation is unchanged. Alpha.26 remains
+unpublished and undeployed. Alpha.27 passed fresh complete qualification.
+
+Alpha.27 revision `59d59ddb4045584908d4671a6756c37ce9ab4d44` and its immutable
+tag are pushed. All three native builds and the full macOS JS/native/jj/TUI
+qualification passed, as did the tag Release, Mac and iOS workflows. Fly release
+174 runs the exact control image and pins the stock alpha.27 worker. The seven
+UID1500 worker smoke commands passed; its VM was destroyed and absence checked
+twice. Canonical app/health/auth, ten running code hashes and database checks
+passed at 2026-11-01T02:49:47.939Z. The live home instance/image stayed unchanged.
+
+The legacy npm package passed an isolated fresh install, real postinstall,
+CLI/native/jj checks and all-platform artifact/revision checks at
+2026-11-01T03:01:16.405137Z. Its `next` tag names alpha.27; stable remains3.9.13.
+The primary `@exla/rudder` publish job succeeded while its explicit version
+returned404 through03:09:30Z. Registry visibility resolved without another
+publish. Its isolated fresh install and all CLI/native/jj/platform checks passed
+at03:16:26.784450Z. Both `next` tags now name alpha.27, both packages' native pairs
+and package metadata apart from name match, and both private fixtures were
+removed. Stable remains3.9.13. Original pending observations are retained.
+See the [verified npm and Cloud record](verification-alpha27.json).
+
+Task startup/cleanup composition, Root IPC/image bootstrap and the actual
+connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.
+Hosted ChatGPT subscription registration and OAuth refresh/writeback remain
+separate dependencies. See the [working verification record](verification-managed-launch-working.json).
+
+## Machine entry and durable retirement, alpha.28
+
+The checkout now contains the fixed native root launcher and FIRST managed
+entry, with a retained off-App client worker and typed project/seed/helper cells.
+Its five entry tests and seven bootstrap tests pass. The Docker packaging source
+installs the launcher and storage service with root ownership and mode0555;
+all38 existing native build/artifact checks pass. These changes are not in
+alpha.27 and do not enable the default managed project/task path.
+
+Three disposable probes preserved a real startup failure: mixed real/effective
+IDs with NNP became all-root IDs across exec while capabilities stayed zero.
+The correction enters fixed native code with only SETGID/SETUID/SETPCAP, requires
+actual safe dumpability policy0 and drops all IDs/bounding/capabilities before
+config or threads. Its fourth physical probe passed at03:01:14Z: two actual
+same-user ptrace/proc-FD refusals, original-main/single-thread checks, three
+actual child reaps/pipe EOF, exact VM destruction and two absence checks.
+This qualifies the privilege component, not the installed production launcher,
+machine worker readiness, project authority or model execution. Original failed
+source, ELF bytes and VM cleanup evidence remain retained.
+
+The actual Rudder native Codex adapter now also passed against the official
+Codex 0.166.0 executable and a synthetic loopback provider, with zero paid model
+calls. The case covers a real file edit, exact thread/turn binding, typed peer
+steering, stale/wrong-target refusal, interruption and actual child/reader joins,
+reaping and pipe EOF. Holding the real interrupted notification proved that the
+empty interrupt RPC acknowledgment alone does not confirm interruption. A real
+multi-client initialization exposed an originator/version parsing error; the
+corrected parser accepts Codex's first-client originator while preserving the
+minimum version and malformed-version refusals. The passing run took 23.63s and
+finished all cleanup. This qualifies the existing native adapter with a simulated
+provider, not managed guest execution, real authentication or model quality.
+
+Private task forks retain Git alternates into the shared seed even after a task
+joins. Safe seed reuse therefore also requires original fork ownership and
+verified, durable localization of every object needed by retained jj history.
+Thread joins alone cannot release those mount references. The integrated fork
+owner/localizer and never-linked recovery passed 20 real local Git/jj history,
+original-intent and recovery tests. Its current
+durability fallback copies all shared objects before removing the alternate;
+that is not a constant-cost fork or the final distributed-cache design. The real
+read-only mount fixture passed on Fly at 2026-11-01T04:18:35Z: after durable
+localization, normal unmount with flags0 and shared mount removal, the private
+fork still read Git/jj status and old history and created a new commit. The exact
+named Rust test passed with actual child exit0 and all pipe EOF. Seven stock
+commands and exact VM destruction/two absence checks also passed in 15 provider
+calls. The [physical VCS record](verification-vcs-localization-working.json)
+binds source, ELF, image and cleanup evidence. This does not establish Root
+service retirement, third-seed capacity reuse or representative build speed.
+
+The seed-use ledger and normal retirement path are integrated with original
+factory/helper ownership, retained fork identity, explicit discard or whole
+published acceptance, durable localization and distinct Root retirement/release
+acknowledgments. The host acknowledges readiness from the actual retained client
+worker before publishing Serving. Original dispatch/fork/helper/enrollment permits
+and whole unused-App custody now support settlement of proven never-started
+tasks. Uncertain activation, enrollment and partial alternate installation remain
+retained. The native library containing the new ledger gates passed 89 tests
+with zero failures and 13 ignored; the updated full application passed 1,254
+with zero failures and 19 ignored at 2026-11-01T04:18:01Z.
+
+The combined native application suite passed 1,251 tests with zero failures and
+19 ignored at 2026-11-01T03:55:11Z. The native library passed 82 with 13 ignored;
+the local fork/history suite passed 12 with one physical mount case ignored.
+The application run used the required explicit Node/profile-helper paths and
+serial execution. These results do not replace the ignored physical gates.
+
+Frozen working source manifest
+`90f02b7339e2690de0b7743012b2248bc67905359e70c3fbd2d37d92bcfa1260`
+built successfully at 2026-11-01T04:01:32Z as a qualification image derived from
+the immutable alpha.27 worker, replacing all four production native executables.
+The qualification image digest is
+`sha256:f531105ae9cc80c7bc6603104fb008cd6599f724599069936b44ba3ab97f58e5`.
+This is an uncommitted development snapshot, not a release or deployment.
+
+The real installed production bootstrap then passed on a disposable Fly VM at
+2026-11-01T04:14:24Z. An inherited package metadata mode0664 first failed the
+artifact guard before startup; explicit Docker mode0644 corrected packaging.
+The passing snapshot manifest is
+`310404b9590ab264b504d95eac1076acfe2653827c2468c06ff0b91ed5b11be5`,
+image digest `sha256:dddb3a94710114039d29bf51955db24cb5ea6b3adbefef8384562415747333e9`.
+All four compiled native executable bytes are unchanged from the first image.
+The actual original launcher Child/pidfd/executable witness, root storage service,
+UID1500/capabilities-zero/NNP1 engine, authenticated client and non-main worker ACK
+were checked live. Seven stock commands passed; exact VM destruction and two
+independent absence checks passed in 15 provider calls. Both earlier failed VMs
+also have verified destruction/absence. See the [focused verification record](verification-machine-bootstrap-working.json).
+This snapshot predates the later never-started follow-on; its physical proof
+does not qualify those changes or any model/project/source/retirement authority.
+
+Normal Root unmount/third-seed reuse and trusted machine control ingress remain
+open. The default startup path is still legacy.
+
+Alpha.28 also passed TypeScript checking, all 822 JavaScript tests
+with 10 optional skips, and all 59 real terminal tests using the newly built
+normal native executable. All four native executables built from the integrated
+source. The isolated Codex provider fixture passed four checks. CI dependency
+caches restore external dependencies only, clean every local workspace crate
+and retain the full release qualification; cache restoration is never evidence
+that a release passed.
+
+### Alpha.28 delivery
+
+Revision `c04997dcd7b23be83257268f34ebb4bcd1da7519` and tag
+`v4.0.0-alpha.28` were pushed together after the exact final SHA passed
+[all three native builds and full Mac qualification](https://github.com/exla-ai/rudder/actions/runs/41273492190).
+Mac JavaScript passed 813 tests with 19 skips; the Mac native application passed
+1,082 with 12 ignored. The actual stock worker then passed seven commands plus
+installed Root/native/storage/client startup and real non-main worker ACK at
+2026-11-01T04:44:38Z. Its exact VM was destroyed with two absence checks.
+
+Fly release **175**, deployment `jp1QZVeBBN01OTAaeAOgBzY1O`, runs the tagged
+control image and pins the tested alpha.28 worker. App/health returned 200 and
+unauthenticated state/CAS returned 401. Runtime hashes and database integrity
+passed at 2026-11-01T05:11:09Z. The protected live home's original instance and
+alpha.7 image were unchanged. See [the delivery record](verification-alpha28.json)
+for exact image digests, checks and scope.
+
+The [tag publication workflow](https://github.com/exla-ai/rudder/actions/runs/41275825138),
+Mac and iOS jobs passed. The primary `@exla/rudder` package passed a fresh
+unprivileged installation with its real postinstall, CLI/native/jj commands and
+all three platform artifact manifests at 2026-11-01T05:25:01Z. Its `next` tag
+names alpha.28; stable `latest` remains 3.9.13. The legacy `@viraatdas/rudder`
+package became available and passed the same fresh unprivileged installation,
+real postinstall, CLI/native/jj commands and all-platform verification at
+2026-11-01T06:57:33Z. Both packages have identical native manifests and package
+metadata except the package name. Both `next` tags name alpha.28; stable `latest`
+remains 3.9.13. No republishing or retagging was attempted.
+
+The default path remains legacy. Authenticated host ingress, a durable machine
+receipt store, fresh logical project/engine enrollment, immutable managed
+runtime packaging and isolated per-home app/vault/network provisioning are the
+next private implementation batch. Its separate compile checks do not qualify
+those features in alpha.28. Normal Root retirement/reuse, real managed models,
+distributed cache/build performance and fleet/migration gates remain open.
+
+### Unreleased managed ingress integration
+
+The next working batch connects authenticated host transport, immutable runtime
+packaging, original Root engine registration, durable machine command receipts,
+prepared-local App/task ingress and fresh Cloud provisioning. The original
+worker now stages the host capability after HostServing and registration; an
+early pending registration can no longer leave ingress permanently absent.
+Only the App loop adopts that capability, using a nonblocking handoff.
+
+The frozen registration library passed 103 tests with zero failures and 13
+ignored. The combined native application passed its 204 managed tests with zero
+failures and six ignored; 1,077 unrelated tests were filtered out. Cloud compiled
+and its 23 focused provisioning, operation and HTTP tests passed. Another 79
+existing home transport, packaging and Fabric HTTP regression tests passed. The exact
+managed-runtime source-prefix test also passed. These are component checks,
+not physical registered-engine, PostgreSQL durability or model qualification.
+The initial application compile found two mutable-fixture errors, which were
+corrected before the passing run. Original failed receipts remain retained.
+
+The lean managed image was pushed from a separate, earlier frozen snapshot as
+`sha256:6aa9ba078b75bc55e39a7b1e3f21a65d8970eef570156cf6518365efe7be42f9`.
+Its first registry push failed with HTTP403; the identical-source cached retry
+succeeded. Its disposable Fly VM passed at 2026-11-01T05:48:56Z: all four native
+executables, the complete runtime and sidecar closure/permissions, real pinned
+Codex version execution, Node/ws loopback and original Root/storage/client
+startup were verified. Seventeen provider calls included exact VM destruction
+and two independent absence checks. See [the physical image record](verification-managed-runtime-working.json).
+The offline harness first omitted a Python fixture; a separate corrected copy
+passed all 12 injected scenarios before any provider call. This image predates
+registration and App integration and is not deployed. Fresh source initialization, verified S3 root publication followed
+by PostgreSQL admission/assignment, real backend execution and default migration
+remain open. S3 remains the content data plane; PostgreSQL holds fleet metadata
+and ownership, rather than introducing another blob store.
+
+The actual Claude 2.1.316 CLI also passed the production TypeScript protocol
+actor against a synthetic loopback provider after a real interoperability fix.
+Its official binary checksum and detached manifest signature were verified
+using [Anthropic's published signing-key procedure](https://code.claude.com/docs/en/setup#verify-the-manifest-signature).
+Synthetic peer commands emit an exact `command_lifecycle` started UUID before
+model output, without necessarily replaying a user message. The adapter now
+accepts that exact-session/active-input event; queued, unrelated, other-session
+and nested-tool events do not acknowledge the input.
+
+The passing run performed a real tool file edit, preserved typed non-human peer
+input, refused a wrong turn and confirmed two interruptions. Holding the actual
+terminal notification after its interrupt RPC receipt proved that the receipt
+alone does not confirm interruption. Three loopback requests made zero paid
+model calls; 29 focused unit/bridge tests passed. The actual CLI exited1 after
+its interrupted print session, with observed exit and both pipe closures and no
+forced stop. The original failing run and forced fixture cleanup remain retained.
+See [the scoped Claude record](verification-claude-protocol-working.json).
+This is host protocol evidence, not Rust adapter, managed guest, real provider
+authentication or full process-tree drain qualification. Claude is not yet in
+the qualified managed image.
+
+The later production Rust Claude actor also passed its real official-CLI
+loopback qualification with a fixture-only RPC relay importing that same
+production protocol. It performed a file edit and typed peer steer, refused
+wrong/stale turns and kept interruption pending through both an actual CLI
+receipt with terminal held and an actual RPC ACK with the Rust event held.
+Actual actor, pipe-reader and relay joins, original child reaps, both EOFs and
+kernel ECHILD passed, with zero paid model calls. The first run exposed a test
+assumption about JSON key order; comparing the exact prefix and parsed complete
+peer value corrected the fixture without changing production behavior.
+See [the scoped native Claude record](verification-native-claude-protocol-working.json).
+Managed guest/profile, real authentication, production launch wrapper and normal
+Root retirement remain separate gates; managed Claude is still unsupported.
+
+The actual PostgreSQL storage component also passed all 14 stages at
+2026-11-01T07:01:45Z on a disposable PostgreSQL 17.11 instance. Production
+factories used verified TLS/SCRAM and restricted roles. Real transactions
+exercised row-lock overlap across independent factories, lost COMMIT replies,
+RLS, authenticated registration, streamed CAS image/source/environment
+publication, service admission, fresh bootstrap and original owner acquisition.
+The conditional object service was in memory; Fly/Root enrollment was synthetic.
+This qualifies neither physical Root registration nor fleet HA/RPO or models.
+Original registry carriers remained held until the actual fixture child exited;
+PostgreSQL stopped and its cluster was removed, then the exact VM was destroyed
+and absence checked twice. The first attempt exposed a fixture waiter-chain
+assumption and missing failed-proof retention; both were corrected before the
+passing run. See [the scoped PostgreSQL record](verification-managed-storage-pg-working.json).
+
+The later renewal integration also passed the real-PG fixture at
+2026-11-01T07:09:01Z. A real FabricCas/S3-adapter publication stayed held for
+18.58 seconds while the same owner renewed ten times, advancing serial 1 to 10.
+The original lease expired while the current lease remained live. Historical
+request retries returned the original ACK, and a wrong owner was refused.
+All 15 stages and exact VM teardown with two absence checks passed. This uses
+synthetic Root/clock admission and the memory conditional object service;
+physical Native watchdog, real S3 and clock continuity remain unqualified.
+
+### Fresh broker admission and image boundary, unreleased
+
+The working tree now connects the fresh agent broker to the actual retained
+source, task projection, worker Journal and assigned owner lease. SQLite
+authorizer, execution-progress and commit hooks restrict shared writes using
+that same lease. Status observation remains read only after admission closes;
+inbox polling still needs write admission because it expires deliveries.
+Uncertain effects retain their original call and connection and prevent normal
+retirement. The ten engine tests passed against actual SQLite transactions,
+cached statements, commit cutoffs, cancellation, capability authentication and
+retained read-only observation. These use a synthetic admission restriction;
+they do not establish a genuine assigned lease or physical Root readiness.
+The native broker compiled and passed 28 tests, including the two new
+refusal/wire tests and the existing worker/join ownership regressions; one
+fixture-export test was ignored. All eight actual agent API integration tests
+also passed, with one fixture export ignored. A first API regression command
+selected zero library tests and supplies no behavioral evidence. The normal
+native CLI built from unchanged recorded Main inputs. Genuine Root/PG broker
+qualification remains open.
+
+The full immutable userspace image built and pushed successfully with strict
+hardlink deduplication. Its disposable Fly boot verification failed: Fly adds
+kernel modules under `/usr/lib/modules`, including files with hardlink aliases
+outside the captured userspace roots. The topology check remains intact. The
+next change must separate provider kernel data from both immutable userspace
+capture and the guest execution view; excluding it from hashing alone is
+insufficient. The working tree now implements that exact protected-directory
+boundary and mandatory empty guest mount; four engine policy tests and all ten
+image-import tests passed, preserving the external-hardlink refusal. A new
+canary copy passed fourteen offline scenarios and still needs a fresh image,
+boot verification and actual restricted-guest observation. The failed VM was
+destroyed and two independent absence checks
+passed at 2026-11-01T08:07:09.762Z. This image is not deployed or qualified.
+
+The broader Rust workspace run passed on the earlier connected-flow snapshot
+at 2026-11-01T08:13:00Z: 2,130 tests passed, zero failed and 49 were ignored
+across 65 suite reports. This run predates the broker hooks. The previous full
+JavaScript run passed 871 tests, skipped twelve and
+failed one Docker command contract after adding the private image helper. That
+contract was corrected and its 38 focused tests passed; a new complete run is
+still required. No full-suite success is inferred from that focused correction.
+
+Authenticated transport recovery is also integrated. A new socket must complete
+the original Root/native/server generation handshake before replacing a serving
+session. Reconnect does not reset operation or lease clocks, replay an uncertain
+send, or retire the original process/source owners. The Cloud build and all eight
+new transport tests passed, alongside 41 existing Cloud regressions. The native
+library passed 139 tests with fourteen ignored after correcting a test-only
+socketpair constructor that incorrectly required Root. The first failure remains
+retained. Sidecar-core packaging is now integrated: 26 manifest entries and a
+strict four-field pin include both script hashes. Four native reader tests,
+twelve script tests and 21 Python packaging tests passed; two Root filesystem
+tests skipped. Installed-image and configured physical reconnect/isolation proof
+are still pending. The PostgreSQL audit found missing row-lock permissions and
+renewal read access. The unapplied transport migration now grants UPDATE only
+on four otherwise unused lock columns and SELECT on renewal receipts, preserving
+readiness, credential and revocation restrictions. Reconciliation explicitly
+casts its UUID/text parameter. Actual PostgreSQL qualification passed at
+2026-11-01T08:58:21Z: all ten transport checks and sixteen base stages passed,
+including forced RLS, forbidden credential/readiness writes, actual revocation
+blocking behind the auth row lock, lost COMMIT acknowledgments and unchanged
+historical ACK reconciliation. Twenty-two provider calls included exact VM
+destruction and two absence observations. The HMAC fixture calls registry methods
+directly and uses real loopback sockets, memory S3 and synthetic clock admission;
+it does not qualify configured Root/native/sidecar wire or production activation.
+See [the scoped database evidence](verification-managed-storage-pg-working.json).
+
+Accepted-source generations and the physical kernel qualifier are integrated.
+Six real jj/CAS generation tests passed, including parent history and unchanged
+object reuse. Their deep-directory regression first found a production stack
+overflow; moving the recursive import's I/O buffer to the heap preserved the
+depth guard and corrected it. The combined native test binary compiled after
+correcting an owned cancellation Arc argument, then passed 214 managed tests
+with six ignored and three kernel mechanics tests with one physical test ignored.
+The actual registered startup consumer, explicit probe cleanup and disposable
+kernel execution remain separate gates.
+
+The later full Main JavaScript run passed at 2026-11-01T08:39:55Z: 889 passed,
+zero failed and ten skipped, with all 1,942 recorded source inputs unchanged.
+Its native CLI artifact came from the earlier broker integration build; newer
+Rust scopes above have their own compiled-test evidence. Later generation,
+kernel and PG-fixture changes are not included in that JavaScript run.
+
+The image-preseed source audit found a warm-VM cache gap: BeginImage repeated
+inventory and verification before finding an existing publication. The new
+exact-root, current-registration reuse path passed the actual PostgreSQL fixture
+at 2026-11-01T09:40:10Z: two root-receipt GETs, zero CAS payload reads and zero
+object/staging/root PUTs. S3 was simulated through the actual FabricCas adapter;
+this does not qualify physical Native/Root or real S3 performance.
+
+The next cold-image batch integration is in Main, default off. Client/server
+framing, retained SDK work, protected config and the separate frozen migration
+were reconstructed from both exact source seals. TypeScript passes after
+splitting the two Begin discriminants into separate union members. All 100
+selected Node storage/transport/client regressions pass. The actual PG batch
+variant passed at 2026-11-01T10:17:28Z: frozen migration/refusal, restricted grants,
+three batches/five objects, exact lost-ACK reconciliation, unknown Started with
+zero dispatch, expired-original refusal and full tiny-image publication. Its
+22 provider calls include destruction and two absence observations. It uses
+fixture Root/clock/provider and simulated S3, not physical Native or throughput.
+Per-object S3 staging-lease reads remain, so fewer HTTP and
+PG requests do not establish the original 300s whole-image bound. A separate
+nonrevocable retention class and actual S3 qualification are still required.
+
+The e57 immutable image built successfully and its complete CAS graph contains
+22,175 objects / 1,968,404,726 bytes. Its Bookworm qualification child reproduced
+all four production executable hashes and executed its test list. Physical runs
+remain unqualified. After correcting a checker-only canonical key-order error,
+the strict filesystem check found that Fly replaces `/usr/sbin/swapon` with a
+hardlink to `/.fly/swapon`: baked 51,512 bytes, observed 459,224 bytes. All three
+disposable VMs were destroyed and independently absent twice. The current
+unreleased fix retains the actual protected host file, captures an empty0444 CAS
+node and mounts a sealed read-only/noexec empty file in the guest. The existing
+external-hardlink rejection remains. The combined native test executables
+compiled; affected test execution, fresh image and physical mask verification
+must pass before claiming this boundary qualified.
+
+The later source43 image and its Bookworm test child built successfully. Review
+also caught and corrected the missing fixed `/sbin` guest alias. The fresh Fly
+run passed topology with zero unexpected hardlink groups, then its `--verify`
+child exceeded the original300s window and was killed by the305s observer.
+Actual exit/signal/EOF and exact VM destruction plus two absence checks are
+recorded at 2026-11-01T10:47:54Z. The kernel probe was not reached. The verifier
+rebuilds a fresh1.97GB CAS: current code performs roughly88,696 per-object sync
+calls for22,174 refs, besides repeated hashing and metadata checks. This source
+audit identifies work to remove; it does not attribute the exact Fly stall.
+The retained bulk-import implementation must preserve full hashes, closure,
+durability and source custody under the unchanged300s deadline.
+
+The new immutable batch-hold core passed TypeScript and 56 selected Node tests.
+It requires an actual role-bound S3 adapter's own versioning/lifecycle/policy
+readbacks; ordinary constructors and saved JSON cannot qualify it. A distinct
+nonrevocable hold removes per-object staging-lease reads while PG admission,
+expiry, unknown effects and both root publications remain guarded. The explicit
+startup caller and separate new PG fixture are integrated and typecheck; they
+are not production activation. Minimal bucket/IAM changes extend only this
+hold prefix and the workload role's retention guards/read permission. Admin
+readback passed10:31:39Z and actual existing control-plane OIDC role readback
+passed10:34:48Z. Old policy versions and operator recovery remain. The actual
+new backend capability and real tiny object/publication probe passed at
+2026-11-01T11:22:53.731085+00:00. The actual role-bound factory performed
+its own three reads, three hold writes, conditional object conflict/readback and
+both root publications under one original 30s window (24,940ms remaining after
+effects). Closed/expired owners issued no new SDK calls. Original child exit0,
+both EOF and explicit parent-owned local cleanup passed; all S3 holds remain.
+[Structured proof](verification-managed-batch-cas-s3-working.json) preserves the
+failed setup attempt and corrected transfer. Full-image throughput, physical Root
+and production startup remain unqualified.
+
+The separate immutable-retention PG attempt failed at the cold-image producer
+with `effect_unknown` after nine preceding database stages passed. Its exact
+failing cache operation was not recorded, so the fixture now captures bounded
+operation and backend-counter diagnostics without changing positive assertions.
+The owned VM was destroyed and independently absent twice at 10:56:43Z.
+The diagnostic second attempt reached the intended lost-ACK publication refusal.
+The fixture incorrectly expected a signed error ACK where production deliberately
+throws `effect_unknown`; only that assertion was corrected. Fresh attempt A3
+passed at 11:07:01Z: three batches/five objects, immutable holds, zero per-object
+lease GETs, unknown-effect refusal, original expiry and tiny-image publication.
+Its VM was destroyed and independently absent twice. Real S3, physical Root and
+whole-image throughput remain unqualified; both failed attempts are preserved.
+
+## Paged workspaces and durable image import, unreleased
+
+The V2 workspace slice is integrated from its exact 36-file source seal. It adds
+paged metadata, shared read-only Git objects, private metadata CoW and history
+archives that graft existing CAS objects without copying packs. Review corrected
+archive admission to reserve capacity for all live/partial cows before creation.
+The managed boot path already preserves Root ownership; an initial concern from
+the legacy bootstrap was withdrawn. V1 remains the default. Full V2 Root/task
+execution, restart recovery and large cold-import timing remain open gates.
+
+The seven-file bulk image importer is also integrated. Fresh objects stay private
+until file barriers; bounded batches settle shard/tmp publication. A separate
+nonexpiring hold protects shared CAS data through crashes, and one transaction
+commits both pins before releasing retention. Full SHA and typed closure checks
+remain. Review corrected the actual runtime's final export checks to use the
+same bounded import clock and to refuse late success after staging the export.
+Individual fsync calls remain uncancellable; no full-image speed is claimed yet.
+
+The combined library run passed 440 tests with 28 ignored at 11:20:13Z. This
+includes all 11 engine import tests and three native bulk fixtures. The actual
+native binary initially passed 1,297 tests with nine auth fixture failures from
+missing required Node/helper paths. The focused ten-test rerun passed; the later
+complete run with actual fixture paths passed 1,306/zero failures with 21 ignored
+at 12:30:50Z, including the post4d0 Git reuse fix and path-specific diagnostics. JavaScript196 passed 928 with zero failures before this
+Rust integration. The fresh normal native binary passed all 59 TUI checks.
+
+The actual new Bookworm engine test ELF passed all three Root FUSE cases at
+11:36:37Z: normal-unmount/TLS ordering, cancellation during the real handshake,
+and UID1500 shared read-only access with independent writes in two CoW views.
+All original exits/EOF, raw logs and exact VM teardown plus two absence checks
+passed. The first canary never ran tests because image CMD600 was appended to
+its supervisor argv; the corrected exact init.exec preserves all test checks.
+[Component evidence](verification-managed-paged-metadata-working.json) keeps
+Native/Root IPC/full-source launch and production enabling unqualified.
+
+The complete image from frozen source
+`4d0a3e6203938cd11b7b0460e2aae8889ec071a29d4c7332aa4044292846ae74`
+built and pushed at11:36:25Z with actual four-ELF/full-pin prints. Its digest is
+`sha256:a2e3e4f7011f2597afe4a29dc774b1893836c22e1e16e1e2417990d20b050cdd`.
+The new V12 canary failed the capture-consistency check: the real full-tree
+helper exited1 with `captured image filesystem changed`, and original exit plus
+both EOF were observed. It was not timeout-killed. The same-image V13 diagnostic
+also failed consistency, with original child settlement at 289,383.816ms. Both
+metadata walks completed with 22,954 entries and zero errors; 2,207 paths changed.
+All 50 retained samples are directories with only inode number changed. The
+bounded sample does not establish the types of unsampled changes or prove a held
+descriptor changed identity: postwalk follows helper exit and descriptor closure.
+A separate same-image diagnostic then verified OverlayFS and actual soft/hard
+FD limits of 10,240. All eight held directory samples retained their full
+metadata and named identity across cache eviction; all eight unheld directories
+changed only inode numbers. After releasing the handles, all 16 directory inode
+numbers changed. [Physical diagnostic evidence](verification-managed-image-directory-identity-working.json)
+records the original child settlement and exact VM destruction plus two absence
+checks. Neither full-image attempt reached the kernel probe. Exact VM destruction and two absence checks passed for both.
+No deadline or filesystem-stability check is relaxed.
+
+## Current implementation track
+
+Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.
+All edits are in the user's main checkout. No product edits predated this track;
+the three architecture documents already contained this session's planning work.
+
+| Track | Concrete scope | Gate and state |
+|---|---|---|
+| Planning/commands | Shared deterministic routing with an optional Decisions helper; read-only intent; home Cloud ingress; retired public pair/nudge entries | E11/E12 subset implemented and CI verified; legacy sail limitation below |
+| Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
+| Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
+| Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
+| Full storage/engine rewrite | Milestones below | Cloud release170 / worker alpha.20 is deployed and verified; its stock worker smoke and full release matrix passed. Both npm next tags name alpha.20; both packages passed isolated installs and all-platform artifact verification. Captured checkpoint DATA passed independent HTTPS readback after producer destruction. Default workspace integration, connected models, history, fleet and migration gates remain open |
+
+The current native simple-execution path remains an isolated worker; explicit
+main-checkout mode remains available. The initial automatic DAG path retains
+the existing approval gate. This first change does not establish the eventual
+single persistent task owner through every v4 engine operation. The standalone
+TS board/CLI and old installed clients need separate migration checks.
+
+Home web/phone task ingress uses native routing. Legacy task sails have a
+different finite TS lifecycle: discussion/planning fail closed with a
+home/dashboard alternative until that adapter migrates. Starting a permanent
+dashboard in its place without task identity/approval/completion tracking would
+misreport completion. Local `/cloud` task forwarding still reaches that legacy
+path, so this is a stated alpha limitation, not complete Cloud routing parity.
+
+## Latest delivery and next implementation, alpha.15
+
+Main/tag `v4.0.0-alpha.15` is revision `a048aad42734dcb87b6c3ccfecabba1377b19764`.
+Fly release166 is deployed: canonical app/health/authentication, exact runtime
+hashes and SQLite integrity pass at2026-10-31T06:24:56Z. Active home instance/image
+are unchanged. Fresh stock15 S3/Native-CAS DATA restore passes06:26:25Z; a separate
+digest-pinned exact-source qualifier passes actual UID1500/FUSE/offline-source
+finalization and historical reopen at06:26:33Z. Both canaries and the synthetic
+credential row are independently absent at06:27:15Z. These are synthetic
+source/grant qualification cases, not managed-default or model-provider claims.
+See [delivery](delivery-alpha15.json),
+[local checks](../../examples/execution/evidence/2026-10-31-alpha15-foundations/README.md)
+and [runtime proof](../../examples/execution/evidence/2026-10-31-alpha15-runtime/README.md).
+
+Local verification:1,204 baseline Rust tests,82 final affected tests,25 separate
+execution compatibility cases, JavaScript739passed/9skipped and real-binary
+TUI59passed. The local production build stamped candidate30658fa; the final tag's
+only later change is the Fly image pin. Exact-tag CI/Fly builds are separate.
+The original unpublished local15 tag was corrected before any push. All three
+native release builds passed. Release run41176059172 then failed seven tests
+at the same macOS rpc_view fixture assertion: `/tmp` was compared against its
+canonical `/private/tmp` form. Both npm publication steps were skipped. The
+fixture now creates its short root under canonical `/tmp`; verify the next
+release before claiming registry availability. Cloud release166 stays verified.
+
+The next local batch implements the Spec5 / Binding4 codec, a parent-clocked stop protocol and host context2 with separate guest and source lifetimes. Runtime5 remains refused while shutdown and launch ownership are connected. The verifier also replaces redundant full-patch generation with one status check. Remaining integration starts with joint Spec5 /
+Binding4, protected context2 and actual host-source client/controller witness;
+separate guest ingress from source finalization, carry the original parent
+stop deadline, and join provisional receipt +successful helper exit +fresh
+issuer authorization. Then compose the qualified connected transport and run
+physical/model checks before default migration. Private-jj partial projection /
+acceptance, a production build-cache caller with independent speed trials,
+fleet authority and real-device Tailscale continuity remain open. Do not mark
+the full v4 goal complete at this release.
+
+## V4 foundations and current continuation, 2026-10-31
+
+Cloud alpha.14 is live as release 165 from tagged revision
+`13889d1e0860b5a806f5513d32cf0f215747759f`. Canonical app/health/authentication,
+database integrity, source and compiled runtime hashes pass at
+`2026-10-31T04:43:15Z`. The active home retains its original instance/image.
+The actual S3 checkpoint DATA publication and fresh stock14 native-CAS restore
+pass at `2026-10-31T04:51:07Z`: nine new uploads, thirteen exact objects/12,953
+bytes, opaque high-u64 values, zero-upload same-ID retry, and retention across
+two settled Native helpers. All three alpha14 canaries and both synthetic
+credential rows are independently absent at `2026-10-31T04:53:47Z`.
+See [delivery proof](delivery-alpha14.json) and
+[tagged runtime evidence](../../examples/execution/evidence/2026-10-31-alpha14-runtime/README.md).
+
+All three native alpha.14 platform artifacts pass CI. The first publish
+attempt passed JavaScript checks, then failed one Darwin fixture setup race:
+994 Native tests passed, one failed and11 were ignored. Peer rejection can
+close the client before the test server sets its read timeout. Managed jj/TUI
+and publication were skipped. The single failed-job retry failed on the same fixture against the unchanged
+immutable tag. No more retries are planned; the next source release adds the
+server-ready barrier that passes the local merged Native suite.
+Registry publication and isolated npm installations remain open. Both npm
+`next` tags still name alpha.7; `latest` remains 3.9.13. Do not retag or
+hand-publish. See the runtime evidence ci.json and registry.json.
+The real S3 controller needed an exact archived-source exception and a
+top-level-await correction. Its failed canary/credential were removed; the
+corrected serialized-preload negative control and subsequent real run pass.
+
+After the alpha.14 source boundary, main has the following uncommitted work.
+These changes are absent from the deployed immutable tag:
+
+- Host-only Journal source authorization uses a distinct purpose, operation and
+  domain-separated exact-binding scope. Its non-Serde result is identity/expiry
+  DATA from one read transaction. Thirteen actual SQLite/golden/expiry tests,
+  five guest-partial compatibility cases and one current-attempt case pass.
+  The Native issuer must still hold actual EngineOwnership and clamp expiry
+  against fresh post-query and original sent time.
+- Actual Fabric EngineOwnership now supplies an opaque source lease retaining
+  the real checkout lock through callback settlement. Retirement revokes before
+  fallible writes; stopping retains existing leases and denies new acquisition.
+  Thirty-three focused cases pass, including nine new lifetime tests and ten
+  fresh-process OS-lock probes. This is local held custody, not a source grant
+  or active remote session.
+- Six Native CLI/prompt files provide five primary slash choices, shared help,
+  truthful historical Gam notices and one conductor contract. Focused coverage
+  passes 170 unique tests with one pre-existing simulation ignored. Legacy
+  dispatch/recovery and combined nudge behavior are retained; source-authorizer
+  module wiring is deferred until the transport review settles.
+- The accidentally tracked legacy Native `.ledger` session is removed from
+  future source, with an exact mode0600 private copy retained outside the repo.
+  The directory was already ignored. Tagged source/history are unchanged.
+
+The Native source-authorizer transport is now applied and compiled. Its
+24 actual Unix fixtures pass, including request/reply MAC authentication, exact
+post-query expiry clamping, issuer-peer checks, conservative pathname retention,
+callback panic retirement and an actual TLS-destructor timeout/retry. The fixed
+join coordinator retains actual workers and only reports their real settlement;
+its own final teardown is excluded from that endpoint-only receipt. Independent
+source review passes. A merged Native test executable passes1,054 tests with
+13 explicit ignores; its proof binds the exact compiled foundations and does
+not claim the later budget module was linked into that executable.
+
+A shared finalization budget now provides one suspend-aware host deadline,
+original-deadline adoption constraints, per-phase remaining-time caps and
+absorbing expiry/cancellation. Four library tests pass, including actual stalled
+Unix I/O and exact decimal nanoseconds above JavaScript's integer range. This
+is a time constraint, never shutdown or checkpoint authority. New managed stop
+wire dispatch and phase plumbing remain to be integrated.
+
+The controller witness and actual Journal source issuer are integrated. The
+SQLite-owned keeper passes70 focused cases, including cross-process writer
+exclusion, checkpoints and fresh writes; the unsafe raw-descriptor preparation
+and two fixture/compiler failures are retained privately as superseded evidence.
+The real cleared-environment child composition passes: authenticated3FD
+handoff, retained controller witness after control close, actual guest token
+rotation/broker closure, continuing host authorization and sticky denial after
+host revocation. Its first fixture attempt blocked on the retired guest probe;
+that probe now runs after the active source exchange.
+
+The integrated foundations pass1,204 library/Native tests with15 explicit
+ignores. Final source-lifetime and live-fleet patches are applied;82 affected
+checks pass with one explicit child-helper ignore. The13 source-lifetime cases
+include actual blocked callbacks, observer-first spawn failure, source loss
+around fsync/packet delivery, original deadlines and an unslept27-query burst.
+The endpoint uses a bounded token bucket: default16 requests/second with64 burst
+credits, fixed workers/admissions unchanged. Legacy helper-observed finalization
+starts one30s budget and does not renew for duplicate packets; original parent
+queue time still needs the new stop wire. Fleet notes no longer start unavailable
+workers, and deferred Enter is bound to the same terminal instance. Explicit
+resume is preserved. Production build, Node/TUI verification, versioning and
+actual delivery are next. No new user feature flag is added. Source authority,
+guest ingress closure, provisional shutdown packet, successful helper exit,
+fresh final authorization and accepted history remain separate facts. The new
+managed family must join them before default adoption.
+
+Cloud alpha.13 was deployed as release 164 from
+`030ebeff621089649c0cfb50e55f8fc9c7642d61`, verified at
+`2026-10-31T03:13:36Z`. The canonical app, health/authentication, database and
+unchanged active home pass. Its stock worker boot and S3-to-fresh-native-CAS
+restore pass. A directly derived image adds only the tagged qualifier and
+provenance; the actual offline remote guest, partial checkpoint finalization
+and historical reopen pass. All seven alpha.13 canaries, including the four
+candidate attempts, and the temporary credential row were independently absent
+at `2026-10-31T03:17:30Z`. The tagged config now names the actual alpha.13 worker.
+See [delivery proof](delivery-alpha13.json) and
+[tagged runtime evidence](../../examples/execution/evidence/2026-10-31-alpha13-runtime/README.md).
+The active home retains alpha.7 until idle. This does not activate remote launch
+by default or qualify connected inference, accepted history or faster builds.
+
+All three alpha.13 native platform artifacts, publication JavaScript checks and
+separate TUI CI pass. Publication then stopped on four Mac socket fixtures:
+Darwin reports an exhausted accept queue as ConnectionRefused, one fixture path
+exceeded SUN_LEN, and another dropped its peer before the oversized-frame parser
+completed. Both npm publish steps were skipped. Next-tag corrections preserve
+the exact authentication, 8,193-byte rejection and deadline assertions without
+production changes. Both npm `next` tags remain alpha.7 as of
+`2026-10-31T03:18:20Z`; actual publication and fresh installations remain gates.
+
+Post-alpha.13 main contains the verified completion/prompt cleanup and retained
+Plan/reviewer resume-mode correction in `6ef9e41`. The alpha.14 candidate adds
+[partial checkpoint DATA publication](partial-checkpoint-publication.md) and
+[bounded connected networking](connected-network-transport.md). Neither path
+enables managed remote execution by default. Both are absent from the frozen
+alpha.13 images. Full v4 remains the active objective.
+
+Checkpoint publication retains the exact new source-complement bytes, plan and
+freeze/drain audit documents without hydrating inherited content or the private
+accepted seed. Rust, opaque native RPC, TypeScript and Cloud share the canonical
+fixture with above-JS-integer counters. A DATA bundle remains distinct from an
+accepted source/history or live execution grant. Transfer readers settle before
+their exact clone is released. Lost acknowledgment cleanup preserves uncertain
+retention rather than adopting a newer pin generation by name.
+
+The connected transport transfers an actual guest loopback listener to a host
+supervisor, validates its namespace and process witnesses, and dials only sealed
+public IPv4 pins. DNS workers, accepted connections, buffers and lifetimes are
+bounded. Settlement waits for actual owned workers and sockets. The standalone
+no-key TLS qualifier has a source-bound disposable Fly VM result below;
+transport tests do not establish provider inference or managed launch qualification.
+
+Candidate `96c7b25` passes the fresh production build and native checkpoint RPC,
+737 JavaScript tests with no failures, and all 59 TUI journeys. Two worker cases
+initially skipped for missing archive dependencies pass separately, leaving nine
+optional skips. The earlier coordinated Linux library/dashboard run passes
+1,139 tests with 12 explicitly ignored fixtures; the later network correction
+passes 17 units and five integration cases, including a failing old-code control.
+This is composed coverage, not one final successful full-workspace Rust command.
+See [local evidence](../../examples/execution/evidence/2026-10-31-alpha14-foundations/README.md).
+
+At `2026-10-31T04:18:26Z`, the corrected candidate passes the actual disposable
+Fly connected transport case: separate USER/NET, socket-namespace ioctl,
+loopback-only networking, zero capabilities/NNP, verified TLS1.3 HEAD with
+HTTP200, one DNS job/upstream and actual worker/process/socket settlement.
+The canary is destroyed and independently absent. Its derived image uses stock
+alpha.13 plus the exact candidate release qualifier; this remains distinct from
+an alpha.14 tag/deployment or provider inference. See
+[physical transport evidence](../../examples/execution/evidence/2026-10-31-alpha14-connected/README.md).
+
+The immutable archive test setup needed the shared Cargo target and SQLite/PTY
+native dependencies. Failed/stopped setup runs remain private; final checks bind
+the unchanged source and fresh binaries. Tagged Fly images, deployment and the
+real S3 checkpoint DATA smoke now pass as recorded above. Mac test CI, both npm
+publications and isolated installs remain the alpha.14 delivery gates.
+Host-only Journal authorization and Native CLI cleanup are applied/tested after
+the tag; the source transport remains private pending corrections. Managed
+defaults, private-jj acceptance, production
+build-cache adoption, fleet/migration and the remaining command cleanup remain
+full v4 work.
+
+The previous Cloud checkpoint, alpha.12, deployed as release 163 from
+`f609730d27ee7d02b1886eb343477d1c09aa7255`; the canonical app, health,
+authentication, database integrity and unchanged active-home instance were
+verified at `2026-10-31T01:28:36Z`. Its complete worker image passed an owned
+Fly bootstrap/runtime smoke, including packaged CLI/native/buddy, changed-remote
+Git/jj fetch and auxiliary tool entrypoints. A fresh worker restored the synthetic
+RunnableRoot from deployed S3 into its native CAS and retained it across helper
+restart. Six separate network primitive modes and five local execution plus
+four RPC cases passed on the explicitly supplemented qualification image.
+All seven canaries, including three earlier refused/failed fixture attempts,
+and the temporary credential row were independently absent at
+`2026-10-31T01:34:09Z`. The frozen Fly config still names alpha.11; the deployment
+explicitly overrides its worker image to alpha.12, verified in runtime config.
+See [exact delivery evidence](delivery-alpha12.json) and
+[runtime provenance](../../examples/execution/evidence/2026-10-31-alpha12-runtime/README.md).
+The active home keeps its running alpha.7 image until idle. This CAS-format
+round trip does not establish filesystem materialization or agent-launch latency.
+
+Both npm `next` tags still point to alpha.7, verified at `2026-10-31T01:34:20Z`.
+All three alpha.12 native artifacts and separate TUI CI passed. The board host
+preflight passed on both actual Mac platforms and Linux, and publication's
+JavaScript checks passed. Native tests then found one more Mac path fixture:
+the journal getter returns canonical `/private/var`, while the test expected
+lexical `/var`. The next tag canonicalizes only that expected temporary path.
+Both npm publish steps were skipped. The alpha.13 candidate has since passed
+the affected full Rust targets under a symlinked TMPDIR, 712 JavaScript tests
+and all 59 terminal journeys against its newly built production pair. Actual macOS CI,
+registry availability and fresh installation remain separate release gates.
+
+All three alpha.11 native artifacts and separate Mac/iOS and TUI CI passed.
+The publication job failed four macOS board fixtures before either npm publish
+step: three assumed a short socket path and one mocked only Linux's opener.
+A controlled long-TMPDIR run reproduces the old fixtures' three path failures;
+the corrected fixtures pass all ten cases, including an explicit long-home
+case. The Darwin opener selection also passes an isolated branch check on
+Linux; actual Darwin qualification remains the next tag's CI gate.
+See [fixture correction evidence](../../examples/board/evidence/2026-10-31-ci-fixtures/report.json).
+Registry availability and fresh installs remain separate gates.
+All three alpha.10 native platform builds, Mac/iOS and TUI CI passed. Its
+publication job then stopped on two managed-guard test path assertions. A
+symlinked TMPDIR reproduces both failures on Linux: child process.cwd() resolves
+the parent while the fixture compared its original spelling. Canonicalizing only
+the disposable fixture identity preserves exact refusal checks and changes that
+controlled run from 1 pass / 2 failures to 3 passes. The correction is in the
+alpha.11 tag; alpha.10 remains unpublished. Alpha.9 publication failed twice in
+the macOS remote-root HTTP fixture before npm publication. Darwin inherits a
+listener's nonblocking flag, while the fixture assumed blocking full-body
+writes. Alpha.10 normalizes accepted streams and adds forced
+backpressure tests, including the real engine-control handler. Do not retag
+alpha.9, publish by hand or treat its Cloud deployment as npm availability.
+
+The shorter startup context from alpha.4 is included. Partial-capture namespace4,
+the inactive PostgreSQL authority adapter and explicit internal managed App
+composition are included in Cloud alpha.12, alongside private managed storage,
+writer floors, board capabilities and paired native build artifacts. Alpha.13
+main-checkout work joins logical freeze, distinct partial RPC and Record2 data
+with physical execution drain; it is included in the frozen alpha.13 images. CLI publication,
+configured worker image and live adoption remain separate facts. The active
+objective remains the full plan.
+
+The deployed alpha.12 adds the
+[execution workspace ownership contract](execution-workspace.md), strict
+source-only remote selection and explicit network configuration/kernel
+primitives. It also corrects the Mac board fixtures and runs them before native
+compilation in each platform release job. Cross-review caught and closed a late
+checkpoint-custody gap: State now verifies its actual lock/directory/sidecar
+before and after checkpoint retention. Production build, all 1,466 Rust tests, 712 JavaScript tests and 59 terminal
+journeys passed; 19 Rust cases and 9 optional Node cases were skipped.
+[Exact local evidence](../../examples/execution/evidence/2026-10-31-alpha12-foundations/local-checks.json)
+keeps host-unsupported qualification separate. Npm availability remains blocked
+by the Mac journal fixture above. Remote activation and the new partial
+checkpoint/transfer protocols remain open.
+
+The alpha.13 tag implements the offline physical composition in
+source: jointly versioned Spec4/Binding3, separate partial RPC1, namespace5
+whole-effect admission and actual frozen-view ownership, Record2's explicit
+complete/partial families, and one-shot partial finalization after real kernel,
+RPC and FUSE drain. The host checks actual namespace descriptors against owned
+pidfds before guest launch and checks all five backend capability sets. The
+frozen guard and exact retained capture/evidence remain owned through the final
+authenticated receipt. Saved records expose historical data rather than new
+execution authority.
+
+The Native source factory uses a protected context, actual Node transport and
+fresh root admission. Its in-memory current-authority check is separate from
+bounded broker I/O and permanently fences failed/expired attempts. Full
+workspace compilation passed. Under a symlinked temporary directory, 61 execution
+units, 4 handoff and 7 RPC integrations passed; partial RPC/journal checks passed
+18 cases, Native source factory 9 cases and broker 16 cases (one existing ignored
+exporter). Corrected test-only file modes, missing imports, temporary-directory
+helpers and HTTP fixture routing retain their original failure logs. No product
+authorization checks were weakened. Aggregate Rust coverage now passes 1,540
+unique tests with 17 existing ignored cases. The original full commands found
+two test-only timing/path assumptions; controlled corrections and full affected
+target reruns pass. This is composed coverage, not one successful full-workspace
+command. Production TS/board and the paired native build pass, along with 712
+JavaScript tests (nine optional skips) and all 59 real terminal journeys. These
+checks use a symlinked TMPDIR. [Local check identities and coverage](../../examples/execution/evidence/2026-10-31-alpha13-foundations/local-checks.json)
+remain separate from tagged CI and delivery.
+
+One actual offline remote guest passed on Fly at `2026-10-31T02:44:05Z`, from
+the frozen candidate `c04b4c632206068900df9717b51c4120516e268e`. It scanned
+100,101 names, statted a shared 208 MiB logical File, kept a changed file open
+and mmap-held in a descendant, then returned the authenticated partial Record2
+after real process/RPC/FUSE drain. No unchanged payload or accepted seed was
+fetched. Five capture objects and two evidence objects survived GC; complete
+local pins remained zero. A second helper returned historical data without
+another factory or current shutdown authority. The caller's namespace/status
+witnesses stayed unchanged. All four owned canaries, including three earlier
+controller fixture failures, were independently absent at
+`2026-10-31T02:46:57Z`; the active home's instance/image stayed unchanged.
+See [candidate source, image, exact proof and limitations](../../examples/execution/evidence/2026-10-31-alpha13-candidate-remote/README.md).
+This derived image uses the stock alpha.12 worker plus the pinned candidate
+qualifier. It is not tagged alpha.13 delivery or a build/agent-start benchmark.
+
+Current composition:
+
+```mermaid
+flowchart TD
+    H[Held execution reservation] --> S[Host source, cache and current authorization]
+    S --> V[Namespace5 view and partial RPC]
+    V --> N[Owned wrapper: new USER, MNT and offline NET]
+    N --> A[Parent verifies namespace FDs and acknowledges]
+    A --> P[Private PID tree, restricted root and zero capabilities]
+    P --> B[Parent verifies actual backend before managed readiness]
+    B --> D[Authenticated stop, kernel reap, RPC settlement and FUSE unmount]
+    D --> F[Owned freeze, fresh capture nonce and retained evidence]
+    F --> R[Record2 fsync, authority recheck and authenticated receipt]
+```
+
+This candidate does not enable Native remote launch by default. Next composition
+gates are a separate host source authorizer during guest ingress retirement,
+remote stop budgets, partial checkpoint transfer/publication, private-jj
+projection/history acceptance, connected provider networking and physical legacy
+retirement. A replicated byte-data candidate and accepted versioned history are
+different facts. A future publication must retain the proof closure as well as
+the RunnableRoot graph; uploading a few extra unreferenced Blobs is insufficient.
+
+Alpha.11 includes:
+
+- [Private managed storage](managed-storage.md), explicit journal schema5 opt-in,
+  receipt-scoped recovery and pre-startup Native refusal. Focused checks cover
+  55 managed cases, 24 owner cases, 11 Runtime cases and 41 journal cases. The
+  exact tagged alpha.10 Linux CI artifact refuses the floor without rewriting
+  ownership. [Component proof](../../examples/execution/compatibility/evidence/2026-10-30-alpha11-floor/README.md).
+  TypeScript/alternate-home physical retirement, same-run retry and activation
+  remain unimplemented.
+- [Private board sessions](board-access.md), authenticated reads/control/SSE and
+  a bounded native browser callback. A disposable real Chromium run passed
+  bootstrap, reload, usage, live updates and daemon-restart behavior with
+  synthetic data. A subsequent Rust test-only temp-path correction keeps all
+  fixture endpoints within their disposable root on macOS too.
+- One native Cargo graph and complete, source-bound manifests for all three
+  release platforms. Frozen alpha.10 inputs qualified the graph with one
+  engine/bridge compilation each; that warm-cache run took 599.8s with two jobs.
+  It is not a controlled speedup measurement. Local candidate checks passed:
+  350 engine, 1,030 native, 32 bridge and 711 Node tests (9 optional skips), all 59 real
+  terminal journeys, production/Cloud builds and the context audit. The prior
+  full-workspace command exposed an obsolete test that bypassed production's
+  EOF-aware PTY wait; its summary assertion was retained and the corrected
+  Native/unit suites passed. Cloud rollout is verified; registry/fresh-install verification remains pending.
+
+The separate owned NEWNET/TUN observation is in
+[the networking gate](managed-network-isolation.md). It changes no product
+network defaults and does not establish egress, packet-helper or preview support.
+
+Alpha.10's mounted partial-capture proof passed
+as root and UID1500, retaining dirty chunks across lost replies, later FD writes,
+mmap and collection without creating a complete pin. Capture through data ACK
+took 711/724 ms in those individual loopback samples. The owned VM was deleted;
+[frozen source, failures and checksums are archived](../../examples/vfs/evidence/2026-10-30-partial-capture/README.md).
+Complete remote checkpoint/observation and accepted-source publication stay
+closed until their separate consumers are integrated.
+
+Local release checks passed: engine baseline 338 (before the subsequent auth
+control edits) plus 11 affected execution/control tests afterward; native 1,002;
+VCS bridge with CLI 32; JavaScript 650 passed/9 explicit skips; real terminal 59.
+TypeScript/Cloud compilation, optimized paired build, context audit, public
+artifact checksums and the inactive infrastructure validator also passed.
+These local checks are separate from the linked Cloud proof and pending npm gate.
+
+The inactive Cloud PostgreSQL adapter passed 19 actual Node/pg transaction and
+crash/recovery tests on PostgreSQL17.11. A new native process-local lease guard
+passed 18 tests and the shared duration vectors. Neither activates a project,
+connects the production control plane nor qualifies provider failover/RPO.
+[Adapter evidence and remaining enrollment/provider gates](../../examples/fleet-authority/evidence/2026-10-30-node-adapter/README.md).
+
+The managed App path now has bounded preparation, fsynced reservation/assignment,
+actual backend process binding and authenticated stop/checkpoint receipts. It
+is an internal API without a public/default caller. Selected Codex key bootstrap
+passed against actual 0.166.0 with ephemeral storage and no model calls; its
+mandatory private v2 frontend gate, current TS consumer refusal and old-client
+recovery qualification are implemented/tested. See [auth evidence](../../examples/agent-runtime/evidence/2026-10-30-managed-auth/README.md)
+and [released-client refusal and its missing-owner limitation](../../examples/execution/compatibility/evidence/2026-10-30-alpha9-refusal/README.md).
+Default activation additionally needs a separate managed record namespace and
+durable protocol floor under the real owner/quiescence boundary.
+A new marker cannot physically fence an older native client.
+[Managed launch contract and open gates](managed-launch.md).
+
+Source review also found a concrete managed-network activation gate: the helper
+shares host TCP loopback, while the normal board serves its browser token to
+loopback clients. Filesystem/PID isolation cannot authenticate that raw HTTP
+client. No live exploit was attempted. Keep managed launch inactive until
+controlled guest networking and board access close that path. Cloud worker
+control and CAS retain their separate bearer/account checks.
+
+Next implementation contracts are [controlled networking and board access](managed-network-isolation.md),
+[remote launch and quiescent partial publication](remote-managed-launch.md),
+and [public provider caches with private CoW state](provider-runtime-cache.md).
+The last addresses a measured fresh-home finding: Codex populated roughly 87 MB
+across 5,502 public plugin-cache files without inference. Its supported
+catalog-free policy is a proposed selected profile, not a change to installed
+user plugins or a demonstrated cold-start speedup. The [provider rollout](authority-provider-rollout.md)
+and default-disabled RDS foundation are unapplied; no database or new persistent
+provider spend was created. Full fleet ingress/activation and migration remain open.
+
+The alpha.11 build-pipeline changes unify native and its jj companion under
+`rudder-vcs-bridge/cli` and validate exact-source paired prebuilt manifests.
+Forty-seven focused JS cases pass. A read-only frozen alpha.10 build compiled
+each workspace library/binary once in 599.79 seconds with two jobs and reused
+dependencies. That run qualifies the command/outputs, not a controlled speedup;
+integrated current-source tests and all three release platforms remain pending.
+
+- `engine/` provides typed immutable roots, local checksummed CAS, staged
+  publication, retained closures and conservative collection. Source,
+  environment, full private view and hardlink topology have separate identities.
+  Checkpoint v3 retains the topology; validated build inputs include it in both
+  Rudder and native frontend action contracts. Local retention cannot assert
+  remote durability by itself.
+- The opt-in persistent native host owns one checkout after its terminal views
+  disconnect. It fences compatible owners with an OS lock and journal epochs,
+  refuses known live legacy schedulers, and exposes authenticated control and
+  existing attach views. This extracts the existing App; it is still one project
+  per host process. Fleet authority ingress/activation and the final machine-wide
+  multi-project actor have not been implemented; the inactive tested PostgreSQL
+  adapter is a foundation for that work.
+- The SQLite WAL journal records capability-scoped commands, effects, mailboxes,
+  explicit acknowledgments, topic versions and exact-root integration evidence.
+  Retries by the original sender return historical receipts after a recipient
+  restart; they never route into its replacement. Started effects recover as
+  uncertain and require reconciliation. Exact live thread/turn observations gate
+  controls; a pending command rechecks its original grant and both run epochs
+  before dispatch. Retired pending targets receive a rejected receipt; started
+  effects remain uncertain. Real Claude 2.1.314 and Codex 0.166.0 engine/dashboard
+  steering passed, including attributed peer input and explicit same-thread
+  resume in that historical profile. Automatic idle delivery is now wired through
+  journal claims and the Native owned actor; actual backend/profile wake and
+  model adoption remain separate qualification, and delivery never supplies ACK.
+  Peer resume and interrupt-then-replace are refused pending tool/child
+  reconciliation; exact simple-interrupt receipts and ActiveAppend remain.
+  Codex model-turn interruption can leave a yielded shell running until process
+  cancellation or engine shutdown. See [actual provider evidence](../../examples/agent-runtime/evidence/2026-10-30/README.md).
+- Rudder's Rust VFS has immutable prepared directory indexes and private
+  persistent inode/namespace deltas. Actual mounted Fly tests cover inherited
+  directory rename, raw names, hardlinks, shared mmap/fsync, atomic saves,
+  open-unlinked files, strict busy unmount and server-abort recovery. A 100,000
+  child directory rename visited no children. A rootless UID1500 self-mapped
+  user/mount namespace can open a boot-delegated `/dev/fuse` without a custom
+  privileged broker. The explicit restricted execution helper also passed the
+  real `TerminalPane` path with Node/gcc, private roots, external broker auth,
+  credential/CAS/peer denial, Ctrl+C and witnessed crash teardown. Its owned VM
+  was deleted and absence verified at `2026-10-30T13:19:39Z`. Default launch,
+  managed view/VCS integration and uncertain-run reconciliation remain open.
+  [Execution proof and limits](worker-execution.md), including uninterruptible
+  I/O limits, are separate from [VFS qualification](vfs-qualification.md).
+- The next unshipped storage track adds 4 MiB immutable chunks, bounded radix
+  directory shards and ancestry-free SourceRoot/EnvironmentRoot descriptors.
+  A frozen optimized Buck2 workload using those formats returned actual Rust
+  and TypeScript results: 6.322 s for a fresh graph and 3.261–3.872 s warm,
+  reusing an existing local prepared CAS/SDK. SDK verification remains a large
+  repeated cost; these are not download or agent-launch timings. See the
+  [exact build inputs and stage reports](../../examples/build-profile/evidence/2026-10-30-runnable-v2/README.md).
+- Scoped lazy remote sessions authorize objects through verified parent paths,
+  with bounded cache/source workers and stale-attempt rejection. Mounted Fly
+  root and UID1500 cases fetched only two data chunks from a 208 MiB file while
+  exercising private writes, mmap, rename/link/unlink and strict cleanup.
+  Constructor/fork measured 49–55 ms after fixture preparation. The source was
+  authenticated loopback HTTP, not production S3 or cross-machine latency.
+  [Frozen mounted evidence](../../examples/vfs/evidence/2026-10-30-remote-ranges/README.md).
+- The bounded remote directory pager now passed actual mounted `getdents64`,
+  tiny-buffer cookies, seeks, rewind across mutations and reopen on Fly as root
+  and UID1500. Both listed 100,101 names without File/Blob reads; first listing
+  took 24.564–25.579 s. This is a cold metadata cost to improve, separate from
+  root construction/private fork (70–115 ms in those samples). The final helper
+  matched all 182 qualified inputs and its VM was deleted. See the
+  [exact paging evidence](../../examples/vfs/evidence/2026-10-30-remote-readdir/README.md).
+- Individual-object retention and partial delta plans now preserve new bytes
+  across collection without hydrating their inherited closure. Transfer clones
+  only its own retention and preserves native receipt generations as opaque JSON.
+  The scoped upload path sends new units and lets Cloud validate the complete
+  resulting directory before issuing a replicated data receipt. Eight partial
+  retention cases, the real native wire case, 20 transfer/download cases and 51
+  Cloud CAS regressions pass. Producer checkpoint/journal integration and the
+  default launch path remain separate gates. See [partial retention](partial-retention.md).
+- The native v3 helper now composes its own protected VCS service and real
+  external capability broker, then settles its writers before finalization.
+  Mounted local-root cases exercised jj status/diff/log/new/edit, open-FD writes
+  and real journal epoch revocation. The revoked attempt produced no checkpoint;
+  all owned process descriptors settled. These were debug/stripped binaries,
+  not optimized latency or real-model/default-launch proof. See
+  [native helper evidence](../../examples/vcs/evidence/2026-10-30/native-v3/README.md)
+  and the [managed-launch next slice](managed-launch.md).
+- A pinned Buck2 profile builds real Rust and TypeScript against a real native
+  REAPI cache. Archived whole-build warm samples range from 2.45 to 3.56 s.
+  The latest topology-aware matrix measured a fresh-graph remote hit at 3.216 s
+  and a source edit at 5.287 s under concurrent development load. Prepared-index
+  lookup is 2 ms; initial preparation/materialization remains substantial. This profile does
+  not yet build arbitrary Cargo/build scripts or prove cross-engine action
+  interoperability. See [build profile and raw samples](build-profile.md).
+- The new remote store has a retained/versioned S3 bucket and a Fly OIDC workload
+  role. CloudFormation `rudder-fabric-v1` completed at
+  `2026-10-30T11:29:29.573Z`. Workload-role conditional-write, no-overwrite,
+  immutable-delete denial and staging-renewal checks passed at
+  `2026-10-30T11:38:28.450Z`. Default-profile admin credentials remain outside
+  application configuration; the app uses temporary workload credentials. The
+  cache-miss policy update completed at `2026-10-30T13:01:57.637Z`: the dedicated
+  bucket allows the role to distinguish missing keys (404) from denial (403).
+  At `2026-10-30T13:09:26.122Z`, the actual Fly OIDC role passed a loopback test
+  of the current HTTP handler: fresh miss, conditional upload, hit, root
+  publication/read, identical download and immutable-delete denial. Deployed
+  login/worker authentication subsequently passed against the deployed API on
+  two independent workers at `2026-10-30T14:40:53.368Z`.
+  [Safe reports](../../examples/fabric/evidence/2026-10-30/README.md).
+- The Cloud CAS API streams large downloads and spools uploads privately before
+  checksum-verified conditional S3 writes. A real 70 MiB S3 round trip and strict
+  root publication passed at `2026-10-30T12:14:20.550Z`: upload 964 ms, download
+  745 ms, publication 884 ms, peak process RSS 126,623,744 bytes. That check used
+  the admin default profile; deployed worker authentication is a separate gate.
+  Blob limits are 256 MiB; directory metadata remains bounded at 4 MiB. Large
+  flat directories in that deployed baseline are not a general scale claim;
+  bounded sharded metadata is in the unshipped track above.
+- One persistent framed native helper supplies pinned source and staged target
+  transfer adapters. The actual HTTP handler, 70 MiB blob and an independent
+  fresh native CAS are tested together, including loss/corruption and u64
+  checkpoint cursors. Two fresh alpha.4 Fly workers restored the same
+  767,656,523-byte prepared environment through the deployed API, then built a
+  Rust library/dependent library and compiled/ran TypeScript. Cold download was
+  132–152 s; eager export took about 49 s. This is the full-transfer baseline,
+  not a lazy-launch claim. Both VMs and temporary credentials were removed.
+  See [transfer contracts and proof](fabric-transfer.md).
+- Startup prompt and generated guidance now request relevant context on demand.
+  The main role contract is 1,167 bytes, worker contract 915 bytes, and Rudder's
+  own always-loaded `AGENTS.md` is 5,820 bytes, down from 193,536. Full reference
+  material remains linked. Current context audit has no findings. See
+  [prompt context](prompt-context.md).
+
+Both npm `next` tags now resolve to alpha.7, and fresh isolated Linux installs
+ran the packaged CLI and native binary. Alpha.7 fixes the Mac PTY teardown,
+inherited checkout-lock and broker response problems that blocked alpha.4/5/6
+publication. The full release workflow passed on all three native platforms,
+including 931 Mac dashboard tests, 27 library tests and all 59 terminal journeys.
+The stable `latest` tag remains 3.9.13. See [current delivery proof](delivery-alpha7.json).
+
+The alpha.4 release candidate passed the production and Cloud builds, 1,063
+Rust tests (16 ignored), 577 Node tests (8 additional optional skips), and all 59
+real-terminal tests. The final output changes also passed the focused Cloud
+home and PTY regressions: completed command output remains readable, failures
+include drained final text, and a managed backend still needs typed completion.
+The context audit has no findings. Source/evidence inspection found no matches
+to the configured AWS, Claude or Codex secrets, including compressed sources.
+These are local checks; the tag workflow, registry and rollout remain separate.
+
+## Dependency-ordered continuation
+
+1. Finish and ship the current verified track with actual npm/Fly identities,
+   installation/runtime smoke checks and a truthful rollout record. Reserve a
+   complete stable-v4 claim for the full launch gates.
+2. Reproduce E0 baselines on representative TS/Rust, dependency-heavy JS, Python
+   and native Apple workloads. Publish workload manifests and raw samples.
+3. Ratify serialized source/environment/checkpoint/command contracts, durability
+   levels and ownership transfer. Build filesystem/crash/recovery fixtures first.
+4. Qualify E1/E2 candidate materializers on disposable Linux views and two Fly
+   workers; compare entry-count/byte scaling, copy-up, lazy hydration, publication
+   pins and GC races. Do not mount experiments over user checkouts.
+5. Extract the persistent Rust engine with one authority flag and legacy attach
+   adapter. Prove surface-close survival, restart deduplication and old-owner
+   quiescence before giving it scheduling control.
+6. Implement durable roots/CAS, private workspace views and checkpoint export,
+   then remote publication/retention/restore. Meet E5 fault and filesystem gates.
+7. Convert one canonical build workload to the Rudder Buck2 profile, compare
+   Bazel/REAPI, prove action-key invalidation and measure completed builds.
+   Branch-aware graph/compiler reuse is a separate qualified extension.
+8. Extract/generalize adapters and add transactional mailboxes, decision/topic
+   versions, scope authority and active peer controls. Prove E6 races and real
+   Codex/Claude behavior; PTY output is never an acknowledgment.
+9. Embed/bridge pinned jj, implement fenced exact-tree/version integration and
+   migration/export/undo. Complete E7/E8, including offline Mac behavior.
+10. Add cache-aware fleet placement, migrate each surface to engine projections,
+    retire duplicate schedulers/file fan-out/command machinery only after caller
+    migration, and complete E9/E10/E11 recovery/scale/release drills.
+
+Workstreams may overlap after shared contracts and dependencies are stable.
+Keep one editor per file and one integration/release owner. Do not let parallel
+implementation turn independent journals into competing project authorities.
+
+## Verification and delivery record
+
+Current checks: root production build, Cloud TypeScript build and typechecking
+pass. Alpha.3 Node suite: 483 passed, 8 skipped, 0 failed (491 total); native suite:
+859 dashboard tests plus 19 library and 1 terminal-color integration test pass
+(10 documented ignored tests). Persistent cache/boot behavior, shared terminal
+and private-preview fixtures pass. A 1,000-write burst coalesced into one WS
+frame in the loopback fixture; this is not a production latency measurement.
+Real release-binary terminal end-to-end suite: 53 passed, no failures/skips.
+It exercises natural automatic planning through approval/workers/merge,
+discussion scope and command retirement. Final Node suite includes the added
+legacy sail guard. Alpha.3 CI also passed on the release runner: 481 Node tests
+passed with 10 optional skips, 880 native tests passed with 10 ignored, and all
+53 real-terminal tests passed. All three native platform artifacts built.
+
+Before closing this implementation track, replace pending entries with exact
+revision, version, CI workflow result, published npm dist-tag, worker image
+digest, Fly release/deployment identity, canonical URL, UTC verification time,
+checks and active-home adoption state. A pushed commit is not a Cloud rollout.
+
+### Earlier alpha.7 CLI and Cloud delivery checkpoint
+
+[Cloud release 159](delivery-alpha7.json) runs alpha.7 revision
+`a24bc4171d55ce9554068cdeb1b6e228b461d54d`. The canonical app/health returned
+200 and unauthenticated app/CAS access returned 401. The deployed process reports
+the alpha.7 worker pin, SQLite quick-check is `ok`, and the existing active home
+record survived deployment. Exact UTC times and image digests are in the report.
+
+The actual alpha.7 worker image passed CLI/native/provider checks as UID1500 on
+a fresh Fly VM; that VM was deleted and absence verified at
+`2026-10-30T16:23:00.385Z`. Fresh installs of both npm packages passed at
+`2026-10-30T16:29:09.114Z`. Existing active home `8edd225a7d0378` remains started
+on its original 3.9.12 instance; no live agents were restarted. Full fleet adoption
+and local Mac installation are not claimed.
+
+The deploy used the frozen tag source with an explicit alpha.7 worker-image
+override. Tracked `cloud/fly.toml` still pins alpha.4; update that pin as part of
+the next versioned product release before redeploying from the checkout.
+
+The next uncommitted slice adds bounded File chunks, paged directories, explicit
+V1/V2 streaming tree adapters and ancestry-free RunnableRoot metadata. New roots
+require SourceRoot v2 with a projection policy and EnvironmentRoot v2 with
+content-only installer inputs. They cannot pull checkpoint/source ancestry into
+launch; history pins stay explicit. Rust/Cloud validators and a real
+native→HTTP→native round trip cover these formats, but default consumers and
+deployment remain open. Private block writes/live observations and the embedded
+jj provider/journal publication bridge are being integrated in separate owned
+files. These are not yet the qualified default agent-launch path.
+
+### Earlier alpha.3 delivery checkpoint
+
+Runtime source: `f1403d43b739a4ef61caa7c76ce7cee6fcab0eec`, tag
+`v4.0.0-alpha.3`, on `origin/main`. The
+[release workflow](https://github.com/exla-ai/rudder/actions/runs/41034639170)
+succeeded, including both npm uploads with `next` and signed provenance.
+
+Fly.io control-plane release **157**, machine instance
+`01M663AJSZP0492409NN1YEXP4`, runs that revision. The canonical
+[Rudder Cloud app](https://rudder.exla.ai/app), health endpoint and app asset
+returned HTTP 200; unauthenticated state access returned 401. Verified
+`2026-10-30T10:02:07Z`.
+
+- Control image: `sha256:32dac353e59cf60a9434881d836794927a3c154710f762b71db1281a974c30da`.
+- Worker image: `registry.fly.io/rudder-workers-exla:4.0.0-alpha.3`, digest
+  `sha256:6dc1d1fbbc30bee1ff18365e1332bf2124d0c92b8e946d7d51a380f680e1c2dd`.
+- Seven checks passed inside a disposable VM using the actual image, including
+  native Unicode/control keys, packaged routing/ownership, real WebSocket/PTY
+  roundtrip and output/control ordering. All temporary canary VMs were removed.
+- Real private HTTP Serve returned the exact fixture body through `tailscale nc`.
+  The temporary listener/route were removed and all seven prior routes preserved.
+  This was same-host userspace/Serve proof, not a laptop/phone latency result.
+- Existing homes were left on their running images. The configured idle updater
+  adopts the new image without interrupting active agents; full fleet adoption
+  is not claimed.
+
+Npm accepted both uploads but initially reported package processing. At
+`2026-10-30T10:06:35Z`, `@viraatdas/rudder@4.0.0-alpha.3` was available with
+the correct Git revision; an isolated install, CLI version, Linux native smoke,
+new modules and all three platform files were verified. Primary
+`@exla/rudder@4.0.0-alpha.3` still returned **404**. A later registry check
+confirmed both packages resolve alpha.3 through `next`; that blocker has
+cleared. No republishing or retagging was needed.
+
+[Structured evidence](delivery-alpha3.json) contains the machine, image, CI,
+registry, canary, preview and cleanup checks. Refresh provider/registry state
+before making a later claim that it is available everywhere.
+
+### Storage restart point
+
+[The Linux E0/E1 report](phase0-linux-evidence.md) and its exact runner/raw archive
+are the first measured storage evidence. Warm view construction worked on the
+ext4 volume, with empty initial uppers and scoped parent/sibling write isolation;
+native reflinking did not. Namespace startup, agents, jj, real compilation,
+network, remote hydration and durability are outside these mount timings.
+
+This earlier baseline has since been extended by the custom VFS, persistent
+project engine, real peer adapters, build-profile and two-worker restore
+evidence above. Next: finish the Mac release gate, qualify private block writes
+and lazy remote hydration with the VCS provider, wire managed agent launch and
+exact-tree publication, then complete fleet authority, migration, representative
+build workloads and scale/recovery gates. A project-local engine is not yet the
+final machine-wide/fleet architecture.
+
+Release preference was asked asynchronously: v4 prereleases on `next` versus
+3.x foundations or waiting for all gates. The user confirmed continuing to
+publish even unstable increments. Use the established v4 `next` channel.
+An alpha must not move npm `latest` or masquerade as complete stable v4.
+
+The first alpha CI run built all three native artifacts, then caught a macOS
+test-fixture assumption about GNU `timeout`. Publication was stopped; no alpha.1
+package reached npm. The fixture now supplies its own command wrapper. Keep
+the original tag and cut alpha.2, then verify the complete release workflow.
+
+Alpha.2 passed all CI gates and was accepted by npm with signed provenance.
+Fly control-plane release 156 and the alpha.2 worker image passed deployment
+and disposable-VM checks. Npm reported asynchronous package processing: the
+legacy name became visible while the primary name remained pending.
+
+The next incremental fix, alpha.3, tightens legacy preview ownership so `foo`
+cannot capture `foo-bar`'s sibling workspace. Modern nested workspace paths,
+exact legacy group/hash boundaries and ambiguous-owner rejection have focused
+regression coverage. Current source creates workspaces under the repository's
+excluded managed directory; earlier guidance about a sibling default was stale.
+
+The user confirmed continuing to publish even unstable increments. Keep the
+implementation/deployment facts distinct from the still-planned v4 engine,
+distributed CoW storage, build graph and durable coordination workstreams.
+
+## Retained image directory identity, unreleased
+
+The current image importer and runtime selector/importer owners retain bounded
+original O_PATH directory descriptors through later export/task custody. Full
+held and named metadata must still match; no inode change is ignored or adopted.
+Exact paths share one owner, incomplete captures remain refused, and actual
+process limits are checked without raising them. Import directories are checked
+once per deep validation instead of retaining duplicate unheld stamps.
+
+The affected library run passed 21 tests, including seven real directory/FD
+fixtures. Runtime capture passed eight tests, including five new anchor cases.
+The first compile failed because native has no tempfile dev dependency; the
+tests now use UUID-owned standard-library fixtures. The earlier complete native
+1,306-pass run precedes this change. The new frozen 30d source image built at
+12:53:08Z with digest `sha256:779f0d447371f232e51dac92abf3dbc8556272d2d97f3566842fff2fb5c40b15`.
+Its full manifest is `7ef992b11aac3e77df3661969ab67398ab1d67396a0786d8622f719e2d4417fc`.
+The matching Bookworm test-image build is still active. Installed full-tree and
+kernel verification remain pending. The original frozen-source metadata inherited
+an older capture timestamp; the actual raw source manifest supplies the correct
+capture time, with an explicit private correction preserving the original receipt.
+
+A separate compiler artifact constructor now exists under
+`cloud/worker/managed-compiler-v1/`. Eight offline tests pass. Its first actual
+remote build installed declared snapshot prerequisites and reached Rust input
+capture, then refused source file ownership/mode. The failed construction is
+retained. The explicit isolated-source metadata normalization keeps original
+byte hashes and the strict output verifier. All ten offline tests pass. The
+fresh A2 build and complete verifier agree on 1,047 entries/852,319,618 logical
+bytes and manifest `add56ea6ade5411145b026094f63d8d5838e38b58d397d09749027090d346d0c`.
+Its separate image digest is `sha256:88d25bcd2d359fa6c829a9126d96011b17d197b23307f997e2406e00bc5d562f`.
+[Construction evidence](verification-managed-compiler-artifact-working.json)
+keeps installed execution, compiler preparation custody, REAPI hits and the
+production App caller unqualified. The current managed runtime image and its size limit remain
+separate from this compiler artifact.
+
+The actual V14 full-image run failed at a later baked-file guard at
+13:07:24Z. The original helper exited1 after288,674.56ms with
+`image DATA verification file identity differs`; the prior filesystem-consistency
+error did not recur. This checks baked-file regular type, UID/GID, mode, link
+count and installed/rebuilt length, so the precise mismatch remains unproved.
+No kernel probe was reached. Original child/pipes settled and exact owned VM
+destruction plus two absence checks passed. A read-only same-image manifest
+comparison is being prepared before another complete CAS import. The helper
+now reports the actual guard fields and lengths; its criteria are unchanged.
+
+The full current Rust run224 was stopped by the disk guard before completion,
+with no test assertion failure reported beforehand. A private hash/identity plan
+removed1.21GB of obsolete Root-generated debug ELF/rlib artifacts, preserving
+current outputs and original receipts. Run225 repeats the complete suite with
+two test threads and the original disk floor. Neither incomplete run is green
+release proof.
+
+The complete Rust225 run passed2,257 tests with zero failures and57 ignored at
+13:21:58Z. TUI226 then passed all59 checks against the freshly compiled native
+binary. These precede integration of the new retained-preparation API. Its
+first targeted run passed23 and exposed one fixture using the wrong FileNode
+import API. The corrected actual StagedContentStore fixture passed all24 normal
+cases, with one subprocess-only probe ignored standalone. The SQLite regression
+invokes that probe explicitly and verifies main-file lock preservation.
+
+The V14 metadata-only diagnostic passed every installed baked-file guard and
+canonical/pin binding. The namespace-only diagnostic then examined all18,989
+expected regular files,2,096 required parents and22,949 namespace entries in
+1,958ms without reading payload bytes. Exactly one extra empty regular file was
+present: `/usr/bin/swapon.original`. All expected types/lengths matched.
+[Diagnostic evidence](verification-managed-baked-image-namespace-working.json)
+keeps raw payload hashes, full directory CAS and the old rebuilt length unproved.
+The managed Docker recipe now declares that exact empty backup before image
+pinning; no filesystem exclusion or validation criterion was weakened. Its
+16 asset tests passed with two explicit skips. A fresh full-image run is pending.
+
+The actual compiler component image built after correcting a missing verifier
+COPY in its native builder. Both first VM attempts stopped in the complete
+artifact verifier before compiler workloads. Both exact VMs were destroyed and
+independently absent. The first recovery omitted verifier streams; corrected
+recovery retained empty before-verifier streams from the bounded observation.
+No compile/isolation/cache-hit success is claimed. Immutable runtime CAS
+composition is the next performance slice: current full-image imports take
+about289s and should not become a per-machine startup copy requirement.
+
+## Immutable image backing and bounded Git imports, unreleased
+
+The new build-only `rudder-image-preseed --bake-cas-v1` path writes a complete
+immutable image CAS directly to its fresh output, with the original two-pin
+import acknowledgment, exact object inventory and protected files. Its reader
+passed 14 component tests; the emitter compiled but has not yet run against a
+complete worker image. A composed local/image reader passed 16 tests. It falls
+back to the image only for a proved missing local object, and refuses corrupt
+or replaced local content. These are data components; they do not enable the
+managed execution path or establish a complete writable workspace checkpoint.
+
+The repository-sized source fixture uses the exact 2,011 frozen Rudder files
+plus explicitly generated reachable Git history. Its first cold import failed
+the original 30-second limit while writing loose Git objects, before projection
+or seed publication. The bounded pack importer now validates the full reachable
+closure and publishes indexes last, retaining failed files and their original
+owners. Seven new tests and all 15 existing import/initial-source regressions
+pass. The real 72 MiB incompressible shard fixture failed its original 30-second
+import deadline in a debug build (run236). The optimized release shard check
+(run237) passed: its whole fixture took 5.63s, including genuine input creation
+and independent pack/index/object-reader validation. Compilation took 6m51s
+and is excluded from that fixture timing. The full repository release rerun
+is pending; startup speed is not yet qualified. Limits and deadlines have not
+been increased. [Component evidence](verification-managed-image-cas-working.json)
+preserves both the failed debug run and the optimized result.
+
+The optimized repository run238 passed its complete original cold phase in
+11.7017s, including actual history import, verification and seed publication.
+Independent inspection verified 15,031 Git objects across three packs. Acceptance
+then failed the unchanged-leaf reuse assertion: 103 source files have mode0600,
+while Git materializes them as0644. Their 457,279 bytes plus the edited file's
+55,849 bytes exactly account for all 513,128 bytes reread. The production reuse
+fix compares exact content/size and Git's executable bit, preserving raw modes
+in Source DATA. Run 243 passed all 57 VCS/projection checks, including both new
+mode tests. The full release rerun is pending; the fixture assertion is unchanged.
+
+The build-only baked profile now runs through an explicit Docker argument.
+Its first image failed native compilation because the successor source owner
+initializer missed the new retained import carrier. The corrected successor
+shares the predecessor's actual carrier; a new frozen capture built successfully
+at14:20:35Z, source5e4e101, image digest439a923. Its actual inventory contains
+22,175 objects totaling1,974,041,724 bytes. This is build proof, not deployment,
+installed VFS verification or executable runtime admission.
+
+The readonly image VFS and existing Adapter now read directly from retained
+composition, validate the declared closure and explicit hardlinks, and refuse
+writes/checkpoints/raw-FD fallback. Review fixed a late request clearing its
+floor slot before reporting expiration. The first compile caught an old direct
+mutable-lock use; the corrected existing custody path requires the actual lock
+and refuses readonly floors. Run240 passed14 library VFS checks with four
+explicit physical/Root skips. Broader VFS regressions remain pending.
+
+
+### Current continuation: ownership and staging producers
+
+The ordinary source path correctly requires actual fresh storage, PostgreSQL
+acquisition and a Root/Native owner. No qualified Fly suspension/database
+clock-step receipt exists. ProviderFencedV1 is therefore being implemented as a
+distinct new-project ownership mode, with no timer-based replacement. Its real
+first-owner issuer, constraints rejecting older writers and physical replacement
+coordinator still need qualification; unsupported replacement must stay closed.
+This is not a ClockSafety ready flag or an exception to source admission.
+
+The staged physical sequence is compiler SDK qualification and explicit SDK
+activation, runtime qualification and explicit runtime activation, then a fresh
+ordinary home under the same immutable policy. Original known-commit publisher
+permits and real admin authority must drive activation. The runtime permit can
+supply its exact image-qualification tuple; storage/service/S3 admission remains
+separate. The updated control image d3fd8c26a294319102806d101adcbe86bd8dfa63d468b15c9655a102a4edb712
+was built only. An isolated staging app and read-only disposable identity-probe
+machine were subsequently created; the machine has been destroyed. Its context
+is fixed at 5b9d300866ba97f331aa5587f5bc8111179ee9a8de9713b3e3e0d3f1a79584d8.
+It predates the new activation/source-only/provider-mode changes and will need
+another coherent build after their integration. A read-only default AWS profile
+check at 20:32:32Z confirmed versioning on the existing Rudder fabric bucket;
+that does not issue a staging S3 backend or service credential.
+
+### 2026-11-01 20:44Z: source trigger, staged activation and actual S3 identity
+
+The source-only trigger is integrated exactly from sealed manifest
+`920f1f72684dd2bf5d0a440395d7b1b31029464416ef39d59f507b0fb9068dd6`,
+27 targets. Cloud compilation and all eight new Node command/config/actual-script
+fake-transport checks pass. Native runs368/369 pass all seven new fixed-source/wire cases;
+related machine-entry and SDK-origin runs370/371 pass sixteen and four cases. The staged
+SDK activation, runtime activation and distinct ordinary-home flow is also
+integrated exactly, 17 targets, manifest
+`972ec7ab5fd965c45c1c639d2958545f4d801402fa8ca74a9662ad504480c96d`.
+Its three local permit-refusal and actual listener/WebSocket tests pass. Full
+Cloud compilation currently awaits the separate provider-fenced ownership type
+and producer implementation. No physical SDK/activation/build success follows.
+
+The isolated `rudder-v4-qualification` Fly app, dedicated versioned S3 bucket
+and restricted workload role now exist. Actual Fly OIDC plus the same
+`S3FabricObjectStorage.fromWebIdentityForImmutableBatches` adapter passed real
+versioning/lifecycle/policy readback in 1,037ms, with all IO settled and no
+objects written. [Identity evidence](verification-staging-s3-working.json)
+records the original image/VM/instance and exact cleanup, two absent inventories
+and unchanged live home at 20:43:46Z. This is a workload/backend component proof;
+the later staging process must qualify its own original adapter again. No Root,
+compiler, storage-role activation, project acquire or production deployment is
+claimed by the readback. Shared SDK cache reuse remains disabled.
+
+The staged flow review found its 200 status polls at 100ms could reject a valid
+25-second build before work30 elapsed, and three cases could exceed the global
+512-message cap. Root changed query-only pacing to 500ms, 160 polls per case
+and a 1,024-message total budget. Original ordinary/setup/work/cleanup bounds
+remain unchanged; no mutation is replayed. Two focused polling regressions are
+defined and await the final provider-mode Cloud build. The existing sidecar
+harness now injects its actual imported qualification relay; 33 relevant Node
+qualification/transport/listener checks pass.
+
+### 2026-11-01 20:53Z: provider-mode compile and actual S3 CAS component
+
+ProviderFencedV1 is integrated exactly from27-output sealed manifest
+`acebd316c1a50c57e705f2ff57d45d2678c17766842a99689ece39c677880c62`.
+Cloud builds. Native run372 passes four new provider protocol/local-liveness
+cases plus four existing provider cases; run373 compiles the actual binary
+consumers and passes sixteen machine-entry cases. Four new Node provider
+checks and both status-polling regressions pass. The real-PG concurrency and
+old-writer qualification is not yet run. Review identified one heartbeat route
+still doing Fly management reads inside the two-second heartbeat budget; the
+narrow committed-binding route correction is being prepared.
+
+Actual isolated S3 CAS component now passes through a new Fly OIDC VM: policy
+readback,404 misses, staging create/conditional renewal, immutable blob PUT,
+exact read, identical-content conflict verification, actual AWS403 overwrite
+and deletion denials, unchanged original bytes, staging deletion and actual
+foreign-account conditional PUT denial. Final VM7813e0dc141378 / instance
+01M6CE41JB18H56WEVAFFVJ6TB exited0; its exact cleanup/two absences and unchanged
+live home were verified at20:52:20Z. The two earlier probe assertion failures
+and their cleanup remain in [S3 evidence](verification-staging-s3-working.json).
+They concern sanitized error observation and nonexistent foreign GET404, not
+successful forbidden writes. Three tiny immutable fixture blobs remain retained.
+The isolated IAM role was corrected to actual hashed account/staging paths and
+ListBucket miss semantics; production storage/policy is untouched. These checks
+issue no Root/SDK/Source authority or reusable-cache admission.
+
+The stock managed image now protects `/opt/rudder-worker` itself as Root0/0555
+and creates the empty protected SDK mount before runtime bake. All14 executable
+Python asset checks pass with two skips. Fresh worker source756 files/15.3MB,
+plus227 freshly generated CLI/board outputs, is frozen at manifest
+`3e34a5e237ffb93e81c423968b57682492a18466accaba7a3b2f6f1cc5edacce`.
+A new remote stock-managed build is in flight, with real fresh native/emitter
+outputs and baked runtime selected. It has no deployment or qualification claim;
+C1 CAS overlay and the physical SDK→runtime→ordinary flow remain next.
+
+The heartbeat registry correction is integrated exactly from sealed manifest
+`fb71d3b4d9f21e16f6739f44a73ed825d5165dce5c2cefbee5867d8d4b9091bb`.
+Cloud builds; four genuine registry/HMAC-path fixture regressions pass, retaining
+invalid MAC/foreign worker/changed binding refusal and old clock-renew behavior.
+It does not construct a successful Native provider owner. Independent bounded
+review found no additional concrete ownership P1/P2. Thirty-nine related Cloud
+policy/provisioning/storage/clock/provider regressions pass.
+
+The updated staging-control image is built:
+`sha256:c192f728efeef6e4e30e89dfb108e33328d62deff8feb2ded02740e40b39d341`,
+context manifest `1f91d237dc6b62fc39ac925c2381e5ff22be3ec6e7b80085833706e8ebb74bd4`,
+verified20:57:18Z. This includes provider mode, trigger, original activation and
+heartbeat route correction; it is not a managed worker or execution proof.
+The isolated app now has publicIPv6 and sharedIPv4 for its fixed HTTPS origin.
+No control machine is running yet. The actual provider-owner PostgreSQL variant
+is integrated with unchanged budgets and is running on its own disposable VM;
+fixture enrollment/CAS rows remain explicitly synthetic. Activation-only PG
+cases are being connected separately, preserving the older suites.
+
+### 2026-11-01 21:04Z: actual provider-owner PostgreSQL component passes
+
+The first physical PG run reached provider bootstrap but failed because one
+query used the same UUID parameter in a JSON text comparison. Root added the
+explicit `$4::text` cast; no admission/fence check was removed. That original
+failure, natural process evidence, server error and exact owned cleanup remain
+retained. A fresh second cluster then passed actual concurrent first-owner
+exclusivity, immutable receipt retry, old API/raw SQL lease-writer refusal,
+16s without heartbeat and no time-based regrant, same-owner heartbeat, immutable
+mode and replacement/wrong-owner refusal. Actual restricted TLS factories,
+nonroot user, natural Child exit0/both EOFs and PG stop/removal are checked.
+[PG evidence](verification-provider-owner-pg-working.json) records24 provider
+calls and exact VM2865537ef02418 cleanup/two absences at21:04:17Z. Enrollment,
+provider and CAS rows are explicitly synthetic DATA; this cannot construct a
+Native owner, prove Root registration or qualify physical replacement/SDK.
+The older control imagec192f728 predates the SQL correction and must be rebuilt
+before the full ordinary-source staging campaign.
+
+### 2026-11-01 21:10Z: fresh worker artifacts and activation/regression checks
+
+The fresh stock managed build produced all four Bookworm production ELFs and
+same-source preseed emitter. Its new runtime CAS has22,177 objects and
+1,980,777,987 bytes, inventory9a9cd9a6…, manifestcfa14328…, installer7f67e750….
+Base image004218657658… then received only the exact pinned C1 CAS overlay,
+which verifies the four ELF/inventory hashes, compiler descriptors and protected
+SDK parent/empty leaf. Final worker image is
+`sha256:f4d5922cfa332a67e05fccd6e7bd46703c24f1a51b4a832346535c4434ba55a6`.
+[Build evidence](verification-managed-c1-worker-working.json) labels these
+unreleased working-source artifacts; their packageVersion33 is not the shipped
+alpha33 product identity. No SDK/runtime execution role is claimed yet.
+
+The corrected control image includes the actual PG-tested SQL cast:
+`sha256:ec7ed50fd7c5e9680cee1f5259882fd317d368a009f5c196224098b887e70853`,
+context77cb91e7ac7d…, built21:07:01Z. Full Native library run374 passes275 with
+21 ignored; complete Native binary run375 passes1,365 with21 ignored. The
+actual SDK activation-only PG component passes all three fresh DB cases:
+known one-shot original publisher permit, actually forwarded COMMIT with lost
+reply remaining unknown, and wrong-real-DB refusal. Actual3 closed socket pairs,
+restricted TLS factories and exact VM cleanup/two absences were verified at
+21:09:03Z,22 provider calls. [Activation evidence](verification-staging-activation-pg-working.json)
+keeps synthetic Root/compiler/provider evidence explicit. The corresponding
+runtime activation component and actual fresh-volume component are next.
+
+The runtime activation-only PG component also passes its three fresh DB cases,
+with genuine original fixture SDK publication/activation first in each SAME DB,
+then runtime original permit, actual lost admin-COMMIT reply and wrong-DB refusal.
+Six actual socket pairs close; all original owners remain retained through the
+fixture lifetime. Exact VM8ee335b7e10d48 cleanup/two absences were verified at
+21:12:54Z,24 provider calls. These database mechanisms retain explicit synthetic
+Root/compiler/provider labels and do not qualify physical SDK/runtime mounts.
+
+### 2026-11-01 21:27Z: regression and original-custody corrections
+
+Full Node run376 executes1,009 cases:997 pass,11 skip, one older sidecar
+import-stripping harness fails because it did not inject the now-imported
+qualification relay. Root corrected only that harness; nineteen affected
+uploader/sidecar tests then pass. The original failed full log remains retained;
+this is not a claim of a subsequent green full run.
+
+The ordinary staging registry originally archived/deleted its actual provision
+carrier before the driver requested recovery DATA. The narrow correction is
+integrated from manifest62d8158509d7…: only explicit qualification-origin,
+fixed-source-suite, provider-mode ordinary carriers stay retained within the
+existing16-carrier bound. Default production archival remains unchanged; the
+getter refuses foreign/unqualified state and exposes no secret or cleanup
+authority. Cloud builds and all eight new lifecycle cases pass, together with
+sixteen related provisioning/heartbeat cases. The final control image needs
+this correction and the pending strictly observed Fly normalization delta.
+
+Fresh-volume probe attempts1/2 stop before filesystem work because actual Fly
+readbacks expand mount metadata and omit false/empty config fields. Root
+independently reconciled their original acknowledged IDs, exact nonce/image/
+instance/config/volume attachment, then removed only those VMs/volumes and
+verified two absences plus the unchanged live home. Attempt3 reaches the real
+guest filesystem but fails a mount/device assertion; its automatic exact
+cleanup succeeds. The diagnostic attempt4 retains the original filesystem
+checks and adds bounded actual mount/device observations. No fresh-volume
+success, cold restart, Root/SDK/source grant or normal retirement is claimed.
+
+### 2026-11-01 21:27Z: actual fresh encrypted volume filesystem component
+
+The bounded fifth fresh-volume run passes actual original encrypted1GiB
+provider allocation, distinct ext4 block device/mount identity, Root ownership,
+empty root except lost+found, exclusive no-follow creation, file/directory
+fsync, same-directory atomic rename and exact inode/bytes/SHA readback. The
+usable guest device is1,056,964,608 bytes, smaller than the provider's nominal
+1GiB; actual capacity is observed and checked against the held device instead
+of asserting an unsupported exact nominal byte count. No encryption mechanism
+or cold-restart durability is inferred. All held guest files close, all actual
+CLI children reap, then exact VMe826243a5321e8 and volumevol_r7yn0gl8kox6g19r
+are destroyed and checked absent twice. The unchanged protected home and
+24 provider calls are recorded at21:27:31Z in
+[fresh-volume evidence](verification-fresh-volume-working.json), preserving all
+four prior failed component attempts and their eventual verified cleanup.
+
+The private staging policy/services templates are now prepared from actual
+worker/descriptor/PG/S3/volume evidence, explicitly limited to this isolated
+new-project run. They are not role/owner/source grants or fleet HA/clock/RPO
+qualification. The actual control bootstrap nonce still must bind their final
+bytes before upload; SDK/runtime publishers remain the only role producers.
+
+### 2026-11-01 21:39Z: final Cloud input checks and staging attempt state
+
+Fly machine readbacks omit empty env/services/false auto_destroy and expand
+mounts with encrypted/name/size metadata. The narrow parser correction is
+integrated from manifest2d80896a4194…; requests stay byte-identical, expanded
+mounts bind the original VolumeAck, raw actual config/hash remain authoritative,
+and execution/process/secret/extra-environment checks stay strict. All eight
+new normalization cases and38 related Cloud cases pass. Full Node run377 now
+passes1,014 cases, zero failures,11 skipped (1,025 total), including the
+corrected old sidecar harness and new custody/normalization cases.
+
+Final control image5a5bebe6f69d… / contexta89b40e13e96… is built from those
+coherent Cloud inputs. Its first exporter403 remains retained; a terminal exact
+immutable build-graph retry succeeds at21:33:40Z. Workerf4d5922c… is unchanged.
+
+The first actual control VM861054bee01278 boots, verifies its supervisor and
+binds the private original nonce, but its first private upload exits with an
+SSH organization-authorization rejection BEFORE admission. Its exact DELETE
+acknowledgment is reconciled by two fresh machine-list absences and unchanged
+protected home at21:37:29Z; GET retains a destroyed tombstone. No home is
+provisioned. The original local retained controller is terminated only after
+that verified cleanup. Its failed evidence/private upload remains retained.
+Current read-only organization checks succeed. A fresh second controller/bundle/
+authority uses explicit SSH organization and actual list-absence cleanup,
+with the original deadlines and no unknown upload replay. Full physical
+SDK/runtime/ordinary-source qualification remains in progress, not proved.
+
+The second control attempt also stops at SSH organization authorization before
+bootstrap/admission; its unknown DELETE is reconciled by two exact-id list
+absences and unchanged protected home, then its retained local controller ends.
+The third uses the documented Machines API command-array/stdin contract with a
+fixed actual-Child/pidfd/wait/EOF wrapper. Read-only bootstrap succeeds, but the
+actual wrapper observes ZERO stdin bytes on the first upload despite the
+nonempty request. The receiver refuses before creating the file; no role or
+home is admitted. Automatic exact VM cleanup/two absences succeeds. Request/
+response/actual-child evidence is retained privately. No confidential argv
+fallback or unknown write replay occurs.
+
+The next finite staging transport uses Fly's native encrypted app-secret file
+injection for exactly operator/services/birth, with explicit file modes and
+secret-environment suppression. A protected planned birth identity will be
+confirmed against the actual original supervisor before public admission.
+Nonsecret receipts/admission can use the bounded fixed exec receiver; private
+inputs never enter command arguments. Source/controller proposals are being
+prepared; this transport and full physical SDK flow are not yet qualified.
+
+### 2026-11-01 21:54Z: protected staging birth integrated
+
+The optional protected `birth.json` reader and strict driver compatibility are
+integrated from manifests6db76ae848bf… and340e0384504e…. The original setup900
+starts before the bounded file read; matching birth metadata does not grant
+ownership, readiness or admission. Syntax checks and two driver parser cases
+pass. The two actual-filesystem Python cases skip locally because this home is
+UID1500; actual Root-owned Fly startup/readback remains required.
+
+Control context20f2c01b7b86… compares all3,997 payload files against current
+source or the pinned original Node ELF. It reuses135,434,674 exact frozen bytes
+and changes only the supervisor and its driver reader. Its remote build is
+in flight. Full Rust workspace run378 stops at the unchanged disk-floor guard;
+obsolete, unused Root build objects/archives are removed with hash records and
+run379 starts. Neither a completed workspace suite nor the physical SDK flow
+is claimed by these source/parser checks.
+
+### 2026-11-01 22:08Z: real secret-file startup and full workspace checks
+
+Full Rust workspace run379 passes2,606 tests across69 groups, zero failures,
+77 ignored, at22:06:30Z. TypeScript checking also passes. These results precede
+the next worker launcher permission fix and do not qualify that future change.
+
+Actual native Fly secret-file delivery works, but the requested0600 becomes
+0755 in the guest. The first A6 supervisor therefore correctly refuses before
+admission. Its exact VM and three owned secrets are cleaned. A separate bounded
+metadata probe observes Root0:0, nlink1, exact bytes/hash and the Root0700 parent;
+its VM and original secret are also cleaned. The earlier403 read attempt makes
+no mutation; fresh private auth succeeds. No provider mode behavior is inferred
+from the requested configuration alone.
+
+The staging startup now retains the protected parent and bounded original FDs,
+accepts only0600 or the observed0755, restricts those files to0600 through their
+held FDs, fsyncs and rechecks named identity/bytes before parsing. The original
+setup900 includes that work. Actual A7 supervisor startup confirms all three
+Root-owned0600 files and their exact hashes plus planned birth. The component
+stops before public receipts/admission; exact VM80e9e51ae2e928 and three secrets
+are deleted and verified absent in27 calls. See
+[native secret-file evidence](verification-native-secret-files-working.json).
+
+The standalone managed worker's strict config/token/registration-key readers
+have the same provider-mode mismatch. A narrow retained startup fix is in
+preparation. Its fresh worker image and the complete SDK/runtime/ordinary flow
+remain required; no SDK role, reusable build-cache result or full v4 completion
+is claimed by the control-only pass.
+
+### 2026-11-01 22:24Z: standalone worker fix and retirement restriction
+
+The standalone launcher now retains a preparation stage before parsing its
+three fixed injected files or starting children. It validates their original
+protected parent/FDs, restricts only the observed0755 form to0600, and preserves
+existing0600 and absent-profile behavior. Eight actual file/FD cases pass;
+the complete native library passes283 tests,21 ignored. The fresh four-ELF
+worker base13579e8812d6… builds and pushes at22:22:11Z from sourcebf37421cd673…;
+its C1 data overlay is in progress. Actual worker/SDK readiness remains pending.
+
+Provider retirement groundwork closes admission without changing the original
+ownership UUID, epoch, engine, provider binding or head. It records bounded
+reconciliation inventory and one-shot dispatch intent; it produces no physical
+fence or successor. Cloud builds and18 unit cases pass. The actual PostgreSQL
+extension passes at22:23:55Z with24 provider calls and verified cluster/VM
+cleanup. Three retained failures correct invalid/incomplete topic fixture rows;
+production restrictions are unchanged. Valid FK-backed rows now prove insert
+and delete refusal. See [retirement evidence](verification-provider-retirement-working.json).
+
+The explicit fifty-fork real-source/runtime benchmark is integrated and its
+release ELF is compiling. No new fifty-fork timing or concurrency claim is
+made before execution. Its fixed single active mutation per wave measures
+logical view capacity/isolation, not fifty running model agents.
+
+The full A5 control run passes private file and public admission gates, then
+the actual SDK qualifier creates its isolated app but fails at volume creation.
+The generated name is39 characters. A distinct fresh-name component request
+returns HTTP400 with Fly's explicit30-character limit; no volume is created.
+The unknown SDK request is not replayed. Its original control/app owners remain
+retained for cleanup, and a canonical bounded name plus retained transport
+diagnostics are being prepared. Worker2c44eaacc919… / control e3cdaef6b769… are
+the actual A5 inputs. No SDK/runtime role is published.
+
+A read-only raw API check also finds the five earlier Root fixture volumes in
+`pending_destroy`, despite their disappearance from CLI inventories. The
+[fresh-volume evidence](verification-fresh-volume-working.json) now states
+that distinction: known deletion and inactive provider teardown are proved;
+physical erasure and terminal raw API absence are not.
+
+The A6 SDK run subsequently creates its30-character volume and its first
+Machine. Fly omits empty process.env and adds empty init; strict parsing refuses
+that observed representation before the Machine is configured or started. The
+next narrow parser correction preserves nonempty exec/env/init and raw config
+hash checks, and retains the original Machine ID before metadata validation.
+The control and stopped SDK Machine both receive known DELETE plus exact-version
+destroyed-wait200. Volume deletion transitions through waiting_for_detach to
+inactive pending_destroy; the app and three secrets are deleted and checked
+absent. Original and tail reconciliation use32 calls at22:44:22Z, preserving the
+initial incomplete teardown rather than replaying its known deletion.
+
+The actual Bookworm fifty-fork run fails after34 immutable publications and
+two negative attempts, during Completed(34). Successful view forks take roughly
+20ms and dependent publication roughly3.8s. The failure is inside publication;
+the per-attempt30s and total300s restrictions are not exhausted. Its original
+retained cause was omitted from the benchmark output, so the next diagnostic
+delta uses the existing failure() accessor and records bounded resource metrics.
+No quota or deadline is increased. Actual test exit101, both EOFs and terminal
+BuildKit failure are retained in [the failed benchmark evidence](verification-fifty-fork-working.json).
+
+Full Node run386 passes1,028 cases but exposes one new regression: a global128
+transport-retention limit blocks the existing16-home carrier allowance. The
+correction retains the explicit128 lifetime request cap for qualification, and
+bounds default service retention by16 app groups with128 requests each. All28
+focused transport/process/ordinary-custody cases pass after correction. Full
+Node run387 is in progress. This is a source fix, not a raised campaign limit.
+
+### 2026-11-01 23:03Z: lease contract fixed and real lifecycle checked
+
+Full Node run387 completes with1,041 passed,0 failed and11 skipped. Subsequent
+null incomplete_config handling passes16 focused cases and Cloud compiles;
+Fly's actual nullable representation remains distinct from false or nonempty
+values. A7 fixture cleanup completes32 calls at22:54:18Z, with both exact
+Machine versions terminal and SDK app/control secrets independently absent.
+
+A8 reaches SDK app, volume, Machine and all three secrets, then Fly rejects the
+lease description: the90-character prefix/challenge exceeds its64-rune limit.
+The correction sends the existing full64-character challenge SHA256. Exact
+reply comparisons, TTLs, clocks, nonce custody and reconciliation stay intact.
+All23 focused lease tests pass and Cloud compiles. A distinct operator probe
+uses the original stopped disposable SDK Machine and the actual lease class:
+acquisition201, exact readbacks, renewal201 and release200 pass in16 requests
+at23:02:32Z. This is Machine lease proof, without project or Root authority.
+See [lease evidence](verification-fly-lease-working.json). A8 fixture cleanup
+and a new frozen control-image build are in progress; no SDK readiness or
+new production delivery is claimed. The fifty-fork diagnostic rerun remains
+active, preserving the original34-of50 failure and unchanged time/resource
+restrictions.
+
+The diagnostic A2 fifty-fork run now proves EMFILE/os24, with a10,240 descriptor
+limit. Descriptor observations grow from600 before the first publication to
+10,054 after Completed(34) fails;27,465ms remain on that attempt. Successful
+StoreIo settlement retains its up-to256 cached shard-directory FDs in every
+original publication carrier. The immutable pin already owns independent
+root/object/tmp/GC custody. A narrow production lifetime correction is being
+prepared; uncertain/failed operations must retain custody, and all original
+limits remain unchanged. No50-fork success is claimed.
+
+A8 operator cleanup completes32 calls at23:03:14Z: both exact Machine versions
+reach destroyed-wait200, original volume deletion reaches an inactive state,
+and SDK app/control secrets are verified absent. The next A9 control fixture
+is destroyed before init/admission, after image preparation; no SDK resources
+are created. Its24-call cleanup verifies Machine and secret absence. Available
+provider logs contain only image pull/preparation, so the startup cause is
+unproven. A source review separately identifies that the canonical SDK process
+exec overrides the image's environment-clearing entrypoint. It must use the
+same fixed /usr/bin/env -i prefix before the strict empty-environment launcher;
+Fly injects infrastructure variables even when app secrets are ignored. This
+correction will be included before another full SDK attempt.
+
+### 2026-11-01 23:10Z: storage lifetime correction and next real SDK flow
+
+The known StoreIo settlement now refuses pending resources and closes its
+per-operation shard cache only after the existing unlock/original-clock
+postcheck. Independent immutable pin custody and all failed/unknown owners
+remain retained. Five new real-CAS regressions and existing backed-retention
+cases are compiling under the unchanged disk/time guard. A3 freezes the new
+production code for an unchanged actual50-fork rerun; no result yet.
+
+The fixed SDK process command now exactly preserves the image's env-clearing
+entrypoint. Cloud build and22 focused provision/parser cases pass. An initial
+focused invocation ran before Cloud compilation finished and saw stale output;
+the completed-build invocation passes all22. Full Node run390 previously had
+1,043 passes,11 skips and one EADDRINUSE failure in the orchestrator fixture.
+That fixture used PID-derived ports and now atomically binds port0; both real
+orchestrator scenarios pass in run391. A full current-source rerun remains.
+
+Control image1f66693c4efd… is frozen from manifestff4e0a096208… with the lease
+and process corrections. Fresh A10 control80e967ea397e68 / instance
+01M6CP09TNDY2Y2NP7MJ8H6FV8 boots and reaches original-flow observation, unlike
+A9's pre-init destruction. Actual SDK/runtime/ordinary qualification and original
+resource cleanup remain pending. This uses the existing explicit worker2c44…,
+which predates the new storage lifetime correction; no new production release
+or current-source worker qualification is implied.
+
+A10 reaches actual lease acquisition/readbacks and dispatches its original SDK
+configure update. That request times out; an independent read of the exact
+original Machine later shows a provider revert to its original stopped version.
+The recorded reason is invalid base64 contents for the config secret-backed
+file. No update is replayed, TTL or request deadline is increased. The SDK
+secret wire encoding must match Fly's file-secret base64 contract in both the
+intent body digest and actual POST. Cleanup completes32 calls at23:12:03Z,
+including exact-version terminal waits, original volume deletion, absent SDK
+app/control secrets and unchanged protected user home.
+
+All27 backed-retention cases pass in run392, including the five new descriptor
+lifetime regressions. Broader engine-library testing is running. A3's actual
+fifty-fork rerun is active, and a fresh same-source Bookworm worker base is
+building from manifest42e3222cd966… with the storage correction and Docker cache
+ordering change. These are build-only artifacts; neither changes the production
+worker or restarts any active home.
+
+### 2026-11-01 23:18Z: actual fifty-view capacity passes
+
+The unchanged actual A3 component passes all50 immutable publications and both
+expected negative attempts, retaining every original private view and owner.
+Campaign time is198,333ms under the original300s restriction; the outer actual
+child exits0 with wait and both EOFs. Median logical fork is20.26ms and dependent
+publication3,728.96ms. Descriptor observations go from334 before the first
+publication to1,041 after the last, under the unchanged10,240 limit. Build-only
+artifact4ae3c9072922… is tied to frozen source49851daaff6f… . A1/A2 failures
+remain recorded. See [fifty-view evidence](verification-fifty-fork-working.json).
+This is one mutating operation at a time and does not qualify50 model agents,
+cold workers, Root mounts, private jj workspaces or normal physical drain.
+
+The complete engine library also passes416 tests with14 ignored in run393.
+The SDK encoding correction now reaches actual configured files on A11's new
+stopped version, but its original POST response exceeds local15s HTTP/1.5s
+lease-operation limits. Independent readback confirms completion after about27s;
+that DATA does not become the missing original acknowledgment. A11 is cleaned
+in32 operator calls at23:18:10Z, with both terminal waits and app/secret absence.
+Primary fly-go exposes one direct Update POST, while flyctl uses a120s provider
+lease and separately waits for settlement. A typed bounded startup lifecycle
+profile is being prepared; generic defaults and runtime/publication authority
+clocks stay separate. No A11 mutation is retried or adopted.
+
+The current-source worker base44706ba66bee… builds/pushes successfully at
+23:21:57Z with four freshly compiled Bookworm ELFs and source42e3222cd966… .
+Its exact C1 CAS overlay104f13a76d74… completes at23:24:34Z, retaining the new
+ELF/component descriptors and1,980,798,731-byte baked runtime. The CLI logs a
+builder-release deadline warning after the artifact is pushed; image build
+success does not claim physical builder drain. These images are not deployed
+and have no SDK/runtime role qualification yet. The local release build remains
+active. All A11 disposable resources and its local controller are now closed.
+
+### 2026-11-01 23:32Z: bounded startup profile verified locally
+
+Managed configure/start now selects a closed process-local lifecycle profile:
+provider lease120s, whole mutation/preflight phase60s, other checks5s, and a
+session bounded by min120s and the SAME original provisioning300s remainder.
+The HTTP adapter retains/propagates the actual operation AbortSignal. Generic
+probe defaults, runtime/publication leases, Root30s and admission rules stay
+unchanged. Unknown/late responses never become ACKs or replay candidates.
+Cloud compiles and all64 focused cases pass. Retained failed test attempts
+correct two inert fixture DTO/timer assumptions; production additionally uses
+an explicit never-return in the catch to satisfy TS2366. No bound is widened
+outside the explicit managed-startup profile.
+
+New control source8a7e534fbbc8… is building for the actual current worker104f…
+from producerV3/controllerV6, with a fresh unbound bundlea14. Its SDK flow is
+still unqualified. The local product build remains live under its original
+3600s/disk guard; it is not restarted while compiling.
+
+The next performance primitive is specified in PLAN6.1: one genuine flat source
+parent with sibling private overlays, exact typed parent GC dependencies and
+verified changed data. Cold baseline/reattachment still scans the full source;
+warm inheritance explicitly uses completed immutable-CAS facts, and reads still
+verify served bytes. A private engine-only implementation is in progress; the
+current default publisher and measured50-view baseline are unchanged.
+
+A12 with the new worker and lifecycle profile obtains the ORIGINAL configure
+HTTP ACK and its new exact Machine version. The next start step fails during
+its first readback, before any start or new lease POST. A later independent
+readback passes the strict machineAck parser with the identical configured
+instance and config SHA, now stopped. The exact initial invalid readback fields
+are not exported, so a particular transient state is not proved. The correction
+will await the acknowledged update's exact-version stopped state under the
+same original budget, retain strict final checks, and expose bounded safe
+original read diagnostics. It will not reconstruct an unknown update ACK.
+A12 operator cleanup completes32 calls at23:37:37Z; both exact Machines reach
+terminal waits, SDK app/control secrets are absent, and the protected user home
+is unchanged. No Root or SDK process was started. Original failed evidence and
+configure ACK remain retained; no SDK qualification is claimed.
+
+### 2026-11-01 23:47Z: original-update settlement implemented
+
+Managed update now retains the SAME original60s mutation Operation through an
+exact acknowledged-version wait for documented settled state, followed by a
+strict same-ID/version/config and stopped read. The fixed HTTP lifecycle wait
+cap is60s, additionally shortened by the original operation signal; the server
+wait uses at most55s and fits the remaining original budget. No new clock,
+transient-state parser exception, unknown-ACK adoption or mutation retry exists.
+Ordinary checks retain5s caps. A bounded latest-read tuple records fixed stage,
+sanitized ID/version/state, host/incomplete booleans and config SHA only.
+
+Cloud compilation and71 focused cases pass, including delayed known-ACK wait,
+original deadline expiry,400/version/config/state refusals and redacted bounded
+diagnostics. Full latest-source Node suite396 is active. Native product build
+and59TUI cases already pass; Cloud-only edits do not require recompiling them.
+New frozen control38cd7c07db70… / source108e175617fe… builds successfully for
+fresh actual A13 against current worker104f… . Source-parent overlay work resumes
+in a new High-effort helper with only its checkpoint, not the old conversation.
+No production release is started; publishing will be batched at milestones.
+
+### 2026-11-01 23:59Z: restart fixes and green latest-source Node suite
+
+The15 failures in full Node run396 were all caused by the shared Fly model in
+`tests/managed-storage-pg-fixtures.mjs` refusing the newly added configure wait
+route before the tests reached their target assertions. Its wait now checks
+the exact acknowledged version, settled state and original bounded timeout.
+The affected17 cases pass. The lifecycle test also now starts its update ACK
+in `created` and proves that completion waits for settlement to `stopped`.
+All14 lifecycle cases pass. Latest-source full Node run397 completes with
+1064 PASS,11 SKIP,zero failures and no guard interruption. Private receipt/log:
+`/workspace/home/.cache/rudder-release-build/alpha22-checks/main397-node-suite.{json,log}`.
+Native build394 and59TUI cases from395 remain unchanged and passing.
+
+A13 did not prove either settlement success or failure. Its captured Fly
+credential had a validity end of23:49:16Z, between the last200 at23:48:59Z and
+the403 at23:49:39Z; fresh authenticated reads proved the original control VM
+remained present. Exact operator cleanup completes32calls at23:52:47Z with
+control/SDK terminal waits, inactive volume deletion acknowledgment and app/
+control-secret absence. This is operator teardown, not normal owner retirement
+or proof of physical volume erasure. No SDK start was observed in that run.
+
+Private controller v7 distinguishes authentication, not-found response,
+provider failure and unknown transport, retaining bounded status/hash/size
+diagnostics without private error text;8 offline cases pass. Private producer
+v4 requires an explicit credential instead of capturing the short-lived
+deprecated auth-token output. Fresh isolated A14 uses a30-minute org-scoped
+credential, new bound boot UUID and the unchanged control38cd7c07db70… /
+worker104f13a76d74… artifacts. It is still running; no SDK/runtime/ordinary
+qualification or production delivery is claimed. The private source-overlay
+draft remains outside Main pending review and compilation.
+
+
+### 2026-11-02 00:05Z: A14 settles configure, startup quarantines, fixture cleaned
+
+The fresh isolated A14 run used an explicitly created 30-minute organization
+credential, private controller v7 and bundle producer v4. The controller now
+distinguishes authorization failures from absence and never falls back to a
+short-lived `flyctl auth token`. Eight offline controller cases passed.
+
+Actual provider responses prove the configured SDK Machine reached its exact
+acknowledged settled version and strict stopped readback before start. Start
+was acknowledged. The Root launcher then emitted its fixed startup quarantine
+marker at its original 30-second deadline. The original SDK qualification
+expired with no Root acknowledgment, message or successful qualification.
+Runtime and ordinary stages were not reached. Read-only process observations
+showed the original launcher, Native and Root service retained, with no Node
+sidecar. Runtime proof capture is a diagnostic lead, not an established cause.
+
+The exact disposable control and SDK Machines were destroyed, each original
+version reached terminal `destroyed`, and list reads confirmed absence. The
+known volume delete was acknowledged and inactive state observed; this is not
+physical-erasure evidence. App deletion returned 202, the first read still
+returned 200, and a later pair returned 404. All three exact original temporary
+control secrets were deleted and absence verified. The protected user home
+identity remained unchanged before and after. Cleanup evidence is in
+`/workspace/rudder-staging-flow-control-run-a14/operator-cleanup-v1/report.json`
+and `operator-cleanup-v2/report.json` (20 plus 10 calls); v1 records the
+intermediate pending app deletion honestly. The retained local controller was
+stopped after cleanup and the qualification credential revoked successfully at
+2026-11-02T00:05:34.753397Z. No normal retirement or provider-owner fencing
+qualification is claimed. No production release or deployment occurred.
+
+A local checkpoint, `e03c1356`, records the existing v4 implementation and green
+latest-source Node fixes. Subsequent Source parent and sibling overlay work is
+an engine component in progress; Native/VCS callers have not switched to it.
+
+### 2026-11-02 00:15Z: retained source-parent engine component green
+
+The engine now derives one genuine flat source parent and publishes private
+sibling overlays against that exact retained parent and Environment owner.
+Warm publication walks and verifies changed local objects; served bytes still
+verify, and explicit cold reattachment fully validates the original flat graph.
+Observed physical custody failures remain absorbing across repair, including
+failures first seen through the original flat owner. Cancellation and resource
+exhaustion remain unknown and retain their carriers. Existing pin/hold limits
+are shared across both dependency namespaces. Overlay inputs dispatch through
+the actual retained build-input owner. No Native/VCS caller selection or large
+performance conclusion is claimed by this component checkpoint.
+
+The final 28 source-overlay cases pass in guarded run403. Full engine library
+run404 passes444 with14 ignored and zero failures at00:15:02Z. Native library
+run402 passes288 with21 ignored, including five bounded diagnostic cases. The
+Root startup diagnostic emits only fixed typed stage/check labels and bounded
+IO kind/errno through nonblocking socket/FIFO writes; full or broken output
+cannot block the retained service. It adds no error-chain text or new clock.
+Actual publication counters now measure successful local hash-read and object
+fsync calls, excluding retention files, directory fsyncs, foreign reads, parent
+capture and later served reads. Counters are complete only after original ACK.
+The fifty-view fixture and caller selection remain pending integration/checks.
+
+### 2026-11-02 00:18Z: caller and actual-fifty variants integrated, qualification pending
+
+The Native/VCS source path now retains the genuine parent from initial source
+preparation, shares that exact Arc with task candidates and uses actual typed
+overlay owners through canonical/Journal inputs and Published source capture.
+A successor fully republishes the accepted graph with the same Environment
+before deriving a distinct flat parent. The existing owner, lease, canonical,
+verification, operation/WC, acceptance and original-clock gates remain.
+Independent review found no blocking production issue and added an original
+cancellation regression immediately after the successor's full pin ACK.
+
+The actual-fifty fixture now uses that same prepared parent rather than
+deriving a second parent, retains both dependency namespaces and emits actual
+publication hash-read/fsync counters plus verified inherited/Runnable reads.
+Its original50 successes/52 attempts, width1,30/300/480s restrictions, corpus
+and NOFILE provisioning are unchanged. Private controller v2 rejects obsolete
+legacy and incomplete instrumentation reports;5 offline synthetic tests pass
+with36 rejection mutations. These are predicate checks, not performance proof.
+
+Caller target405 compiles, but its6 explicitly selected strict tests refuse
+the actual local UID1500 at their unchanged UID0 gate. This is not a successful
+runtime qualification. A seventh cancellation-window case is now integrated.
+Fresh Bookworm build-only Root execution is being prepared; Native binary
+check406 and relevant VCS/Native suites407/408 are still active. No worker
+image, SDK/runtime qualification, release or deployment is claimed here.
+
+### 2026-11-02 00:34Z: current checks and Root component evidence
+
+Current-source Native binary check406 passed. VCS library407 passed61 with6
+ignored. Native binary managed selection408 passed262 and failed9 at missing
+profile-loader environment before child spawn. With the actual Node and built
+helper paths supplied, the profile-loader selection409 passed all10 cases;
+source and helper hashes are retained in the private input receipt. No source
+change or broader retest was needed for that environment correction.
+
+The frozen Bookworm component build at
+`/workspace/rudder-fifty-fork-build-overlay-a1` executed all7 strict initial
+source tests as actual UID0:7 passed in1.68 seconds. This resolves the earlier
+local UID1500 refusal for these component cases. It does not qualify managed
+Root storage, SDK or agent operation.
+
+The same original build then failed its packed-history component before parent
+preparation completed. Its retained actual test child exited101 after53 seconds,
+was reaped with both EOFs, and did not time out or truncate output. The error
+was the generic dependent-publication failure; the actual underlying error is
+still retained but not exposed by this fixture. Import progress reports an
+acknowledged complete import with12260 objects and no import error. Its29866ms
+field is elapsed time at failure observation, not measured import duration.
+There is no fifty-workspace result, p50 or established performance gain. No
+retry of that failed original operation is authorized by these observations.
+
+Build-only managed worker source manifest
+`5a80479e2fc2153a935739a34df6c197bae7bf4601260a04b3de0d255a8309f9`
+produced base digest
+`sha256:b40dc77d3aaa2bcfd745f9ffeaba74c1502b2bf20b9142ab757f620c603a769c`
+at00:28:05Z. Its exact four production ELF hashes are in
+`/workspace/rudder-managed-c1-worker-build-a4/report.json`. The immutable C1 CAS
+overlay built successfully at00:30:28Z as
+`sha256:da4120c2decfcd776457d46e9eb7c9db781570b8df37d57779012d33d2212b2c`;
+its report binds1981517179 runtime encoded bytes and22177 objects. Both original
+build observers terminated successfully. Neither artifact is a production
+deployment or SDK/runtime qualification. A fresh isolated A15 control run is
+using this exact overlay to observe the new bounded startup diagnostics.
+
+### 2026-11-02 00:37Z: actual Root startup failure identified
+
+Fresh isolated A15 used the exact successful A4 overlay. Its original SDK
+configure update and start were acknowledged. Private log capture returned0
+and retained24036 bytes; the closed diagnostic reports `root_storage`,
+`capture_runtime`, `EngineProtectedProc`, `validation_or_other`, with no IO
+kind or errno. The launcher subsequently reports `wait_client`. No Root ACK,
+SDK success or subsequent role qualification is established by this capture.
+
+Two fixed read-only guest observations returned HTTP200 and child exit0. The
+original engine process623 has UID/GID1500, effective capabilities0 and
+NoNewPrivs1. Its `/proc/623` directory is UID/GID1500 mode0555; its `fd`
+directory is UID/GID0 mode0500. The protected-directory distinction matches a
+separate real-process dumpable0/1/0 reproduction. The startup predicate checks
+the general proc directory and therefore rejects this protected engine. A
+narrow correction to inspect the protected fd directory is being prepared;
+no deadline or credential/protection guard relaxation is intended.
+
+Original observation hashes and fixed labels are retained in
+`/workspace/rudder-staging-flow-control-run-a15/root-fixed-diagnostic-observation.json`;
+fixed proc observations are in the same private run directory. The original
+control remains retained while its SDK observation settles. The live protected
+user home has not been changed.
+
+A15's unchanged SDK window expired with no Root ACK; runtime and ordinary were
+not reached. Exact disposable fixture cleanup completed at00:39:58Z in28
+bounded calls: both original Machine versions reached destroyed with list
+absence, the known volume delete was acknowledged and inactive state observed,
+the SDK app returned two404 reads, and all three exact temporary secrets were
+absent. Protected user-home identity was unchanged before and after. Evidence:
+`/workspace/rudder-staging-flow-control-run-a15/operator-cleanup-v1/report.json`.
+The retained controller was stopped through its original pidfd after cleanup,
+its process was absent, and the short-lived credential revocation returned0
+at00:40:10Z. This is fixture teardown, not normal runtime retirement or provider
+fencing qualification.
+
+### 2026-11-02 00:41Z: targeted startup correction verified locally
+
+The Root proof now checks the actual protected `/proc/PID/fd` directory,
+requiring nonsymlink directory metadata, UID/GID0 and exact mode0500. Existing
+pidfd liveness, complete engine credential/capability/group/NoNewPrivs floor,
+parentage, image, idmap, namespaces and original deadlines are unchanged.
+Independent review found no blocking issue. Guarded412 passed the real isolated
+exec regression: dumpable0 is accepted, dumpable1 refused with the same typed
+marker, then dumpable0 accepted again; a sentinel rejects zero-test children.
+Guarded413 passed66 runtime-proof cases with2 ignored and no failures. Actual
+SDK qualification of this corrected worker still requires a new artifact/run.
+
+The packed-history failure fixture now borrows the original retained dependent
+failure, closed active stage and actual partial local IO counts, preserving
+carriers and the original returned error. Failure-only resource observations
+avoid CAS/retention readback while the original GC lock may remain held. Engine
+diagnostic test410 passed without formatting arbitrary errors; fixture/strict
+target compile411 passed. A new strict original-pin-conflict regression awaits
+actual UID0 execution, making8 strict cases. No performance fix or deadline
+increase is claimed. A1 workload termination is separately reconciled in
+`/workspace/rudder-fifty-fork-build-overlay-a1-reconciliation-v1/REPORT.md`;
+Fly builder cleanup remains unknown, although the original test/RUN failure is
+terminal. Any new diagnostic experiment uses new custody, directory and nonce.
+
+### 2026-11-02 00:48Z: actual fifty-overlay component passed
+
+Fresh frozen source
+`2c20467e696c03c115eac24454d35e8a84229b3db2d69a535e66c038b9afbf88`
+passed all8 strict initial-source cases as actual UID0 in1.79 seconds, including
+the original retained-publication conflict regression. The subsequent original
+packed-history component passed:50 completed immutable forks,52 actual attempts
+with two negative cases, width1 and unchanged30/300/480-second restrictions.
+The original test child exited0, was waited with both EOFs and original pidfd/
+executable custody, without timeout, kill or truncation. The original build
+observer exited0 and reports no continuing remote build. Published component
+image digest is
+`sha256:e494db8761af71ca10635d2e4f7fdb54e959b25b3e6b508a18c2cc9057d1657e`.
+
+The50-sample publication median is23.82942ms, p95 28.802306ms, maximum30.815094ms;
+the49 warm-sample median is also23.82942ms. The prior full-publication A3 run's
+50-sample median was3724.429781ms, an observed156.30 ratio. Both report x86_64
+and available parallelism8; these remain separate warm-media component runs,
+not a controlled cold-worker population or agent-performance qualification.
+The50-fork campaign took10.605 seconds, with total per-fork median184.628355ms.
+Source preparation including the genuine parent completed in11.853 seconds
+under its unchanged original30-second constraint. This successful observation
+does not retroactively identify A1's omitted underlying failure.
+
+Actual publication instrumentation records250 local hash-read calls and250
+object-sync calls, each totaling2489350 bytes, all matching the verified new
+deltas. Counters exclude retention files, directory syncs, foreign/earlier parent
+and later served-read work; per-reference inherited IO is not independently
+tagged. All views share the exact genuine source parent and Environment Arcs;
+the overlay depth is3. The actual report and original transcript are retained
+at `/workspace/rudder-fifty-fork-build-overlay-a2`; bounded baseline comparison
+with input hashes is `/workspace/rudder-fifty-overlay-comparison-v1/comparison.json`.
+No Root mount, production Native parity, SDK, model-agent, normal drain or public
+deployment conclusion follows from this component. The corrected managed worker
+A5 remote build started only after this original benchmark/build terminated.
+
+Independent read-only review matched the original eight-pass strict marker,
+nonce/source/test-file-bound ELF, nested actual child report and pushed digest,
+all50 successful and two negative views, original limits, shared owner bindings,
+both served-read sets, per-delta counters and baseline arithmetic. It found no
+material issue or unwarranted claim in the scoped component comparison.
+
+
+### 2026-11-02 01:00Z: corrected managed worker build and fresh qualification start
+
+The A5 remote base build completed with original observer exit0 at00:57:14Z,
+source manifest `4ebbfd5881ca9081b8007873399b4ee38179028c205366d532649576a070ec5f`
+and immutable digest
+`sha256:527aae8fe1223a7f9a3ea2c8bc776bd484b4de29a8bda4f7890d23a6c3966017`.
+It includes the corrected procfs protection predicate and retained publication
+diagnostics from product revision9952e60e. The exact C1 data overlay then
+completed with original observer exit0 at00:59:03Z and immutable worker digest
+`sha256:399c946b8551b7017a69ee114a82c9dd26fb99d9fb657161d891ff750d919fc6`.
+Both reports explicitly record no continuing remote build and no deployment,
+SDK or runtime qualification. Build receipts and original logs remain in
+`/workspace/rudder-managed-c1-worker-build-a5` and
+`/workspace/rudder-managed-c1-overlay-build-a5`.
+
+A fresh isolated A16 qualification began using that exact worker, a newly
+created45-minute organization credential and new original boot nonce
+`7cce17be-7276-4cf5-ace1-aeee28b200dc`. ControllerV9 changes only the immutable
+worker digest fromV8 and passes all8 offline controller cases. ProducerV6
+binds new bundleA18 to the actual original nonce. The unchanged control image
+is independently bound to the original A17 build receipt. Initial observation
+confirms the original control VM started and acknowledged the injected files'
+expected hashes. The original900-second controller clock and all nested
+qualification constraints remain unchanged. SDK, runtime and ordinary task
+results are pending; this start establishes none of their readiness claims.
+No production or protected live-home mutation occurred.
+
+
+### 2026-11-02 01:08Z: A16 retained runtime failure and narrower diagnostics
+
+A16's exact configured SDK worker started with the original start HTTP ACK and
+owned readback. The actual launcher observation confirms Root client, parent
+and host-worker authentication accepted. The driver received6 messages, then
+its original SDK window expired without an SDK ACK send attempt. The original
+controller quarantined at70 settled requests; runtime and ordinary cases were
+never entered. The actual fixed diagnostic is
+`root_storage/serve_runtime/validation_or_other`, with no narrower check or IO
+errno. A read-only process observation found the original engine and Root
+service but no SDK helper at observation time. This does not identify the
+underlying prepare failure or prove that earlier SDK prepare was never entered.
+Private evidence is `/workspace/rudder-staging-flow-control-run-a16`, including
+`root-fixed-diagnostic-observation.json` and original logs hash
+`86f9037237fd98dfec3b79795d70182a89b3bbe777237ca79e16b27fed90543f`.
+
+The private A16 cleanup helper's first actual attempt refused at preflight:
+five pre-existing control-app volumes are already `pending_destroy`, all
+unattached. Its6 original requests were GETs, all settled; no DELETE occurred,
+and the final protected-home read matched. These unrelated volumes are preserved.
+A corrected fresh preflight will guard the original control VM's empty mounts
+and preserve pre-existing control volumes. The prior attempt is retained and
+will not be rewritten or reused to replay mutations. Disposable resources and
+the original local controller remain retained until exact teardown succeeds.
+
+Runtime and SDK preparation now attach fixed typed phase labels while preserving
+narrower existing checks. The SDK owner retains the actual full failure and
+returns only check/IO-kind/errno diagnostic DATA, closing the previous generic
+wrapper's diagnostic loss. There are no formatted private causes, replacement
+clocks, retries or changed prepare effects. Guarded414 passed all3 diagnostic
+regressions, including panic-on-Display redaction and original cancellation.
+
+The ordinary runtime helper's later capsule gate also used the invalid0555
+`/proc/PID` ownership predicate. It now observes the real0500 fd directory:
+root ownership means protected, UID/GID1500 means the same helper is still
+pending, other type/mode/ownership refuses. Strict engine/SDK protection still
+rejects pending. The real isolated exec regression covers dumpable0→1→0 in the
+same process. Guarded415 passed69 runtime-image tests,2 ignored,0 failures.
+This later correction is not established as A16's hidden failure and does not
+claim an actual successful helper handoff or runtime qualification.
+
+
+A16 exact fixture teardown subsequently passed at01:09:55Z in40 calls. Both
+original machine DELETEs were acknowledged, each original instance version
+reached `destroyed`, and both inventories twice confirmed absence. The original
+SDK volume DELETE was acknowledged and its inactive state twice observed; this
+establishes no physical erasure. The SDK app reached two404 observations, the
+three exact temporary secrets are absent, and the protected live-home identity
+matched before and after. V2 explicitly forbids control-app volume DELETEs and
+preserves the five observed unrelated volumes. The local controller was then
+signaled through its original pidfd, reached terminal state and disappeared
+from procfs; its wrapper terminated241. The temporary organization token was
+revoked with exit0 at01:10:01Z. Evidence is `operator-cleanup-v2/report.json` and
+`post-cleanup-retirement.json` under the A16 directory. Original controller
+report flags remain the earlier retained state and are not rewritten. This is
+operator fixture teardown, not normal runtime retirement or provider fencing.
+
+
+At01:13Z the SDK helper child transition was corrected: Command's built-in
+UID/GID setters ran before pre-exec and could remove the authority needed to
+clear supplementary groups. The forked child now uses raw Linux syscalls to
+clear groups and bounding capabilities while privileged, disables kept and
+ambient capabilities, sets NNP1, drops all UID/GID IDs to1500 and clears
+remaining capabilities. Existing process custody, original clocks, cancellation
+and effect accounting remain unchanged. Its later protection check uses the
+actual protected fd directory, retaining the strict parent and image checks.
+Guarded416 passed the genuine UID1500 exec/refusal/ND0 regression; the strict
+Root positive test is ignored locally and awaits actual Root execution in the
+next frozen build. Independent review found no authority or custody blocker;
+raw syscalls also address its narrow glibc-wrapper observation. This correction
+is not established as the cause of A16's hidden prepare failure.
+
+Guarded417 native binary cargo check passed at01:15:17Z (91.662s).
+No image, production update or successful SDK handoff is implied by these
+local checks.
+
+
+Local checkpoint54c740b6 contains the prepare diagnostics and helper-floor
+repairs. A6 froze767 source files (15,532,491 bytes) and227 generated CLI/board
+files (2,610,121 bytes), source manifest
+`b53298e47d708c4f5604d2b18c6e45bda393aa4359910637661a1671b3fb0fc2`.
+The original product Dockerfile remains unchanged. A separate bound private
+Dockerfile runs the exact ignored Root child-floor regression in native-builder
+after the production build, with a fresh manifest nonce and test-only240s
+watchdog. The build receipt requires the same actual completed BuildKit step
+to emit one-test/one-pass output and its exact standalone parent marker.
+At01:16Z the original A6 remote build-only/push operation started; no output
+digest or actual Root pass exists yet. This operation deploys no machine and
+does not claim SDK/runtime qualification.
+
+At01:27Z A6's actual strict Root child-floor step completed: exactly1 passed,
+0 failed/ignored,314 filtered,0.01s test execution. The same nonce-bound
+BuildKit step20 emitted exactly one standalone parent marker followed by the
+gate marker and DONE. This proves actual Root-to-UID1500 exec, empty five
+capability sets, NNP1, empty groups, no UID/GID0 regain, protected ND0 fd
+directory, original child exit and both EOFs with unchanged parent caps/NNP.
+Image assembly/push is still in progress; no base digest or SDK/runtime
+qualification is claimed by this component result.
+
+A6's original build process exited0 and its manifest push completed at
+01:30:06Z, base digest
+`sha256:439e5414b4312d89294ddee4f48fda5d0c42afa949d9c24e67e693719bbf656a`.
+The completed receipt binds source54c740b6, strict Root proof, four actual ELF
+hashes, runtime CAS and log SHA256. Remote continuation is false. The C1
+compiler-data-only overlay build started next and requires this exact successful
+base receipt, including its actual Root proof; no machine was deployed.
+
+A6's compiler-data-only overlay exited0 and pushed
+`sha256:da09d12625e92c6f8b61ecc6a5604f163aaebdf15e73236769ea9bffcc8cc6e5`
+at01:31:52Z. Its raw receipt SHA256 is
+`f5a7e169e961a9fe26ae4bdfc7f2104bc21d7a4aaee930fc7dbb3a95ab890d95`,
+bound to the exact base receipt
+`4c8f26bd02d1c60550b0ed6e6815575d98e3952f3298fe726126f0c9eb1d3a55`.
+Both original build processes are terminal with no remote continuation.
+V10 changes only V9's worker digest to this actual A6 digest; its eight offline
+cases pass. No token, qualification home or original supervisor has yet been
+created for A17; completed image builds do not establish SDK/runtime readiness.
+
+
+### 2026-11-02 01:45Z: A17 identifies a concrete static component defect
+
+A17 ran the exact completed A6 overlay with a fresh nonce and temporary token.
+The original control VM and SDK worker each have their original provider ACKs;
+the SDK app, volume, machine, configure and start slots are captured with no
+pending effect. Its original SDK window expired after six messages and no SDK
+ACK send attempt. The controller quarantined with all70 effects settled and no
+unknown effect. Runtime and ordinary qualification were never entered.
+
+The actual fixed Root diagnostic now identifies `RuntimeMountComponents`, with
+validation classification and no IO errno, before SDK preparation. A separate
+read-only observation guarded the original SDK machine/instance/image and read
+only the immutable installer root and its leaf shard. Both object hashes and
+sizes matched. It observed five expected directory components and three expected
+regular file components; `timezone` is a symlink to
+`/usr/share/zoneinfo/Etc/UTC`. The existing component validator deliberately uses
+NOFOLLOW and requires a regular file there. This establishes a concrete image
+importer defect, although the grouped diagnostic does not identify the first
+failed per-component check or prove the earlier mount-ID checks succeeded.
+
+The probe's actual child exited0, was waited and reached both pipe EOFs.
+Evidence is `/workspace/rudder-staging-flow-control-run-a17`, specifically
+`root-fixed-diagnostic-observation.json` and
+`root-cas-components-observation.json`. Its original logs SHA256 is
+`370292cc5afdbf8bfece6c4a5a078fa9579d739a55eac71e221d75b40f6b44a7`.
+The independent read-only probe review fixed best-effort unknown diagnostics so
+logging failure cannot discard retained child custody. No runtime ACK, ready
+state or qualification was generated by this probe.
+
+A narrow correction is being prepared to derive the fixed static file from an
+already captured regular target, retaining the original source and target
+checks. Separate fixed component/check labels and actual open errno are now
+integrated for useful diagnostics without changing NOFOLLOW, role or mount
+validation, the original clocks or custody. Disposable A17 fixture cleanup is
+in progress; this is not normal runtime retirement or provider fencing.
+
+
+A17 operator fixture cleanup completed at01:44:10Z in40 settled calls. Both
+original machine versions reached terminal destroyed state with two inventory
+absences. The original SDK volume DELETE was acknowledged and its inactive
+state observed twice; the SDK app returned404 twice. The three temporary
+secrets are absent and the protected live-home identity matched before/after.
+The five unrelated control volumes remain preserved. Cleanup report SHA256:
+`be970a6277e1bd5398191bcbc139a6960f6d856232a72a7d9bc8bae4c09920be`.
+The supervising parent then signaled its original held controller pidfd after
+checking that exact complete cleanup receipt. Original child25287 was waited
+and reaped, its proc entry is absent, and the supervisor's original session
+terminated0. The temporary organization token was revoked with exit0 at
+01:44:43Z using environment-only delivery. These facts establish exact operator
+fixture cleanup and local child retirement, not runtime retirement or fencing.
+
+Guarded418 caught a diagnostic-helper signature regression at compile time:
+the SDK's Buck2 helper also uses the original three-argument descriptor function.
+That function is now restored byte-for-byte; runtime component diagnostics use a
+separate named function. A real Buck2 descriptor regression covers the shared
+contract. The original failed attempt remains recorded; fresh native checks
+are required before another worker build.
+
+
+The fixed static-file importer now retains each original fixed source parent
+and source stamp. A symlink can project only an exact regular target already
+captured under a declared immutable directory, with the original target stamp
+and manifest record still matching. It reuses that captured CAS reference,
+content hash, size and mode, adding the declared source manifest row while
+preserving the canonical row and original physical hardlink topology. Every
+`ParentDir` component refuses, avoiding lexical normalization through a possible
+symlink prefix. There is no runtime host-link following, containment relaxation,
+new budget, retry, ready state or execution grant. Independent review verified
+the integrated outputs and source/target custody. Test fixtures use `/workspace`
+when available and the existing temporary-directory fallback elsewhere.
+
+Guarded419 passed all4 runtime component diagnostics/SDK shared-helper tests.
+Guarded420 passed28 preseed tests,1 ignored; guarded421 explicitly ran the real
+fixed `/etc/localtime` custody test and passed1,0 ignored. That test reads actual
+Root-owned source/target metadata and captured content; it does not claim a
+privileged Root execution or runtime mount. Guarded422 passed74 runtime-image
+tests with3 ignored. The final native binary check is in progress. Fresh baked
+image, mount, SDK and ordinary qualification remain required.
+
+Guarded423 native binary cargo check passed at01:52:49Z in63.151s.
+No worker image or runtime qualification follows from these local checks.
+
+### 2026-11-02 02:08Z: corrected component source frozen
+
+[Structured component evidence](verification-runtime-static-components-working.json)
+records the actual A17 failure, exact importer/diagnostic source hashes, all five
+passing local checks and separate operator cleanup. Product checkpoint
+`ce6a1a4d44ca03f9a294af7998d88bd884fb4238` is committed locally and unreleased.
+
+A7 froze769 source files /15,556,641 bytes and227 generated CLI/board files /
+2,610,121 bytes. Source manifest SHA256 is
+`cfd9e52e3b724478f0d089517140cc4bce00df53763108b5b8e773d0ed000d9c`.
+Independent review matched every frozen source file to that committed revision
+and all generated hashes, sizes and modes. The separate qualification Dockerfile
+retains the original product Dockerfile and strict Root child-floor test. It adds
+a bounded immutable metadata check after the actual CAS bake: five directory
+components, four regular file components, and the exact shared captured content
+reference, logical size and raw manifest hash for timezone and UTC. Small Blob
+and larger File content representations are both accepted. It reads exactly
+three metadata CAS objects, verifies their raw sizes/hashes and reads no file
+payload or content descriptor. Its result supplies no runtime or SDK grant.
+
+The private helper patch and independent fresh20-case offline run passed.
+Actual build-only/push is still running on its original child, currently at the
+unchanged240-second strict Root test gate. There is no completed A7 image or
+SDK/runtime/ordinary qualification result at this record's timestamp. No new
+provider fixture, temporary credential or production deployment was created.
+
+A7 subsequently failed with a known terminal build result at02:08:25Z. The
+original strict Root gate exited124 after240.1 seconds during test compilation;
+it emitted no `running 1 test`, no result and no success marker. The original
+build child exited1, remote continuation is false, no immutable digest was
+published and the baked component gate was never reached. This is retained
+failed build evidence, not a failing execution of the Root privilege test.
+The production native build had completed in366.9 seconds. Build-only test
+compilation and bounded execution are being assessed separately; no timeout or
+assertion was weakened and no SDK fixture was launched.
+
+### 2026-11-02 02:25Z: corrected baked component image verified
+
+A8 separately prepared the locked release test harness without running tests,
+then ran the unchanged240-second Root test gate with its10-second kill tail.
+The actual privilege test passed1,0 ignored in0.01s. The following baked CAS
+metadata gate passed all nine component checks: timezone is now a114-byte File
+with the same captured Blob reference and raw manifest hash as canonical UTC.
+The preparation and qualification are separate build lifetimes; the240 seconds
+continue to cover the original timed Cargo command, not the preceding compile.
+
+The original build child exited0 at02:25:08Z with no remote continuation and
+pushed immutable base image `sha256:15b8dce89a219a7e6248d87cc9bedd22f7b0f3c650e79c1a640a3309751c0f9b`.
+Independent review verified the frozen40efcf98 source checkpoint, unchanged
+ce6a1a4d product bytes, all three nonce-bound build proofs, both complete
+four-ELF output steps, runtime CAS roots and final push. Structured component
+evidence preserves the source, receipt and log hashes. This is build evidence;
+the compiler overlay and actual SDK/runtime/ordinary flow remain separate.
+
+The compiler DATA overlay also exited0 and pushed immutable image
+`sha256:4b6d4148f8ac1e9ca8e7579913d2a7a2934a343897168b32d7c4ba007b57b415`
+at02:27:13Z. Independent final-chain review passed at02:27:54Z, binding all
+four actual descriptor outputs, ELF/CLI pins, source manifest, runtime CAS and
+the unchanged6,430-object compiler CAS layout. No runtime or SDK role was
+activated by either image build. A18 will use this exact image with a separately
+bound controller and retained original process custody.
+
+### 2026-11-02 02:37Z: staging startup diagnostics
+
+A18 used that reviewed A8 image with the exact bound V11 controller. Its
+control VM migrated and admitted the isolated setup, but the driver reported
+`qualification_driver_start_failed` with `owners_retained:false` before
+constructing a staged flow owner. No SDK home, runtime home or ordinary home
+was captured. The original control supervisor and controller remain held for
+read-only diagnosis and operator cleanup; this is not an A8 Root regression
+result or a completed qualification. The existing failure record does not
+identify which startup check failed.
+
+The future control driver now records one of13 fixed startup check labels and
+only the existing S3 retention state's closed enum and boolean/null settlement
+observation. It reads that adapter's in-memory status without repeating its
+readback or serializing exception text, credentials, role identifiers or policy
+metadata. Independent review reconstructed the entire prior source after
+removing only these diagnostic additions, confirming unchanged checks, clocks,
+requests and custody. Syntax validation and all5 focused diagnostic/birth tests
+passed. The active A18 image and processes do not contain this future change.
+
+A fixed read-only probe completed against the original control VM at02:40Z.
+Its actual guest child exited0 with both output streams closed. All observed
+pre-storage predicates passed, including private input, supervisor birth,
+remaining setup time and exact policy/candidate hashes. It also confirmed the
+fixed driver catch marker. This narrows the failure to later startup work; it
+does not establish S3 request settlement or identify the failing operation.
+The first local collector refused a changed wrapper hash before any network
+dispatch and was reaped; its evidence is retained separately.
+
+A18's original controller reached its unchanged900-second setup deadline at
+02:44:45Z with all106 recorded effects settled and no captured homes. Operator
+cleanup then passed20 calls at02:45:11Z, removing only the exact original
+control VM and three original temporary secrets, verifying absence and the
+protected live home's identity. The supervisor used its original held pidfd to
+stop and reap the controller at02:45:18Z; temporary token revocation exited0 at
+02:45:31Z. This is disposable fixture cleanup, not normal runtime retirement.
+
+The separate control image containing the reviewed diagnostics built and
+pushed successfully at02:43:50Z as
+`sha256:e6fdd33e84c99ffd139ea775ef869a243213c900ccdf79e27d2d651d016f68b0`.
+Independent review verified all4,000 actual context files against A17, finding
+only the reviewed driver change, and bound the actual log to the final push.
+The original build child exited0 with no remote continuation. No production
+deployment or SDK/runtime readiness follows from this control image build.
+
+### 2026-11-02 02:56Z: SDK qualification reached its original deadline
+
+A19 used that exact diagnostic control image and the reviewed A8 worker image.
+Control startup succeeded and the original controller captured one SDK home.
+The SDK session reached its unchanged300-second deadline with six messages and
+no publication acknowledgment. The flow quarantined at02:56:45Z with all70
+controller effects and44 SDK transport responses settled, and no pending SDK
+effect. Runtime and ordinary qualification were not started; helper and
+scheduler readiness remain false.
+
+The first fixed diagnostic collector refused locally before canonicalization,
+token access or network dispatch. Its guard required a nested custody flag that
+the actual SDK projection omits; the enclosing original home record carries the
+required false flag. Both independent replay and Root inspection confirmed the
+schema mismatch. The original collector output is retained separately while a
+corrected guard is reviewed. This local refusal identifies no Root failure and
+does not renew the SDK session or authorize a replacement owner.
+
+After that correction, the original machine guard passed. The installed Fly
+CLI rejected the collector's log-command syntax; its child exited1 with an
+actual wait and both streams closed. A separately reviewed correction used
+the installed CLI's supported command and completed at03:03:31Z. Independent
+review matched the original VM, instance, config and image, all original
+capture receipts, and the retained raw log hash. The closed projection contains
+one failure: `serve_runtime / SdkBakedInventory / io / not_found / errno 2`.
+This identifies the failed SDK check without establishing a missing pathname.
+
+Operator cleanup completed40 calls at03:04:18Z, verifying the original control
+and SDK machines' absence, the SDK app's absence, the three temporary secrets'
+absence, and the protected live home's unchanged identity. SDK volume deletion
+was acknowledged; two reads showed it unattached and waiting for detach.
+Physical erasure was not verified. The five existing control volumes were
+preserved. The
+supervisor stopped and reaped its original controller through its held pidfd;
+temporary token revocation exited0 at03:04:56Z. Historical flow cleanup flags
+remain unchanged. These are separate operator cleanup facts, not normal runtime
+retirement or a passing SDK result.
+
+### 2026-11-02 03:10Z: SDK baked reader receives its original parent
+
+The SDK owner retained three original descriptors: the catalogue parent, its
+`cas/` subdirectory, and the parent's inventory file. It supplied the second
+descriptor to `BakedImageCas`, whose reader checks `inventory.json` and `cas/`
+relative to its root. The frozen image has the expected parent layout. The
+incorrect descriptor therefore explains the observed check and errno through
+source inspection; the actual diagnostic did not expose a pathname.
+
+A private helper now supplies the original parent and inventory descriptors,
+while retaining all three originals in the SDK owner. Existing checks, clocks,
+failure custody and image layout remain unchanged. The strict Root regression
+uses that production helper with real immutable CAS files, verifies a payload
+read, reproduces the old descriptor's ENOENT, and refuses missing or replaced
+named inventory while checking original descriptor identities.
+
+Independent source review and syntax parsing passed. A9 then compiled the
+production binaries and separate test harness from revision `ba5fcd098d04`.
+Its actual UID0/GID0 descriptor regression passed with one test and no ignored
+tests, as did the unchanged privilege regression. These remain immutable reader
+and process privilege checks; actual SDK admission and workload completion
+still require a separate staged run.
+
+### 2026-11-02 03:29Z: fresh SDK descriptor worker build passes
+
+The original A9 build process exited with code 0 and pushed base image
+`sha256:7ef42ea99d627ca569a46baa0d217660495dca9cbcd3433c7252dc5d2195579f`
+at 03:28:59Z. All four separate gates passed: test harness preparation, the
+existing Root privilege regression, the new Root SDK descriptor regression,
+and static component metadata verification. Both actual tests reported one
+pass, no failures and no ignored tests in 0.01s. Their original 240s bounds and
+10s kill tails were unchanged.
+
+Independent review checked the frozen source, actual ordered test output,
+four ELF hashes, metadata roots, push digest and original build command. The
+base report SHA is
+`ab5bdc629f39053f3e8b8e508ee931f52bba4b012ab256620ccfc5d717e0c9d4`;
+the independent review SHA is
+`3301ddbb23cf5f5f1bff5f613cab206a4454c94c161b62b9acd19b0248ac00a2`.
+The original C1 overlay build then exited with code 0 at 03:31:48Z and pushed
+`sha256:fc448f9d80435c6423a93b0c0ea665d7c39f942a599a9b31253d9126a72a02d0`.
+It combines that exact base with the existing immutable compiler data image.
+All four descriptor files were recovered with matching sizes and hashes. Its
+report SHA is
+`487307f4438d431f849540a3d7b3dc80ec942e2cca9243fbf4e82d28e7d982a3`.
+Independent final chain review passed, with receipt SHA
+`759a0933172b05eeaac73763b72ee4215464ec290bd04e05526721ad169868a5`.
+It checked the complete frozen source, ordered gates, original process receipts,
+four ELF outputs, all descriptors and the final immutable digest. SDK, runtime
+and ordinary workload qualification remain pending. No public release or
+production deployment occurred.
+
+
+### 2026-11-02 03:45Z: new worker reaches SDK qualification, remains unqualified
+
+A20 used the exact verified A9 worker, a fresh scoped credential and the
+reviewed V13 controller. Root observed the original supervisor's completed
+process capture and retained pidfd before binding the single fresh nonce.
+The control VM acknowledged its injected files and started the SDK stage.
+
+The SDK's original deadline expired with six messages, no helper qualification
+and no Root acknowledgment. The controller retained quarantine at 03:43:51Z;
+runtime and ordinary workload stages did not start. All 70 controller effects
+settled with no unknown effects. One guarded, bounded diagnostic read of the
+original SDK machine completed at 03:44:02Z. Its closed projection reported
+`serve_runtime / SdkQualification / validation_or_other`, with no IO kind or
+errno. This is a later check than the previous `SdkBakedInventory` failure;
+it does not identify the nested qualification predicate.
+
+The independent diagnostic review SHA is
+`5e6d1dc811995f4197cbb0789baa31b495dfab2c04454d20b476a63f6127d947`.
+Exact operator teardown then completed with 40 settled calls at 03:44:29Z,
+including original machine terminal waits and two absence observations,
+temporary secret absence, and the protected live home guard. The SDK volume
+had an original DELETE acknowledgment and was inactive; physical erasure was
+not established. Five preexisting control volumes were preserved. Cleanup
+report SHA:
+`f70bc871d6210d586ccdd770782ebb3bfd4e7bfaef054287c9b9b852bfbde63b`.
+The retained original controller was signaled through its original pidfd and
+actually reaped at 03:44:52Z. The fresh token was revoked by an actually waited
+child at 03:44:56Z. No normal runtime retirement, SDK admission, public release
+or production deployment was established.
+
+### 2026-11-02 04:24Z: combined source compiles; SDK privilege boundary reproduced
+
+The original combined ledger, reservation drain and SDK diagnostic build
+finished at 04:23:35Z. Production binary checking and both test harness builds
+passed in the original 1800s compile bound. A separate actual Root test then
+passed: the original UID1500 helper, with all capability sets empty,
+NoNewPrivs enabled and dumpability disabled, could not read its Root parent's
+`/proc/<pid>/exe`. The original child was waited and both streams reached EOF.
+This reproduces an unavailable operation in the SDK handshake; it does not
+identify A20's unobserved nested failure.
+
+The first seven nonroot tests passed. The eighth selector used the source
+filename's module name instead of its declared `managed_app::runtime_task`
+alias and selected zero tests. The runner correctly refused its zero-test
+success. The remaining nineteen tests did not run, and the combined candidate
+was rejected. No source from that candidate was integrated into Main. The
+original report SHA is
+`ac9469817217a39d6865011fa8069ac2bfd225c5b989440af876d7a2a96ce16a`;
+the terminal observation SHA is
+`3b9fb585af785fed82222b540e110ad143bdf3403f5de3d3c3dc733109097fd2`.
+Remote builder release remains unverified. No image was published or deployed.
+
+The next SDK change explicitly uses the genuine original Root issuer's
+retained executable witnesses, consistent with the existing storage bootstrap.
+It preserves the helper's unprivileged pre-exec floor and the original child,
+kernel peer, process birth, installed image, namespace, sealed capsule and
+clock checks. This changes the trust contract: a received witness is validated
+DATA from that issuer, not an independent proof that an actively hostile Root
+parent executes a particular image. Such DATA cannot construct the private
+SDK owner, readiness acknowledgment or runtime client. Containment of a
+hostile global Root that controls protected code, state or original endpoints
+is outside this boundary. Implementation, independent review and actual SDK
+qualification are still pending.
+
+### 2026-11-02 04:59Z: witness DATA fixtures pass; ordinary test panics
+
+The next original source qualification compiled the production binary and both
+test harnesses in 701.5s. Held original executable descriptors passed the exact
+test-list preflight. Both separate Root fixtures passed: the unprivileged
+helper's Root-parent executable denial and the fifteen-case receiver witness
+DATA validation. The latter does not qualify a genuine Root issuer, SDK
+bootstrap, runtime admission or reverse Root-to-helper executable inspection.
+
+The ordinary suite's four executable-list children passed. Seven selected
+tests then passed before
+`managed_app::runtime_task::tests::same_barrier_helper_and_original_cancel_survive_off_app_validation_and_alias_drop`
+exited 101. Its original child was actually waited with both output streams at
+EOF, a held pidfd and no timeout or observer error. The remaining thirty-one
+tests did not run. The inner panic text was retained only inside the failed
+build, so its cause is not established by the locally available output hashes.
+
+The original qualification tool session exited 1 with a matching false
+acceptance marker at 04:59:14Z. Candidate report SHA:
+`ed842f5ad0696c13cd2b809f5759134a769df46a5c065a71669d25b5715cad92`.
+Root terminal-observation SHA:
+`94efccae501bea598130a1ffded948f63f3c2dca530d367eb695cb1010df03ee`.
+Independent actual-evidence review SHA:
+`41831f767e5881b4789191596d89965db0e472f10124dfaf03637a754927bb1d`.
+The combined source remains outside Main. Remote builder release is unverified;
+no image publication, VM deployment or SDK/runtime qualification occurred.
+The next unused workflow adds bounded diagnostics from the same original
+failed test capture before another explicitly prepared attempt.
+
+### 2026-11-02 05:12Z: fresh diagnostic localizes fixture setup failure
+
+A separate fresh diagnostic reused cached compiler and Root layers as DATA,
+then ran only the eighth test on the same pinned executable under UID/GID1500,
+empty groups, zero capabilities and no-new-privileges. Its actual child exited
+101 with complete wait, both EOFs and a held pidfd. Bounded output identifies
+`managed_runtime_task_tests.rs:19:129`: fixture setup's `prepare_owned` returned
+`ManagedSourcePrepareFailure` with unsettled cleanup before the barrier
+assertions ran. The nested cause remains unknown; this does not establish the
+old qualification attempt's nested cause.
+
+Original diagnostic tool session 62618 exited 0 with a matching observation
+marker and unconditional `qualificationAccepted:false`. Candidate SHA:
+`e8885022348031182f2c943d32ede47db977fb22fedadf3197b72a165bcc9e6b`.
+Root terminal-observation SHA:
+`3cbd0a57459a5117c9491e01ec2919189eafa128918c8aea79910ef864cf341c`.
+Independent actual-evidence review SHA:
+`ff471ee883d7118bd412a1efc7ea4b823ca66c1d47a91f7641b32124d6b97793`.
+This diagnostic grants no source, SDK, runtime or retirement qualification.
+The complete suite and genuine SDK attempt remain required.
+
+
+### 2026-11-02 05:23Z: fresh metadata confirms absent test-image boundary
+
+A second diagnostic ran the same pinned test once under the same privilege
+floor and bounds. Closed metadata from that fresh uncached step confirms
+`/usr/lib/modules` is absent (`lstat` returned `ENOENT`, errno 2).
+`/usr/sbin/swapon` is a canonical, nonsymlink, Root-owned regular file, mode
+0755. The test again exited 101 during fixture source preparation with complete
+original wait, both EOFs and a held pidfd. The nested preparation cause remains
+unknown, as does the old qualification attempt's nested cause.
+
+Original tool session 6084 exited 0 with a matching diagnostic-only marker and
+`qualificationAccepted:false`. Candidate SHA:
+`f8cb31babc11d7ec7b1afaec36f4c417a9ef1be06af81785aba0bfb5579e4203`.
+Root terminal-observation SHA:
+`417c1a104ba7f5e19a593e1d3ee61fe7dbcd7fc78030cf8f550ca5afe3830169`.
+Independent actual-evidence review SHA:
+`ce5e753cde836efeee53034bfd79084bc172fa95958eb69faa97d09ede6d21f8`.
+The next unused qualification workflow prepares the provider boundaries already
+specified in the worker Dockerfile before rerunning the full selected suite.
+No source, SDK, runtime or retirement qualification follows from this metadata.
+
+
+### 2026-11-02 05:44Z: full runtime ledger and witness source qualification passes
+
+The fresh remote qualification compiled the production binary and both test
+harnesses, then passed all 39 selected ordinary tests under UID/GID1500,
+zero capabilities and no-new-privileges. Both separate Root DATA fixtures also
+passed, including the receiver witness matrix. Exact executable-list preflight,
+original child waits, both output EOFs and held pidfds were verified. The test
+image now prepares the provider boundaries already specified in the worker
+Dockerfile. This passing attempt does not establish the hidden cause of older
+fixture failures.
+
+Original session 91229 exited 0 with the matching acceptance marker at
+05:43:50Z. Candidate report SHA:
+`dbb54310d3490b56f0b7df5d60fc7d0c8367c93b7118d689b908e49206eb456b`.
+Root's strict original-session acceptance SHA:
+`c6484e55b55014dce332bab0e5642a1a12b3a0e0e9a79b337f61376310f1b0aa`.
+The actual raw stream hashes and strict proof were replayed at
+05:44:04.540301Z; observation SHA:
+`b33c5b0a41003b63549cf664c63c75f3c2e19fc5755a393968e48980f26b3a83`.
+Independent actual-chain review SHA:
+`b82dbdd17cfa5a0d3367ec09c34dd645e4886fa296c48686cb58f8f1653b2876`.
+The frozen source patch SHA is
+`2e20b6c734f3dd8aae282b90e58569a5a617a31b1c639b880ed5e0e2ff26aa6c`.
+
+This source slice retains covered task/source reservations and their original
+observations through partial failure, adds a fail-closed runtime-use ledger,
+and validates SDK executable witness DATA from the genuine Root issuer.
+Uncovered producers and retained aliases continue to block complete closure.
+No final producer census, automatic release/unmount, normal runtime retirement,
+reverse ptrace, genuine SDK bootstrap or ordinary runtime qualification follows
+from the build fixtures. A newly built artifact and genuine SDK attempt remain
+required. No image publication or deployment occurred in this qualification.
+
+### 2026-11-02 06:54Z: worker artifact built; genuine SDK attempt remains blocked
+
+The source25 managed worker base and its C1 CAS overlay completed their actual
+builds and private image publication. The resulting immutable worker image is
+`registry.fly.io/rudder-workers-exla@sha256:4de965c64b3b87ad94f523c11d09d65593158cb1799a55a270d0b8d98a50f678`.
+Root observed both original build exits, and independent review checked the
+four installed executable hashes, runtime inventory and descriptor bindings.
+Overlay report SHA:
+`d75192c98d72845512b656e0091ba5942e9c307ab37881f0fc2af49afb38d22e`.
+This private build publication is not a control-plane deployment or SDK success.
+
+A fresh disposable SDK attempt using that artifact expired without a helper
+result or Root acknowledgment. Its one-shot retained diagnostic identifies
+`root_storage/serve_runtime/SdkProcessResult`, class `validation_or_other`;
+the nested helper cause remains unknown. Exact operator cleanup verified both
+disposable machines absent, the SDK app absent, and three temporary secrets
+absent. The original controller was reaped through its held pidfd and its
+temporary token was revoked. Protected live-home responses matched before and
+after cleanup. Volume deletion was acknowledged and inactivity observed;
+physical erasure and normal runtime retirement were not established.
+Root settled-observation SHA:
+`316fcaad0db9d89694c7309f2a2e9a2bf8a94d396c4b4303455766f09eceef07`.
+Independent settled-data review SHA:
+`0b7bfcd9d5bc750423ff92bff4faf7099ee9c451149c8e79ae74c6494183c307`.
+
+The separate source35 qualification passed the default production check and
+compiled the library harness, then failed to compile a deliberate panic test
+with `E0277` at `catch_unwind`. No test body or feature leaf ran, and remote
+builder cleanup remains unverified. A test-local `AssertUnwindSafe` correction
+preserves the original claim, panic and absorbing-state assertions. Its fresh
+full qualification is pending. The additional producer, Root-command and SDK
+diagnostic proposals remain outside Main until their relevant checks pass.
+
+
+### 2026-11-02 07:27Z: controller source integrated; Rust qualification hit its compile limit
+
+The twelve-file controller composition is integrated with all six optional
+experiment, collector, entry, flow, packaging and target-check guards disabled.
+It retains the original authenticated command and collector owners, adds a
+strict target DATA accessor, and binds the staging package to five compiled
+modules plus its entry source. The two Python payloads remain byte-identical
+to the reviewed collector sources. Fresh coherent five-module noEmit and
+syntax/lineage checks passed before integration. Source-manifest SHA:
+`b5204ce719d01e5bc2d2ff5c3eebb07d50402ca8ed143023a24914a04c69e460`.
+Independent source review SHA:
+`c2fa6f9fa2f63196cfe8e18451e35f4d13a679fb91b78fe55a8ca00e093dd6ea`.
+Actual artifact/revision, compiled module, target and genuine-capture bindings
+remain absent. The full Cloud build passed (original session 85599), as did
+all 68 selected registry/staging/policy regression tests across ten files
+(original session 79247), with zero skips. Actual compiled module hashes are
+recorded as local build DATA; the controller image has not been rebuilt.
+
+The corrected source35 attempt reached its fixed 1800-second compiler limit
+while linking the admission-wins harness. The original provider child settled
+with exit 1, actual wait, both pipe EOFs and held pidfd; compiler step 19 exited
+124. Default harnesses and the close-wins leaf compiled, but no test body ran.
+There is no overall compile or source acceptance. Remote builder resource
+cleanup remains unknown. Original session 93123 candidate-report SHA:
+`18c8cbd7695349c75f5a6994111080947d43d0ebf71d7039f2a5ee6d1ea94b3e`.
+Root terminal observation SHA:
+`baed30c5a60ce86b556873765ff3d2e40a6625c9f39cac143a27d1fd2a5125a4`.
+Independent actual failure review SHA:
+`b60630ff1dfae2b8934d437ac5c6e28ad77f759f92dcead7421859bf57ba7025`.
+The next source-only recipe keeps production feature binaries in release mode
+and uses explicit development profiles for test harnesses. The source36 bytes,
+original compile/test deadlines and all test/list requirements stay fixed.
+It has not been executed and establishes no SDK, runtime or deployment result.
+
+### 2026-11-02 07:54Z: protected optional operator data reaches the existing driver
+
+The staging installer now validates optional `genuine_ingress` data on the
+original protected operator and projects a detached, frozen snapshot into the
+existing driver input. Its new guard remains false. The optional route requires
+the existing staging flow, exact case/feature and artifact fields, and the same
+validated policy image. Optional admission checks the full original operator
+hash against the same retained migration record before PostgreSQL access.
+Default configuration, read ordering and migration/admission SQL are preserved.
+
+The single reviewed output is
+`examples/managed-runtime-image-staging/install.mjs`, SHA
+`5f77440b901d126e41315df7042b2261b6990ce12bf578dc709fb9ea3be76710`.
+Root's fresh 16 source-reused pure tests and syntax check passed. Independent
+review repeated the 16 tests, syntax, exact patch and lineage checks; receipt
+SHA `ca3ae38e33b4c5ba7120cdebfff99b5ee6e4992698615177d75c11476aa15cb0`.
+No installer main, PostgreSQL or provider action was run for this change.
+Controller source inventory and externally qualified Rust artifact provenance
+remain separate; future activation must bind both to the actual integrated
+revision and final compiled bytes.
+
+The revised source36 qualifier separately requires explicit dev and release
+package cleans within its original 1800-second compiler limit, plus exact
+`fresh: false` on all eleven selected Cargo artifacts. Root's isolated tiny
+Cargo probe showed that an unqualified package clean retained release output.
+The corrected disabled recipe passed 61 pure tests and independent review.
+One new context prepared successfully in original session 49855; Root's
+preflight session 74651 checked 633 source files, 646 context files, modes,
+fresh nonce, literal includes and the unchanged disk reserve. Independent
+actual-context review cleared at 07:54:35Z, receipt SHA
+`e7569a6b666a9ad2e7aad43f81ea6240b271fd203db4c03ac8a69531325202c6`.
+The one original remote build started in session 11132. Its terminal failure
+and the remaining qualification gap are recorded below.
+
+### 2026-11-02 08:19Z: all source36 artifacts compiled; Root witness test failed
+
+Original session 11132 settled with exit 1 and an explicit false acceptance
+marker. The compiler stage completed in 1336.6 seconds, inside its unchanged
+1800-second limit. All eleven selected Cargo artifacts reported exact
+`fresh: false`, including the three production feature binaries built with
+the original release recipe. This establishes compilation DATA only.
+
+The first Root privilege-boundary test passed. The second Root test,
+`sdk_helper_root_producer_witness_real_scm_data_checks`, exited 101. The Root
+stage ended after 39.86 seconds, before the non-Root test stage ran. Its
+original child wait, both stream EOFs and held pidfd were observed; no outer
+observer error, timeout or truncation was reported. The failed test's output
+hashes were retained, but its error text was not exported from the failed
+build layer. The nested cause remains unknown. Remote builder resource
+cleanup remains unverified.
+
+Candidate-report SHA:
+`d6dd0e87268cb9117aadd3ce2da1e6a049b0c6e15110cc9805f50df2b9a73153`.
+Root's original-terminal observation SHA:
+`9453708e3796c10c2723bda4a4323e878f2fe277b0cea05a4d3cbcd923962e35`.
+Independent actual failed-attempt review SHA:
+`c9d6cd89a2e25c1ae80bd46a6d17b6a8431754aed59e806d8040f9769f98d1f5`.
+No source acceptance file was created. The sixteen pending Rust changes
+remain outside Main, and no new product image, SDK/runtime qualification,
+retirement result or deployment follows from this attempt. The next step is
+a bounded diagnostic of the failed Root test with its original budget and
+child ownership preserved.
+
+### 2026-11-02 08:49Z: retained Root diagnostic identifies the fixture deadline
+
+A separate diagnostic reused the exact prior compiler prefix and executable
+as historical DATA, then ran only the failed Root test with a fresh diagnostic
+nonce. Original session 81219 settled with exit 0 and a matching diagnostic
+marker. The selected test exited 101 after 30.01 seconds. Its complete bounded
+output identifies `compiler_sdk_peer_witness_tests.rs:246:112`: the original
+fixture wait/EOF deadline expired. Both the provider child and selected test
+had completed actual waits, both stream EOFs and held pidfds, with no capture
+timeout, truncation or observer error. The nested operation consuming the
+fixture's budget remains unknown.
+
+Diagnostic report SHA:
+`40f76cb986c48d490888b6a2df1898748a585319a229fc58e67b14abe7111318`.
+Root original-terminal observation SHA:
+`8d246d5cede08458633c593d6ce4ecb5864b4e9c1723c1dce3547676bc98ceb1`.
+Independent actual diagnostic review SHA:
+`1f77e60148776fbcc9ee84acf2cfeb8550ec62fd5b358fe8bd9bb2b4cd49b59b`.
+All source, SDK, runtime and qualification flags remain false. Cached compiler
+output establishes no new freshness. The proposed next qualifier optimizes
+only the default library harness using the existing release profile, preserving
+the source bytes, selected tests and all original deadlines. Its effectiveness
+requires a fresh complete qualification; no source integration or deployment
+has occurred.
+
+### 2026-11-02 09:28Z: source qualification canceled before test execution
+
+The fresh mixed-profile qualifier's original session 14982 settled with exit 1
+and a false acceptance marker. Its default library release harness compiled,
+and the close-wins and admission-wins feature compile markers were observed.
+BuildKit canceled compile step 19 while the carrier-contention production
+binary was compiling. The overall compile completion marker is absent, and
+no Root or non-Root test ran. This does not establish an inner compiler timeout
+or a Rust test failure; the profile's effect on the Root deadline is untested.
+
+The retained output also reports Depot/GraphQL `401 Unauthorized`, health
+`Invalid token`, and a builder-release deadline error. Their exact causal
+relationship to cancellation is unknown. A separate bounded Fly identity
+probe completed successfully, so configured-identity expiry is not established.
+The original local child completed its wait, both stream EOFs and held pidfd,
+without an outer timeout, truncation or observer error. Remote compiler
+termination and builder cleanup remain unverified.
+
+Candidate-report SHA:
+`39fb8c89bf401cf9d11702f058667d1b8e55e25ed5f6956ee78c8c3f26997617`.
+Root original-terminal observation SHA:
+`79101bff23028e365a69562a1107c138839f176ae319fb97520f9585f13abe66`.
+Independent actual failed-attempt review SHA:
+`c37e19210362b1a099fa1d4e11fc03d14dc62923861b4cd396665fa1103fa8d1`.
+No acceptance file was created. The sixteen pending Rust paths remain outside
+Main, with no new source, SDK, runtime, image or deployment qualification.
+
+### 2026-11-02 13:35Z: source checks and image builds passed; runtime remains pending
+
+The subsequent source36 qualification completed in original session 9129 with
+exit 0. All eleven selected artifacts reported `fresh: false`; compilation
+took 1482 seconds within the unchanged 1800-second limit. All 86 selected tests
+passed, including both Root tests, 54 ordinary tests and 30 feature tests.
+Independent review accepted this source qualification at 10:13:22Z, receipt
+SHA `60aa8769f9e6b5eb5177f32b2fdbdf71294f00f6a294989c080015d7578f80d6`.
+The source changes were integrated in revision
+`aea4b817a3abaf810cc6cd67a09ed9a25e902bb5`. Source-test acceptance does not
+establish genuine bootstrap, SDK/runtime admission or normal retirement.
+
+All three exclusive worker image builds completed and were pushed as private
+build artifacts. Their immutable digests are:
+
+- Close-wins: `sha256:51af34e6a8eede0536b581067d2516f35dd9b32dbd053a13ef5632704fbf0b3b`.
+- Admission-wins: `sha256:cc5c1113c4c1378b07a2412d136ca648ae2e56dc2e67bdb631249aa16b4271a5`.
+- Carrier-contention: `sha256:32333c97a2739e0ea4d6bf88f4eb2f69f48c6c9a3af76ae16a1bc373769056f8`.
+
+The first close-wins controller failed during setup before admission. Its
+original cleanup completed and its temporary token was revoked. The retained
+status has no nested setup exception. Source inspection identified a path
+mismatch: `flyctl` was checked beneath the context root although the image
+installs it at `/workspace/home/.fly/bin/flyctl`. Revision
+`620fd66b17f755f069536006b4dfc64f5c5cec91` fixes that check; eight focused tests
+passed. A new controller context and image were built from the corrected setup,
+with image digest
+`sha256:8988856b61aa3271ee95eeddf13a79827d64b69aab31092d1d591cf2f982e5ad`.
+This setup revision and the historical controller compiler result remain
+separate provenance facts.
+
+The second attempt's original supervisor session 1886 exited 0 after the
+unchanged 900-second deadline expired at 13:28:38Z while awaiting the completion
+gate. The binder had completed, but completion publication was never invoked.
+The original report records zero controller provider calls, an empty effect
+list, no created resources and verified cleanup through the no-owned-resource
+route. No protected-resource comparison or provider absence scan occurred.
+Independent cleanup receipt SHA:
+`671bf385d30795237445164e9d25a264427ffddfb156999dc4166005cccc765d`.
+The temporary token's original revocation command exited 0 at 13:34:42Z, with
+an acknowledged revocation, original child wait and no observer errors.
+Revocation receipt SHA:
+`c993c4f417f6da28709dd1e4e3945fb137d44a05aa8a050b40b91dcf902418b7`.
+Preparation for a fresh attempt moves static gate review before the runtime
+clock; the expired attempt is retained without replay or deadline renewal.
+SDK/runtime admission, the three genuine cases and normal retirement remain
+unverified. No public
+release, control-plane deployment or Mac installation follows from these builds.
+
+### 2026-11-02 14:26Z: genuine attempt reaches SDK startup; cleanup verified
+
+The third close-wins attempt completed setup and admission, then expired its
+original 300-second SDK phase. All 70 controller effects settled without an
+unknown outcome. A bounded diagnostic against the original SDK machine
+completed with an actual child wait and both stream EOFs. Its sole fixed record
+was `SdkHelperExitUnknown` at `serve_runtime`; the underlying cause remains
+unknown. Independent diagnostic receipt SHA:
+`a26af952f6b0f1b4ca59b07b1b29c455de2297b443e28106df6bf9fb4f6901f6`.
+
+Original operator cleanup completed 40 settled calls at 14:17:48Z. It verified
+the control and SDK machine terminal states and repeated absences, SDK app
+absence, SDK volume inactivity, and removal of three temporary secrets. The
+protected live worker's identity matched before and after cleanup. This does
+not establish physical volume erasure or normal retirement. Cleanup receipt
+SHA `7986296be369d16ec9baf1b3f25b8d1d597b090d8386b8f739eccaf88760e69c`.
+The original supervisor session 24511 then reaped its controller after a stop
+through the held original pidfd and exited 0. Token revocation was acknowledged
+at 14:25:38Z, receipt SHA
+`38960697770916458b1ab8fc63451fbbbe423f2dc0c607fa323f1e77a4ba31cf`.
+
+Source review identified two diagnostic gaps: the UID1500 helper can fail to
+reopen its Root-owned inherited stderr pipe, and relayed inner stderr can
+precede the fixed failure frame. A private repair and strict Root-to-UID1500
+pipe regression are being prepared. They are not integrated or qualified.
+SDK/runtime admission and all three genuine cases remain unverified.
+
+### 2026-11-02 15:18Z: source37 diagnostic and continuation checks passed
+
+The fresh source37 qualification completed in original session 57624 with
+exit 0. All 102 selected tests passed: 69 ordinary tests, three Root tests and
+30 feature tests. All eleven selected artifacts reported `fresh: false`;
+compilation took 1503.4 seconds within the unchanged 1800-second limit.
+Independent replay accepted the complete source proof, receipt SHA
+`014440ff69233c9bf5415779e968c1250af43c4783b34e479a8351e160475e79`.
+The integrated TypeScript passed `npm run check` and all 26 SDK protocol tests.
+The qualified 635-file source map SHA is
+`b23c55aadfcf49ffe4bb8fddb922a891c389adb30454fe448673900eff60316b`.
+
+The integrated changes retain original command descendants through admission
+failure, refuse peer resume and interrupt-then-replace pending tool/child
+reconciliation, and repair fixed helper failure reporting. The strict Root test
+exercised the original Root-owned stderr pipe across the actual UID1500 floor:
+the old generic emitter wrote no bytes, while the helper emitted one fixed
+frame through its inherited writer. Relayed workload stderr follows that frame
+as bounded hex data. These checks do not explain the third attempt's SDK
+failure; a fresh genuine run on newly built worker images remains required.
+
+Source-test acceptance does not establish SDK/runtime admission, genuine
+bootstrap, delivered ingress, reverse ptrace, release runtime parity or normal
+retirement. No public release, deployment or Mac installation was performed.
+
+### 2026-11-02 23:23Z: SDK helper namespace failure found and fixed
+
+Claude took over this work after Sol hit its usage limit. A lean sixth
+close-wins attempt reached SDK admission at 22:51:05Z. Unlike earlier
+attempts, the SDK machine's own log carried the fixed failure frame:
+`SdkHelperNamespaceWorkload`, class `io`, errno 13 (`permission_denied`), at
+`serve_runtime`. The phase then expired, as before. Operator cleanup completed
+40 calls, and the attempt's temporary org token was revoked and confirmed
+rejected. No qualification apps, machines or secrets remained.
+
+The cause is in the helper itself. It sets itself non-dumpable before it
+connects, then unshares a user namespace and writes its own `uid_map`. After
+`unshare(CLONE_NEWUSER)` a non-dumpable process keeps its proc files owned by
+global root, so that open fails with EACCES. A Python probe on the Fly kernel
+(6.12) reproduced it exactly: dumpable succeeds and non-dumpable gets errno 13.
+No earlier test ran this helper unprivileged on Linux.
+
+Turning the helper dumpable for the map writes would let any UID1500 process
+`pidfd_getfd` its SDK descriptors. Instead the helper forks a child before it
+connects. That child holds no descriptor or capsule data and waits
+non-dumpable. When asked, it creates the namespace and writes the maps, and
+the helper joins it with `setns`, staying non-dumpable throughout. New Linux
+tests cover the kernel refusal, the join, a same-UID `pidfd_getfd` attempt
+(EPERM) and reaping an unused child. All 36 SDK library tests pass locally as
+UID1500.
+
+A fresh close-wins base (`sha256:89e9f1fd…`, native `ca92e991…`) and overlay
+(`sha256:9e5682ce…`) were built at `8bd01d58`. Every in-image gate passed,
+including the Root exec floor and baked descriptor tests. The base review is
+an operator self-check recomputed from the build log, not an independent
+review. The new namespace tests are compiled in the image but run only on the
+local Linux host.
+
+Lean attempt7 reached SDK admission at 00:13:52Z on 2026-11-03. The EACCES is
+gone: the SDK machine's fixed frame is still `SdkHelperNamespaceWorkload` at
+`serve_runtime`, but now with class `validation_or_other` and no errno. No
+workload stderr was relayed, so the helper fails before or at the workload
+spawn, after the uid map step. The phase expired at 00:18:34Z. Cleanup
+completed 40 calls, no qualification machines or secrets remained, and the
+temporary org token was revoked and confirmed rejected. The remaining cause is
+unknown. SDK, runtime and ordinary admission remain unverified.
+
+### 2026-11-03: Resume after attempt7, descriptor namespace correction
+
+Sol reviewed Opus's retained attempt6/7 evidence and resumed at `8bd01d58`.
+The old full Cargo run ended with one failure in a 30ms preparation fixture;
+the other reported suites passed. Both preparation contention fixtures now
+allow two seconds for fixture capture and the blocked stage on their same
+original clock. The focused preparation run passed all 20 tests. Production
+deadlines are unchanged.
+
+A local reproduction found another SDK helper failure: an FD retained before
+mount-namespace cloning still names the original mount. Using it as a proc-FD
+bind source fails with EINVAL. The helper now holds cwd at the original floor
+while cloning, then opens the kernel-rebased cwd and checks its original inode.
+This avoids traversing Root-private ancestors as UID1500. Workspace, source
+and output reopenings require the same held inode and type; unavailable,
+deleted, replaced or symlink locators refuse. Mount, namespace and chdir
+failures retain their errno in the fixed diagnostic frame. This reproduction
+does not establish the exact cause of attempt7's frame, which lacked errno.
+
+All 38 focused SDK library tests passed locally; seven tests requiring other
+environments were ignored. A separate ignored regression requires genuine
+global Root, a Root-owned 0700 ancestor and the actual irreversible UID1500
+capability floor. It must run in an isolated qualifying environment before
+claiming coverage of that production layout. No permissions or privilege floor
+were relaxed. TypeScript checking and the Cloud build passed; broader checks
+are still running at this source checkpoint.
+
+The idle worker-token rotation also now claims each home before its first
+provider await, rechecks whether the home became busy, and retains a pending
+replacement across uncertain POST results and server restart. Three focused
+Cloud tests passed, including actual restart after losing the provider reply.
+Authenticated use of the same pending token settles the transition. A pending
+token that never reaches the home requires explicit reconciliation; this
+change does not automatically clear it or invalidate existing open sockets.
+
+The fresh worker image and genuine SDK/runtime admission remain pending. The
+historical source37 qualification does not qualify these changed Rust inputs.
+The diagnostic lean controller omitted original binder-completion gates;
+those gates must be restored for the next qualifying run. No release,
+deployment, Mac installation or protected live-home restart occurred during
+this checkpoint.

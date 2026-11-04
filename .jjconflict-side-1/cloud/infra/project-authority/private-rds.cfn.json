@@ -1,0 +1,886 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "UNAPPLIED Rudder private PostgreSQL authority candidate; disabled by default; no transport, application activation or provider qualification",
+  "Metadata": {
+    "RudderComponent": "ProjectAuthorityPreproduction",
+    "ReviewDate": "2026-10-30",
+    "ProviderStatus": "Candidate only; provider failure envelope and transport unresolved",
+    "WorkloadIdentity": "Reuse existing Fly OIDC provider and STS pattern; this stack grants no Fly runtime access",
+    "RuntimePolicy": "Unattached; future transport must assign its own reviewed principal"
+  },
+  "Parameters": {
+    "ProvisioningState": {
+      "Type": "String",
+      "Default": "disabled",
+      "AllowedValues": [
+        "disabled",
+        "reviewed-preproduction"
+      ],
+      "Description": "Cost approval and reviewed change set required before changing this value; not authority activation"
+    },
+    "PostgreSQL17MinorVersion": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^17\\.[0-9]+$",
+      "Description": "Required explicit available 17.x minor, checked against us-east-1 orderability before any deployment"
+    },
+    "AvailabilityZoneA": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^us-east-1[a-z]$"
+    },
+    "AvailabilityZoneB": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^us-east-1[a-z]$"
+    },
+    "OperatorPrincipalArn": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$",
+      "Description": "Explicit existing operator role with upstream MFA/SSO policy; never an application role"
+    },
+    "DBInstanceClass": {
+      "Type": "String",
+      "Default": "db.t4g.small",
+      "AllowedValues": [
+        "db.t4g.small",
+        "db.m7g.large"
+      ],
+      "Description": "Small is a burstable preproduction sizing candidate; production sizing needs measured memory and credit headroom"
+    },
+    "DBInstanceIdentifier": {
+      "Type": "String",
+      "Default": "rudder-authority-preprod",
+      "AllowedPattern": "^[a-z][a-z0-9-]{0,40}[a-z0-9]$"
+    }
+  },
+  "Rules": {
+    "ReviewedPreproductionInputs": {
+      "RuleCondition": {
+        "Fn::Equals": [
+          {
+            "Ref": "ProvisioningState"
+          },
+          "reviewed-preproduction"
+        ]
+      },
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Equals": [
+              {
+                "Ref": "AWS::Region"
+              },
+              "us-east-1"
+            ]
+          },
+          "AssertDescription": "Only the reviewed us-east-1 region is supported"
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "PostgreSQL17MinorVersion"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "PostgreSQL17MinorVersion must be explicitly reviewed"
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "AvailabilityZoneA"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "AvailabilityZoneA must be explicitly reviewed"
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "AvailabilityZoneB"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "AvailabilityZoneB must be explicitly reviewed"
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "OperatorPrincipalArn"
+                  },
+                  ""
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "OperatorPrincipalArn must be explicitly reviewed"
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "AvailabilityZoneA"
+                  },
+                  {
+                    "Ref": "AvailabilityZoneB"
+                  }
+                ]
+              }
+            ]
+          },
+          "AssertDescription": "Two distinct available AZs are required"
+        }
+      ]
+    }
+  },
+  "Conditions": {
+    "CreateReviewedPreproduction": {
+      "Fn::Equals": [
+        {
+          "Ref": "ProvisioningState"
+        },
+        "reviewed-preproduction"
+      ]
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "CidrBlock": "10.48.0.0/16",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "PrivateSubnetA": {
+      "Type": "AWS::EC2::Subnet",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": "10.48.0.0/24",
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZoneA"
+        },
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "PrivateSubnetB": {
+      "Type": "AWS::EC2::Subnet",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": "10.48.1.0/24",
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZoneB"
+        },
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "PrivateRoutes": {
+      "Type": "AWS::EC2::RouteTable",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "PrivateRouteAssociationA": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PrivateSubnetA"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRoutes"
+        }
+      }
+    },
+    "PrivateRouteAssociationB": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PrivateSubnetB"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRoutes"
+        }
+      }
+    },
+    "DatabaseSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "GroupDescription": "Private authority; inbound only from separately attached reviewed VPC clients",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "CidrIp": "10.48.0.0/16",
+            "Description": "PostgreSQL only within the dedicated VPC"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "RuntimeClientSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "GroupDescription": "Unattached future VPC authority API; no inbound listener or transport is created",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "DestinationSecurityGroupId": {
+              "Ref": "DatabaseSecurityGroup"
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "OperatorClientSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "GroupDescription": "Unattached one-off private migration runner; separate from application",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "DestinationSecurityGroupId": {
+              "Ref": "DatabaseSecurityGroup"
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "RuntimeDatabaseIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "GroupId": {
+          "Ref": "DatabaseSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "SourceSecurityGroupId": {
+          "Ref": "RuntimeClientSecurityGroup"
+        },
+        "Description": "Only future reviewed VPC API clients"
+      }
+    },
+    "OperatorDatabaseIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "GroupId": {
+          "Ref": "DatabaseSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "SourceSecurityGroupId": {
+          "Ref": "OperatorClientSecurityGroup"
+        },
+        "Description": "Only separately authorized migration runner"
+      }
+    },
+    "DatabaseSubnets": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "DBSubnetGroupDescription": "Two isolated AZ subnets for traditional Multi-AZ RDS instance",
+        "SubnetIds": [
+          {
+            "Ref": "PrivateSubnetA"
+          },
+          {
+            "Ref": "PrivateSubnetB"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "StorageKey": {
+      "Type": "AWS::KMS::Key",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Retained Rudder authority RDS storage and snapshots",
+        "EnableKeyRotation": true,
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AccountAdministeredIAMDelegation",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "SecretsKey": {
+      "Type": "AWS::KMS::Key",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Retained separate Rudder authority Secrets Manager encryption",
+        "EnableKeyRotation": true,
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AccountAdministeredIAMDelegation",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "DatabaseParameters": {
+      "Type": "AWS::RDS::DBParameterGroup",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "PostgreSQL17 authority durability and TLS floor; exact parameter availability must be checked before deployment",
+        "Family": "postgres17",
+        "Parameters": {
+          "rds.force_ssl": "1",
+          "ssl_min_protocol_version": "TLSv1.2",
+          "password_encryption": "scram-sha-256",
+          "synchronous_commit": "on",
+          "log_statement": "none",
+          "log_min_error_statement": "panic",
+          "log_parameter_max_length": "0",
+          "log_parameter_max_length_on_error": "0",
+          "log_min_duration_statement": "-1",
+          "log_duration": "0"
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "DBInstanceIdentifier": {
+          "Ref": "DBInstanceIdentifier"
+        },
+        "DBName": "rudder_authority",
+        "DBInstanceClass": {
+          "Ref": "DBInstanceClass"
+        },
+        "Engine": "postgres",
+        "EngineVersion": {
+          "Ref": "PostgreSQL17MinorVersion"
+        },
+        "EngineLifecycleSupport": "open-source-rds-extended-support-disabled",
+        "MultiAZ": true,
+        "PubliclyAccessible": false,
+        "NetworkType": "IPV4",
+        "Port": "5432",
+        "DBSubnetGroupName": {
+          "Ref": "DatabaseSubnets"
+        },
+        "VPCSecurityGroups": [
+          {
+            "Ref": "DatabaseSecurityGroup"
+          }
+        ],
+        "DBParameterGroupName": {
+          "Ref": "DatabaseParameters"
+        },
+        "StorageType": "gp3",
+        "AllocatedStorage": "20",
+        "MaxAllocatedStorage": 100,
+        "StorageEncrypted": true,
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "StorageKey",
+            "Arn"
+          ]
+        },
+        "MasterUsername": "rudder_administrator",
+        "ManageMasterUserPassword": true,
+        "MasterUserSecret": {
+          "KmsKeyId": {
+            "Fn::GetAtt": [
+              "SecretsKey",
+              "Arn"
+            ]
+          }
+        },
+        "EnableIAMDatabaseAuthentication": false,
+        "CACertificateIdentifier": "rds-ca-rsa2048-g1",
+        "BackupRetentionPeriod": 35,
+        "PreferredBackupWindow": "06:00-06:30",
+        "DeleteAutomatedBackups": false,
+        "CopyTagsToSnapshot": true,
+        "DeletionProtection": true,
+        "AutoMinorVersionUpgrade": false,
+        "AllowMajorVersionUpgrade": false,
+        "PreferredMaintenanceWindow": "sun:07:00-sun:08:00",
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "RuntimeSecret": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Condition": "CreateReviewedPreproduction",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Generated candidate runtime credential; not installed in PostgreSQL and not granted to a runtime principal by this stack",
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "SecretsKey",
+            "Arn"
+          ]
+        },
+        "GenerateSecretString": {
+          "SecretStringTemplate": "{\"username\":\"rudder_authority_runtime\",\"dbname\":\"rudder_authority\"}",
+          "GenerateStringKey": "password",
+          "PasswordLength": 40,
+          "ExcludeCharacters": "\"'\\"
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    },
+    "RuntimeSecretReadPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Condition": "CreateReviewedPreproduction",
+      "Properties": {
+        "Description": "Unattached least-privilege runtime credential policy; future transport must review and attach explicitly",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "secretsmanager:GetSecretValue",
+              "Resource": {
+                "Ref": "RuntimeSecret"
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": "kms:Decrypt",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SecretsKey",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": {
+                    "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                  },
+                  "kms:EncryptionContext:SecretARN": {
+                    "Ref": "RuntimeSecret"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "OperatorRole": {
+      "Type": "AWS::IAM::Role",
+      "Condition": "CreateReviewedPreproduction",
+      "Properties": {
+        "Description": "Separate migration/bootstrap operator; no application trust or infrastructure modification permission",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Ref": "OperatorPrincipalArn"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PrivateMigrationCredentials",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "Database",
+                        "MasterUserSecret.SecretArn"
+                      ]
+                    },
+                    {
+                      "Ref": "RuntimeSecret"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "SecretsKey",
+                      "Arn"
+                    ]
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:SecretARN": [
+                        {
+                          "Fn::GetAtt": [
+                            "Database",
+                            "MasterUserSecret.SecretArn"
+                          ]
+                        },
+                        {
+                          "Ref": "RuntimeSecret"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "Rudder"
+          },
+          {
+            "Key": "Component",
+            "Value": "ProjectAuthorityPreproduction"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "WriterEndpoint": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "Endpoint.Address"
+        ]
+      }
+    },
+    "WriterPort": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "Endpoint.Port"
+        ]
+      }
+    },
+    "DbiResourceId": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "DbiResourceId"
+        ]
+      }
+    },
+    "DatabaseArn": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "DBInstanceArn"
+        ]
+      }
+    },
+    "VpcId": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "Vpc"
+      }
+    },
+    "PrivateSubnetA": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "PrivateSubnetA"
+      }
+    },
+    "PrivateSubnetB": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "PrivateSubnetB"
+      }
+    },
+    "RuntimeClientSecurityGroupId": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "RuntimeClientSecurityGroup"
+      }
+    },
+    "OperatorClientSecurityGroupId": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "OperatorClientSecurityGroup"
+      }
+    },
+    "RuntimeSecretArn": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "RuntimeSecret"
+      }
+    },
+    "MasterSecretArn": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "Database",
+          "MasterUserSecret.SecretArn"
+        ]
+      }
+    },
+    "RuntimeSecretReadPolicyArn": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Ref": "RuntimeSecretReadPolicy"
+      }
+    },
+    "OperatorRoleArn": {
+      "Condition": "CreateReviewedPreproduction",
+      "Value": {
+        "Fn::GetAtt": [
+          "OperatorRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

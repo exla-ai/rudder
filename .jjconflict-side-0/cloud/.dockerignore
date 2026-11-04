@@ -1,0 +1,17 @@
+node_modules
+dist
+worker/node_modules
+**/.git
+**/.jj
+**/.rudder
+**/.ledger
+**/.claude
+**/.codex
+**/RUDDER_SHARED.md
+**/.env
+**/.env.*
+**/.DS_Store
+**/npm-debug.log*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

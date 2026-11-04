@@ -7327,12 +7327,16 @@ fn worker_plain_shifted_letters_are_forwarded_to_terminal() {
     )
     .expect("spawn test pty");
 
-    for _ in 0..20 {
+    // Poll with generous deadlines: the shared test host is often loaded, and a
+    // fixed short sleep made this test fail without any product regression.
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
         std::thread::sleep(Duration::from_millis(25));
         pane.drain_output();
         if pane.visible_lines_snapshot().join("\n").contains("ready") {
             break;
         }
+        assert!(Instant::now() < ready_deadline, "test pty never printed ready");
     }
 
     let mut app = App::new();
@@ -7346,11 +7350,17 @@ fn worker_plain_shifted_letters_are_forwarded_to_terminal() {
         app.handle_worker_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
     }
 
-    std::thread::sleep(Duration::from_millis(50));
-    let output = app
-        .selected_terminal_mut()
-        .map(|terminal| terminal.visible_lines().join("\n"))
-        .unwrap_or_default();
+    let echo_deadline = Instant::now() + Duration::from_secs(10);
+    let output = loop {
+        std::thread::sleep(Duration::from_millis(25));
+        let output = app
+            .selected_terminal_mut()
+            .map(|terminal| terminal.visible_lines().join("\n"))
+            .unwrap_or_default();
+        if ('A'..='Z').all(|ch| output.contains(ch)) || Instant::now() >= echo_deadline {
+            break output;
+        }
+    };
     for ch in 'A'..='Z' {
         assert!(output.contains(ch), "missing {ch:?}; output was {output:?}");
     }

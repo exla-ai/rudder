@@ -106,42 +106,28 @@ cloud-sync paused; `main-branch-jrqtg` (Sol) completed; `ps` cancelled
 
 ## 6. Decisions the user needs to make
 
-- DECIDED 2026-11-04: ship 4.0.0 Cloud-first from what is built, Mac work
-  in 4.1, build caching per PLAN.md section 0. Open: confirm `latest`.
+- DECIDED 2026-11-04: 4.0.0 ships only when jj on the Rudder VFS works and
+  is measured. No alpha releases or Cloud deploys before then.
 - Whether to approve the one optional Fly campaign (single retained owner,
   SDK + runtime + ordinary on one image) described in the readiness doc.
 - Cloud deploy (worker image + Fly control plane) needs explicit approval.
 - `origin/rudder/mac-pty-diagnostic`: 7 unmerged PTY/broker commits from
   10-30, about 210 behind main. Needs a Mac to verify; merge or drop.
 
-## 7. Scope and order
+## 7. What gets built (order)
 
-4.0.0 = Cloud on Fly, Linux, what is built today (see PLAN.md section 0).
+No alpha releases, no Cloud deploys, until 4.0.0 (PLAN.md section 0).
 
-1. Full gate green on main (running 2026-11-04). Classify the 5 Cloud test timeouts.
-2. Rewrite `v4-release-readiness.md` for the Cloud-first scope.
-3. Release 4.0.0 to `latest` (npm version, release-check CI, push main + tag).
-4. Cloud worker image + Fly deploy, with user approval.
+0. Main green: fix the 6 failing tests (see section 2).
+1. Remove agent ceremony and cut the CLI (small, reduces noise for the rest).
+2. jj storage backend on the engine content store.
+3. jj working-copy plugin on the VFS (copy-on-write forks, VFS change tracking).
+4. Warm snapshots from a trusted builder; agent launch uses forks.
+5. Tool-native caches behind one Rudder cache per machine.
+6. Scorecard on real repos, local and Cloud, v3 vs v4.
+7. Release 4.0.0 and deploy Cloud (user approval), one Fly run.
 
-4.0.x, right after release (details in PLAN.md section 0):
-
-1. Make it work, then evaluate: run the scorecard on real repos, local and
-   Cloud, v4 against v3. Fix what fails, cut what does not earn its keep.
-2. Remove agent ceremony (`rudder done`, `remember`, `share`, `context`,
-   auto `DECISIONS.md`, automatic hardening and follow-up chains). Starting
-   points: `native/src/tasks.rs`, `src/brain.ts`, worker prompts, hardening
-   queue in `native/src/main.rs`.
-3. Cut the CLI to about ten commands (`src/main.ts` and the command registry).
-4. Delete BYOC and `rudder improve`.
-
-4.1 headline, in order: wire overlay workspaces into agent launch, warm forks
-from a trusted builder snapshot, one Rudder cache per machine for tool-native
-caches, REAPI for Buck2/Bazel repos, then cross-machine cache (E2, one Fly run)
-and Mac work.
-
-Product follow-up: Rudder's own scheduler auto-queues hardening follow-ups
-(`.rudder/hardening.json`, `MAX_FOLLOWUP_DEPTH = 3` in `native/src/main.rs`).
-That is what produced 15 hardening runs. Consider turning it off by default.
+After 4.0.0: REAPI for Buck2/Bazel repos, cross-machine cache, Mac.
 
 ## 8. Disk and leftovers (ask before deleting)
 

@@ -93,8 +93,8 @@ create, read-only ones included.
 - **Run only the checks for what you changed** (one test file, one `cargo test`
   filter, `npm run check`). The full suite above runs once per release, not per
   commit, task or agent. Re-run a failing test alone before treating it as real.
-- **CI is for releases.** Do not watch CI, rerun it or debug it during normal
-  development. Push only when releasing (or docs-only).
+- **No prereleases until 4.0.0.** Do not cut alpha versions or deploy Cloud.
+  CI is for the release; do not watch, rerun or debug it during development.
 - **No git archaeology.** Do not spend turns on history, rebases, bisects or
   branch bookkeeping unless the task is about history.
 - **No new status docs, receipts or evidence files.** Update
@@ -122,7 +122,7 @@ Filter provider output so worker tokens stay private. Mac installation/release
 has separate build, install/launch and signing gates; see reference §§9, 11.
 
 End with a short final message: what changed, what was checked, what is left.
-`rudder done` still exists until 4.0.x removes it; when a run's prompt asks for
+`rudder done` still exists until the ceremony removal lands; when a run's prompt asks for
 it, keep it to that same short summary. Report unfinished work honestly. The
 locked direction is [PLAN.md section 0](PLAN.md); current status and open work
 are in [the v4 handoff](docs/v4-handoff.md). `docs/architecture/` is background

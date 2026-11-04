@@ -29,13 +29,27 @@ Companion documents:
 This section overrides anything below that conflicts with it. Current status
 and open work live in [the v4 handoff](docs/v4-handoff.md).
 
-- **4.0.0 ships Cloud-first, Linux only, from what is built today.** Mac work
-  (APFS clones, offline Mac drafts, signing, Mac baselines) moves to 4.1.
+- **v4.0 goal: jj on the Rudder VFS.** The efficiency is the point of v4, so
+  4.0.0 ships only when it works. No alpha releases or Cloud deploys before
+  then.
+  1. **jj storage backend on the engine content store.** jj commits and trees
+     live in Rudder's CAS; a snapshot is a commit. Git stays at the edges
+     (push/pull to GitHub).
+  2. **jj working-copy plugin on the VFS.** An agent's workspace is a
+     copy-on-write fork; jj asks the VFS what changed instead of scanning.
+  3. **Warm snapshots.** A trusted builder snapshots the default branch with
+     dependencies installed and builds done; forks start from it.
+  4. **Agent launch uses forks, not checkouts.**
+  5. **Measured on real repos, v3 vs v4:** fork time, disk per agent, time to
+     first build, plus the scorecard below.
+  Both pieces are plugins written against `jj-lib` (already linked into the
+  native binary), not a hard fork of jj. The jj pin stays 0.40.0 unless a
+  plugin needs a newer API.
+- **Cloud on Fly, Linux first.** Mac work (APFS, offline drafts, signing)
+  follows after 4.0.0.
 - **Build speed for parallel agents comes from three layers, in this order:**
-  1. **Warm forks.** A trusted Rudder builder keeps a warm snapshot of the
-     default branch with dependencies installed and build outputs present.
-     Each agent starts from a copy-on-write fork of it, so its first build is
-     incremental. Agents never write into the shared snapshot.
+  1. **Warm forks** (the v4.0 goal above). Agents never write into the shared
+     snapshot.
   2. **Tool-native caches behind one Rudder cache per Cloud machine.** Rudder
      points sccache, the pnpm store, uv, Turborepo/Nx and similar tools at a
      cache it runs on the machine. Shared across machines later.
@@ -47,11 +61,11 @@ and open work live in [the v4 handoff](docs/v4-handoff.md).
   agent miss builds privately and never publishes a result other agents trust.
 - **The custom managed compiler cache path is frozen.** Its reuse stays
   disabled; do not start new hardening work on it.
-- **Cross-machine content cache (E2) is 4.1.** One real two-worker Fly run is
+- **Cross-machine content cache (E2) comes after 4.0.0.** One real two-worker Fly run is
   needed to prove it, with user approval.
-- **No new hardening waves.** Work items must map to a 4.0.x or 4.1 goal above.
-- **Next phase is "make it work, then evaluate".** No new features until the
-  scorecard below runs on real repos with real Codex and Claude sessions,
+- **No new hardening waves.** Work items must map to a goal in this section.
+- **Make it work, then evaluate.** Every milestone is checked with the
+  scorecard on real repos with real Codex and Claude sessions,
   local and Cloud, comparing v4 with v3 on the same tasks: agent start time,
   work lost on restart, tokens per accepted change, merge correctness, and the
   web/phone flow. Record the numbers, bad ones included. This replaces E0-E14

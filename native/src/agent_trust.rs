@@ -26,19 +26,28 @@ pub(crate) fn prepare_for_launch(program: &str, cwd: &Path) {
         .unwrap_or_default();
     // A RUDDER_*_BIN override is a test fake or a custom build: leave the real
     // config files alone.
-    let (config, trust): (Option<PathBuf>, fn(&Path, &str) -> std::io::Result<bool>) = match name {
-        "claude" if std::env::var_os("RUDDER_CLAUDE_BIN").is_none() => {
-            (claude_config_path(), trust_claude)
-        }
-        "codex" if std::env::var_os("RUDDER_CODEX_BIN").is_none() => {
-            (codex_config_path(), trust_codex)
-        }
+    let config = match name {
+        "claude" if std::env::var_os("RUDDER_CLAUDE_BIN").is_none() => claude_config_path(),
+        "codex" if std::env::var_os("RUDDER_CODEX_BIN").is_none() => codex_config_path(),
         _ => return,
     };
-    let Some(config) = config else { return };
+    if let Some(config) = config {
+        trust_for(name, &config, cwd);
+    }
+}
+
+/// Records trust for `cwd`'s roots in `config` for the CLI named `name`. An
+/// overlay fork (src/warm-snapshot.ts) is trusted at its workspace path, which
+/// is also the agent's cwd inside the fork's namespace.
+pub(crate) fn trust_for(name: &str, config: &Path, cwd: &Path) {
+    let trust: fn(&Path, &str) -> std::io::Result<bool> = match name {
+        "claude" => trust_claude,
+        "codex" => trust_codex,
+        _ => return,
+    };
     for root in trust_roots(cwd) {
         if let Some(root) = root.to_str() {
-            let _ = trust(&config, root);
+            let _ = trust(config, root);
         }
     }
 }
@@ -377,6 +386,28 @@ mod tests {
         assert!(fs::read_to_string(&config)
             .unwrap()
             .starts_with("written by codex meanwhile\n\n[projects.\"/work/repo\"]"));
+    }
+
+    #[test]
+    fn fork_launches_record_trust_for_claude_and_codex() {
+        let temp = tempdir();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        // A fork outside any checkout: only `.jj` on disk, plus `<path>.fork/`.
+        let fork = base.join("ws/agent-1");
+        fs::create_dir_all(fork.join(".jj")).unwrap();
+        fs::create_dir_all(base.join("ws/agent-1.fork")).unwrap();
+        let claude = base.join(".claude.json");
+        fs::write(&claude, "{}").unwrap();
+        let codex = base.join("config.toml");
+        trust_for("claude", &claude, &fork);
+        trust_for("codex", &codex, &fork);
+        let root = fork.to_str().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&claude).unwrap()).unwrap();
+        assert_eq!(value["projects"][root]["hasTrustDialogAccepted"], true);
+        assert!(fs::read_to_string(&codex)
+            .unwrap()
+            .contains(&format!("[projects.\"{root}\"]")));
     }
 
     #[test]

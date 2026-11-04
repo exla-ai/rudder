@@ -1190,6 +1190,8 @@ impl TerminalPane {
         if let (Some(command), Some(cwd)) = (&command, &options.cwd) {
             crate::agent_trust::prepare_for_launch(&command.program, cwd);
         }
+        // After trust: trust keys on the agent program, and the fork's
+        // workspace path is the agent's cwd inside its namespace too.
         let command = enter_fork(command, options.cwd.as_deref());
         let mut builder = command_builder(command, &options.term)?;
         if let Some(cwd) = &options.cwd {

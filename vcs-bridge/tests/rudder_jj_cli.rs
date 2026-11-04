@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(all(feature = "cli", target_os = "linux"))] // forks use Linux OverlayFS
 //! rudder-jj behaves like stock jj on a normal repo, and forks via rudder-overlay.
 
 use std::path::Path;

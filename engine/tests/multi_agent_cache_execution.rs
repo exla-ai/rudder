@@ -386,10 +386,11 @@ fn worker_process() {
     fs::create_dir(scratch_path.join("target")).unwrap();
     fs::write(scratch_path.join("fixture.c"), &immutable_source).unwrap();
     let compiled = Command::new("/usr/bin/cc")
+        // GNU ld only; the macOS linker rejects --build-id.
+        .args(if cfg!(target_os = "linux") { &["-Wl,--build-id=none"][..] } else { &[][..] })
         .args([
             "-frandom-seed=rudder-fixture",
             "-fno-ident",
-            "-Wl,--build-id=none",
             "fixture.c",
             "-o",
             "target/fixture",

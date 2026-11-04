@@ -3,12 +3,13 @@
 These modules implement local v4 authority/data-format migration. They do not
 replace `src/migration.ts`'s existing local-to-Cloud session transfer or
 `cloud/src/project-authority/migration.ts`'s administrator-only PostgreSQL schema
-installation. They do not migrate the real fleet. No manifests, dependencies,
-shared schemas, jj pin, generated context, or shared registrations were changed.
+installation. They do not migrate the real fleet. Native registration, shared
+writer admission and retained App ownership are wired into the product paths
+described below. Manifests, dependencies, shared schemas and the jj pin are unchanged.
 
 ## Registration and admission
 
-- Register `mod v4_migration;` in `native/src/main.rs` (module lives at
+- `mod v4_migration;` is registered in `native/src/main.rs` (module lives at
   `native/src/v4_migration/mod.rs`). It uses existing native/engine dependencies.
 - In legacy/default native engine startup, before owner acquisition, scheduler
   creation, or any authority-mode config write, call
@@ -16,10 +17,10 @@ shared schemas, jj pin, generated context, or shared registrations were changed.
   including malformed/interrupted/completed rollback state, requires explicit
   recovery rather than opening a scheduler. Explicit v4 recovery uses the exact
   committed receipt and current journal state under its owner lock.
-- At TS writer admission, alongside `assertLegacyWriterAllowed`, await
-  `assertNoPendingV4Migration(repository)` from `src/migration.ts`. The existing
-  synchronous authority guard is outside n6 ownership; add this at its async
-  run-manager/daemon/board callers or provide equivalent synchronous admission.
+- TS `assertLegacyWriterAllowed` includes synchronous marker refusal for all
+  run-manager/daemon/board callers, including detached spawn. The async
+  `assertNoPendingV4Migration(repository)` from `src/migration.ts` provides
+  equivalent admission for callers using that helper.
 - Neither guard physically fences incompatible binaries. The trusted host must
   establish confirmed scheduler shutdown, command/effect reconciliation,
   disabled launchers, and fencing of uncontrolled external publishing credentials.
@@ -52,18 +53,27 @@ lock into a permission token or treat its JSON receipt as a newly granted fence.
    head under this same lock first; do not grant scheduler control. Supply that
    exact `OwnerFence`. Do not infer an owner from filesystem JSON or change the
    authority mode through config.
+   A normally stopped legacy App supplies its exact inactive fence and current
+   run epochs. The migration's `reactivating` phase verifies its durable drain
+   proof before acquiring custody for history import under the retained lock.
 5. Hash the exact `bundle/manifest.json` bytes with raw SHA256 and call
    `session.prepare(&journal, MigrationRequest{...})`. Bind previous authority,
    previous owner, unique migration ID, new owner ID, the full legacy run list,
    existing run epochs (None for unregistered legacy runs), bundle path and hash.
    Reusing an ID with a different request fails. Unknown/stale/omitted run epochs,
    missing source/history/session inventories and corrupt blobs fail before intent.
-6. Repeatedly call `advance` until `Committed`. Committed phases are `prepared`,
+6. Repeatedly call `advance` until `Committed`. A normally retired legacy App
+   starts at `reactivating`: it verifies the exact normal-drain release and
+   reclaims journal custody under a request-bound enrollment identity, without
+   creating a scheduler. Its durable intent reconciles an interrupted CAS once.
+   The original request keeps the supplied inactive owner and complete inventory.
+   Other committed phases are `prepared`,
    `exported`, `importing`, `imported`, `transferring`, `committed`. Importing saves
    one run per step. Only the current in-flight run registration and exact pending
    owner transfer can be reconciled after SQLite commit but before receipt save.
    Unrelated changes fail. The existing Journal transaction changes owner and all
-   run epochs together, retiring stale pending targets. No runtime/attempt,
+   run epochs together, verifies settled effects/runtime custody through
+   `transfer_recovered_owner` and retires stale pending targets. No runtime/attempt,
    capability, scheduler, or backend turn is created by import.
 7. Keep historical records available through the legacy adapter and store/show the
    compatibility projections from `legacyRecoveryRecord`, which preserve opaque
@@ -84,7 +94,8 @@ Stop/drain the v4 backend/owner and reconcile its effects first. Open a migratio
 session with fresh quiescence. `pause_for_rollback` uses the saved owner/run epochs.
 For normal v4 work that changed them, use `pause_for_rollback_at` with the host's
 explicit current owner and full run inventory. Stale expectations fail. The
-rollback intent is saved before `Journal::release_owner`, which invalidates the
+rollback intent is saved before `Journal::release_drained_owner`, which verifies
+normal runtime/effect drain and invalidates the
 owner and all run epochs transactionally. Restart reconciles an interrupted
 release rather than repeating it. `rollback_paused` means no active journal owner.
 
@@ -123,9 +134,9 @@ without promising that linked old workspace metadata is immediately resumable.
   real SQLite and OS locks. It exercises every committed upgrade phase, partial
   import, post-commit/pre-receipt uncertainty, rollback, stale/concurrent actors,
   changed runtime epochs, known live legacy owners and corrupt/linked metadata.
-- n13 must run the integrated native/CLI/App lifecycle gates after registering
-  these modules/call sites. This worker does not claim that those unowned call sites
-  or real Mac hardware, Fly, staging, fleet rollout, packaging or release gates pass.
+- Integrated native/CLI/App lifecycle gates cover the product wiring below.
+  Real Mac hardware, Fly, staging, fleet rollout, packaging and release remain
+  separate coordinator gates. This local hardening pass uses no Fly services.
 
 
 ## Integrated explicit product entry points
@@ -135,6 +146,9 @@ from stdin. Its `upgrade` action retains the actual native checkout lock while
 calling `__migrate-v4` to capture source, history, records, workspaces and explicitly
 selected transcript files, then advances the existing journal migration receipt.
 `advance` and `status` recover or inspect the same receipt.
+Legacy TS users without a Fabric directory get private local journal storage;
+the explicit upgrade request still supplies the accepted head and previous
+owner fence before project enrollment. Storage creation grants no authority.
 
 After `committed`, `rudder engine adopt-migration --repo <checkout>` accepts an
 `AdoptionRequest` on stdin. Supply the migration ID, exact current journal
@@ -176,3 +190,40 @@ App. A crash between transfer and that receipt requires explicit adoption again.
 No file flag grants this admission, and legacy startup still refuses the original
 migration marker. Runtime restart reconciliation and uncertain-custody refusal
 remain mandatory. Recovered records remain paused and plans unapproved.
+
+## Hardened recovery checkout handoff
+
+The exported checkout now retains `.rudder/engine/v4-recovery.json`. This is
+refusal evidence and archive provenance, never an ownership grant. It remains
+incomplete until every paused record and explicit transcript/workspace mapping
+has been written. All compatible TS writers and native legacy startup refuse
+this marker, including malformed and linked markers. Do not delete it.
+
+After explicit `rollback_export` or `recovery_export`, deliberately start the
+returned checkout with `rudder engine start --repo <integrationPath>`. Under
+its real checkout lock the native Fabric constructor verifies the completed
+export, receipt-pinned archive hash, selected rollback checkpoint and retained
+run inventory, acquires a fresh journal owner for that new checkout, imports
+history without runtimes and publishes its own owner projection. App adoption
+keeps interrupted records Paused, preserves explicit exported transcript links
+and requires fresh plan approval. Normal restart repeats these checks and uses
+the current journal inventory. The original checkout and its migration refusal
+marker remain intact through this separate handoff.
+
+`rollback_pause` accepts `expected_owner` (`current_owner` remains an input
+alias) and the complete current `run_epochs`. After normal App shutdown, use
+the exact inactive owner returned by the journal. The migration adapter verifies
+the immediately preceding durable normal-drain release and reuses it without
+starting a scheduler or incrementing epochs again. An inactive flag from an
+unqualified release is insufficient. Interrupted release recovery makes the
+same drain-proof check, and repeated pause requests retain the checkpoint.
+
+The shared synchronous TS admission guard covers every run-manager, scheduler,
+planning writer and scheduler-daemon entry point. Native legacy startup checks
+again after acquiring its actual checkout lock. Integrated tests in
+`native/src/v4_migration_integration_tests.rs` use the real owner/App lifecycle,
+retained source leases, normal shutdown, restart, rollback and separate recovery
+ownership; unresolved runtime custody refuses transfer before owner publication.
+Fabric selection alone also refuses a legacy journal owner or retained legacy
+state without a committed migration or completed separate recovery export.
+An `owner.json` authority label cannot override the actual journal's owner.

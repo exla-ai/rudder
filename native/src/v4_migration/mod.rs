@@ -36,6 +36,7 @@ pub struct MigrationRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    Reactivating,
     Prepared,
     Exported,
     Importing,
@@ -229,11 +230,11 @@ pub fn prepare_fabric_restart(repository: &Path, journal: &Journal) -> Result<Op
             launchers_disabled:true,external_credentials_fenced:true}}).map(Some)
 }
 
-fn safe_run_id(id: &str) -> bool {
+pub(crate) fn safe_run_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && id != "." && id != ".."
         && id.chars().all(|c|c.is_ascii_alphanumeric() || matches!(c, '-'|'_'|'.'))
 }
-fn compatible_record(id: &str, mut record: serde_json::Value) -> Result<serde_json::Value> {
+pub(crate) fn compatible_record(id: &str, mut record: serde_json::Value) -> Result<serde_json::Value> {
     ensure!(record["id"] == id && record["status"].is_string() && record["task"].is_string(),
         "invalid migration run compatibility record");
     let original = record["status"].as_str().unwrap().to_owned();
@@ -245,8 +246,11 @@ fn compatible_record(id: &str, mut record: serde_json::Value) -> Result<serde_js
     if ["created", "running", "steering", "verifying", "orphaned"].contains(&original.as_str()) {
         object.insert("status".into(), serde_json::json!("paused"));
     }
-    object.insert("migrationRecovery".into(), serde_json::json!({"format_version":1,
-        "original_status":original,"automatic_resume":false}));
+    let mut recovery=object.get("migrationRecovery").and_then(|value|value.as_object()).cloned().unwrap_or_default();
+    recovery.entry("original_status").or_insert(serde_json::json!(original));
+    recovery.insert("format_version".into(),serde_json::json!(1));
+    recovery.insert("automatic_resume".into(),serde_json::json!(false));
+    object.insert("migrationRecovery".into(),serde_json::Value::Object(recovery));
     Ok(record)
 }
 
@@ -277,6 +281,14 @@ pub struct MigrationSession {
     repository: PathBuf,
     _owner_lock: File,
     receipt_path: PathBuf,
+}
+impl Drop for MigrationSession {
+    fn drop(&mut self) {
+        // As with EngineOwnership's CheckoutLock, a concurrent process spawn
+        // may briefly inherit this open description before exec closes it.
+        // The retired migration session must explicitly release its OS lock.
+        let _=FileExt::unlock(&self._owner_lock);
+    }
 }
 impl MigrationSession {
     /// Run off the App loop. Never call while engine_host already owns its lock.
@@ -352,7 +364,7 @@ impl MigrationSession {
         }
         let state = journal.project_state(&request.previous_owner.project_id)?;
         ensure!(
-            state.owner_active && state.owner == request.previous_owner,
+            state.owner == request.previous_owner,
             "stale migration owner epoch"
         );
         let epochs = epochs(journal, &request.previous_owner)?;
@@ -383,7 +395,7 @@ impl MigrationSession {
             format_version: 1,
             owner: request.previous_owner.clone(),
             request,
-            phase: Phase::Prepared,
+            phase: if state.owner_active {Phase::Prepared} else {Phase::Reactivating},
             imported: 0,
             run_epochs: epochs,
             rollback_checkpoint: None,
@@ -408,6 +420,32 @@ impl MigrationSession {
         reject_live_legacy(&self.repository)?;
         let mut receipt = self.required(migration_id)?;
         match receipt.phase {
+            Phase::Reactivating => {
+                // A normally retired legacy App already released its epoch.
+                // Persist this intent before reacquiring only journal custody
+                // for history import. No scheduler or backend is constructed.
+                ensure!(receipt.owner==receipt.request.previous_owner && receipt.imported==0,
+                    "migration enrollment differs from its prepared fence");
+                verify_bundle(&receipt.request.recovery_bundle,&receipt.request.recovery_manifest_sha256,
+                    &receipt.owner.project_id,migration_id)?;
+                let next = OwnerFence {project_id:receipt.owner.project_id.clone(),
+                    owner_id:format!("migration-enrollment:{:x}",Sha256::digest(serde_json::to_vec(&receipt.request)?)),
+                    epoch:receipt.owner.epoch.checked_add(1).context("owner epoch exhausted")?};
+                let state=journal.project_state(&receipt.owner.project_id)?;
+                if !state.owner_active && state.owner==receipt.owner {
+                    validate_epochs(journal,&receipt.owner,&receipt.run_epochs)?;
+                    let mut prior=receipt.owner.clone();
+                    prior.epoch=prior.epoch.checked_sub(1).context("invalid released migration epoch")?;
+                    journal.release_drained_owner(&prior,now_ms)?;
+                    receipt.owner=journal.transfer_recovered_owner(&receipt.owner,&next.owner_id,now_ms)?;
+                } else {
+                    ensure!(state.owner_active && state.owner==next,"migration enrollment requires reconciliation");
+                    validate_epochs(journal,&next,&increment_epochs(&receipt.run_epochs)?)?;
+                    receipt.owner=next;
+                }
+                receipt.run_epochs=epochs(journal,&receipt.owner)?;
+                receipt.phase=Phase::Prepared;
+            }
             Phase::Prepared => {
                 verify_bundle(
                     &receipt.request.recovery_bundle,
@@ -436,7 +474,10 @@ impl MigrationSession {
                     validate_epochs(journal, &receipt.owner, &expected)?;
                     match (run.expected_epoch, current) {
                         (Some(expected), Some(actual)) => {
-                            ensure!(expected == actual, "stale imported run epoch")
+                            let enrollment=receipt.owner.epoch.checked_sub(receipt.request.previous_owner.epoch)
+                                .context("invalid migration enrollment epoch")?;
+                            ensure!(enrollment<=1 && expected.checked_add(enrollment)==Some(actual),
+                                "stale imported run epoch")
                         }
                         (None, None) => {
                             journal.register_run(&receipt.owner, &run.run_id, now_ms)?;
@@ -464,16 +505,15 @@ impl MigrationSession {
                     project_id: receipt.owner.project_id.clone(),
                     owner_id: receipt.request.next_owner_id.clone(),
                     epoch: receipt
-                        .request
-                        .previous_owner
+                        .owner
                         .epoch
                         .checked_add(1)
                         .context("owner epoch exhausted")?,
                 };
                 ensure!(state.owner_active, "migration owner is no longer active");
-                if state.owner == receipt.request.previous_owner {
+                if state.owner == receipt.owner {
                     validate_epochs(journal, &state.owner, &receipt.run_epochs)?;
-                    receipt.owner = journal.transfer_owner(&state.owner, &next.owner_id, now_ms)?;
+                    receipt.owner = journal.transfer_recovered_owner(&state.owner, &next.owner_id, now_ms)?;
                 } else {
                     ensure!(
                         state.owner == next,
@@ -511,7 +551,7 @@ impl MigrationSession {
         }
         if receipt.phase != Phase::RollbackPausing {
             // Settle an uncertain transfer rather than release a stale fence.
-            if receipt.phase == Phase::Transferring {
+            if matches!(receipt.phase, Phase::Transferring | Phase::Reactivating) {
                 receipt = self.advance(journal, migration_id, now_ms)?;
             }
             self.assert_owner(journal, &receipt.owner)?;
@@ -554,6 +594,9 @@ impl MigrationSession {
                             .context("owner epoch exhausted")?,
                 "rollback release requires reconciliation"
             );
+            // Inactive state alone is insufficient: release_owner also makes
+            // an owner inactive without proving its runtimes/effects drained.
+            journal.release_drained_owner(&receipt.owner, now_ms)?;
             for (run, epoch) in increment_epochs(&receipt.run_epochs)? {
                 ensure!(
                     journal.run_epoch(&receipt.owner.project_id, &run)? == epoch,
@@ -589,6 +632,15 @@ impl MigrationSession {
     ) -> Result<MigrationReceipt> {
         reject_live_legacy(&self.repository)?;
         let mut receipt = self.required(migration_id)?;
+        if matches!(receipt.phase, Phase::RollbackPausing | Phase::RollbackPaused | Phase::RolledBack) {
+            let same = receipt.owner == *expected_owner && receipt.run_epochs == *expected_runs;
+            let released = receipt.owner.project_id == expected_owner.project_id
+                && receipt.owner.owner_id == expected_owner.owner_id
+                && expected_owner.epoch.checked_add(1) == Some(receipt.owner.epoch)
+                && increment_epochs(expected_runs)? == receipt.run_epochs;
+            ensure!(same || released, "rollback retry differs from its recorded owner and run inventory");
+            return self.pause_for_rollback(journal, migration_id, now_ms);
+        }
         ensure!(
             receipt.phase == Phase::Committed,
             "explicit rollback fence requires a committed migration"
@@ -598,8 +650,23 @@ impl MigrationSession {
                 && expected_owner.epoch >= receipt.owner.epoch,
             "rollback fence belongs to another or older owner"
         );
-        self.assert_owner(journal, expected_owner)?;
+        let state = journal.project_state(&expected_owner.project_id)?;
+        ensure!(state.owner == *expected_owner, "stale migration owner epoch");
         validate_epochs(journal, expected_owner, expected_runs)?;
+        if !state.owner_active {
+            // Normal App shutdown has already released exactly one epoch.
+            // Reuse its transactional drain proof, without acquiring a new
+            // scheduler merely to stop it again or incrementing epochs twice.
+            let mut previous = expected_owner.clone();
+            previous.epoch = previous.epoch.checked_sub(1).context("invalid released rollback epoch")?;
+            journal.release_drained_owner(&previous, now_ms)?;
+            receipt.owner = expected_owner.clone();
+            receipt.run_epochs = expected_runs.clone();
+            receipt.rollback_checkpoint = Some(uuid::Uuid::new_v4().to_string());
+            receipt.phase = Phase::RollbackPaused;
+            self.save(&receipt)?;
+            return Ok(receipt);
+        }
         receipt.owner = expected_owner.clone();
         receipt.run_epochs = expected_runs.clone();
         receipt.phase = Phase::RollbackPausing;
@@ -656,12 +723,7 @@ impl MigrationSession {
             !state.owner_active && state.owner == receipt.owner,
             "rollback owner changed"
         );
-        for (run, epoch) in &receipt.run_epochs {
-            ensure!(
-                journal.run_epoch(&receipt.owner.project_id, run)? == *epoch,
-                "stale rollback run epoch"
-            );
-        }
+        validate_epochs(journal, &receipt.owner, &receipt.run_epochs)?;
         Ok(())
     }
     fn assert_owner(&self, journal: &Journal, owner: &OwnerFence) -> Result<()> {
@@ -704,7 +766,7 @@ impl MigrationSession {
 }
 fn epochs(journal: &Journal, owner: &OwnerFence) -> Result<BTreeMap<String, u64>> {
     Ok(journal
-        .owned_runs(owner)?
+        .recorded_run_inventory(owner)?
         .into_iter()
         .map(|run| (run.run_id, run.run_epoch))
         .collect())
@@ -945,6 +1007,11 @@ pub(crate) fn verify_bundle(bundle: &Path, hash: &str, project: &str, migration:
 /// authority configuration. Completed rollback also requires an explicit adapter
 /// handoff, so merely opening an old dashboard never resumes migrated work.
 pub fn refuse_implicit_startup(repository: &Path) -> Result<()> {
+    match fs::symlink_metadata(repository.join(".rudder/engine/v4-recovery.json")) {
+        Ok(_) => bail!("recovery checkout requires an explicitly started fresh Fabric owner; legacy scheduler startup refused"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
     match fs::symlink_metadata(repository.join(".rudder/engine/v4-migration.json")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
@@ -952,6 +1019,30 @@ pub fn refuse_implicit_startup(repository: &Path) -> Result<()> {
             "project migration requires explicit recovery; implicit scheduler startup refused"
         ),
     }
+}
+
+/// Selecting Fabric in config is routing, not permission to migrate historical
+/// users without capture/handover. Only an actual Fabric journal owner permits
+/// its ordinary restart; filesystem projections can supply refusal evidence.
+pub(crate) fn refuse_unmigrated_fabric_startup(repository: &Path, journal: &Journal) -> Result<()> {
+    let project=rudder_engine::paths::local_project_id(repository)?;
+    match journal.project_state(&project) {
+        Ok(state) => {
+            ensure!(state.owner.owner_id.starts_with("fabric:"),
+                "existing legacy owner requires explicit migration before Fabric startup");
+            return Ok(());
+        },
+        Err(error) if matches!(error.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::QueryReturnedNoRows))=>{},
+        Err(error)=>return Err(error),
+    }
+    for name in ["runs", "graph.json", "plans", "undo-stack.json", "migration.json", "engine/owner.json"] {
+        match fs::symlink_metadata(repository.join(".rudder").join(name)) {
+            Ok(_)=>bail!("existing legacy state requires explicit migration before Fabric startup"),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(error)=>return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn safe_relative(path: &str) -> bool {

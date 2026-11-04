@@ -1,5 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRecoveryBundle, exportRecoveryBundle, legacyRecoveryRecord, verifyRecoveryBundle, type RecoveryRoot, type RecoveryManifest } from "./recovery.js";
 import { writeJson } from "../util.js";
 import type { JsonValue } from "../types.js";
@@ -83,7 +84,9 @@ export async function exportLegacyRunProjections(exportedRuns: string, destinati
  * engine_host uses v4_migration::refuse_implicit_startup at the same boundary.
  */
 export async function assertNoPendingV4Migration(repository: string): Promise<void> {
-  if (await exists(path.join(repository, ".rudder", "engine", "v4-migration.json"))) throw new Error("Project migration requires explicit recovery with its recorded owner and run epochs before a scheduler can start");
+  for (const name of ["v4-migration.json", "v4-recovery.json"]) {
+    if (await exists(path.join(repository, ".rudder", "engine", name))) throw new Error("Project migration requires explicit recovery with its recorded owner and run epochs before a scheduler can start");
+  }
 }
 
 /** Reassemble an ordinary integration checkout with its retained .git/.jj data,
@@ -120,6 +123,16 @@ export async function prepareLegacyProjectRecovery(options: {
   if (manifest.project_id !== options.projectId || manifest.migration_id !== options.migrationId
     || manifest.rollback_checkpoint !== options.rollbackCheckpoint) throw new Error("Recovery selection differs from its checkpoint");
   const exported = await exportLegacyProjectRecovery(options.bundle, options.destination);
+  // Refusal evidence, never a live owner grant. A fresh native Fabric owner
+  // must retain its checkout lock, verify this archive and import these paused
+  // records before any explicit resume. Interrupted adaptation stays refused.
+  const recoveryFile = path.join(exported.integrationPath,".rudder","engine","v4-recovery.json");
+  const recovery = { format_version: 1, repository: await fsp.realpath(exported.integrationPath),
+    source_project_id: options.projectId, migration_id: options.migrationId,
+    bundle: await fsp.realpath(options.bundle),
+    recovery_manifest_sha256: createHash("sha256").update(await fsp.readFile(path.join(options.bundle,"manifest.json"))).digest("hex"),
+    rollback_checkpoint: options.rollbackCheckpoint ?? null, run_ids: [] as string[], ready: false };
+  await writeJson(recoveryFile, recovery, {mode:0o600});
   const mappings = manifest.roots.map((root, index) => ({ before: path.resolve(root.path), after: exported.roots[index].path }))
     .sort((a,b) => b.before.length - a.before.length);
   const remap = (value: string): string => {
@@ -143,7 +156,10 @@ export async function prepareLegacyProjectRecovery(options: {
         source_project_id: options.projectId, source_migration_id: options.migrationId,
         session_files: exported.roots.filter(root => root.role === "sessions" && root.run_id === id).map(root=>root.path) };
       await writeJson(path.join(exported.integrationPath,".rudder","runs",id,"run.json"), record as JsonValue, {mode:0o600});
+      recovery.run_ids.push(id);
     }
   }
+  recovery.ready = true;
+  await writeJson(recoveryFile, recovery, {mode:0o600});
   return exported;
 }

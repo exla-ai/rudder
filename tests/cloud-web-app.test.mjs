@@ -217,7 +217,7 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
   const homeDb = new Database(dbPath);
   homeDb.prepare(
     "insert into rudder_workspaces (id, account_id, workspace_key, status, source_kind, last_activity_at, created_at, updated_at) values (?,?,?,?,?,?,?,?)",
-  ).run("home-bob", "acct-bob", "home", "deleting", "home", stale, now, now);
+  ).run("home-bob", "acct-bob", "home", "stopped", "home", stale, now, now);
   const activity = () => homeDb.prepare("select last_activity_at from rudder_workspaces where id = 'home-bob'").get().last_activity_at;
   await ok("bob", "GET", "/api/app/state?passive=1");
   assert.equal(activity(), stale, "a passive poll leaves the machine's activity alone");

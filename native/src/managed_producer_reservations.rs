@@ -109,6 +109,7 @@ impl CoveredIngressFreshRoots {
     }
 }
 impl IngressCommandRoot {
+    pub(crate) fn original_task_role_charged(&self)->bool{self.0.children.task.get().is_some()}
     pub(crate) fn retain_original_job(&self,out:&mut Option<Arc<IngressJob>>)->Result<bool>{self.0.retain_actual(out)}
     pub(crate) fn same_selected_source(&self,left:&OriginalTaskSelectedSource,right:&OriginalTaskSelectedSource)->bool {
         let(lp,ls)=left.originals();let(rp,rs)=right.originals();
@@ -138,7 +139,11 @@ impl OriginalFreshFlow {
 impl IngressCommandRoot {
     pub(crate) fn fixture_no_descendants(&self)->bool {self.0.children.task.get().is_none()}
 }
+impl FreshInitializationRoot {
+    pub(super) fn retain_original_attempt(&self,out:&mut Option<Arc<FreshInitializationAttempt>>)->Result<bool>{self.0.retain_actual(out)}
+}
 impl CoveredProducerRoots {
+    pub(super) fn fresh_roots(&self)->&[Arc<FreshInitializationRoot>]{&self.fresh}
     pub(super) fn command_roots(&self)->&[Arc<IngressCommandRoot>]{&self.commands}
     #[cfg(feature="managed-ingress-genuine-fixture")]
     pub(super) fn fixture_contains_original_command_root(&self,actual:&Arc<IngressCommandRoot>)->bool {

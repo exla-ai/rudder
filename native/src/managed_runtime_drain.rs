@@ -1,8 +1,11 @@
-//! Binary-only closure of covered task and generation reservations. This owns
-//! no complete runtime census, task completion proof, Root intent or release.
+//! Retained producer census after covered task/generation/ingress admission
+//! closes. Samples never issue task completion, Root stop or release authority.
 use super::*;
 use rudder_native::root_storage_bootstrap::runtime_image::{RuntimeNativeUseObservation,RuntimeNativeUseData};
 use crate::managed_app::runtime_task::OriginalTaskRuntimeUse;
+#[path="managed_runtime_producer_census.rs"]
+pub(crate) mod census;
+use census::RuntimeProducerCensusData;
 /// Stored INSIDE WorkerCarrier. No Shared/cell/root back-reference: retaining
 /// this campaign cannot create Shared -> campaign -> Shared ownership cycles.
 pub(super) struct CoveredTaskGenerationAdmission {
@@ -40,6 +43,8 @@ pub(crate) struct CoveredTaskGenerationProgress {
     pub retained_command_roots:usize,pub retained_fresh_roots:usize,
     pub retained_command_jobs:usize,pub retained_command_selected_sources:usize,pub retained_command_scopes:usize,
     pub original_command_descendants_associated:bool,
+    pub original_fresh_descendants_associated:bool,
+    pub retained_fresh_attempts:usize,pub retained_fresh_coordinators:usize,
     pub original_boundary_roots_captured:bool,
     pub original_task_cells_captured:bool,
     pub retained_project_roots:usize,
@@ -70,6 +75,7 @@ pub(crate) struct OriginalProducerUseData {
     pub task_factories_joined:usize,pub task_factories_pending:usize,
     pub cache_factories_joined:usize,pub cache_factories_pending:usize,
     pub enrollments_pending:usize,pub enrollments_quarantined:usize,pub unscoped_enrollments:usize,
+    pub runtime:RuntimeProducerCensusData,
 }
 struct SeedRoots {original:SeedTicket,tasks:Option<Vec<SeedTaskTicket>>,caches:Option<Vec<SeedCacheTicket>>}
 /// External-only custody. Job -> selected source is strong; the reverse task
@@ -77,6 +83,10 @@ struct SeedRoots {original:SeedTicket,tasks:Option<Vec<SeedTaskTicket>>,caches:O
 struct CommandDescendants {
     root:Arc<IngressCommandRoot>,actual:Option<Arc<crate::managed_machine_ingress::IngressJob>>,
     selected:Option<crate::managed_machine_ingress::OriginalTaskSelectedSource>,scope:Option<SeedTaskTicket>,associated:bool,
+}
+struct FreshDescendants {
+    root:Arc<FreshInitializationRoot>,actual:Option<Arc<crate::managed_machine_ingress::FreshInitializationAttempt>>,
+    coordinator:Option<Arc<crate::managed_fresh_machine::ManagedFreshMachine>>,associated:bool,
 }
 fn retain_original_task(out:&mut Vec<SeedTaskTicket>,actual:&SeedTaskTicket) {
     if !out.iter().any(|held|held.same_original_task(actual)){out.push(actual.clone());}
@@ -116,7 +126,7 @@ pub(crate) struct CoveredTaskGenerationDrain {
     shared:Arc<Shared>,ingress:crate::managed_machine_ingress::ManagedIngressControl,
     campaign:Arc<CoveredCampaign>,roots:Option<CoveredRoots>,closed:bool,
     producer_roots:Option<super::producer_reservations::CoveredProducerRoots>,producer_roots_associated:bool,
-    command_descendants:Vec<CommandDescendants>,task_cells:Vec<SeedTaskTicket>,
+    command_descendants:Vec<CommandDescendants>,fresh_descendants:Vec<FreshDescendants>,task_cells:Vec<SeedTaskTicket>,
     runtime_uses:Option<RuntimeNativeUseObservation>,task_uses:OriginalTaskUseData,
     task_use_sample_current:bool,native_uses:RuntimeNativeUseData,
     producer_sample_current:bool,producers:OriginalProducerUseData,
@@ -139,9 +149,15 @@ impl CoveredTaskGenerationDrain {
             retained_command_jobs:self.command_descendants.iter().filter(|c|c.actual.is_some()).count(),
             retained_command_selected_sources:self.command_descendants.iter().filter(|c|c.selected.is_some()).count(),
             retained_command_scopes:self.command_descendants.iter().filter(|c|c.scope.is_some()).count(),
-            original_command_descendants_associated:self.producer_roots.is_some()&&self.command_descendants.iter().all(|c|c.associated),
+            original_command_descendants_associated:self.producer_roots.as_ref().is_some_and(|roots|roots.command_count()==self.command_descendants.len())
+                &&self.command_descendants.iter().all(|c|c.associated),
+            original_fresh_descendants_associated:self.producer_roots.as_ref().is_some_and(|roots|roots.fresh_count()==self.fresh_descendants.len())
+                &&self.fresh_descendants.iter().all(|held|held.associated),
+            retained_fresh_attempts:self.fresh_descendants.iter().filter(|held|held.actual.is_some()).count(),
+            retained_fresh_coordinators:self.fresh_descendants.iter().filter(|held|held.coordinator.is_some()).count(),
             original_boundary_roots_captured:roots.is_some_and(|roots|roots.within_known_bounds),
-            original_task_cells_captured:self.producer_roots_associated&&self.producer_roots.as_ref().is_some_and(|r|r.fresh_count()==0)
+            original_task_cells_captured:self.producer_roots_associated&&self.fresh_descendants.iter().all(|held|held.associated)&&self.producer_sample_current
+                &&self.producers.runtime.fresh_discovery_quiescent()
                 &&self.command_descendants.iter().all(|held|held.associated)&&roots.is_some_and(|roots|roots.within_known_bounds&&roots.seeds.iter().all(|seed|seed.tasks.is_some())),
             retained_project_roots:roots.map_or(0,|roots|roots.projects.len()),
             retained_seed_roots:roots.map_or(0,|roots|roots.seeds.len()),
@@ -177,9 +193,30 @@ impl CoveredTaskGenerationDrain {
                 Some((scoped,quarantined))=>{if !scoped {data.unscoped_enrollments+=1;}if quarantined {data.enrollments_quarantined+=1;}},
             }
         }
+        // Each original parent retains its complete appendable subtree. A
+        // borrowed payload leaves the previous successful sample stale; never
+        // report an empty replacement for a busy, failed or late producer.
+        for held in &self.command_descendants {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            let Some(actual)=&held.actual else{return Ok(())};
+            let Some(sample)=actual.observe_original_producers()?else{return Ok(())};data.runtime.include(sample);
+        }
+        for held in &self.fresh_descendants {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            let Some(actual)=&held.actual else{return Ok(())};
+            let Some(sample)=actual.observe_original_producers()?else{return Ok(())};data.runtime.include(sample);
+        }
+        for actual in &roots.generations {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            let Some(sample)=actual.observe_original_producers()?else{return Ok(())};data.runtime.include(sample);
+        }
+        time(&self.campaign.original,&self.campaign.cancelled)?;
+        let Some(kernel)=self.shared.kernel.observe_original_producers()?else{return Ok(())};data.runtime.include(kernel);
         self.producers=data;
-        self.producer_sample_current=roots.seeds.iter().all(|seed|seed.tasks.is_some()&&seed.caches.is_some())
-            &&self.command_descendants.iter().all(|held|held.associated);
+        self.producer_sample_current=self.producer_roots_associated&&roots.within_known_bounds
+            &&roots.seeds.iter().all(|seed|seed.tasks.is_some()&&seed.caches.is_some())
+            &&self.command_descendants.iter().all(|held|held.associated)
+            &&self.fresh_descendants.iter().all(|held|held.associated);
         Ok(())
     }
     /// Incremental capture outside every carrier lock. Command roots are fixed
@@ -200,6 +237,22 @@ impl CoveredTaskGenerationDrain {
             if !self.ingress.retains_original_command(actual)?{continue;}
             held.associated=actual.retain_original_task_descendants(&held.root,&mut held.selected,&mut held.scope)?;
             if held.associated {if let Some(scope)=&held.scope{retain_original_task(&mut self.task_cells,scope);}}
+        }
+        Ok(())
+    }
+    fn retain_fresh_descendants(&mut self)->Result<()> {
+        let roots=self.producer_roots.as_ref().context("original fresh roots absent")?;
+        for root in roots.fresh_roots() {
+            if !self.fresh_descendants.iter().any(|held|Arc::ptr_eq(&held.root,root)) {
+                self.fresh_descendants.push(FreshDescendants{root:root.clone(),actual:None,coordinator:None,associated:false});
+            }
+        }
+        for held in &mut self.fresh_descendants {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            if !held.root.retain_original_attempt(&mut held.actual)?{continue;}
+            let actual=held.actual.as_ref().unwrap();
+            if !self.ingress.retains_original_fresh(actual)?{continue;}
+            held.associated=actual.retain_original_coordinator(&mut held.coordinator)?;
         }
         Ok(())
     }
@@ -239,7 +292,7 @@ impl MachineControl {
         ensure!(out.is_none(),"original covered reservation drain output occupied");
         *out=Some(CoveredTaskGenerationDrain{shared:self.shared.clone(),ingress,producer_roots:None,producer_roots_associated:false,
             campaign:Arc::new(CoveredCampaign{original:original_cleanup,cancelled}),roots:None,closed:false,
-            command_descendants:Vec::new(),task_cells:Vec::new(),
+            command_descendants:Vec::new(),fresh_descendants:Vec::new(),task_cells:Vec::new(),
             runtime_uses:None,task_uses:OriginalTaskUseData::default(),task_use_sample_current:false,native_uses:RuntimeNativeUseData::default(),
             producer_sample_current:false,producers:OriginalProducerUseData::default()});
         self.poll_covered_task_generation_drain_retaining(out.as_mut().unwrap())
@@ -251,6 +304,7 @@ impl MachineControl {
         // entry guards, fallible clocks or borrows. Refusal leaves old counts stale.
         owner.task_use_sample_current=false;owner.native_uses.sampled=false;owner.producer_roots_associated=false;owner.producer_sample_current=false;
         for held in &mut owner.command_descendants{held.associated=false;}
+        for held in &mut owner.fresh_descendants{held.associated=false;}
         ensure!(Arc::ptr_eq(&self.shared,&owner.shared),"foreign original covered reservation machine");
         ensure!(owner.ingress.belongs_to_machine(self),"foreign original ingress owner; retain close candidate");
         ensure!(self.shared.app_thread!=std::thread::current().id(),"covered reservation drain requires off App");
@@ -287,6 +341,7 @@ impl MachineControl {
             }
         }
         owner.retain_command_descendants()?;
+        owner.retain_fresh_descendants()?;
         owner.producer_roots_associated=owner.producer_roots.as_ref().context("original producer roots absent")?.validate_retained(&owner.ingress)?;
         if !owner.producer_roots_associated{return Ok(owner.progress_data());}
         let roots=owner.roots.as_mut().unwrap();

@@ -42,3 +42,11 @@ impl Cleanup {
         }
     }
 }
+
+impl Cleanup {
+    pub(super) fn observe_original_producer_worker(&self)->Result<Option<crate::managed_machine_entry::census::WorkerCensus>> {
+        use crate::managed_machine_entry::census::{self,WorkerCensus};
+        let worker={let Some(held)=census::borrow(&self.owner)?else{return Ok(None)};held.worker.clone()};
+        Ok(Some(WorkerCensus::observe(worker.as_ref())?))
+    }
+}

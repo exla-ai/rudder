@@ -461,4 +461,5 @@ pub(crate) use producer_reservations::{IngressCommandRoot,FreshInitializationRoo
 
 #[path="managed_runtime_drain.rs"]
 mod runtime_drain;
+pub(crate) use runtime_drain::census;
 pub(crate) use runtime_drain::{CoveredTaskGenerationDrain,CoveredTaskGenerationProgress,UncoveredRuntimeProducers};

@@ -279,3 +279,21 @@ mod tests;
 #[path="managed_current_source_sdk.rs"]
 mod current_sdk;
 pub(crate) use current_sdk::{CurrentSourceSdkCampaign,CurrentSdkBuildState,CurrentSourceSdkCleanup};
+
+impl SourceGeneration {
+    pub(super) fn observe_original_producers(&self)->Result<Option<super::census::RuntimeProducerCensusData>> {
+        use super::census::{self,RuntimeProducerCensusData,WorkerCensus};
+        let handles={
+            let Some(factory)=census::borrow(&self.factory)?else{return Ok(None)};
+            let Some(bootstrap)=census::borrow(&self.bootstrap)?else{return Ok(None)};
+            let Some(retirement)=census::borrow(&self.retirement)?else{return Ok(None)};
+            (factory.handle.clone(),bootstrap.handle.clone(),retirement.handle.clone())
+        };
+        Ok(Some(RuntimeProducerCensusData {
+            generation_factories:WorkerCensus::observe(handles.0.as_ref())?,
+            generation_bootstraps:WorkerCensus::observe(handles.1.as_ref())?,
+            generation_retirements:WorkerCensus::observe(handles.2.as_ref())?,
+            ..RuntimeProducerCensusData::default()
+        }))
+    }
+}

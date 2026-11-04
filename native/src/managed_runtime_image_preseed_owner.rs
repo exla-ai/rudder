@@ -124,3 +124,9 @@ impl ImagePreseedExport {
 
 struct BackedImageClock {original:ManagedImageBudget,cancelled:Arc<AtomicBool>}
 impl rudder_engine::store::ImageImportFence for BackedImageClock{fn remaining(&self)->Result<std::time::Duration>{clock(&self.original,&self.cancelled)?;self.original.remaining()}}
+
+impl ManagedImagePreseed {
+    pub(crate) fn observe_original_producer_worker(&self)->Result<Option<crate::managed_machine_entry::census::WorkerCensus>> {
+        crate::managed_machine_entry::census::worker(&self.factory)
+    }
+}

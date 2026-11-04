@@ -132,3 +132,16 @@ impl MachineControl {
 #[cfg(test)]
 #[path="managed_machine_kernel_startup_tests.rs"]
 mod tests;
+
+impl KernelSlot {
+    pub(super) fn observe_original_producers(&self)->Result<Option<super::census::RuntimeProducerCensusData>> {
+        use super::census::{self,RuntimeProducerCensusData,WorkerCensus};
+        let handles={
+            let Some(probe)=census::borrow(&self.worker)?else{return Ok(None)};
+            let Some(retirement)=census::borrow(&self.retirement)?else{return Ok(None)};
+            (probe.original.clone(),retirement.original.clone())
+        };
+        Ok(Some(RuntimeProducerCensusData{kernel_probes:WorkerCensus::observe(handles.0.as_ref())?,
+            kernel_retirements:WorkerCensus::observe(handles.1.as_ref())?,..RuntimeProducerCensusData::default()}))
+    }
+}

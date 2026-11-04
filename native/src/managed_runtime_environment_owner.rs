@@ -131,3 +131,9 @@ mod preparation_dispatch_tests {
         }
     }
 }
+
+impl SharedRuntimeEnvironment {
+    pub(crate) fn observe_original_producer_worker(&self)->Result<Option<crate::managed_machine_entry::census::WorkerCensus>> {
+        crate::managed_machine_entry::census::worker(&self.worker)
+    }
+}

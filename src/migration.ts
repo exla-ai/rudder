@@ -263,3 +263,7 @@ export function summaryAsJson(plan: MigrationPlan): JsonValue {
     })),
   };
 }
+
+// Authority/data-format migration is distinct from local-to-Cloud session transfer.
+export { captureLegacyProject, exportLegacyRunProjections, exportLegacyProjectRecovery, assertNoPendingV4Migration } from "./v4-migration/capture.js";
+export { createRecoveryBundle, verifyRecoveryBundle, exportRecoveryBundle, legacyRecoveryRecord } from "./v4-migration/recovery.js";

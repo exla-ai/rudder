@@ -3,6 +3,11 @@
 use super::*;
 use rudder_engine::journal::{Journal, OwnerFence};
 
+#[cfg(target_os = "linux")]
+mod managed;
+#[cfg(target_os = "linux")]
+pub(crate) use managed::ManagedAppDrain;
+
 pub(crate) struct AppEngineLifecycle {
     repository: PathBuf,
     fence: OwnerFence,
@@ -223,6 +228,12 @@ fn shutdown_app_until(
     can_publish: bool,
 ) -> Result<()> {
     app.ensure_managed_source_shutdown_ready()?;
+    #[cfg(target_os = "linux")]
+    app.ensure_managed_task_shutdown_ready()?;
+    anyhow::ensure!(
+        !app.agents.iter().any(|run| run.managed_local.is_some() && run.terminal.is_some()),
+        "managed pane requires its retained runtime drain before App retirement"
+    );
     app.close_attach_clients(reason);
     let mut failures = Vec::new();
     let mut pending = Vec::new();
@@ -282,7 +293,7 @@ fn shutdown_app_until(
             thread::sleep(Duration::from_millis(5));
         }
     }
-    if let Err(error) = if can_publish {
+    if let Err(error) = if can_publish && !app.managed_project_mode {
         app.write_rudder_context_timed(None)
     } else {
         Ok(())

@@ -42,6 +42,7 @@
     {"id": "change.check.v1", "cli": ["change", "check"], "adapter": null, "scope": "change", "capability": "change.check", "arguments": {"change_ids": "text_array_1_to_64", "authorization": "check"}, "receipt": "command"},
     {"id": "project.cloud.v1", "cli": ["project", "cloud"], "adapter": "cloud", "scope": "project", "capability": "project.cloud", "arguments": {"argv": "text_array_0_to_128"}, "receipt": "command"},
     {"id": "project.board.v1", "cli": ["project", "board"], "adapter": "board", "scope": "project", "capability": "project.board", "arguments": {"argv": "text_array_0_to_128"}, "receipt": "command"},
+    {"id": "project.files.v1", "cli": ["project", "files"], "adapter": "project-files", "scope": "execution", "capability": "observe", "arguments": {"workspace_id?": "text", "path?": "text"}, "receipt": "observation"},
     {"id": "project.serve.v1", "cli": ["project", "serve"], "adapter": "serve", "scope": "project", "capability": "project.serve", "arguments": {"argv": "text_array_0_to_128"}, "receipt": "command"},
     {"id": "project.restart.v1", "cli": ["project", "restart"], "adapter": "restart", "scope": "project", "capability": "project.restart", "arguments": {}, "receipt": "command"},
     {"id": "project.gc.v1", "cli": ["project", "gc"], "adapter": "gc", "scope": "project", "capability": "project.gc", "arguments": {"dry_run": "boolean"}, "receipt": "command"},
@@ -91,7 +92,7 @@
     {"name": "fanout", "replacement": "run", "adapter": "fanout", "owner": "n13 command migration", "expires": "2027-02-01"},
     {"name": "auth", "replacement": "auth login", "adapter": "login", "bare_only": true, "owner": "n13 command migration", "expires": "2027-02-01"}
   ],
-  "callbacks": ["done", "remember", "share", "context", "engine", "__fabric-fetch", "__claude-sdk", "__worker", "__route-task", "__launch-node", "__graph-mirror", "__sync-checkout", "__pull-export", "__adopt-moved", "__models", "__refresh-models", "__event"],
+  "callbacks": ["__migrate-v4", "__open-project-files", "done", "remember", "share", "context", "engine", "__fabric-fetch", "__claude-sdk", "__worker", "__route-task", "__launch-node", "__graph-mirror", "__sync-checkout", "__pull-export", "__adopt-moved", "__models", "__refresh-models", "__event"],
   "retired": ["tmux", "tui", "shell", "interactive", "legacy-shell"],
   "retired_slash": ["/ask", "/run", "/gam", "/nudge", "/tell"],
   "slash_aliases": [

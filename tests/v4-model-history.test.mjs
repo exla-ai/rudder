@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -9,7 +9,9 @@ import { prepareSelectedModelProfile, codexProtocolCapabilities, claudeProtocolC
 import { discoverInstalledCodexModels } from "../dist/model-profile/codex-discovery.js";
 
 async function fixture(t) {
-  const root = await mkdtemp("/workspace/rudder-model-identity-");
+  const base = "/workspace/rudder-scratch/n13-model-receipts";
+  await mkdir(base, { recursive: true });
+  const root = await mkdtemp(path.join(base, "identity-"));
   const old = process.env.RUDDER_HOME; process.env.RUDDER_HOME = root;
   t.after(async () => { if (old === undefined) delete process.env.RUDDER_HOME; else process.env.RUDDER_HOME = old; await rm(root, { recursive: true, force: true }); });
   await writeFile(path.join(root, "auth-profiles.json"), JSON.stringify({ version: 1, profiles: {
@@ -143,4 +145,35 @@ test("installed Claude initialization exposes actual SDK model capabilities", { 
   } finally { clearTimeout(timer); child.kill("SIGKILL"); await stopped; }
   // No user prompt/turn or authentication was supplied. This is discovery
   // evidence only, not an authenticated Claude execution qualification.
+});
+
+
+test("managed installed-model helper discovers the protected protocol and removes its private probe", async t => {
+  const root = await fixture(t);
+  const program = path.join(root, "installed-codex");
+  await writeFile(program, `#!${process.execPath}
+import readline from 'node:readline';
+if (process.argv[2] !== 'app-server') process.exit(2);
+for await (const line of readline.createInterface({ input: process.stdin })) {
+  const call = JSON.parse(line);
+  if (!call.id) continue;
+  const result = call.method === 'initialize' ? { userAgent: 'codex/0.166.0' }
+    : call.method === 'model/list' ? { data: [{ model: 'actual-installed-model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }], nextCursor: null }
+    : undefined;
+  if (!result) process.exit(3);
+  process.stdout.write(JSON.stringify({ id: call.id, result }) + '\\n');
+}
+`, { mode: 0o700 });
+  const invoke = model => spawnSync(process.execPath, [path.resolve("dist/managed-task-profile-cli.js"),
+    "discover-model", "selected", "codex", model, program], {
+    env: { RUDDER_HOME: root, PATH: "/usr/local/bin:/usr/bin:/bin" }, encoding: "utf8", timeout: 15000,
+  });
+  const result = invoke("actual-installed-model");
+  assert.equal(result.status, 0, result.stdout); assert.equal(result.stderr, "");
+  const { selection } = JSON.parse(result.stdout);
+  assert.equal(selection.model, "actual-installed-model"); assert.equal(selection.effort, "high");
+  assert.equal(selection.backend_version, "codex/0.166.0"); assert.equal(selection.profile_id, "selected");
+  assert.ok(!result.stdout.includes("fixture-key"));
+  assert.equal(invoke("unavailable-model").status, 1);
+  assert.ok(!(await readdir(root)).some(name => name.startsWith("model-probe-")));
 });

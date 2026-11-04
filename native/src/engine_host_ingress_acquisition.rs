@@ -72,7 +72,7 @@ impl RetainedManagedAcquisition {
         let lifetime=Arc::new(EngineOwnerLifetime {lock:Arc::new(lock),assigned:None,repo:record.repo.clone(),owner:fence.clone(),authority:NativeAuthority::Fabric,
             process_id:std::process::id(),revoked:AtomicBool::new(false)});
         self.owner=Some(EngineOwnership {lifetime,journal,fence,record_path:record.repo.join(".rudder/engine/owner.json"),record,
-            released:false,identity_home:self.selection.home.clone(),managed_store:None});
+            released:false,identity_home:self.selection.home.clone(),managed_store:None,migration_records:None});
         self.custody()?;
         let actual=self.owner.as_mut().unwrap();actual.journal.recover(&actual.fence,epoch_ms())?;
         write_owner_record(&actual.record_path,&actual.record)?;

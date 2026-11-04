@@ -149,6 +149,16 @@ impl ManagedHostRuntime {
     pub(crate) fn store(&self)->&LocalStore {self.store.as_ref().expect("ready runtime store")}
     pub(crate) fn environment(&self)->Result<&ObjectRef> {ensure!(self.environment_ack,"original environment pin ACK unavailable");self.environment.as_ref().context("actual environment absent")}
     pub(crate) fn profile_loader(&self)->ManagedProfileLoaderRuntime {ManagedProfileLoaderRuntime {node:NODE.into(),helper:PROFILE.into(),rudder_home:self.project.home.clone()}}
+    pub(crate) fn selected_model_profile(&self, selected:&crate::managed_task_launch::ManagedTaskOptIn,
+        model:&str, original:&FinalizationBudget,cancelled:&AtomicBool)->Result<crate::managed_task_launch::SelectedTaskProfile> {
+        self.assert_current(original,cancelled)?;
+        // Same immutable host artifact whose guest path programs() supplies.
+        let backend=match selected.backend() {crate::Backend::Codex=>HostBackend::Codex,crate::Backend::Claude=>HostBackend::Claude,_=>anyhow::bail!("unsupported selected managed backend")};
+        self.programs(backend)?;
+        let profile=crate::managed_profile_loader::discover_and_load_selected_model(&self.profile_loader(),selected,model,
+            &Path::new(ROOT).join("codex"),cancelled,original)?;
+        self.assert_current(original,cancelled)?;Ok(profile)
+    }
     pub(crate) fn programs(&self,backend:HostBackend)->Result<ManagedTaskPrograms> {
         ensure!(!matches!(backend,HostBackend::Claude),"Claude managed guest/profile qualification is not admitted by this image policy");
         let file=Path::new(ROOT).join(match backend {HostBackend::Codex=>"codex",HostBackend::Claude=>"claude"});

@@ -2,6 +2,7 @@ import { render } from "preact";
 import { BoardView, ProjectIndex } from "./components";
 import { UsageView } from "./usage";
 import { boardAccess } from "./access";
+import { ProjectFilesPanel } from "./project-files/panel";
 
 declare global {
   interface Window {
@@ -12,7 +13,7 @@ declare global {
 
 function App({ slug, usage }: { slug: string; usage: boolean }) {
   if (usage) return <UsageView />;
-  return slug ? <BoardView slug={slug} /> : <ProjectIndex />;
+  return slug ? <><BoardView slug={slug} /><ProjectFilesPanel key={slug} slug={slug} /></> : <ProjectIndex />;
 }
 
 const mount = document.getElementById("app");

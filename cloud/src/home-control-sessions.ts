@@ -6,7 +6,7 @@ export interface HomeRpcTiming {
   setTimeout(callback: () => void, timeoutMs: number): unknown;
   clearTimeout(timer: unknown): void;
 }
-type UnknownReason = "replaced" | "closed" | "timeout" | "send_failed";
+type UnknownReason = "replaced" | "closed" | "timeout" | "send_failed" | "cancelled";
 export class HomeRpcEffectUnknownError extends Error {
   readonly code = "HOME_RPC_EFFECT_UNKNOWN";
   readonly effect = "unknown";
@@ -30,6 +30,8 @@ type Pending<S extends object, V> = {
   method: string;
   deadline: number;
   timer?: unknown;
+  cancel?: () => void;
+  signal?: AbortSignal;
   resolve: (value: V) => void;
   reject: (error: Error) => void;
 };
@@ -76,7 +78,8 @@ export class HomeControlSessions<S extends object, V> {
     const session = this.#current.get(homeId);
     if (session?.socket === socket) this.close(session);
   }
-  request(homeId: string, socket: S, method: string, params: unknown, timeoutMs: number): Promise<V> {
+  request(homeId: string, socket: S, method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<V> {
+    if (signal?.aborted) return Promise.reject(new HomeRpcEffectUnknownError("cancelled", method));
     const session = this.#current.get(homeId);
     if (!session || session.socket !== socket || !this.isCurrent(session)) {
       return Promise.reject(Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 }));
@@ -91,6 +94,12 @@ export class HomeControlSessions<S extends object, V> {
       const pending: Pending<S, V> = { session, id, method, deadline, resolve, reject };
       session.pending.set(id, pending);
       try {
+        if (signal) {
+          pending.signal = signal;
+          pending.cancel = () => { this.#fail(pending, "cancelled"); };
+          signal.addEventListener("abort", pending.cancel, { once: true });
+          if (signal.aborted) { pending.cancel(); return; }
+        }
         pending.timer = this.#timing.setTimeout(() => this.#fail(pending, "timeout"), timeoutMs);
         // A synchronous test timer/transport may already have retired this entry.
         if (session.pending.get(id) !== pending) {
@@ -121,6 +130,11 @@ export class HomeControlSessions<S extends object, V> {
     // A queued timer can run late. The reply cannot acquire a new deadline
     // merely by arriving before that delayed timer callback is dispatched.
     if (this.#timing.now() >= pending.deadline) { this.#fail(pending, "timeout"); return false; }
+    if (!error && (pending.method === "projectFiles" || pending.method === "projectFileScopes")
+      && Buffer.byteLength(JSON.stringify(result) ?? "") > (pending.method === "projectFiles" ? 24 * 1024 * 1024 : 128 * 1024)) {
+      if (this.#take(pending)) pending.reject(Object.assign(new Error("Project file reply exceeds its bound"), { status: 502 }));
+      return false;
+    }
     if (!this.#take(pending)) return false;
     if (error) pending.reject(Object.assign(new Error(error), { status: 400 }));
     else pending.resolve(result);
@@ -132,6 +146,7 @@ export class HomeControlSessions<S extends object, V> {
     if (pending.session.pending.get(pending.id) !== pending) return false;
     pending.session.pending.delete(pending.id);
     if (pending.timer !== undefined) this.#timing.clearTimeout(pending.timer);
+    if (pending.cancel) pending.signal?.removeEventListener("abort", pending.cancel);
     return true;
   }
   #fail(pending: Pending<S, V>, reason: UnknownReason): boolean {

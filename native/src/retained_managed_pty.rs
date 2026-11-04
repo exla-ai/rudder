@@ -169,6 +169,7 @@ impl RetainedPtySpawn {
         // Allocate parser state before transferring any original resource.
         let parser = vt100::Parser::new(options.size.rows, options.size.cols, options.scrollback_lines);
         let pane = TerminalPane {
+            screen_exporter: crate::terminal_stream::ScreenExporter::new(1, 16 * 1024, 128, 40_000),
             instance_id,
             execution_profile,
             agent_link_launch_json,

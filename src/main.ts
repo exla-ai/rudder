@@ -108,8 +108,20 @@ type Parsed = {
 };
 
 export async function main(): Promise<void> {
+  if (process.argv[2] === "__open-project-files") {
+    const [repo, ...args] = process.argv.slice(3);
+    if (!repo || repo.length > 4096 || args.length !== 1 || args[0]!.length > 256) throw new Error("Invalid project file action");
+    const { runProjectFilesCommand } = await import("./project-files/cli.js");
+    await runProjectFilesCommand(repo, args);
+    return;
+  }
   // This private transport owns binary stdio. Setup, notices and general flag
   // parsing must never write into its frame stream.
+  if (process.argv[2] === "__migrate-v4") {
+    const { runMigrationCaptureCommand } = await import("./v4-migration/cli.js");
+    await runMigrationCaptureCommand();
+    return;
+  }
   if (process.argv[2] === "__fabric-fetch") {
     const { runFabricFetchHelper } = await import("./fabric-fetch.js");
     await runFabricFetchHelper();
@@ -199,8 +211,14 @@ export async function main(): Promise<void> {
   }
 
   switch (parsed.command) {
+    case "project-files": {
+      const { runProjectFilesCommand } = await import("./project-files/cli.js");
+      await runProjectFilesCommand(parsed.flags.repo ?? findRepoRoot(), parsed.args);
+      return;
+    }
     case "engine":
-      await runEngineCommand(parsed.args[0], parsed.flags.repo ?? findRepoRoot(), parsed.flags.json);
+      await runEngineCommand(parsed.args[0], parsed.flags.repo ?? findRepoRoot(), parsed.flags.json,
+        [...parsed.args.slice(1), ...(parsed.flags.run ? ["--run",parsed.flags.run] : [])]);
       return;
     case "attach": {
       await runNativeCommand(["attach", ...parsed.args]);

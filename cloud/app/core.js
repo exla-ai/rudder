@@ -58,7 +58,7 @@ function authHeaders() {
   return headers;
 }
 
-export async function api(path, { method = "GET", body, raw } = {}) {
+export async function api(path, { method = "GET", body, raw, signal } = {}) {
   const headers = authHeaders();
   if (raw) headers["Content-Type"] = raw.type || "application/octet-stream";
   else if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -66,6 +66,7 @@ export async function api(path, { method = "GET", body, raw } = {}) {
   try {
     res = await fetch(path, {
       method, headers, credentials: "same-origin", cache: "no-store",
+      signal,
       body: raw || (body !== undefined ? JSON.stringify(body) : undefined),
     });
   } catch {

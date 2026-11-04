@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { BackendTelemetryObserver } from "./agent-efficiency/backend-observer.js";
 import type { BackendAdapter, BackendId, RunRequest, RudderEvent, AuthProfileStore, EffortLevel } from "./types.js";
 import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, ensureRudderCodexBinary } from "./codex-binary.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel, loadAuthStore, loadConfig, saveRunRecord } from "./state.js";
@@ -407,12 +408,17 @@ async function spawnAndStream(params: {
   // report cumulative totals, so we keep the max seen and write it onto the
   // run record so the scheduler's budget cap operates on real numbers.
   const usageState = { input: 0, output: 0 };
+  const telemetry = new BackendTelemetryObserver(params.request.run);
   let emitQueue = Promise.resolve();
   const enqueueBackendLine = (line: string, stderr: boolean) => {
     emitQueue = emitQueue
       .then(async () => {
         accumulateUsage(usageState, line);
         await emitBackendLine(params.request.run, line, params.emit, stderr, streamState);
+        if (!stderr) {
+          // Private observational evidence is best effort, never execution authority.
+          void telemetry.observe(parseJsonLine(line)).catch(() => {});
+        }
       })
       .catch(async (error: unknown) => {
         await params.emit({
@@ -463,6 +469,7 @@ async function spawnAndStream(params: {
       }
       void (async () => {
         await emitQueue;
+        await telemetry.flush();
         // Persist the best-effort token usage captured from the stream so the
         // scheduler can sum it against the budget cap. Only write when we saw a
         // real number; backends that emit no usage leave run.tokens untouched.

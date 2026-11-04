@@ -44,12 +44,20 @@ pub fn completions(words: &[&str]) -> Vec<String> {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComposerInput { Text, Backend, Rudder(String), Refused(String) }
+pub fn utc_date() -> String {
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_secs() as libc::time_t;
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut utc) }.is_null() { return String::new(); }
+    format!("{:04}-{:02}-{:02}", utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday)
+}
 /// Call only in the correct composer. Backend slash text is forwarded intact
 /// before interpreting Rudder's namespace, including retired Rudder spellings.
 /// `utc_date` is the owner's trusted YYYY-MM-DD date, never agent input.
 pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> ComposerInput {
     let Some(command) = text.trim().split_whitespace().next().filter(|word| word.starts_with('/')) else { return ComposerInput::Text; };
     if backend_composer { return ComposerInput::Backend; }
+    if command[1..].contains('/') { return ComposerInput::Text; }
     let r = registry();
     if r.retired_slash.iter().any(|value| value == command) {
         return ComposerInput::Refused(format!("{command} is retired; use ordinary task input or a selected agent action"));
@@ -61,7 +69,7 @@ pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> 
         }
         return ComposerInput::Rudder(command.into());
     }
-    ComposerInput::Refused(format!("Unknown Rudder command {command}; use the backend composer for backend slash commands"))
+    ComposerInput::Refused(format!("unknown command: {command}; use the backend composer for backend slash commands"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -48,6 +48,7 @@ export function classifyComposerInput(text: string, composer: "project" | "backe
   if (!text.trimStart().startsWith("/")) return { kind: "text", text };
   if (composer === "backend") return { kind: "backend", text };
   const command = text.trim().split(/\s+/, 1)[0]!;
+  if (command.slice(1).includes("/")) return { kind: "text", text };
   if (manifest.retired_slash.includes(command)) return { kind: "refused", reason: `${command} is retired; use ordinary task input or a selected agent action` };
   if (manifest.slash.includes(command)) return { kind: "rudder", command, text };
   const alias = manifest.slash_aliases.find((entry) => entry.name === command);

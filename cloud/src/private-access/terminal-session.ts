@@ -11,6 +11,7 @@ export interface TerminalScreen {
   rows: number;
   screen: string;
   scrollback: string[];
+  text?: string;
 }
 export interface TerminalCursor { generation: string; sequence: number }
 export interface ScreenFrame extends TerminalCursor {
@@ -189,7 +190,8 @@ export class TerminalScreenSession {
       || screen.columns < 1 || screen.rows < 1 || screen.columns > 1000 || screen.rows > 1000
       || screen.scrollback.length > 10000) throw new Error("invalid terminal screen");
     const limit = this.options.maxScreenBytes ?? 2 * 1024 * 1024;
-    let bytes = Buffer.byteLength(screen.screen);
+    if (screen.text !== undefined && typeof screen.text !== "string") throw new Error("invalid terminal text");
+    let bytes = Buffer.byteLength(screen.screen) + Buffer.byteLength(screen.text ?? "");
     for (const line of screen.scrollback) {
       if (typeof line !== "string") throw new Error("invalid terminal history");
       bytes += Buffer.byteLength(line); if (bytes > limit) break;

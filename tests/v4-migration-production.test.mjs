@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 const source = fileURLToPath(new URL('../src/',import.meta.url));
 registerHooks({resolve(specifier, context, next) {
   if(specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
@@ -25,9 +26,7 @@ async function helper(request) {
   return JSON.parse(output);
 }
 async function fixture(t) {
-  const scratch='/workspace/rudder-scratch/n13';
-  await fs.mkdir(scratch,{recursive:true});
-  const root=await fs.mkdtemp(path.join(scratch,'migration-'));
+  const root=await fs.mkdtemp(v4ScratchPrefix('migration-production'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const repo=path.join(root,'repo');
   const initialized=spawnSync('jj',['git','init','--colocate',repo],{encoding:'utf8'});

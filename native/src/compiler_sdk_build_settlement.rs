@@ -67,49 +67,42 @@ impl CompilerSdkJobDisposal {
         require_original_worker(&d.build_worker,build.caller_thread)?;ensure!(Arc::ptr_eq(&build.sdk,&self.sdk),"SDK disposal belongs to another actual client");
         ensure!(build.registered,"SDK original charged slot absent");
         self.sdk.current(&original)?;subject_current(d.subject,&build)?;job_protocol::time(&original,&cancel)?;
-        let warm=matches!(d.subject,DisposalSubject::Published)&&build.previous.is_some()&&build.dispatch_permit.is_some();
-        if warm {
-            // Only a genuinely unconsumed dispatch permit from this factory,
-            // plus its successful prior-owned result, proves no Root dispatch.
-            ensure!(build.execution.is_none()&&!build.sent&&build.reply.is_none()&&build.remote_reply.is_none()&&build.source.is_none()&&build.output.is_none(),"SDK warm alias attempted Root effects");
-        } else {
-            d.request=Some(match d.subject{
-                DisposalSubject::Published=>{let execution=build.execution.as_ref().context("SDK actual original Root execution ACK absent")?;
-                    ensure!(execution.ready&&build.dispatch_permit.is_none()&&build.sent&&build.published,"SDK original cold build effect/publication unknown");
-                    JobCloseRequest::Published(CloseRequest{version:1,kind:"compiler_sdk_job_close_v1".into(),binding:execution.binding.clone(),artifact_result:build.result.as_ref().unwrap().clone(),cleanup_constraint:original.constraint()})},
-                DisposalSubject::TerminalFailure=>{let(binding,helper)=build.terminal_data()?;
-                    JobCloseRequest::TerminalFailure(FailureCloseRequest{version:1,kind:"compiler_sdk_failed_job_close_v1".into(),binding:binding.clone(),helper:helper.clone(),cleanup_constraint:original.constraint()})}
-            });
-            d.bytes=Some(d.request.as_ref().unwrap().bytes()?);let limit=match d.subject{DisposalSubject::Published=>4096,DisposalSubject::TerminalFailure=>16*1024};ensure!(d.bytes.as_ref().unwrap().len()<=limit,"SDK original close frame bound");d.cancel=Some(cancel_fd()?);
-        }
+        // Every ordinary build executes. Preparation reuse never permits
+        // skipping the original Root helper's disposal ACK and pipe EOF.
+        d.request=Some(match d.subject{
+            DisposalSubject::Published=>{let execution=build.execution.as_ref().context("SDK actual original Root execution ACK absent")?;
+                ensure!(execution.ready&&build.dispatch_permit.is_none()&&build.sent&&build.published,"SDK original cold build effect/publication unknown");
+                JobCloseRequest::Published(CloseRequest{version:1,kind:"compiler_sdk_job_close_v1".into(),binding:execution.binding.clone(),artifact_result:build.result.as_ref().unwrap().clone(),cleanup_constraint:original.constraint()})},
+            DisposalSubject::TerminalFailure=>{let(binding,helper)=build.terminal_data()?;
+                JobCloseRequest::TerminalFailure(FailureCloseRequest{version:1,kind:"compiler_sdk_failed_job_close_v1".into(),binding:binding.clone(),helper:helper.clone(),cleanup_constraint:original.constraint()})}
+        });
+        d.bytes=Some(d.request.as_ref().unwrap().bytes()?);let limit=match d.subject{DisposalSubject::Published=>4096,DisposalSubject::TerminalFailure=>16*1024};ensure!(d.bytes.as_ref().unwrap().len()<=limit,"SDK original close frame bound");d.cancel=Some(cancel_fd()?);
         // Only private BuildState-owned aliases are exposed by this API. Its
         // mutex excludes current calls; the actual build/TLS owner is joined.
         // Immutable result accessors expose no job FD/path/pipe API.
         build.remote_reply.take();build.source.take();build.output.take();build.cancel.take();d.aliases_closed=true;
-        if !warm {
-            loop {
-                if cancel.load(Ordering::Acquire)||original.remaining().is_err(){if let Some(fd)=&d.cancel{let _=signal_cancel(fd);}job_protocol::time(&original,&cancel)?;}
-                self.sdk.current(&original)?;let endpoint=build.reply.as_ref().context("SDK original private reply absent")?;
-                if !d.sent{if !endpoint.send_data(d.bytes.as_ref().unwrap(),&[d.cancel.as_ref().unwrap()])?{std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);continue;}d.sent=true;}
-                if !d.shutdown{ensure!(!d.shutdown_attempted,"SDK original write shutdown uncertain");d.shutdown_attempted=true;endpoint.shutdown_disposal_write()?;d.shutdown=true;}
-                if d.ack.is_none(){match endpoint.receive_disposal_retaining(&mut d.pending)?{
-                    RuntimeDisposalRead::Pending=>{std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);continue;},RuntimeDisposalRead::ReadClosed{..}=>anyhow::bail!("SDK Root closed without original disposal ACK"),RuntimeDisposalRead::Packet=>{}}
-                    let packet=d.pending.as_ref().unwrap();ensure!(packet.credentials.pid==self.sdk.client.service.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0&&packet.fds.is_empty(),"SDK disposal ACK is not actual original Root service");
-                    d.ack=Some(d.request.as_ref().unwrap().parse_ack(&packet.bytes)?);
-                    let(pid,start)=d.ack.as_ref().unwrap().helper();let expected=match d.subject{DisposalSubject::Published=>{let e=build.execution.as_ref().unwrap();(e.helper_pid,e.helper_start.as_str())},DisposalSubject::TerminalFailure=>{let(_,h)=build.terminal_data()?;(h.original_helper_pid,h.original_helper_start.as_str())}};
-                    ensure!((pid,start)==expected,"SDK disposal closed another original helper");
-                    job_protocol::time(&original,&cancel)?;d.pending.take();
-                }
-                match endpoint.receive_disposal_retaining(&mut d.pending)?{
-                    RuntimeDisposalRead::Pending=>{},RuntimeDisposalRead::Packet=>anyhow::bail!("SDK Root disposal sent extra data/descriptors"),
-                    RuntimeDisposalRead::ReadClosed{peer_fully_closed:true}=>{d.root_eof=true;break},RuntimeDisposalRead::ReadClosed{peer_fully_closed:false}=>{}}
-                std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);
+        loop {
+            if cancel.load(Ordering::Acquire)||original.remaining().is_err(){if let Some(fd)=&d.cancel{let _=signal_cancel(fd);}job_protocol::time(&original,&cancel)?;}
+            self.sdk.current(&original)?;let endpoint=build.reply.as_ref().context("SDK original private reply absent")?;
+            if !d.sent{if !endpoint.send_data(d.bytes.as_ref().unwrap(),&[d.cancel.as_ref().unwrap()])?{std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);continue;}d.sent=true;}
+            if !d.shutdown{ensure!(!d.shutdown_attempted,"SDK original write shutdown uncertain");d.shutdown_attempted=true;endpoint.shutdown_disposal_write()?;d.shutdown=true;}
+            if d.ack.is_none(){match endpoint.receive_disposal_retaining(&mut d.pending)?{
+                RuntimeDisposalRead::Pending=>{std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);continue;},RuntimeDisposalRead::ReadClosed{..}=>anyhow::bail!("SDK Root closed without original disposal ACK"),RuntimeDisposalRead::Packet=>{}}
+                let packet=d.pending.as_ref().unwrap();ensure!(packet.credentials.pid==self.sdk.client.service.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0&&packet.fds.is_empty(),"SDK disposal ACK is not actual original Root service");
+                d.ack=Some(d.request.as_ref().unwrap().parse_ack(&packet.bytes)?);
+                let(pid,start)=d.ack.as_ref().unwrap().helper();let expected=match d.subject{DisposalSubject::Published=>{let e=build.execution.as_ref().unwrap();(e.helper_pid,e.helper_start.as_str())},DisposalSubject::TerminalFailure=>{let(_,h)=build.terminal_data()?;(h.original_helper_pid,h.original_helper_start.as_str())}};
+                ensure!((pid,start)==expected,"SDK disposal closed another original helper");
+                job_protocol::time(&original,&cancel)?;d.pending.take();
             }
+            match endpoint.receive_disposal_retaining(&mut d.pending)?{
+                RuntimeDisposalRead::Pending=>{},RuntimeDisposalRead::Packet=>anyhow::bail!("SDK Root disposal sent extra data/descriptors"),
+                RuntimeDisposalRead::ReadClosed{peer_fully_closed:true}=>{d.root_eof=true;break},RuntimeDisposalRead::ReadClosed{peer_fully_closed:false}=>{}}
+            std::thread::sleep(original.phase_limit(Duration::from_millis(1))?);
         }
         job_protocol::time(&original,&cancel)?;self.sdk.current(&original)?;subject_current(d.subject,&build)?;
         build.reply.take();build.parent.take();build.work_fd.take();d.cancel.take();
         ensure!(build.reply.is_none()&&build.remote_reply.is_none()&&build.source.is_none()&&build.output.is_none()&&build.cancel.is_none()&&build.parent.is_none()&&build.work_fd.is_none(),"SDK native job descriptor alias remains");
-        ensure!(warm||d.root_eof&&d.ack.is_some(),"SDK original Root resource/EOF proof absent");
+        ensure!(d.root_eof&&d.ack.is_some(),"SDK original Root resource/EOF proof absent");
         job_protocol::time(&original,&cancel)?;d.resources_closed=true;Ok(())
     }
     /// OFF App after the ACTUAL cleanup worker/TLS join. Same stored cleanup

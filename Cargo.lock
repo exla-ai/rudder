@@ -3498,15 +3498,20 @@ name = "rudder-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "fs2",
  "fuser",
+ "futures",
  "hex",
+ "jj-lib",
  "libc",
+ "pollster",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "toml",
  "uuid",
 ]

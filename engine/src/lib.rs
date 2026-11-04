@@ -25,3 +25,4 @@ pub mod workspace;
 pub mod build;
 pub mod execution;
 pub mod vfs;
+pub mod jj_store;

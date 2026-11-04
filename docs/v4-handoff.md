@@ -27,6 +27,13 @@ Only two docs steer work. Everything else is reference or evidence.
 
 ## 2. Where main is (step 9, 2026-11-04)
 
+**4.0.0 shipped 2026-11-04.** npm `latest` is 4.0.0 for `@exla/rudder` and
+`@viraatdas/rudder` (tag v4.0.0, commit 500e5c3b, all release checks green on
+Linux, macOS arm64 and Intel). Cloud control plane deployed 16:25Z running
+worker image `registry.fly.io/rudder-workers-exla:4.0.0`; homes adopt it when
+idle. The image was built before the last macOS test-only fixes; Linux
+behavior differs only in the migration path-spelling fix.
+
 PLAN.md section 0 steps 0-8 are merged. Step 9 results:
 
 - Full suites green: Node 943/943, TUI 59/59 (one load flake passes alone),

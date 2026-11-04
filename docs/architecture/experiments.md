@@ -1,5 +1,9 @@
 # Rudder v4 experiments and decision gates
 
+> **Superseded scope (2026-11-04).** The direction is locked in `PLAN.md` section 0
+> and current status is in `docs/v4-handoff.md`. This file is kept as evidence.
+
+
 Status: specification, 2026-10-30. No experiment results are claimed here.
 Supports [PLAN.md](../../PLAN.md) and [the research evidence](research.md).
 

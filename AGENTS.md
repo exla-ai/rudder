@@ -81,9 +81,27 @@ The build cleans `dist/`, compiles TS/board/native and copies the binary. Do not
 run it concurrently with `npm test`, which also writes `dist/`. The TUI suite
 uses a real binary and disposable backends. Large storage/build fixtures belong
 on `/workspace`; never mount over user checkouts or fill Cloud's small `/tmp`.
-Keep one task's scratch and evidence in one `/workspace/rudder-scratch/<task>/`
-reused across attempts, and delete it when the task ends unless a tracked doc
-cites it. Tests remove every temp dir they create, read-only ones included.
+Keep one task's scratch in one `/workspace/rudder-scratch/<task>/` reused across
+attempts, and delete it when the task ends. Tests remove every temp dir they
+create, read-only ones included.
+
+## Development speed: spend time on product, not process
+
+- **Work on `main`.** No feature branches, PRs or long-lived side branches.
+  Commit small and often to local `main`. `release-check/*` branches exist only
+  during a release and are deleted after it.
+- **Run only the checks for what you changed** (one test file, one `cargo test`
+  filter, `npm run check`). The full suite above runs once per release, not per
+  commit, task or agent. Re-run a failing test alone before treating it as real.
+- **CI is for releases.** Do not watch CI, rerun it or debug it during normal
+  development. Push only when releasing (or docs-only).
+- **No git archaeology.** Do not spend turns on history, rebases, bisects or
+  branch bookkeeping unless the task is about history.
+- **No new status docs, receipts or evidence files.** Update
+  `docs/v4-handoff.md`; put proof in the `rudder done` summary. Do not commit
+  logs, captures or JSON receipts.
+- **No hardening waves or follow-up chains.** A follow-up must map to a goal in
+  `PLAN.md` section 0, or it is dropped.
 
 ## Shipping
 
@@ -94,8 +112,8 @@ authorize unrelated deployment. Never force-push.
 Product pushes to `origin/main` require a versioned npm release: run relevant
 checks, commit, `npm version` appropriately, then push main and the created tag.
 Tag CI publishes; do not manually `npm publish`. v4 prereleases use `next`;
-stable uses `latest`. Verify CI and actual registry availability. Docs/evidence
-only pushes do not require a product version bump.
+stable uses `latest`. Verify CI and actual registry availability. Docs-only
+pushes do not require a product version bump.
 
 Cloud also needs the worker image and Fly control-plane deployment. Verify
 `https://rudder.exla.ai/app`, revision/image/deployment, UTC time and smoke checks.
@@ -104,6 +122,7 @@ Filter provider output so worker tokens stay private. Mac installation/release
 has separate build, install/launch and signing gates; see reference §§9, 11.
 
 Before final handoff, file `rudder done` with summary, interfaces, follow-ups and
-actual delivery proof when requested. Report unfinished work honestly. The v4
-target is [PLAN.md](PLAN.md); current status and open work: [v4 handoff](docs/v4-handoff.md). Evidence/continuation state is in
-[the implementation record](docs/architecture/implementation.md).
+actual delivery proof when requested. Report unfinished work honestly. The
+locked direction is [PLAN.md section 0](PLAN.md); current status and open work
+are in [the v4 handoff](docs/v4-handoff.md). `docs/architecture/` is background
+reference only.

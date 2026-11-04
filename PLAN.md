@@ -23,7 +23,33 @@ Companion documents:
 - [Experiments, acceptance gates, and failure cases](docs/architecture/experiments.md).
 - [Implementation state and context handoff](docs/architecture/implementation.md).
 - [Measured Linux workspace substrate](docs/architecture/phase0-linux-evidence.md).
-- [Alpha.3 delivery evidence](docs/architecture/delivery-alpha3.json).
+
+## 0. Locked direction (2026-11-04)
+
+This section overrides anything below that conflicts with it. Current status
+and open work live in [the v4 handoff](docs/v4-handoff.md).
+
+- **4.0.0 ships Cloud-first, Linux only, from what is built today.** Mac work
+  (APFS clones, offline Mac drafts, signing, Mac baselines) moves to 4.1.
+- **Build speed for parallel agents comes from three layers, in this order:**
+  1. **Warm forks.** A trusted Rudder builder keeps a warm snapshot of the
+     default branch with dependencies installed and build outputs present.
+     Each agent starts from a copy-on-write fork of it, so its first build is
+     incremental. Agents never write into the shared snapshot.
+  2. **Tool-native caches behind one Rudder cache per Cloud machine.** Rudder
+     points sccache, the pnpm store, uv, Turborepo/Nx and similar tools at a
+     cache it runs on the machine. Shared across machines later.
+  3. **REAPI for repos that already use Buck2 or Bazel.** The same cache serves
+     REAPI (self-hosted bazel-remote/Buildbarn on Fly, or BuildFetch to try).
+     Buck2 is supported, not required: Rudder does not generate Buck2 graphs
+     for other repos.
+- **Only the trusted builder writes shared results.** Agents read only. An
+  agent miss builds privately and never publishes a result other agents trust.
+- **The custom managed compiler cache path is frozen.** Its reuse stays
+  disabled; do not start new hardening work on it.
+- **Cross-machine content cache (E2) is 4.1.** One real two-worker Fly run is
+  needed to prove it, with user approval.
+- **No new hardening waves.** Work items must map to a 4.0.x or 4.1 goal above.
 
 ## 1. Product objective and constraints
 
@@ -333,6 +359,9 @@ cannot supply at the measured cost. Avoid stacking two complete filesystems
 unless their separate benefit is demonstrated.
 
 ## 7. Opinionated Cloud build contract
+
+Superseded where it conflicts with section 0 (warm forks, tool-native caches,
+REAPI only for Buck2/Bazel repos, trusted writer only).
 
 ### 7.1 Two indexes over reusable content
 

@@ -1,5 +1,8 @@
 # Rudder v4 handoff (2026-11-04)
 
+How to work: see "Development speed" in `AGENTS.md` (main only, targeted
+checks, CI only at release, no new status docs, no hardening waves).
+
 This is the single entry point for whoever picks up v4 next. It reconciles
 the status of every agent from the parallel plan `plan-20181-0`, says which
 doc owns what, and lists what is open. Nothing is running right now: all
@@ -7,28 +10,30 @@ workers are merged or cancelled, the planner run is deleted, and the
 hardening follow-up queue was emptied (backup:
 `/workspace/rudder-build/hardening-queue-backup.json`).
 
-## 1. Which doc is authoritative
+## 1. Which doc is authoritative (locked 2026-11-04)
 
-| Doc | Owns |
+Only two docs steer work. Everything else is reference or evidence.
+
+| Doc | Role |
 |---|---|
-| `PLAN.md` (sections 1-20) | v4 target design. Do not treat it as status. |
-| `docs/architecture/v4-release-readiness.md` | Release gates E0-E14 and their current state. Most accurate status doc. |
-| `docs/architecture/implementation.md` | Long evidence log (4k lines). "Current continuation" at the top is stale-ish; prefer this handoff for status. |
-| `docs/engineering-reference.md` | How things work, release workflow ("Releasing"). |
-| `DECISIONS.md` | Auto-written decision log from runs. Append-only noise; skim only. |
-| `docs/architecture/*.json` | Delivery/verification receipts. Evidence, not instructions. |
-| `/workspace/rudder-v4-restart-handoff.md` | STALE (outside repo, says alpha.34 image build running). Superseded by this file. |
+| `PLAN.md` section 0 | **The locked direction.** Overrides the rest of PLAN.md. |
+| `docs/v4-handoff.md` (this file) | **Current status and open work.** Update it, do not start new status docs. |
+| `PLAN.md` sections 1-20 | Background design. Read the relevant section only. |
+| `docs/engineering-reference.md` | How things work; release workflow. |
+| `docs/architecture/v4-release-readiness.md` | E0-E14 gate detail (written before the scope cut). |
+| `docs/architecture/*.md` (implementation, experiments, research and about 30 more) | Background reference. Do not extend. The JSON receipts and `examples/*/evidence` were deleted 2026-11-04; they are in git history before that date. |
+| `DECISIONS.md` | Auto-written run log. Skim only. |
+| `/workspace/rudder-v4-restart-handoff.md` | Stale, outside the repo. |
 
 ## 2. Where main is
 
 - Local `main` holds every merged worker. Published: `v4.0.0-alpha.34`
   (origin/main `368c72f2`). package.json is still `4.0.0-alpha.34`.
-- Last full gate on this tree (before the final merges finished):
-  `npm run check` pass, cloud build pass, `npm test` 5 failures, all
-  "waitFor timed out" in Cloud end-to-end tests (`cloud-digest:163`,
-  `cloud-home-move:130`, `cloud-home:96`, `cloud-home:371`,
-  `cloud-onboarding:155`). Unknown if flaky under load or real. Cargo,
-  build and TUI were not completed. Rerun the full gate first.
+- Gate rerun 2026-11-04: check and Cloud build pass. The 5 earlier Cloud
+  timeouts passed (load flakes). One real Node failure:
+  `tests/cloud-web-app.test.mjs:221`, a home row with status "deleting"
+  disappears after a passive `/api/app/state` poll. Cargo, build and TUI
+  results pending.
 
 ## 3. Status of every agent
 
@@ -50,7 +55,7 @@ Plan lanes (all merged locally):
 | n11 | Automatic planning, durable tasks | Done, 95 tests. |
 | n12 | Private previews, responsive terminals | Done, 43 + 15 tests. |
 | n13 | Integration wiring | Done; two installed-provider tests skipped. |
-| n14 | Launch gates / readiness doc | Done. Verdict: stable is BLOCKED. |
+| n14 | Launch gates / readiness doc | Done. Its "stable blocked" verdict used the full E0-E14 bar, since replaced by the Cloud-first scope. |
 
 Hardening waves (all merged locally):
 
@@ -101,21 +106,31 @@ cloud-sync paused; `main-branch-jrqtg` (Sol) completed; `ps` cancelled
 
 ## 6. Decisions the user needs to make
 
-- Cut scope: ship v4 as alpha with the two limits documented, or keep
-  pushing toward stable.
+- DECIDED 2026-11-04: ship 4.0.0 Cloud-first from what is built, Mac work
+  in 4.1, build caching per PLAN.md section 0. Open: confirm `latest`.
 - Whether to approve the one optional Fly campaign (single retained owner,
   SDK + runtime + ordinary on one image) described in the readiness doc.
 - Cloud deploy (worker image + Fly control plane) needs explicit approval.
 - `origin/rudder/mac-pty-diagnostic`: 7 unmerged PTY/broker commits from
   10-30, about 210 behind main. Needs a Mac to verify; merge or drop.
 
-## 7. Suggested order for the cleanup agent
+## 7. Scope and order
 
-1. Run the full gate (AGENTS.md "Verification") on main. Classify the 5
-   Cloud test timeouts. Check harden-10 compiles and harden-11 fixtures.
-2. Fix real breaks only. No new hardening waves.
-3. Release `4.0.0-alpha.35` via the documented release-check flow.
-4. Delete evidence directories (section 8) after the user agrees.
+4.0.0 = Cloud on Fly, Linux, what is built today (see PLAN.md section 0).
+
+1. Full gate green on main (running 2026-11-04). Classify the 5 Cloud test timeouts.
+2. Rewrite `v4-release-readiness.md` for the Cloud-first scope.
+3. Release 4.0.0 to `latest` (npm version, release-check CI, push main + tag).
+4. Cloud worker image + Fly deploy, with user approval.
+
+4.1 headline, in order: wire overlay workspaces into agent launch, warm forks
+from a trusted builder snapshot, one Rudder cache per machine for tool-native
+caches, REAPI for Buck2/Bazel repos, then cross-machine cache (E2, one Fly run)
+and Mac work.
+
+Product follow-up: Rudder's own scheduler auto-queues hardening follow-ups
+(`.rudder/hardening.json`, `MAX_FOLLOWUP_DEPTH = 3` in `native/src/main.rs`).
+That is what produced 15 hardening runs. Consider turning it off by default.
 
 ## 8. Disk and leftovers (ask before deleting)
 

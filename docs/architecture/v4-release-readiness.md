@@ -1,5 +1,9 @@
 # v4 release candidate and unresolved gates
 
+> **Superseded scope (2026-11-04).** The direction is locked in `PLAN.md` section 0
+> and current status is in `docs/v4-handoff.md`. This file is kept as evidence.
+
+
 This is the n14 handoff after n13 integration, dated 2026-11-04. **Stable release is blocked.** Local implementation checks are useful evidence, but do not establish all E0-E14 experiments, supported Macs, genuine coding-model behavior, or delivery. This worker has performed no Fly/provider action and requested no image build. The coordinator owns full integration checks and delivery.
 
 The candidate includes n13 (`b90a5916`), n0's diagnostic changes, the preserved unrelated sign-out run, and n14's corrections. It still reports package version `4.0.0-alpha.34`. The coordinator must integrate n14, create the final versioned source capture, and qualify that exact committed source. An alpha.34 deployment or an older SDK image cannot qualify changed source.

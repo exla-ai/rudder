@@ -1,6 +1,0 @@
-{
-  "mode": "drop-and-exec",
-  "exitCode": 77,
-  "stdout": "{\"errno\":1,\"error\":\"CapabilityDropFailed\",\"hostFallback\":false,\"kind\":\"execution-network-qualification\",\"status\":\"unsupported\"}\n",
-  "stderr": ""
-}

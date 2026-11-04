@@ -1,5 +1,9 @@
 # Rudder v4 implementation and restart record
 
+> **Superseded scope (2026-11-04).** The direction is locked in `PLAN.md` section 0
+> and current status is in `docs/v4-handoff.md`. This file is kept as evidence.
+
+
 Updated: 2026-11-03. Read with [the plan](../../PLAN.md),
 [research](research.md), [gates](experiments.md) and repository `AGENTS.md`.
 This file preserves the working agreement across context compaction. An entry

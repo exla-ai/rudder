@@ -1,1 +1,0 @@
-700 postgres /var/tmp/rudder-fleet-7d17e8f3-be6f-4a61-9d16-8b5a5ac354f5/socket

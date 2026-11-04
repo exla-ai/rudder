@@ -241,3 +241,20 @@ test("volume names fit Fly's 30-character limit", () => {
   assert.ok(long.endsWith("_7"));
   assert.match(long, /^[a-zA-Z0-9_]+$/);
 });
+
+test("burst builders use the trusted-writer tool cache on their volume", async () => {
+  const { useToolCache } = await import("../cloud/worker/builder.mjs");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-builder-cache-"));
+  try {
+    const env = { PATH: "/usr/bin:/bin", HOME: dir };
+    const modulePath = new URL("../dist/tool-cache.js", import.meta.url).href;
+    await useToolCache(env, path.join(dir, "tool-cache"), modulePath);
+    assert.equal(env.TURBO_CACHE_DIR, path.join(dir, "tool-cache", "turbo"));
+    if (env.SCCACHE_DIR) assert.equal(env.SCCACHE_LOCAL_RW_MODE, "READ_WRITE");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -167,7 +167,6 @@ COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 COPY cloud/worker/steer-inbox.mjs ./steer-inbox.mjs
 COPY cloud/worker/cleanup.mjs ./cleanup.mjs
 COPY cloud/worker/telemetry.mjs ./telemetry.mjs
-COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/burst-protocol.mjs ./burst-protocol.mjs
 COPY cloud/worker/burst-broker.mjs ./burst-broker.mjs
 COPY cloud/worker/burst.mjs ./burst.mjs

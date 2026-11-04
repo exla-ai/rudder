@@ -138,9 +138,10 @@ The plan is `PLAN.md` section 0 (steps 0-9). One test gate only, at step 9.
 No evidence files, no automatic follow-ups, no prereleases or Cloud deploys
 before step 9.
 
-Branch `origin/cloud-capacity-build-pool` (1 commit, 2026-11-03, unbuilt) is
-4.1 Cloud capacity work: cleanup job, swap, telemetry/observability, burst
-builders, Codex trust. Keep it; rebase after 4.0.0 (PLAN.md section 0).
+4.1 Cloud capacity is merged onto main (2026-11-04) from
+`cloud-capacity-build-pool`; that branch can be deleted. Node 1025/1025 and
+the rudder-native cargo suite pass. Not yet released or deployed; see
+PLAN.md section 0 "After 4.0.0" for what remains.
 
 ## 8. Disk
 

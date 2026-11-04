@@ -298,6 +298,21 @@ async function ensureToolchains(home, toolsDir, env) {
   }
 }
 
+/**
+ * The builder is its home's trusted writer, so it shares Rudder's tool cache
+ * layout (sccache read-write, pnpm/npm/uv/pip/cargo stores) on its volume and
+ * prunes it to the same limits. Mutates `env`, which every build reads.
+ */
+export async function useToolCache(env, root, modulePath = "/opt/rudder/dist/tool-cache.js") {
+  try {
+    const { toolCacheEnv, pruneToolCache } = await import(modulePath);
+    Object.assign(env, toolCacheEnv("builder", { root, env }));
+    pruneToolCache(root);
+  } catch (error) {
+    console.error(`rudder builder: tool cache unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function main() {
   const tokenSha256 = (process.env.RUDDER_BUILDER_TOKEN_SHA256 || "").trim();
   if (!/^[0-9a-f]{64}$/.test(tokenSha256)) {
@@ -322,7 +337,8 @@ async function main() {
     idleSeconds: Number(process.env.RUDDER_BUILDER_IDLE_SECONDS || 300),
     env,
     builderId: process.env.RUDDER_BUILDER_ID || "",
-    toolchains: process.env.RUDDER_BUILDER_TOOLCHAINS === "0" ? Promise.resolve() : ensureToolchains(home, toolsDir, env),
+    toolchains: (process.env.RUDDER_BUILDER_TOOLCHAINS === "0" ? Promise.resolve() : ensureToolchains(home, toolsDir, env))
+      .then(() => useToolCache(env, path.join(volume, "tool-cache"))),
   });
   // Fly's private network is IPv6; nothing listens on a public address.
   builder.server.listen(port, "::", () => console.error(`rudder builder: ${process.env.RUDDER_BUILDER_ID || ""} listening on [::]:${port}`));

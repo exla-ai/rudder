@@ -23,3 +23,6 @@ ios/build/
 ios/fastlane/.asc.env
 ios/fastlane/README.md
 ios/fastlane/report.xml
+
+# Local scaler state (observability/scaler/state.mjs)
+observability/scaler/.state.json*

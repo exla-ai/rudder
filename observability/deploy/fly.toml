@@ -1,0 +1,56 @@
+# rudder-observability: NOT DEPLOYED. Review observability/README.md first.
+# Homes and the control plane push to rudder-observability.internal:4318 on the
+# Fly private network; Grafana is public only through
+# https://rudder.exla.ai/dashboard/ (a Vercel rewrite) and signs in with Google.
+app = "rudder-observability"
+primary_region = "iad"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  GF_SERVER_ROOT_URL = "https://rudder.exla.ai/dashboard/"
+  GF_SERVER_SERVE_FROM_SUB_PATH = "true"
+  GF_SERVER_DOMAIN = "rudder.exla.ai"
+  GF_AUTH_DISABLE_LOGIN_FORM = "true"
+  GF_AUTH_ANONYMOUS_ENABLED = "false"
+  GF_AUTH_GOOGLE_ENABLED = "true"
+  GF_AUTH_GOOGLE_ALLOWED_DOMAINS = "exla.ai"
+  GF_AUTH_GOOGLE_ALLOW_SIGN_UP = "true"
+  GF_AUTH_GOOGLE_AUTO_LOGIN = "true"
+  GF_USERS_AUTO_ASSIGN_ORG_ROLE = "Viewer"
+  GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH = "/var/lib/grafana/dashboards/rudder-fleet.json"
+  GF_ANALYTICS_REPORTING_ENABLED = "false"
+  GF_SECURITY_COOKIE_SECURE = "true"
+  RUDDER_FLY_APP = "rudder-workers-exla"
+  # Dry run until someone flips this on purpose (observability/README.md).
+  RUDDER_SCALER_APPLY = "0"
+  # Secrets (fly secrets set): RUDDER_OTEL_TOKEN, GF_SECURITY_ADMIN_PASSWORD,
+  # GF_AUTH_GOOGLE_CLIENT_ID, GF_AUTH_GOOGLE_CLIENT_SECRET, and FLY_API_TOKEN
+  # only once the scaler may act.
+
+[[mounts]]
+  source = "rudder_observability_data"
+  destination = "/data"
+  initial_size = "20gb"
+
+# Grafana, for the Vercel rewrite. The collector (4318) is reachable only on
+# the private network and is deliberately not a service here.
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "60s"
+    method = "GET"
+    path = "/dashboard/api/health"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

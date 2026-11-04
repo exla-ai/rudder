@@ -34,7 +34,9 @@ reference, plan or task history for a small change.
 | Native UI, PTYs and input | `native/src/main.rs`, `render.rs`, `pty_terminal.rs` | reference §7 |
 | Engine, storage and peer tools | `engine/src/`, native `engine_host.rs`, `fabric_runtime.rs`, `agent_mcp.rs` | `PLAN.md` §§4–6, 10–11, 14 |
 | Cloud and private access | `cloud/src/server.ts`, `cloud/worker/`, `src/cloud.ts` | reference §9 |
+| Burst build pool | `cloud/src/builders.ts`, `cloud/worker/builder.mjs`, `burst.mjs` | reference §9 |
 | Planning, prompts, integration | native `tasks.rs`, `src/brain.ts`, `scheduler.ts` | reference §14 |
+| Metrics, dashboards, scaler | `observability/`, `cloud/worker/telemetry.mjs`, `cloud/src/telemetry.ts` | `observability/README.md` |
 
 ## Invariants
 

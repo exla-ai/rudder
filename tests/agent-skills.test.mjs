@@ -38,6 +38,19 @@ test("the shipped Namecheap skill is installed for Claude and Codex as rudder-na
   }
 });
 
+test("the shipped burst build skill is installed for Claude and Codex as rudder-burst", async () => {
+  const home = await tempDir("burst");
+  const targets = agentSkillTargets(home, {});
+  const result = await installAgentSkills({ targets });
+  assert.ok(result.installed.includes("claude:rudder-burst"));
+  assert.ok(result.installed.includes("codex:rudder-burst"));
+  for (const target of targets) {
+    const skill = await fsp.readFile(path.join(target.dir, "rudder-burst", "SKILL.md"), "utf8");
+    assert.match(skill, /^---\nname: rudder-burst\ndescription: .+\n---\n/);
+    assert.match(skill, /command -v rudder-burst/, "it tells agents to check the command exists first");
+  }
+});
+
 test("installing again rewrites nothing, repairs edits, and leaves the user's own skills alone", async () => {
   const home = await tempDir("idempotent");
   const targets = agentSkillTargets(home, {});

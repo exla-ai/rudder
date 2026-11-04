@@ -256,6 +256,11 @@ const IDLE_WITHOUT_SIGNAL: Duration = Duration::from_secs(60);
 /// Most rows the home machine reopens on boot (`reopen_live_rows_after_home_boot`).
 const HOME_BOOT_REOPEN_CAP: usize = 12;
 
+/// How long a pane must have printed nothing before the cleanup may put its
+/// agent to sleep (`deliver_park_request`). A turn animates its spinner many
+/// times a second, tool calls included, so twenty silent minutes is not work.
+const PARK_MIN_SILENCE: Duration = Duration::from_secs(20 * 60);
+
 /// The dashboard is running on the cloud home machine.
 fn home_runtime_from_env() -> bool {
     env::var("RUDDER_CLOUD_RUNTIME").is_ok_and(|value| value == "home")
@@ -2471,6 +2476,46 @@ enum ConflictOperation {
     Rebase,
 }
 
+/// Why and when an idle agent was put to sleep (run.json `parked`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ParkedNote {
+    /// Milliseconds since the epoch, as a string like every other run.json stamp.
+    pub(crate) at: String,
+    pub(crate) reason: String,
+}
+
+impl ParkedNote {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "at": self.at, "reason": self.reason })
+    }
+
+    pub(crate) fn from_record(record: &serde_json::Value) -> Option<Self> {
+        let parked = record.get("parked")?;
+        let at = parked.get("at").and_then(serde_json::Value::as_str)?.trim();
+        if at.is_empty() {
+            return None;
+        }
+        Some(Self {
+            at: at.to_string(),
+            reason: parked
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+        })
+    }
+
+    /// What the static card says in place of the pane.
+    pub(crate) fn card_note(&self) -> String {
+        if self.reason.is_empty() {
+            "asleep: the home machine's cleanup ended this idle agent's process. Send a message or press Enter to wake it.".to_string()
+        } else {
+            format!("asleep: {}. Send a message or press Enter to wake it.", self.reason)
+        }
+    }
+}
+
 struct AgentRun {
     id: String,
     created_at: String,
@@ -2542,6 +2587,11 @@ struct AgentRun {
     /// pane is gone, and this is what the static card says instead of a
     /// frozen screen. Cleared when the run is resumed or relaunched.
     worker_exit_note: Option<String>,
+    /// Set when the home machine's cleanup put this idle agent to sleep
+    /// (`deliver_park_request`): its process ended, its conversation and
+    /// workspace did not. Persisted as run.json `parked` so the boot reopen
+    /// leaves it asleep; cleared once the row has a live pane again.
+    parked: Option<ParkedNote>,
     last_error: Option<String>,
     worker_input_draft: String,
     worker_input_cursor: usize,
@@ -8672,6 +8722,7 @@ impl App {
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -8866,6 +8917,7 @@ impl App {
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -9121,6 +9173,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -9217,6 +9270,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -10453,6 +10507,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -10998,6 +11053,9 @@ Address the objection directly. If you disagree, say why inside \
                 let workspace = run.workspace_path.as_ref().unwrap_or(&run.cwd);
                 was_live
                     && run.terminal.is_none()
+                    // Put to sleep by the cleanup while idle: a reboot is no
+                    // reason to wake it.
+                    && run.parked.is_none()
                     && matches!(run.mode, AgentMode::Main | AgentMode::Execute)
                     && !run.plain_process
                     && !run.merge_resolver
@@ -13655,6 +13713,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -15299,7 +15358,13 @@ Address the objection directly. If you disagree, say why inside \
                 // The web/phone Approve button on a plan waiting for its
                 // go-ahead: the same as empty-Enter in its orchestrator pane.
                 "approve" => self.deliver_approve_request(&task_id),
-                _ => self.deliver_steer_request(&task_id, &instruction),
+                // The home machine's cleanup putting an idle agent to sleep;
+                // the instruction is the reason the card shows.
+                "park" => self.deliver_park_request(&task_id, &instruction),
+                "steer" | "task" => self.deliver_steer_request(&task_id, &instruction),
+                // A kind from a newer sender must not reach an agent as typed
+                // text ("park"'s reason once would have been a prompt).
+                other => SteerDelivery::Failed(format!("unknown request kind: {other}")),
             };
             let _ = self.write_steer_receipt(&request_id, &result);
             // The durable receipt is written after the injection attempt, then
@@ -15555,6 +15620,102 @@ Address the objection directly. If you disagree, say why inside \
         } else {
             SteerDelivery::Failed(format!("{task_id} could not be stopped"))
         }
+    }
+
+    /// The home machine's cleanup (cloud/worker/cleanup.mjs) putting an idle
+    /// agent to sleep to give its memory back. Its process ends exactly as on a
+    /// machine stop; the conversation and workspace stay, and a message, Enter
+    /// or focusing the row resumes it. The cleanup decides WHICH rows; this is
+    /// where "never one that may be working or that someone has open" holds.
+    fn deliver_park_request(&mut self, task_id: &str, reason: &str) -> SteerDelivery {
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        if self.agents[index].terminal.is_none() {
+            // Already asleep (or never had a pane here): nothing to give back.
+            return SteerDelivery::Delivered;
+        }
+        if let Some(refusal) = self.park_refusal(index) {
+            return SteerDelivery::Failed(refusal);
+        }
+        let cwd = self.cwd.clone();
+        let reason = reason.trim().chars().take(240).collect::<String>();
+        let note = ParkedNote { at: now_stamp(), reason };
+        let (run_id, label) = {
+            let run = &mut self.agents[index];
+            if run.backend == Backend::Codex && run.session_id.is_none() {
+                run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
+            }
+            // Dropping the pane ends the agent's process group.
+            run.terminal = None;
+            if run.status == AgentStatus::Running {
+                // Silent long enough to be idle, but its turn never reported an end.
+                run.status = AgentStatus::Paused;
+                run.completed_at = None;
+            }
+            run.needs_user_input = false;
+            run.wait_signal = None;
+            run.worker_exit_note = Some(note.card_note());
+            run.parked = Some(note.clone());
+            let _ = save_native_run_record(&cwd, run);
+            (run.id.clone(), run.node_id.clone().unwrap_or_else(|| run.id.clone()))
+        };
+        // Focusing the row reopens its conversation once per session; it may
+        // have been reopened already, and must be able to wake again.
+        self.focus_resume_attempted.remove(&run_id);
+        self.record_event(
+            "park",
+            &format!("put {label} to sleep: {}", note.reason),
+            serde_json::json!({ "run": run_id }),
+        );
+        self.push_activity(format!("asleep: {label} ({})", note.reason));
+        self.dirty = true;
+        SteerDelivery::Delivered
+    }
+
+    /// A sleeping row woke (a message, Enter, focus, any relaunch): forget the
+    /// sleep, so the card note goes and the next boot reopens it like any other.
+    /// One place instead of every spawn path.
+    fn wake_parked_rows_with_panes(&mut self) {
+        let cwd = self.cwd.clone();
+        for run in &mut self.agents {
+            if run.parked.is_some() && run.terminal.is_some() {
+                run.parked = None;
+                run.worker_exit_note = None;
+                let _ = save_native_run_record(&cwd, run);
+            }
+        }
+    }
+
+    /// Why a row must not be put to sleep, or `None` when it may.
+    fn park_refusal(&self, index: usize) -> Option<String> {
+        let run = self.agents.get(index)?;
+        if run.managed_local.is_some() || is_cloud_owned_agent(run) {
+            return Some("not a local agent pane".to_string());
+        }
+        if run.is_orchestrator() || run.gam.is_some() || run.merge_resolver {
+            // Each carries live state of its own (a plan, a review loop, a merge).
+            return Some("orchestrators, /gam pairs and merge resolvers stay up".to_string());
+        }
+        if run.plain_process {
+            return Some("a shell pane is not an agent".to_string());
+        }
+        if run.needs_permission {
+            return Some("it is waiting on a permission prompt".to_string());
+        }
+        if self.run_is_attached(&run.id) {
+            return Some("a terminal is attached to it".to_string());
+        }
+        if index == self.selected_agent && self.last_user_activity.elapsed() < PARK_MIN_SILENCE {
+            return Some("someone has it open".to_string());
+        }
+        if run.last_output_at.elapsed() < PARK_MIN_SILENCE {
+            return Some(format!(
+                "its pane printed something {}s ago",
+                run.last_output_at.elapsed().as_secs()
+            ));
+        }
+        None
     }
 
     fn deliver_nudge_all_request(&mut self, instruction: &str) -> SteerDelivery {
@@ -18666,6 +18827,7 @@ Files involved: {}
             needs_user_input: false,
             wait_signal: None,
             worker_exit_note: None,
+            parked: None,
             last_error: None,
             worker_input_draft: String::new(),
             worker_input_cursor: 0,
@@ -20691,6 +20853,7 @@ What to do\n\
             self.write_watched_screens();
             self.poll_handoff_inbox();
             self.reconcile_rows();
+            self.wake_parked_rows_with_panes();
             self.maybe_emit_heartbeat();
         }
 

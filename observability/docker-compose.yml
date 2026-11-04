@@ -1,0 +1,114 @@
+# The whole observability stack on one laptop:
+#   docker compose -f observability/docker-compose.yml up -d
+# Host ports: Grafana 3300, Prometheus 19090, collector 14318, scaler 19464
+# (9090 and 4318 are often taken by other local stacks).
+# then open http://localhost:3300/dashboard/ (same path as production's
+# https://rudder.exla.ai/dashboard/). `home-sim` runs the REAL home telemetry
+# module against its own Linux /proc; `fleet-sim` adds a synthetic fleet with
+# a few hours of history (including a replay of the 2026-11-02 incident) so
+# the graphs have something to show. Nothing here talks to production.
+name: rudder-observability
+
+x-otel-env: &otel-env
+  RUDDER_OTEL_ENDPOINT: http://collector:4318
+  RUDDER_OTEL_TOKEN: local-dev-token
+  RUDDER_OTEL_ENVIRONMENT: local
+
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      RUDDER_OTEL_TOKEN: local-dev-token
+      RUDDER_OTEL_ENVIRONMENT: local
+      PROMETHEUS_OTLP_ENDPOINT: http://prometheus:9090/api/v1/otlp
+    volumes:
+      - ./collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "14318:4318"
+    depends_on: [prometheus]
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-otlp-receiver
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - ./prometheus/targets-local:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "19090:9090"
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      GF_SERVER_HTTP_PORT: "3300"
+      GF_SERVER_ROOT_URL: http://localhost:3300/dashboard/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Local only: open read-only. Production signs in with Google, exla.ai only.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rudder-fleet.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3300:3300"
+    depends_on: [prometheus]
+
+  # The real cloud/worker/telemetry.mjs, reading this container's /proc.
+  home-sim:
+    image: node:22-slim
+    working_dir: /opt/rudder-worker
+    command: ["node", "/sim/home-sim.mjs"]
+    environment:
+      <<: *otel-env
+      RUDDER_WORKSPACE_ID: home-local
+      FLY_MACHINE_ID: local-home-sim
+      FLY_REGION: local
+      RUDDER_OTEL_INTERVAL_MS: "15000"
+    volumes:
+      - ../cloud/worker:/opt/rudder-worker:ro
+      - ./sim:/sim:ro
+    depends_on: [collector]
+
+  fleet-sim:
+    image: node:22-slim
+    command: ["node", "/sim/fleet-sim.mjs"]
+    environment:
+      COLLECTOR_URL: http://collector:4318
+      RUDDER_OTEL_TOKEN: local-dev-token
+      SIM_BACKFILL_HOURS: "5"
+    volumes:
+      - ./sim:/sim:ro
+    depends_on: [collector]
+
+  scaler:
+    image: node:22-slim
+    command: ["node", "/scaler/main.mjs"]
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      RUDDER_SCALER_STATE: /tmp/scaler-state.json
+      RUDDER_SCALER_INTERVAL_MS: "30000"
+      # Dry run: no FLY_API_TOKEN and no RUDDER_SCALER_APPLY here, ever.
+    volumes:
+      - ./scaler:/scaler:ro
+    ports:
+      - "19464:9464"
+    depends_on: [prometheus]
+
+volumes:
+  prometheus-data:
+  grafana-data:

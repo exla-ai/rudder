@@ -13,6 +13,10 @@ use uuid::Uuid;
 const DRIVER: &str = include_str!("frontend_driver.py");
 const RUNNER: &str = include_str!("linux_runner.py");
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "managed_action_gate_tests.rs"]
+mod managed_action_gate_tests;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRun {
     pub format_version: u32,
@@ -82,10 +86,9 @@ impl Buck2Adapter {
 
     /// OFF actor. Retain the original control and input owners until this call
     /// settles. Acknowledged cancellation cannot publish to the managed result
-    /// index. The host owns materialization and must exclude agent/peer writes
-    /// to this workspace and the index's materialized environment throughout
-    /// execution: pre/post verification alone cannot prove that exclusion or
-    /// prevent Buck2 from uploading an action before post-verification.
+    /// index. Currently refuses execution before materialization: no production
+    /// carrier excludes every host agent/peer writer for the full action lifetime.
+    /// Pre/post verification cannot prevent uploads of transiently changed inputs.
     pub fn build_controlled(
         &self,
         index: &BuildIndex,
@@ -127,6 +130,7 @@ impl Buck2Adapter {
         index.validate_prepared(prepared)?;
         let mut sealed = super::sealed_inputs::SealedBuildInputs::acquire(index, input, prepared)?;
         control.check()?;
+        super::managed_action_gate::require_input_custody()?;
         let store = index.store();
         kind(source, ObjectKind::SourceRoot)?;
         let source_directory = source_directory(store, source)?;
@@ -309,6 +313,8 @@ impl Buck2Adapter {
             })?;
             stage_ms.insert("frontend_dispatch".into(), millis(frontend_started));
             control.check()?;
+            // These checks detect persistent changes, not full-lifetime writer
+            // exclusion. They cannot authorize cache reuse or publication.
             // Verify both the actual materialized bytes and their immutable
             // identities after the frontend has finished, before any result
             // publication. A completion response alone is not input validity.

@@ -336,6 +336,11 @@ impl BuildIndex {
 
     pub fn lookup_build(&self, contract: &ActionContract) -> Result<Option<StoredBuild>> {
         contract.validate()?;
+        // Old entries predate full-lifetime host input custody. Do not return
+        // them, even if their key, retention and post-execution checks match.
+        if super::managed_action_gate::require_input_custody().is_err() {
+            return Ok(None);
+        }
         if !contract.policy.cacheable() {
             return Ok(None);
         }
@@ -370,6 +375,7 @@ impl BuildIndex {
 
     pub fn record_build(&self, build: &QualifiedBuild) -> Result<StoredBuild> {
         build.contract.validate()?;
+        super::managed_action_gate::require_input_custody()?;
         self.validate_prepared(&build.prepared)?;
         ensure!(
             build.contract.environment_root == build.prepared.root,

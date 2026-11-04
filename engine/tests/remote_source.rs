@@ -45,6 +45,15 @@ struct Fixture {
     script: PathBuf,
 }
 impl Fixture {
+    /// The real helper needs the repo's esbuild (`npm ci`); skip cleanly without it.
+    fn real() -> Option<Self> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        if !root.join("node_modules/.bin/esbuild").exists() {
+            eprintln!("skipping real Cloud source helper test: run `npm ci` at the repo root first");
+            return None;
+        }
+        Some(Self::new(None))
+    }
     fn new(mode: Option<&str>) -> Self {
         let dir = temporary();
         let node = Command::new("node")
@@ -300,7 +309,9 @@ fn inherited_nonblocking_http_stream_delivers_complete_4mib_body_under_backpress
 #[test]
 fn actual_persistent_source_fetches_4mib_and_receipt_then_cache_reads_offline() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let body = vec![0x6d; 4 * 1024 * 1024];
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, &body);
     let http = Http::new(body.clone(), root(&reference));
@@ -339,7 +350,9 @@ fn actual_persistent_source_fetches_4mib_and_receipt_then_cache_reads_offline() 
 #[test]
 fn actual_cancel_aborts_http_and_drains_before_job_release() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let body = b"fixture".to_vec();
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, &body);
     let http = Http::new(body, root(&reference));
@@ -360,7 +373,9 @@ fn actual_cancel_aborts_http_and_drains_before_job_release() {
 #[test]
 fn concurrent_native_callers_keep_request_ids_ordered_on_one_helper() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, b"one");
     let http = Http::new(b"one".to_vec(), root(&reference));
     let mut config = fixture.config(&http.url);
@@ -398,7 +413,9 @@ fn concurrent_native_callers_keep_request_ids_ordered_on_one_helper() {
 #[test]
 fn helper_survives_the_temporary_thread_that_prepares_it() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, b"thread ownership");
     let http = Http::new(b"thread ownership".to_vec(), root(&reference));
     let config = fixture.config(&http.url);
@@ -422,7 +439,9 @@ fn helper_survives_the_temporary_thread_that_prepares_it() {
 #[test]
 fn stalled_http_deadline_and_bad_hash_never_admit_bytes() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let body = b"right".to_vec();
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, &body);
     let http = Http::new(body, root(&reference));
@@ -608,7 +627,9 @@ fn handshake_mismatch_timeout_and_invalid_config_never_start_unbounded_replaceme
 #[test]
 fn actual_auth_revocation_is_fail_closed_without_credential_fallback() {
     let _serial = serial();
-    let fixture = Fixture::new(None);
+    let Some(fixture) = Fixture::real() else {
+        return;
+    };
     let reference = ObjectRef::from_bytes(ObjectKind::Blob, b"a");
     let http = Http::new(b"a".to_vec(), root(&reference));
     http.mode.store(3, Ordering::Release);

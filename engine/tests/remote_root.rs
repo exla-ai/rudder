@@ -1940,6 +1940,11 @@ impl Drop for Http {
 
 #[test]
 fn actual_helper_http_lazy_lookup_in_100k_directory_fetches_only_two_4mib_ranges() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    if !root.join("node_modules/.bin/esbuild").exists() {
+        eprintln!("skipping real Cloud source helper test: run `npm ci` at the repo root first");
+        return;
+    }
     let start = Instant::now();
     let graph = graph(100000, true);
     let fixture_ms = start.elapsed().as_millis();

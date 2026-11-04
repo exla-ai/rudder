@@ -60,7 +60,7 @@ pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> 
     if command[1..].contains('/') { return ComposerInput::Text; }
     let r = registry();
     if r.retired_slash.iter().any(|value| value == command) {
-        return ComposerInput::Refused(format!("{command} is retired; use ordinary task input or a selected agent action"));
+        return ComposerInput::Refused(format!("{command} has been retired; use ordinary task input or a selected agent action"));
     }
     if r.slash.iter().any(|value| value == command) { return ComposerInput::Rudder(command.into()); }
     if let Some(alias) = r.slash_aliases.iter().find(|value| value.name == command) {
@@ -69,7 +69,7 @@ pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> 
         }
         return ComposerInput::Rudder(command.into());
     }
-    ComposerInput::Refused(format!("unknown command: {command}; use the backend composer for backend slash commands"))
+    ComposerInput::Refused(format!("unknown command {command}; use the backend composer for backend slash commands"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +157,12 @@ impl SurfaceRequest {
                 ensure!(a["authorization"].as_str() == self.operation.split('.').nth(1) && s.selection == Selection::Change, "Change authorization differs"); }
             "project.settings.v1" => { fields(a, &["setting", "value"])?; text(&a["value"], 256)?;
                 ensure!(["model", "effort", "speed", "notifications", "sound", "color", "telemetry"].contains(&a["setting"].as_str().unwrap_or("")) && s.selection == Selection::Project, "Unknown project setting"); }
+            "project.files.v1" => {
+                fields(a, &["workspace_id", "path"])?;
+                if let Some(workspace) = a.get("workspace_id") { text(workspace, 256)?; }
+                if let Some(path) = a.get("path") { text(path, 4096)?; }
+                ensure!(s.selection == Selection::Project, "Project files require project scope");
+            }
             name => {
                 match name {
                     "surface.open.v1" | "agent.list.v1" | "agent.status.v1" | "agent.logs.v1" | "agent.watch.v1" | "agent.attach.v1" | "agent.report.v1" | "agent.find.v1" | "change.sync.v1" | "project.restart.v1" | "auth.login.v1" | "diagnostic.check.v1" | "diagnostic.setup.v1" => fields(a, &[])?,

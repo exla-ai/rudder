@@ -18,6 +18,7 @@ mod frontend;
 mod index;
 mod sealed_inputs;
 mod execution_control;
+mod inflight;
 pub use execution_control::BuildExecutionControl;
 pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};

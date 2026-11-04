@@ -13,7 +13,7 @@ export type CloudBuildRequest = {
   runnable: ObjectRef;
   expected_projection_policy: ObjectRef;
 };
-type Options = { nativeBinary?: string; timeoutMs?: number; signal?: AbortSignal };
+type Options = { nativeBinary?: string; timeoutMs?: number; cancelGraceMs?: number; signal?: AbortSignal };
 const MAX_REQUEST = 64 * 1024;
 const MAX_OUTPUT = 256 * 1024;
 
@@ -78,6 +78,8 @@ export async function runCloudBuildProfile(request: CloudBuildRequest, options: 
   if (Buffer.byteLength(raw) > MAX_REQUEST) throw new Error("Build-profile request exceeds 64 KiB");
   const timeout = options.timeoutMs ?? 300_000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 1_200_000) throw new Error("Build-profile deadline must be 1..1200000 ms");
+  const cancelGrace = options.cancelGraceMs ?? 20_000;
+  if (!Number.isSafeInteger(cancelGrace) || cancelGrace < 1 || cancelGrace > 60_000) throw new Error("Build-profile cancellation grace must be 1..60000 ms");
   options.signal?.throwIfAborted();
   const binary = options.nativeBinary ?? resolveNativeBinaryPath();
   if (!binary) throw new Error("rudder-native binary is not available. Reinstall or rebuild Rudder.");
@@ -85,35 +87,54 @@ export async function runCloudBuildProfile(request: CloudBuildRequest, options: 
     // Do not forward provider credentials to the data-only build helper.
     const child = spawn(binary, ["fabric", "build-profile"], { detached: process.platform !== "win32",
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, stdio: ["pipe", "pipe", "pipe"] });
-    const out: Buffer[] = [], err: Buffer[] = [];
-    let bytes = 0, failure: Error | undefined, reap: NodeJS.Timeout | undefined;
-    const stop = (error: Error) => {
-      if (failure) return;
-      failure = error;
+    const out: Buffer[] = [];
+    let stderr = Buffer.alloc(0);
+    let bytes = 0, failure: Error | undefined, escalation: NodeJS.Timeout | undefined, forced = false;
+    const forceStop = () => {
+      forced = true;
       if (child.pid) {
         try { process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL"); }
         catch { child.kill("SIGKILL"); }
       }
-      // An unresponsive OS process can leave effects uncertain. Never retry or
-      // translate the deadline/abort into a successful receipt or stopped fact.
-      reap = setTimeout(() => { cleanup(); reject(error); }, 2_000);
+      // Keep the original helper and promise until close. Killing a process
+      // group cannot prove a private daemon stopped or publication was absent.
+    };
+    const stop = (error: Error) => {
+      if (failure) return;
+      failure = error;
+      // The native owner calls cancel on its original BuildExecutionControl,
+      // then joins execution and reconciles publication before returning.
+      // Signalling the group here would kill that owner before it can settle.
+      child.kill("SIGTERM");
+      escalation = setTimeout(forceStop, cancelGrace);
     };
     const timer = setTimeout(() => stop(new Error("Build-profile deadline exceeded; build effects require reconciliation")), timeout);
     const abort = () => stop(new Error("Build-profile cancelled; build effects require reconciliation"));
-    const cleanup = () => { clearTimeout(timer); clearTimeout(reap); options.signal?.removeEventListener("abort", abort); };
-    for (const [stream, target] of [[child.stdout, out], [child.stderr, err]] as const) {
+    const cleanup = () => { clearTimeout(timer); clearTimeout(escalation); options.signal?.removeEventListener("abort", abort); };
+    for (const stream of [child.stdout, child.stderr]) {
       stream.on("data", (chunk: Buffer) => {
         bytes += chunk.length;
+        // Preserve reconciliation details even after stdout exceeded its cap.
+        if (stream === child.stderr) stderr = Buffer.concat([stderr, chunk]).subarray(-8_000);
         if (bytes > MAX_OUTPUT) stop(new Error("Build-profile output exceeds 256 KiB; build effects require reconciliation"));
-        else target.push(chunk);
+        else if (stream === child.stdout) out.push(chunk);
       });
     }
     child.stdin.on("error", (error) => stop(error));
-    child.once("error", (error) => { cleanup(); reject(error); });
-    child.once("close", (code) => {
+    child.once("error", (error) => {
+      if (child.pid) stop(error);
+      else { cleanup(); reject(error); }
+    });
+    child.once("exit", (_code, signal) => {
+      if (failure && signal && !forced) forceStop();
+    });
+    child.once("close", (code, signal) => {
       cleanup();
-      if (failure) reject(failure);
-      else if (code !== 0) reject(new Error(`Build-profile failed (${code}): ${Buffer.concat(err).toString("utf8").slice(-8_000)}`));
+      if (failure) {
+        const settlement = forced || signal ? "; original helper settlement unresolved" : "; original helper returned after stop request";
+        reject(new Error(`${failure.message}${settlement}${stderr.length ? `: ${stderr.toString("utf8")}` : ""}`, { cause: failure }));
+      }
+      else if (code !== 0) reject(new Error(`Build-profile failed (${code}): ${stderr.toString("utf8")}`));
       else resolve(Buffer.concat(out).toString("utf8"));
     });
     options.signal?.addEventListener("abort", abort, { once: true });

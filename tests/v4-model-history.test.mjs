@@ -4,14 +4,13 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from "node:fs/promis
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 import { prepareSelectedModelProfile, codexProtocolCapabilities, claudeProtocolCapabilities,
   bindModelSession, assertResumeModelSession, saveModelSessionReceipt } from "../dist/model-profile/identity.js";
 import { discoverInstalledCodexModels } from "../dist/model-profile/codex-discovery.js";
 
 async function fixture(t) {
-  const base = "/workspace/rudder-scratch/n13-model-receipts";
-  await mkdir(base, { recursive: true });
-  const root = await mkdtemp(path.join(base, "identity-"));
+  const root = await mkdtemp(v4ScratchPrefix('model-identity'));
   const old = process.env.RUDDER_HOME; process.env.RUDDER_HOME = root;
   t.after(async () => { if (old === undefined) delete process.env.RUDDER_HOME; else process.env.RUDDER_HOME = old; await rm(root, { recursive: true, force: true }); });
   await writeFile(path.join(root, "auth-profiles.json"), JSON.stringify({ version: 1, profiles: {

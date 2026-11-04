@@ -46,6 +46,16 @@ impl Buck2Adapter {
         Ok(Self { executable })
     }
 
+    /// Recover the recorded original attempt without constructing or running a
+    /// replacement build. Live owners and legacy records with missing process
+    /// identities retain their marker and pin for explicit reconciliation.
+    pub fn reconcile_inflight(&self, index: &BuildIndex, workspace: impl AsRef<Path>) -> Result<()> {
+        let workspace = workspace.as_ref().canonicalize()?;
+        ensure!(workspace.join(".rudder-managed-build.json").is_file(), "unmanaged build workspace");
+        let _lock = lock(&workspace.join(".rudder-build-lock"), false)?;
+        super::inflight::InflightBuild::recovery(index, &workspace, &self.executable)
+    }
+
     pub fn stop(&self, workspace: impl AsRef<Path>) -> Result<()> {
         let workspace = workspace.as_ref().canonicalize()?;
         ensure!(
@@ -53,19 +63,7 @@ impl Buck2Adapter {
             "refusing to stop an unmanaged Buck2 project"
         );
         let _lock = lock(&workspace.join(".rudder-build-lock"), false)?;
-        let mut command = Command::new(&self.executable);
-        command
-            .arg("kill")
-            .current_dir(&workspace)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", workspace.join(".driver/home"));
-        bounded(
-            &mut command,
-            Duration::from_secs(15),
-            &workspace.join(".stop.stdout"),
-            &workspace.join(".stop.stderr"),
-        )
+        super::inflight::InflightBuild::stop_workspace_daemons(&workspace, &self.executable)
     }
 
     pub fn build(
@@ -172,22 +170,8 @@ impl Buck2Adapter {
                 )?,
             )?;
         }
-        let inflight = workspace.join(".rudder-build-inflight");
-        if inflight.exists() {
-            let mut kill = Command::new(&self.executable);
-            kill.arg("kill")
-                .current_dir(&workspace)
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("HOME", workspace.join(".driver/home"));
-            bounded(
-                &mut kill,
-                Duration::from_secs(15),
-                &workspace.join(".recovery-kill.stdout"),
-                &workspace.join(".recovery-kill.stderr"),
-            )?;
-            fs::remove_file(&inflight)?;
-        }
+        super::inflight::InflightBuild::recovery(index, &workspace, &self.executable)?;
+        let mut inflight: Option<super::inflight::InflightBuild> = None;
         let lease = store.begin_staging(Duration::from_secs(3600))?;
         stage_ms.insert("workspace_setup".into(), millis(workspace_started));
         let result = (|| {
@@ -263,15 +247,16 @@ impl Buck2Adapter {
             stage_ms.insert("execution_guard_wait".into(), millis(guard_started));
             let frontend_started = Instant::now();
             let native_contract = serde_json::json!({"format_version":FORMAT_VERSION,"environment":prepared.root,"toolchains":preparation.toolchains,"platform":platform,"policy":profile.policy,"rules":rules,"frontend":frontend_executable,"input_topology":input.hardlinks()});
-            let request = serde_json::json!({"format_version":FORMAT_VERSION,"workspace":workspace,"prepared_directory":prepared_path,"buck2":self.executable,"profile":profile,"native_contract":native_contract});
+            let original = super::inflight::InflightBuild::new(input, &prepared.root, sealed.pin_data())?;
+            let request = serde_json::json!({"format_version":FORMAT_VERSION,"workspace":workspace,"prepared_directory":prepared_path,"buck2":self.executable,"profile":profile,"native_contract":native_contract,
+                "attempt":original.attempt,"start_gate":original.gate(&workspace)});
             let request_path = workspace.join(".driver-request.json");
             atomic(&request_path, &canonical_json(&request)?)?;
-            atomic(
-                &inflight,
-                &canonical_json(
-                    &serde_json::json!({"source":source,"environment":prepared.root,"attempt":Uuid::new_v4().to_string(),"retained_input_pin":sealed.pin_data(),"checkpoint":input.checkpoint()}),
-                )?,
-            )?;
+            // Stage custody before IO. Even an uncertain journal write keeps
+            // this exact pin; no replacement attempt can settle it.
+            sealed.mark_inflight();
+            inflight = Some(original);
+            inflight.as_ref().unwrap().save(&workspace)?;
             let stdout = workspace.join(".driver-response.json");
             let stderr = workspace.join(".driver-error.log");
             let mut command = Command::new("/usr/bin/python3");
@@ -281,25 +266,10 @@ impl Buck2Adapter {
                 .env_clear()
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
                 .stdin(File::open(&request_path)?);
-            sealed.mark_inflight();
-            let outcome = bounded_controlled(&mut command, Duration::from_secs(150), &stdout, &stderr, control);
-            if outcome.is_ok() {
-                sealed.mark_settled();
-                fs::remove_file(&inflight)?;
-            } else {
-                // The driver can start a persistent Buck2 daemon outside its
-                // process group. Settle that original daemon before releasing
-                // workspace/input custody. Keep the inflight recovery marker
-                // if shutdown cannot be confirmed.
-                let mut kill = Command::new(&self.executable);
-                kill.arg("kill").current_dir(&workspace).env_clear()
-                    .env("PATH", "/usr/bin:/bin")
-                    .env("HOME", workspace.join(".driver/home"));
-                bounded(&mut kill, Duration::from_secs(15),
-                    &workspace.join(".cancel-kill.stdout"), &workspace.join(".cancel-kill.stderr"))
-                    .context("managed build failed and original frontend shutdown is unresolved; retain workspace recovery marker")?;
-                sealed.mark_settled();
-                fs::remove_file(&inflight)?;
+            let outcome = bounded_controlled_recorded(&mut command, Duration::from_secs(150), &stdout, &stderr, control,
+                |pid| inflight.as_mut().unwrap().start_driver(&workspace, pid));
+            if outcome.is_err() {
+                inflight.as_mut().unwrap().settle_processes(&workspace, &self.executable)?;
             }
             outcome.with_context(|| {
                 format!(
@@ -403,6 +373,10 @@ impl Buck2Adapter {
             };
             stage_ms.insert("result_capture".into(), millis(capture_started));
             let index_started = Instant::now();
+            inflight.as_mut().unwrap().publication = Some(super::inflight::Publication {
+                contract: qualified.contract.clone(), outputs: qualified.outputs.clone(), trace_id: observation.trace_id.clone(), run_receipt: None,
+            });
+            inflight.as_ref().unwrap().save(&workspace)?;
             let stored = control.publish(|| index.record_build(&qualified))?;
             stage_ms.insert("action_index".into(), millis(index_started));
             let publication_started = Instant::now();
@@ -418,6 +392,8 @@ impl Buck2Adapter {
                     input.checkpoint().clone(),
                 ],
             )?;
+            inflight.as_mut().unwrap().publication.as_mut().unwrap().run_receipt = Some(receipt.clone());
+            inflight.as_ref().unwrap().save(&workspace)?;
             store.publish_extending(
                 &lease.id,
                 &format!("build/run/{}", observation.trace_id),
@@ -441,8 +417,24 @@ impl Buck2Adapter {
                 stage_ms,
             })
         })();
+        if let Some(original) = &mut inflight {
+            let settlement = match &result {
+                Ok(build) => original.finish_published(index, &workspace, build),
+                Err(_) => original.finish(index, &workspace, &self.executable),
+            };
+            if let Err(error) = settlement {
+                // Preserve the original failure as well as custody and partial
+                // publication. Storage errors cannot acknowledge cancellation.
+                let previous = result.err().map(|e| format!("{e:#}")).unwrap_or_else(|| "frontend completed".into());
+                return Err(error.context(format!("{previous}; original build reconciliation unresolved, retain workspace/input custody")));
+            }
+        }
         if result.is_err() {
             let _ = store.abandon_staging(&lease.id);
+        }
+        if result.is_err() && control.publication_started()? {
+            let evidence = inflight.as_ref().and_then(|v|v.reconciliation_data());
+            return result.context(format!("original publication reconciled after synchronous completion: {}", serde_json::to_string(&evidence)?));
         }
         result
     }
@@ -672,7 +664,7 @@ fn hash_file(path: &Path) -> Result<String> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
-fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -801,7 +793,7 @@ mod tests {
         let worker_control=control.clone(); let worker_root=tmp.path().to_owned(); let worker_ready=ready.clone();
         let worker=std::thread::spawn(move || {
             let mut command=Command::new("/usr/bin/python3");
-            command.args(["-I","-c","import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"])
+            command.args(["-I","-c","import os,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); t=p.with_suffix('.tmp'); t.write_text(str(os.getpid())); t.replace(p); time.sleep(30)"])
                 .arg(worker_ready);
             bounded_controlled(&mut command,Duration::from_secs(10),&worker_root.join("stdout"),&worker_root.join("stderr"),&worker_control)
         });
@@ -826,15 +818,22 @@ mod tests {
         assert!(worker.join().unwrap().is_err());
         let contender=OpenOptions::new().read(true).write(true).open(&path).unwrap();
         assert!(FileExt::try_lock_exclusive(&contender).is_err());
+        // Other tests can fork while this descriptor is open. Explicitly
+        // release the producer lock before a child's close-on-exec boundary.
+        FileExt::unlock(&original).unwrap();
         drop(original);
         FileExt::try_lock_exclusive(&contender).unwrap();
     }
 }
-fn bounded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path) -> Result<()> {
+pub(super) fn bounded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path) -> Result<()> {
     bounded_controlled(command, timeout, stdout, stderr, &BuildExecutionControl::new(timeout)?)
 }
 fn bounded_controlled(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path,
     control: &BuildExecutionControl) -> Result<()> {
+    bounded_controlled_recorded(command, timeout, stdout, stderr, control, |_| Ok(()))
+}
+fn bounded_controlled_recorded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path,
+    control: &BuildExecutionControl, record: impl FnOnce(u32) -> Result<()>) -> Result<()> {
     control.check()?;
     // The driver and ordinary children share this new process group. Kill and
     // reap before returning cancellation; a requested interrupt is not stopped.
@@ -844,6 +843,12 @@ fn bounded_controlled(command: &mut Command, timeout: Duration, stdout: &Path, s
         .stdout(Stdio::from(File::create(stdout)?))
         .stderr(Stdio::from(File::create(stderr)?));
     let mut child = command.spawn()?;
+    if let Err(error) = record(child.id()) {
+        let pid = i32::try_from(child.id())?;
+        unsafe { libc::kill(-pid, libc::SIGKILL); }
+        child.wait().context("original driver recording failed and termination is unresolved")?;
+        return Err(error);
+    }
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {

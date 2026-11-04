@@ -26,6 +26,13 @@ impl BuildExecutionControl {
         *state = State::Cancelled;
         Ok(true)
     }
+    /// Publication is a separate fact from a stop request. The original owner
+    /// uses this after synchronous completion to report a lost cancellation
+    /// race, including an uncertain storage commit.
+    pub fn publication_started(&self) -> Result<bool> {
+        let state = self.state.lock().map_err(|_| anyhow::anyhow!("build control poisoned"))?;
+        Ok(matches!(*state, State::PublicationStarted | State::Published))
+    }
     pub(super) fn check(&self) -> Result<()> {
         let state = self.state.lock().map_err(|_| anyhow::anyhow!("build control poisoned"))?;
         ensure!(*state == State::Active && Instant::now() < self.deadline, "managed build cancelled or deadline expired");

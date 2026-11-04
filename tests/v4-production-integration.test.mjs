@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { registerHooks } from 'node:module';
+import { registerHooks, stripTypeScriptTypes } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 const roots = ['../src/', '../cloud/src/'].map(p => fileURLToPath(new URL(p, import.meta.url)));
 registerHooks({resolve(specifier, context, next) {
   if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
@@ -16,6 +17,13 @@ registerHooks({resolve(specifier, context, next) {
     if (url.protocol === 'file:' && roots.some(root => fileURLToPath(url).startsWith(root)) && existsSync(url)) return next(url.href, context);
   }
   return next(specifier, context);
+}, load(url, context, next) {
+  // Production is compiled by tsc. The source harness must also transform
+  // parameter properties in its transitive imports, rather than strip only.
+  if (url.startsWith('file:') && url.endsWith('.ts') && roots.some(root => fileURLToPath(url).startsWith(root))) {
+    return {format:'module',shortCircuit:true,source:stripTypeScriptTypes(readFileSync(new URL(url),'utf8'),{mode:'transform',sourceUrl:url})};
+  }
+  return next(url, context);
 }});
 const { HomeProjectFiles } = await import('../src/project-files/home.ts');
 const { BoardProjectFiles } = await import('../src/board/project-files.ts');
@@ -56,7 +64,7 @@ test('project files command resolves current workspace identity before opening i
 });
 function query(prefix, overrides={}) {return prefix + '?' + new URLSearchParams({version:'1', operation:'read', ...scope, path:'README.md', ...overrides});}
 async function temp(t) {
-  const root = await fs.mkdtemp('/workspace/rudder-production-test-');
+  const root = await fs.mkdtemp(v4ScratchPrefix('production-test'));
   t.after(() => fs.rm(root, {recursive:true,force:true})); return root;
 }
 async function serve(t, handler) {

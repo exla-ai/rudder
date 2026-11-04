@@ -76,6 +76,14 @@ def main():
     request = json.load(sys.stdin)
     if request.get("format_version") != 1:
         raise ValueError("unsupported managed frontend request")
+    # The original parent durably records this driver's PID/start identity
+    # before opening the gate. A parent crash before that cannot start Buck2.
+    gate = Path(request["start_gate"])
+    until = time.monotonic() + 15
+    while not gate.is_file():
+        if time.monotonic() >= until:
+            raise ValueError("original managed build owner did not open its start gate")
+        time.sleep(0.01)
     workspace = Path(request["workspace"]).resolve()
     prepared = Path(request["prepared_directory"]).resolve(strict=True)
     buck2 = Path(request["buck2"]).resolve(strict=True)

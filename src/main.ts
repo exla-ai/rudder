@@ -54,6 +54,8 @@ import type { BackendId } from "./types.js";
 import { commandExists, isTty, MissingToolError, newRunId, runCommand } from "./util.js";
 import { autoUpdateAndRerunIfNeeded, getUpdateAvailable } from "./version-check.js";
 import { printReport } from "./report.js";
+import { applyCommandSurface, printCommandDiscovery } from "./operations/cli.js";
+import { commandHelp } from "./operations/registry.js";
 
 type Parsed = {
   command?: string;
@@ -125,7 +127,8 @@ export async function main(): Promise<void> {
     await runFabricTransferCommand(process.argv.slice(4));
     return;
   }
-  const parsed = parseArgs(process.argv.slice(2));
+  const parsed = applyCommandSurface(parseArgs(process.argv.slice(2)), new Date(), process.argv.slice(2));
+  if (!parsed.flags.version && printCommandDiscovery(parsed)) return;
   if (shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
     return;
   }
@@ -199,8 +202,6 @@ export async function main(): Promise<void> {
     case "engine":
       await runEngineCommand(parsed.args[0], parsed.flags.repo ?? findRepoRoot(), parsed.flags.json);
       return;
-    case "tmux":
-      throw new Error("The tmux dashboard has been removed. Run `rudder` or `rudder dashboard` to open the native dashboard.");
     case "attach": {
       await runNativeCommand(["attach", ...parsed.args]);
       return;
@@ -217,11 +218,6 @@ export async function main(): Promise<void> {
     case "mouse-test":
       await runNativeCommand(["mouse-test", ...parsed.args]);
       return;
-    case "tui":
-    case "shell":
-    case "interactive":
-    case "legacy-shell":
-      throw new Error("Legacy interactive shells have been removed. Run `rudder` or `rudder dashboard` to open the native dashboard.");
     case "__worker": {
       const repo = parsed.flags.repo;
       const run = parsed.flags.run;
@@ -328,6 +324,9 @@ export async function main(): Promise<void> {
       });
       return;
     case "run": {
+      if (parsed.flags.backend && !commandExists(parsed.flags.backend)) {
+        throw new MissingToolError(parsed.flags.backend);
+      }
       await maybeOnboard();
       const task = parsed.args.join(" ").trim();
       if (!task) {
@@ -336,50 +335,6 @@ export async function main(): Promise<void> {
       await startRun({
         task,
         backend: parsed.flags.backend,
-        model: parsed.flags.model,
-        detach: parsed.flags.detach,
-        workspace: parsed.flags.workspace,
-        queue: parsed.flags.queue,
-        json: parsed.flags.json,
-        view: "shell",
-      });
-      return;
-    }
-    case "claude":
-    case "codex": {
-      if (!commandExists(parsed.command)) {
-        throw new MissingToolError(parsed.command);
-      }
-      await maybeOnboard();
-      const task = parsed.args.join(" ").trim();
-      if (!task) {
-        throw new Error(`Missing task. Usage: rudder ${parsed.command} "fix the tests"`);
-      }
-      await startRun({
-        task,
-        backend: parsed.command,
-        model: parsed.flags.model,
-        detach: parsed.flags.detach,
-        workspace: parsed.flags.workspace,
-        queue: parsed.flags.queue,
-        json: parsed.flags.json,
-        view: "shell",
-      });
-      return;
-    }
-    case "acpx": {
-      if (!commandExists("acpx")) {
-        throw new MissingToolError("acpx");
-      }
-      await maybeOnboard();
-      const args = parsed.args[0] === "codex" ? parsed.args.slice(1) : parsed.args;
-      const task = args.join(" ").trim();
-      if (!task) {
-        throw new Error('Missing task. Usage: rudder acpx codex "fix the tests"');
-      }
-      await startRun({
-        task,
-        backend: "acpx",
         model: parsed.flags.model,
         detach: parsed.flags.detach,
         workspace: parsed.flags.workspace,
@@ -1414,128 +1369,5 @@ async function runContextCommand(parsed: Parsed): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(`rudder
-
-Usage:
-  rudder                         Open native dashboard with real agent panes
-  rudder restart                 Clear local session and open dashboard
-  rudder attach [agent]          Mirror one live agent pane of the running dashboard in this terminal
-  rudder engine [start|status|shutdown]   Control the persistent project engine
-  rudder "task"
-  rudder run [options] "task"
-  rudder claude [options] "task"
-  rudder codex [options] "task"
-  rudder login
-  rudder cloud [name or task]
-  rudder cloud help
-  rudder cloud byoc <ssh-host>
-  rudder cloud runtime [fly|byoc]
-  rudder cloud vm <task>
-  rudder cloud list
-  rudder cloud attach <id>
-  rudder cloud talk <id> "message"
-  rudder cloud output <id>
-  rudder cloud onload [runId]
-  rudder cloud logs <id>
-  rudder cloud bootstrap <id>
-  rudder cloud quickstart
-  rudder sail [name or task]
-Run management:
-  rudder watch [run]              Attach to live output
-  rudder logs [run] [--follow]    Print saved output
-  rudder status [--json]          Show active runs for this repo
-  rudder runs [--json]            List runs for this repo
-  rudder report [model] [options] Collect and report on runs with filtering, aggregation, and multiple formats
-  rudder stop <run>               Cancel a run
-  rudder delete <run>             Delete a run and its workspace
-  rudder merge <run>              Merge a run into the current change
-  rudder sync [run]               Rebase a run's jj change onto its base without merging
-  rudder cleanup [--force]        Remove merged run workspaces
-  rudder gc [--dry-run]           Prune bounded diagnostics, old binaries, and stale run records
-  rudder undo [opId]              Rewind jj to an op id, or the last undo-stack entry (global)
-
-Improvement loop:
-  rudder improve run [--dry-run] [--budget-usd N]   Mine telemetry, propose+judge fixes, ship a release
-  rudder improve status                             Last cycle, shipped versions, ledger tail
-  rudder improve report [date]                      Print a cycle report
-  rudder improve schedule install|uninstall|status  Nightly launchd schedule (macOS)
-
-Planner:
-  rudder plan "task"             Decompose a task into a DAG, scaffold empty jj changes, write graph.json
-  rudder fanout "task" [--n N]   Fan out N variant agents on one task, then a judge picks/merges the best (default N=3)
-  rudder context audit           Audit agent context files for size, duplication, secrets, and injection text
-
-Conversation handoff:
-  rudder handoff "<next step>"    Hand THIS chat to Rudder: it forks the conversation into a worker that already knows everything
-  rudder handoff --here "..."     Continue it in the main checkout instead of an isolated workspace
-  rudder handoff --opencode "..." Hand off an opencode chat (default is the claude one; --codex for codex)
-  rudder handoff --list           List recent conversations in this repo with their session ids
-
-Telemetry and feedback:
-  rudder feedback "<what broke>"  Send a report: message + version/model/recent notices (never prompts or code)
-  rudder telemetry [status|on|off] Anonymous usage events; on by default, off in one command
-
-Memory:
-  rudder remember "<insight>"    Append a durable cross-cutting decision to DECISIONS.md (shared, jj-tracked)
-  rudder share "<token/context>"  Append gitignored shared context to RUDDER_SHARED.md for all agents
-
-Board:
-  rudder board [--port N] [--open|--no-open]   Serve the localhost board (opens browser by default)
-  rudder serve [--port N] [--open]             Ensure the board server is up
-
-Setup:
-  rudder onboard
-  rudder doctor [--json]
-  rudder mouse-test [raw|parsed]    Show whether your terminal sends wheel events
-
-Cloud:
-  rudder login                    Open browser login and store cloud token
-  rudder cloud [name or task]     Start a cloud worker from this repo snapshot
-  rudder cloud list               List cloud workers/runs
-  rudder cloud help               Show cloud command help
-  rudder cloud byoc <ssh>         Use your own SSH host for BYOC cloud launches
-  rudder cloud runtime [runtime]  Show or set fly/byoc cloud runtime
-  rudder cloud vm <task>          Prepare a BYOC worker command for a task
-  rudder cloud onload [runId]     Move this Rudder workspace, or one run, to cloud
-  rudder cloud logs <id>          Show cloud worker status while log streaming is pending
-  rudder cloud attach <id|name>   Attach this terminal to a cloud worker, or a project on the home machine by name
-  rudder cloud bootstrap <id>     Regenerate a BYOC worker command
-  rudder cloud pause <id>         Pause an idle cloud worker
-  rudder cloud resume <id>        Resume a cloud worker
-  rudder sail [name or task]      Alias for starting a cloud worker
-
-Report options:
-  --format <format>               Output format: table (default), json, markdown, csv
-  --status <status>               Filter by status (comma-separated: completed,merged,failed,etc)
-  --backend <backend>             Filter by backend: claude, codex, acpx, opencode
-  --after <date>                  Filter by creation date (ISO 8601)
-  --before <date>                 Filter by creation date (ISO 8601)
-  --summary / --no-summary        Show statistics (on by default)
-  --limit <n>                     Limit results to N runs
-  --sort-by <column>              Sort by: created (default), updated, duration, tokens, status
-  --reverse                       Reverse sort order
-  --detailed                      Show full task text and extra details
-
-General options:
-  -d, --detach                    Start in background
-      --workspace                  Always isolate the run in its own jj workspace
-      --queue                     Queue mode (reserved)
-  -m, --model <model>             Backend model
-  -b, --backend <backend>         claude, codex, or opencode
-  -C, --cwd <dir>                 Run from another directory
-  -p, --port <port>               Board server port (default 4774)
-      --n <count>                 Number of fan-out variants for rudder fanout (default 3)
-      --open / --no-open          Open (or do not open) the browser for the board
-      --home-path <path>          Include extra HOME path in cloud snapshot
-      --ssh <host>                BYOC SSH host from ~/.ssh/config
-      --json                      Machine-readable output
-  -v, --version                   Print version
-      --allow-dirty               Allow merge into dirty target branch
-      --dry-run                   Report gc cleanup without deleting
-
-Rebase-first merge:
-  Set {"mergeStrategy":"rebase"} in ~/.rudder/config.json to rebase before
-  merging. If that rebase conflicts, Rudder leaves the workspace mid-rebase so
-  you can resolve it, run git rebase --continue, and retry sync or merge.
-`);
+  console.log(commandHelp());
 }

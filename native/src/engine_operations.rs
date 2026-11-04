@@ -1,6 +1,9 @@
 //! Fixed Root-authenticated engine operations. No generic RPC/Context, root
 //! retention booleans, source/task admission or historical lease adoption.
 use super::*;
+// Shared surface metadata only. This does not expand Root operation authority.
+#[path="command_surface/mod.rs"]
+pub mod command_surface;
 use std::sync::{Mutex,TryLockError};
 use rudder_engine::journal::ManagedProjectPrepare;
 use rudder_engine::protocol::{ObjectRef,ObjectKind};

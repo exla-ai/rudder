@@ -13,6 +13,13 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use rudder_engine::journal as recovery_journal;
+
+#[path = "runtime_recovery/mod.rs"]
+pub(crate) mod restart;
+#[path = "owner_restart.rs"]
+mod owner_restart;
+pub(crate) use owner_restart::RetainedRestartFailure;
 
 const ENGINE_FORMAT: u32 = 1;
 const CONTROL_LIMIT: usize = 8192;
@@ -92,6 +99,7 @@ pub(crate) struct EngineOwnership {
     identity_home: PathBuf,
     managed_store: Option<crate::managed_store::ManagedStore>,
     migration_records: Option<Vec<serde_json::Value>>,
+    restart_recovery: Option<restart::NativeRestartRecovery>,
 }
 
 /// Private, actual process-local custody. Only successful EngineOwnership
@@ -275,6 +283,7 @@ impl EngineOwnership {
         Self::acquire_inner(repo,NativeAuthority::Fabric,None,None,Some(request))
     }
     pub(crate) fn take_migration_records(&mut self)->Option<Vec<serde_json::Value>> {self.migration_records.take()}
+    pub(crate) fn restart_recovery(&self)->Option<&restart::NativeRestartRecovery> {self.restart_recovery.as_ref()}
 
     pub(crate) fn acquire_in_home(repo: &Path, mode: NativeAuthority, home: &Path) -> Result<Self> {
         Self::acquire_inner(repo, mode, Some(home), None, None)
@@ -375,14 +384,16 @@ impl EngineOwnership {
         let owner_id = format!("{}:{instance_id}", mode.name());
         // The lock plus refusal above establishes local quiescence. A transfer
         // is a journal CAS, never a lease timeout or a PID-based takeover.
+        let mut restart_recovery = None;
         let fence = match journal.project_state(&project) {
             Ok(state) => {
                 // The exclusive checkout lock is held. Reconcile the previous
                 // process before changing epochs or admitting replacement work.
-                if state.owner_active {
-                    journal.recover_runtime_restart(&state.owner, epoch_ms())?;
+                match owner_restart::replace_locked_owner(&mut journal, &state.owner, &owner_id,
+                    epoch_ms(), &mut restart_recovery) {
+                    Ok(fence) => fence,
+                    Err(error) => return Err(RetainedRestartFailure::new(error, lock, journal, state.owner).into()),
                 }
-                journal.transfer_recovered_owner(&state.owner, &owner_id, epoch_ms())?
             },
             Err(error)
                 if matches!(
@@ -399,7 +410,6 @@ impl EngineOwnership {
             }
             Err(error) => return Err(error).context("read existing project authority"),
         };
-        journal.recover_runtime_restart(&fence, epoch_ms())?;
         if migration_records.is_some() {crate::v4_migration::record_adoption(&repo,&mut journal,&fence)?;}
         let record = OwnerRecord {
             format_version: ENGINE_FORMAT,
@@ -436,6 +446,7 @@ impl EngineOwnership {
             identity_home: canonical_home,
             managed_store: None,
             migration_records,
+            restart_recovery,
         })
     }
 

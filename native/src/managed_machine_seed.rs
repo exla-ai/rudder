@@ -11,8 +11,12 @@ use std::{sync::Weak,thread::{JoinHandle,ThreadId}};
 const CLOSING:u8=3;
 const RETIRED:u8=4;
 pub(super) const MAX_TASK_SCOPES:usize=128; // two registered uses per task + bounded host scopes.
-const MAX_CACHE_SCOPES:usize=2;
+pub(super) const MAX_CACHE_SCOPES:usize=2;
 pub(super) const MAX_RETIRED_SEEDS:usize=2;
+
+#[cfg(test)]
+#[path="managed_seed_drain_census_tests.rs"]
+mod drain_census_tests;
 
 pub(super) struct SeedCarrier {
     pub(super) source:ManagedInitialSourceOwner,pub(super) store:LocalStore,budget:FinalizationBudget,pub(super) cancelled:Arc<AtomicBool>,
@@ -35,6 +39,15 @@ impl SeedTicket {
                 *out=Some(owner.tasks.values().cloned().collect());Ok(true)},
             Err(TryLockError::WouldBlock)=>Ok(false),
             Err(TryLockError::Poisoned(_))=>anyhow::bail!("original seed task registry poisoned; seed root retained"),
+        }
+    }
+    pub(super) fn capture_cache_roots_retaining(&self,out:&mut Option<Vec<SeedCacheTicket>>)->Result<bool> {
+        ensure!(out.is_none(),"original cache roots already captured");
+        match self.cell.owner.try_lock() {
+            Ok(owner)=>{ensure!(owner.caches.len()<=MAX_CACHE_SCOPES,"original cache registry exceeds covered bound");
+                *out=Some(owner.caches.values().cloned().collect());Ok(true)},
+            Err(TryLockError::WouldBlock)=>Ok(false),
+            Err(_)=>anyhow::bail!("original seed cache registry poisoned; seed root retained"),
         }
     }
     pub(crate) fn ingress_ready(&self)->bool {self.cell.phase.load(Ordering::Acquire)==READY}
@@ -154,6 +167,16 @@ pub(super) struct EnrollmentCarrier {seed_id:String,seed:Weak<Cell<SeedCarrier>>
 #[derive(Clone)]
 pub(crate) struct EnrollmentTicket {pub(super) id:String,pub(super) cell:Arc<Cell<EnrollmentCarrier>>,admission:Option<Arc<SeedAdmission>>}
 impl EnrollmentTicket {
+    pub(super) fn same_original_enrollment(&self,other:&Self)->bool {Arc::ptr_eq(&self.cell,&other.cell)}
+    /// Association only. A pending, legacy or quarantined enrollment remains
+    /// an obligation even if a task's factory happened to join.
+    pub(super) fn observe_original_census(&self)->Result<Option<(bool,bool)>> {
+        match self.cell.owner.try_lock() {
+            Ok(owner)=>Ok(Some((owner.task.is_some(),owner.enrollment.as_ref().is_some_and(|actual|actual.requires_recovery())))),
+            Err(TryLockError::WouldBlock)=>Ok(None),
+            Err(_)=>anyhow::bail!("original enrollment poisoned; census root retained"),
+        }
+    }
     /// Queue-admission DATA only. Retry is possible only while this SAME actual
     /// ticket is still pending; Root IO/ACK must never be inferred from this.
     pub(crate) fn ingress_queue_retryable(&self)->bool {self.cell.phase.load(Ordering::Acquire)==PENDING}
@@ -250,6 +273,7 @@ impl MachineControl {
     pub(crate) fn submit_seed(&self,ticket:SeedTicket)->std::result::Result<SeedTicket,(SeedTicket,anyhow::Error)> {
         let result=(||->Result<()> {ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine unavailable");
             let mut c=self.shared.carrier.try_lock().map_err(|_|anyhow::anyhow!("machine busy; same seed retained"))?;
+            c.covered_reservations.require_task_reservation_open()?;
             ensure!(!c.root_rpc_held&&!c.root_private_held,"original Root IO requires explicit reconciliation");
             ensure!(c.seeds.len()+c.source_reservations.len()<MAX_SEEDS&&!c.seeds.contains_key(&ticket.id)&&!c.retired_seeds.contains_key(&ticket.id)
                 &&ticket.cell.phase.load(Ordering::Acquire)==PENDING,"seed admission full/stale/already attempted");
@@ -264,7 +288,16 @@ impl MachineControl {
             ensure!(c.enrollments.len()<MAX_ENROLLMENTS&&!c.enrollments.contains_key(&ticket.id)
                 &&ticket.cell.phase.load(Ordering::Acquire)==PENDING,"helper admission full/already attempted");
             {let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("enrollment busy/poisoned"))?;
-                ensure!(c.seeds.get(&held.seed_id).is_some_and(|actual|held.seed.upgrade().is_some_and(|seed|Arc::ptr_eq(&actual.cell,&seed))),"helper uses another actual seed generation");}
+                let seed=c.seeds.get(&held.seed_id).context("helper original seed is not registered")?;
+                ensure!(held.seed.upgrade().is_some_and(|actual|Arc::ptr_eq(&actual,&seed.cell)),"helper uses another actual seed generation");
+                if let Some(task)=&held.task {
+                    // An already admitted task can finish enrolling after the
+                    // machine gate closes. Its same registered task root is
+                    // retained by the drain; no new task is created here.
+                    let task=task.upgrade().context("original enrollment task disappeared")?;
+                    let seed=seed.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("original enrollment seed busy/poisoned"))?;
+                    ensure!(seed.tasks.values().any(|actual|Arc::ptr_eq(&actual.cell,&task)),"enrollment task is outside original seed registry");
+                } else {c.covered_reservations.require_task_reservation_open()?;}}
             c.enrollments.insert(ticket.id.clone(),ticket.clone());
             if self.send.try_send(Job::Enroll(ticket.clone())).is_err(){ticket.cell.phase.store(RECOVERY,Ordering::Release);anyhow::bail!("enrollment queue failed; actual helper retained");}Ok(())})();
         match result {Ok(())=>Ok(ticket),Err(error)=>Err((ticket,error))}
@@ -313,6 +346,7 @@ impl MachineControl {
     pub(crate) fn admit_cache_retaining(&self,out:&mut Option<SeedCacheTicket>,seed:&SeedTicket,
         original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"cache scope output exists");let c=self.carrier_off_app(original)?;original_seed(&c,seed)?;
+        c.covered_reservations.require_task_reservation_open()?;
         ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING&&!c.root_rpc_held&&!c.root_private_held,"machine new source work unavailable; original owners retained");let mut s=lock(&seed.cell,original)?;
         s.admission.check_open()?;ensure!(seed.cell.phase.load(Ordering::Acquire)==READY&&s.caches.len()<MAX_CACHE_SCOPES,"cache admission full/closed");
         s.source.prepared_current(original,&cancelled)?;
@@ -383,7 +417,7 @@ impl SeedTaskTicket {
     }
     pub(crate) fn poll_factory_joined_off_app(&self)->Result<bool> {
         ensure!(self.app_thread!=std::thread::current().id(),"factory join observation requires off App");
-        match self.cell.owner.try_lock(){Ok(mut held)=>held.factory.poll_joined(),Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("factory carrier poisoned")}
+        match self.cell.owner.try_lock(){Ok(mut held)=>if held.factory.registration_present(){held.factory.poll_joined()}else{Ok(false)},Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("factory carrier poisoned")}
     }
     pub(crate) fn offer_discarded_retaining(&self,original:&mut Option<JoinedManagedTask>,budget:&FinalizationBudget)->Result<()> {
         ensure!(self.app_thread!=std::thread::current().id(),"completion transfer requires off App");let mut held=lock(&self.cell,budget)?;
@@ -407,7 +441,7 @@ fn check_completion(scope:&TaskScope,joined:&JoinedManagedTask)->Result<()> {
 impl SeedCacheTicket {
     pub(crate) fn ingress_poll_factory_joined(&self)->Result<bool> {
         ensure!(self.app_thread!=std::thread::current().id(),"cache join observation requires off App");
-        match self.cell.owner.try_lock(){Ok(mut held)=>held.factory.poll_joined(),Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("cache factory carrier poisoned")}
+        match self.cell.owner.try_lock(){Ok(mut held)=>if held.factory.registration_present(){held.factory.poll_joined()}else{Ok(false)},Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("cache factory carrier poisoned")}
     }
     /// Checks the actual original constructor ACK plus joined factory custody;
     /// never returns a cache from DATA or a failed result callback.

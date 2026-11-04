@@ -29,7 +29,45 @@ impl Journal {
         assert_owner(&tx, owner)?;
         super::invalidate_recovered_runtimes(&tx, owner, now_ms)?;
         tx.commit()?;
-        self.recover(owner, now_ms)
+        let recovery = self.recover(owner, now_ms)?;
+        // `recover` also serves legacy callers and adopts just one page. An
+        // explicit owner restart must adopt the entire historical completion
+        // backlog before a replacement surface starts delivering receipts.
+        while self.backfill_completion_outbox(owner, 256, now_ms)? == 256 {}
+        Ok(recovery)
+    }
+
+    /// Read the original persisted runtime census before explicit recovery or
+    /// guarded replacement, including an inactive exact recorded owner. This
+    /// is evidence only: it neither proves custody nor grants write authority.
+    pub fn recorded_runtime_inventory(&self, owner: &OwnerFence) -> Result<Vec<RuntimeObservation>> {
+        ensure!(
+            project_state(&self.conn, &owner.project_id)?.owner == *owner,
+            "recorded owner differs"
+        );
+        let mut statement = self.conn.prepare("SELECT observation_json FROM runtime_observations WHERE project_id=?1 ORDER BY run_id LIMIT 4097")?;
+        let rows = statement.query_map([&owner.project_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(rows.len() <= 4096, "recorded runtime inventory exceeds bound");
+        rows.into_iter().map(|encoded| {
+            let observation: RuntimeObservation = serde_json::from_str(&encoded)?;
+            super::super::runtime::validate_observation(&observation)?;
+            Ok(observation)
+        }).collect()
+    }
+
+    /// Persisted App-reserved attempts, including the crash window before the
+    /// first runtime observation. Legacy runs with no instance reserve no
+    /// runtime custody and are excluded. This grants no write authority.
+    pub fn recorded_runtime_attempt_inventory(&self, owner: &OwnerFence) -> Result<Vec<(String, u64, String)>> {
+        ensure!(project_state(&self.conn, &owner.project_id)?.owner == *owner,
+            "recorded owner differs");
+        let mut statement=self.conn.prepare("SELECT run_id,epoch,instance_id FROM runs WHERE project_id=?1 AND instance_id IS NOT NULL ORDER BY run_id LIMIT 4097")?;
+        let rows=statement.query_map([&owner.project_id], |row| Ok((row.get::<_,String>(0)?,db_u64(row,1)?,row.get::<_,String>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(rows.len()<=4096,"recorded runtime attempt inventory exceeds bound");
+        for (run,_,attempt) in &rows {valid_id(run)?;valid_id(attempt)?;}
+        Ok(rows)
     }
 
     /// Bounded adoption of terminal receipts written by older engines. Repeat
@@ -149,6 +187,7 @@ impl Journal {
         let state = project_state(&tx, &expected.project_id)?;
         ensure!(state.owner == *expected, "stale authority epoch");
         require_settled_effects(&tx, &expected.project_id, false)?;
+        require_runtime_observation_census(&tx, &expected.project_id)?;
         let unresolved_runtime:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_observations WHERE project_id=?1 AND (json_extract(observation_json,'$.pty_owned')=1 OR json_extract(observation_json,'$.phase') NOT IN('closed','completed','failed')))",[&expected.project_id],|row|row.get(0))?;
         ensure!(
             !unresolved_runtime,
@@ -237,6 +276,7 @@ impl Journal {
         }
         assert_owner(&tx, owner)?;
         require_settled_effects(&tx, &owner.project_id, true)?;
+        require_runtime_observation_census(&tx, &owner.project_id)?;
         let live: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_observations WHERE project_id=?1 AND (json_extract(observation_json,'$.pty_owned')=1 OR json_extract(observation_json,'$.phase') NOT IN('closed','completed','failed')))", [&owner.project_id], |row| row.get(0))?;
         ensure!(!live, "runtime owners have not drained");
         tx.execute(
@@ -260,6 +300,15 @@ impl Journal {
 
 fn completion_cursor(conn: &rusqlite::Connection, project: &str, consumer: &str) -> Result<u64> {
     Ok(conn.query_row("SELECT COALESCE(MAX(CAST(json_extract(payload_json,'$.through') AS INTEGER)),0) FROM events WHERE project_id=?1 AND kind='command-results-acknowledged' AND json_extract(payload_json,'$.consumer')=?2", params![project,consumer], |row| db_u64(row,0))?)
+}
+
+fn require_runtime_observation_census(conn: &rusqlite::Connection, project: &str) -> Result<()> {
+    // Owner release/transfer bumps run epochs while retaining terminal
+    // observations. The physical instance identity must match; requiring the
+    // new epoch here would prevent replacement of an already drained owner.
+    let missing:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM runs r WHERE r.project_id=?1 AND r.instance_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM runtime_observations o WHERE o.project_id=r.project_id AND o.run_id=r.run_id AND o.instance_id=r.instance_id))",[project],|row|row.get(0))?;
+    ensure!(!missing,"original runtime attempt lacks custody observation and requires reconciliation");
+    Ok(())
 }
 
 fn require_settled_effects(

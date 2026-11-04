@@ -13,6 +13,7 @@ use rudder_native::{root_storage_bootstrap::{self,ManagedMachineBootstrap},root_
     engine_registration::RegisteredEngineOwner,host_ingress::HostIngress};
 use rudder_vcs_bridge::seed::VerifiedMetadataTemplate;
 use crate::managed_app::runtime_task::MachineRuntimeImage;
+pub(crate) use crate::engine_host::restart;
 use std::{any::Any,collections::BTreeMap,ffi::OsString,panic::{catch_unwind,AssertUnwindSafe},
     sync::{Arc,Mutex,TryLockError,atomic::{AtomicBool,AtomicU8,Ordering},mpsc::{self,Receiver,SyncSender}},time::Duration};
 
@@ -247,6 +248,7 @@ impl MachineControl {
         let result=(||->Result<()> {
             ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine worker unavailable");self.shared.kernel.ticket()?.check_on_app()?;
             let mut c=self.shared.carrier.try_lock().map_err(|_|anyhow::anyhow!("machine worker busy; caller retains project"))?;
+            c.covered_reservations.require_task_reservation_open()?;
             ensure!(c.projects.len()<MAX_PROJECTS && !c.projects.contains_key(&ticket.id)
                 && ticket.cell.phase.load(Ordering::Acquire)==PENDING,"managed project admission full/already attempted");
             c.projects.insert(ticket.id.clone(),ticket.clone());

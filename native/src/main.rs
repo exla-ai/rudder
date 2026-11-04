@@ -2218,6 +2218,10 @@ struct App {
     /// Runs we already tried to reopen when their pane was focused. One attempt
     /// each: a resume that fails must not respawn on every Enter.
     focus_resume_attempted: HashSet<String>,
+    /// Explicit restart recovery suppresses boot relaunch; quarantine also
+    /// requires custody reconciliation before an explicit conversation resume.
+    restart_home_boot_suppressed: HashSet<String>,
+    restart_quarantined_ids: HashSet<String>,
     /// Running on the cloud home machine (`RUDDER_CLOUD_RUNTIME=home`), read once
     /// at construction so a test setting the env cannot leak into another App.
     home_runtime: bool,
@@ -3447,6 +3451,8 @@ impl App {
             pending_migration_resumes,
             migration_resumes_attempted: false,
             focus_resume_attempted: HashSet::new(),
+            restart_home_boot_suppressed: HashSet::new(),
+            restart_quarantined_ids: HashSet::new(),
             home_runtime: !managed && home_runtime_from_env(),
             home_boot_reopen_done: false,
             boot_orphaned_ids: HashSet::new(),
@@ -10914,6 +10920,10 @@ Address the objection directly. If you disagree, say why inside \
         let Some(run) = self.agents.get(index) else {
             return false;
         };
+        if self.restart_quarantined_ids.contains(&run.id) {
+            self.notice = Some("runtime custody requires explicit reconciliation before resume".into());
+            return false;
+        }
         if run.managed_local.is_some() {
             self.notice = Some("managed source requires explicit owned recovery; checkout conversation resume is unavailable".into());
             return false;
@@ -10998,6 +11008,7 @@ Address the objection directly. If you disagree, say why inside \
                         && self.boot_orphaned_ids.contains(&run.id));
                 let workspace = run.workspace_path.as_ref().unwrap_or(&run.cwd);
                 was_live
+                    && !self.restart_home_boot_suppressed.contains(&run.id)
                     && run.terminal.is_none()
                     && matches!(run.mode, AgentMode::Main | AgentMode::Execute)
                     && !run.plain_process

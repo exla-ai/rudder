@@ -63,8 +63,7 @@ impl Journal {
         self.backfill_completion_outbox(owner,limit,now_ms)?;
         let deliveries=self.completion_outbox(owner,consumer,limit)?;
         for delivery in &deliveries {
-            let request=serde_json::json!({"consumer":consumer,"sequence":delivery.sequence,
-                "command_id":delivery.receipt.command_id});
+            let request=serde_json::json!({"consumer":consumer,"command_id":delivery.receipt.command_id});
             // Full result remains in the authoritative command receipt. Keep
             // the view bounded even for a large backend response.
             let mut result=serde_json::to_value(delivery)?;
@@ -72,8 +71,24 @@ impl Journal {
                 result["receipt"]["result"]=Value::Null;
                 result["result_omitted"]=Value::Bool(true);
             }
-            self.record_surface_receipt(owner,&format!("{consumer}:{}",delivery.sequence),
-                "command-history-v1",&request,&result,now_ms)?;
+            // The transport sequence is a delivery cursor, not application
+            // identity. Also recognize receipts written by the previous
+            // sequence-keyed implementation across an upgrade/crash window.
+            let tx=self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            assert_owner(&tx,owner)?;
+            let prior:Option<String>=tx.query_row(
+                "SELECT payload_json FROM events WHERE project_id=?1 AND kind='surface-receipt' AND json_extract(payload_json,'$.kind')='command-history-v1' AND json_extract(payload_json,'$.request.consumer')=?2 AND json_extract(payload_json,'$.request.command_id')=?3 ORDER BY sequence LIMIT 1",
+                params![owner.project_id,consumer,delivery.receipt.command_id],|row|row.get(0)).optional()?;
+            if let Some(prior)=prior {
+                let prior:Value=serde_json::from_str(&prior)?;
+                ensure!(prior["result"]["receipt"]==result["receipt"],
+                    "completion command identity has conflicting durable receipt");
+            } else {
+                append_event(&tx,&owner.project_id,"surface-receipt",&owner.owner_id,
+                    &serde_json::json!({"key":format!("{consumer}:{}",delivery.receipt.command_id),
+                        "kind":"command-history-v1","request":request,"result":result}),now_ms)?;
+            }
+            tx.commit()?;
             self.acknowledge_completions(owner,consumer,delivery.sequence,now_ms)?;
         }
         Ok(deliveries)
@@ -157,6 +172,29 @@ mod tests {
         // Another actual surface has its own durable cursor; one surface's
         // application never claims a peer or user acknowledged the result.
         assert_eq!(f.journal.completion_outbox(&f.owner,"other-history",10).unwrap().len(),1);
+    }
+
+    #[test]
+    fn surface_completions_deduplicate_command_identity_across_outbox_sequences_and_legacy_keys() {
+        let mut f=Fixture::new();let id=f.complete(json!({"completed":true}));
+        let original=f.journal.completion_outbox(&f.owner,"history",1).unwrap().remove(0);
+        // Previous clients could commit the sequence-keyed application and
+        // crash before acknowledging. Preserve that application on upgrade.
+        f.journal.record_surface_receipt(&f.owner,&format!("history:{}",original.sequence),
+            "command-history-v1",&json!({"consumer":"history","sequence":original.sequence,"command_id":id}),
+            &serde_json::to_value(&original).unwrap(),5).unwrap();
+        let tx=f.journal.conn.transaction().unwrap();
+        super::super::commands::publish_completion(&tx,&id,6).unwrap();tx.commit().unwrap();
+        let replay=f.journal.apply_surface_completions(&f.owner,"history",10,7).unwrap();
+        assert_eq!(replay.len(),2);assert_ne!(replay[0].sequence,replay[1].sequence);
+        assert_eq!(replay[0].receipt.command_id,replay[1].receipt.command_id);
+        assert_eq!(f.journal.surface_receipts(&f.owner,"command-history-v1",10).unwrap().len(),1);
+        drop(f.journal);f.journal=Journal::open(&f.path).unwrap();
+        assert!(f.journal.completion_outbox(&f.owner,"history",10).unwrap().is_empty());
+        // Each consumer applies once, while repeated publication of the same
+        // command never becomes a second command-history application.
+        assert_eq!(f.journal.apply_surface_completions(&f.owner,"other",10,8).unwrap().len(),2);
+        assert_eq!(f.journal.surface_receipts(&f.owner,"command-history-v1",10).unwrap().len(),2);
     }
 
     #[test]

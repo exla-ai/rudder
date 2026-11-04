@@ -120,7 +120,7 @@ impl FreshLocalNamespace {
         let record=self.active_record.as_ref().unwrap().clone();let lifetime=Arc::new(EngineOwnerLifetime{lock:self.lock.as_ref().unwrap().clone(),assigned:Some(authority),repo:record.repo.clone(),owner:fence.clone(),authority:NativeAuthority::Fabric,process_id:std::process::id(),revoked:AtomicBool::new(false)});
         // Pure move of the ORIGINAL connection/lock/receipt after known ACKs.
         // No existing project/path/serialized owner can reach this constructor.
-        *out=Some(EngineOwnership{lifetime,journal:self.journal.take().unwrap(),fence,record,record_path,released:false,identity_home:binding.home,managed_store:self.store.clone(),migration_records:None});self.promoted=true;Ok(())
+        *out=Some(EngineOwnership{lifetime,journal:self.journal.take().unwrap(),fence,record,record_path,released:false,identity_home:binding.home,managed_store:self.store.clone(),migration_records:None,restart_recovery:None});self.promoted=true;Ok(())
     }
     pub(crate) fn check_assigned_writer(&self,journal:&Journal,expected:&OwnerFence)->Result<()> {ensure!(self.promoted&&self.active_fence.as_ref()==Some(expected),"fresh original assigned local fence differs");self.assert_retained_custody()?;self.custody.as_ref().unwrap().check_journal(journal)}
     pub(crate) fn create_integration_directory(&mut self)->Result<PathBuf>{self.ready(&self.original,&self.cancelled)?;let ns=self.store()?.binding();let parent=Directory::open_existing_root(ns.directory.clone())?;let dir=self.create(parent,"integration")?;Ok(dir.path.clone())}

@@ -270,7 +270,7 @@ fn interrupted_rollback_release_reconciles_original_epoch() {
     let mut intent = committed.clone();
     intent.phase = Phase::RollbackPausing;
     fs::write(path, serde_json::to_vec(&intent).unwrap()).unwrap();
-    f.journal().release_owner(&committed.owner, 20).unwrap();
+    f.journal().release_drained_owner(&committed.owner, 20).unwrap();
     let paused = f
         .session()
         .pause_for_rollback(&mut f.journal(), "migration", 21)
@@ -407,6 +407,117 @@ fn changed_v4_work_requires_explicit_current_owner_and_run_epochs_for_rollback()
     let newer = j.transfer_owner(&paused.owner, "newer-owner", 21).unwrap();
     assert!(session.pause_for_rollback(&mut j, "migration", 22).is_err());
     assert_eq!(j.project_state("project").unwrap().owner, newer);
+}
+
+#[test]
+fn rollback_reuses_normal_shutdown_only_with_its_exact_drain_and_full_inventory() {
+    for drained in [false, true] {
+        let f = Fixture::new();
+        f.prepare();
+        let committed = f.until(Phase::Committed);
+        let mut journal = f.journal();
+        if drained {
+            journal.release_drained_owner(&committed.owner, 20).unwrap();
+        } else {
+            journal.release_owner(&committed.owner, 20).unwrap();
+        }
+        let released = journal.project_state("project").unwrap();
+        let runs = journal.recorded_run_inventory(&released.owner).unwrap().into_iter()
+            .map(|run| (run.run_id, run.run_epoch)).collect();
+        let session = f.session();
+        assert!(session.pause_for_rollback_at(&mut journal, "migration", &released.owner,
+            &std::collections::BTreeMap::new(), 21).is_err());
+        let result = session.pause_for_rollback_at(&mut journal, "migration", &released.owner, &runs, 21);
+        if drained {
+            let paused = result.unwrap();
+            assert_eq!(paused.phase, Phase::RollbackPaused);
+            assert_eq!(paused.owner, released.owner);
+            assert_eq!(paused.run_epochs, runs);
+            assert!(paused.rollback_checkpoint.is_some());
+            assert_eq!(session.pause_for_rollback_at(&mut journal, "migration", &released.owner, &runs, 22).unwrap(), paused);
+            assert_eq!(session.pause_for_rollback(&mut journal, "migration", 22).unwrap(), paused);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("normal drain release"));
+            assert_eq!(session.read().unwrap().unwrap().phase, Phase::Committed);
+        }
+        assert_eq!(journal.project_state("project").unwrap(), released);
+        assert!(refuse_implicit_startup(&f.repo).is_err());
+    }
+}
+
+#[test]
+fn interrupted_rollback_rejects_inactive_owner_without_normal_drain_proof() {
+    let f = Fixture::new();
+    f.prepare();
+    let mut intent = f.until(Phase::Committed);
+    intent.phase = Phase::RollbackPausing;
+    fs::write(f.repo.join(".rudder/engine/v4-migration.json"), serde_json::to_vec(&intent).unwrap()).unwrap();
+    f.journal().release_owner(&intent.owner, 20).unwrap();
+    assert!(f.session().pause_for_rollback(&mut f.journal(), "migration", 21)
+        .unwrap_err().to_string().contains("normal drain release"));
+}
+
+#[test]
+fn upgrade_after_normal_legacy_shutdown_reconciles_only_its_durable_enrollment() {
+    for drained in [false,true] {
+        let f=Fixture::new(); let mut journal=f.journal();
+        if drained {journal.release_drained_owner(&f.request.previous_owner,2).unwrap();}
+        else {journal.release_owner(&f.request.previous_owner,2).unwrap();}
+        let state=journal.project_state("project").unwrap();
+        let mut request=f.request.clone(); request.previous_owner=state.owner.clone();
+        request.runs[0].expected_epoch=Some(2);
+        let session=f.session();
+        let pending=session.prepare(&journal,request.clone()).unwrap();
+        assert_eq!(pending.phase,Phase::Reactivating);
+        let result=session.advance(&mut journal,"migration",3);
+        if !drained {
+            assert!(result.unwrap_err().to_string().contains("normal drain release"));
+            assert_eq!(journal.project_state("project").unwrap(),state);
+            continue;
+        }
+        let prepared=result.unwrap(); assert_eq!(prepared.phase,Phase::Prepared);
+        assert_eq!(prepared.request,request);
+        assert_eq!(prepared.owner.epoch,state.owner.epoch+1);
+        assert_eq!(prepared.run_epochs["completed"],3);
+        // Crash after SQLite committed but before its file receipt. Only this
+        // exact request-bound enrollment can reconcile; it must not repeat CAS.
+        fs::write(f.repo.join(".rudder/engine/v4-migration.json"),serde_json::to_vec(&pending).unwrap()).unwrap();
+        assert_eq!(session.advance(&mut journal,"migration",4).unwrap(),prepared);
+        assert_eq!(session.prepare(&journal,request).unwrap(),prepared);
+        let mut receipt=prepared;
+        for _ in 0..16 {
+            if receipt.phase==Phase::Committed {break;}
+            receipt=session.advance(&mut journal,"migration",5).unwrap();
+        }
+        assert_eq!(receipt.phase,Phase::Committed);
+        assert_eq!(receipt.owner.epoch,state.owner.epoch+2);
+        assert_eq!(receipt.run_epochs["completed"],4);
+        assert_eq!(receipt.run_epochs["stopped"],2);
+        for run in journal.owned_runs(&receipt.owner).unwrap() {
+            assert!(journal.runtime_snapshot(&receipt.owner,&run.run_id,6).unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn migration_commit_requires_actual_runtime_custody_reconciliation() {
+    let f=Fixture::new(); f.prepare();
+    let pending=f.until(Phase::Transferring); let mut journal=f.journal();
+    let epoch=journal.observe_run_attempt(&pending.owner,"stopped","retained-attempt",20).unwrap();
+    assert_eq!(epoch,pending.run_epochs["stopped"]);
+    let mut runtime=rudder_engine::journal::RuntimeObservation {
+        run_id:"stopped".into(),run_epoch:epoch,attempt_id:"retained-attempt".into(),
+        backend:"codex".into(),execution_profile:"codex-app-server".into(),thread_id:Some("thread".into()),
+        active_turn_id:Some("turn".into()),last_interrupted_turn_id:None,
+        phase:rudder_engine::journal::RuntimePhase::Working,capabilities:["inspect".into()].into(),pty_owned:true};
+    journal.observe_runtime(&pending.owner,&runtime,20).unwrap();
+    let error=f.session().advance(&mut journal,"migration",21).unwrap_err();
+    assert!(error.to_string().contains("runtime custody"),"{error:#}");
+    assert_eq!(journal.project_state("project").unwrap().owner,pending.owner);
+    runtime.phase=rudder_engine::journal::RuntimePhase::Closed;
+    runtime.pty_owned=false;runtime.active_turn_id=None;runtime.capabilities.clear();
+    journal.observe_runtime(&pending.owner,&runtime,22).unwrap();
+    assert_eq!(f.session().advance(&mut journal,"migration",23).unwrap().phase,Phase::Committed);
 }
 
 #[test]

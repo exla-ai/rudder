@@ -77,6 +77,22 @@ fn cancelled_preparation_retains_app_and_engine_until_actual_join() {
             Err(_) => panic!("settled source supervisor remained busy"),
         };
         assert!(!stopped.join_worker_panicked);
-        fixture.owner.as_mut().unwrap().finish(true).unwrap();
+        // This fixture reserves a runtime instance but never enrolls a real
+        // helper or persists its runtime custody observation. Source callback
+        // and supervisor joins prove only the source side. They cannot satisfy
+        // the production journal's complete runtime observation census.
+        let error = fixture.owner.as_mut().unwrap().finish(true).unwrap_err();
+        assert!(error.to_string().contains("lacks custody observation"), "{error:#}");
+        let (journal, owner) = fixture.owner.as_mut().unwrap().journal_parts();
+        let state = journal.project_state(&owner.project_id).unwrap();
+        assert_eq!(state.owner, *owner);
+        assert!(state.owner_active, "source joins must not release an unobserved runtime");
+        let projection: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(fixture.repo.join(".rudder/engine/owner.json")).unwrap()).unwrap();
+        assert_eq!(projection["state"], "uncertain");
+        let lock = std::fs::OpenOptions::new().read(true).write(true)
+            .open(fixture.repo.join(".rudder/engine/owner.lock")).unwrap();
+        assert_eq!(fs2::FileExt::try_lock_exclusive(&lock).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock, "uncertain finish must retain the actual checkout lock");
     }
 }

@@ -198,7 +198,15 @@ fn managed_drain_keeps_actual_app_and_owner_until_source_worker_join_settles() {
     wait.recv_timeout(Duration::from_secs(4)).unwrap();
     let gate = managed_machine_entry::ManagedMachineStartupGate::closed_for_tests();
     let mut drain = ManagedAppDrain::capture(owner);
-    assert!(!drain.poll(&mut app, owner, &gate).unwrap());
+    // Several actual App ticks must keep polling the same drain while its
+    // original source writer is held, without treating a request as a join.
+    for _ in 0..3 {
+        assert!(!drain.poll(&mut app, owner, &gate).unwrap());
+        assert!(app.ensure_managed_source_shutdown_ready().is_err());
+        let (journal, fence) = owner.journal_parts();
+        assert!(journal.project_state(&fence.project_id).unwrap().owner_active);
+        owner.assert_current().unwrap();
+    }
     assert!(app.ensure_managed_source_shutdown_ready().is_err());
     owner.assert_current().unwrap();
     assert!(app.shutdown_with_reason("drain still pending").is_err());

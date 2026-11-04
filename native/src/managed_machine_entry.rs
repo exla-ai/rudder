@@ -108,6 +108,8 @@ impl ProjectTicket {
 }
 #[path="managed_machine_seed.rs"]
 mod seeds;
+#[path="managed_machine_drain.rs"]
+mod retirement;
 pub(crate) use seeds::{ManagedSeedCowFactory,SeedTicket,SeedTaskTicket,SeedCacheTicket,ManagedSeedTaskSource,SeedRetirementProgress,NeverStartedProgress,EnrollmentTicket};
 enum Job {Project(ProjectTicket),Seed(SeedTicket),Enroll(EnrollmentTicket)}
 struct WorkerCarrier {bootstrap:ManagedMachineBootstrap,projects:BTreeMap<String,ProjectTicket>,seeds:BTreeMap<String,SeedTicket>,retired_seeds:BTreeMap<String,SeedTicket>,
@@ -144,7 +146,7 @@ fn prepare_project(ticket:&ProjectTicket)->Result<()> {
     match result {Ok(Ok(()))=>{ticket.cell.phase.store(READY,Ordering::Release);Ok(())},Ok(Err(_))=>{if c.owner.shared_admission_closed()&&c.owner.assert_original_local_custody().is_ok(){ticket.cell.phase.store(SHARED_FENCED,Ordering::Release);Ok(())}else{ticket.cell.phase.store(RECOVERY,Ordering::Release);Err(anyhow::anyhow!("managed project preparation failed; original owner retained"))}},
         Err(panic)=>{c.panic=Some(panic);ticket.cell.phase.store(RECOVERY,Ordering::Release);Err(anyhow::anyhow!("managed project preparation panicked; original owner retained"))}}
 }
-fn worker(shared:&Arc<Shared>) {
+fn worker(shared:&Arc<Shared>,drain:&retirement::RetainedMachineDrain) {
     let initialized=(||->Result<()> {let mut c=shared.carrier.lock().map_err(|_|anyhow::anyhow!("machine carrier poisoned"))?;c.bootstrap.check_current_retaining()})();
     if initialized.is_err() {shared.phase.store(QUARANTINED,Ordering::Release);return;}
     while !shared.worker_owned.load(Ordering::Acquire) {
@@ -229,6 +231,8 @@ fn worker(shared:&Arc<Shared>) {
         }));
         if !matches!(outcome,Ok(Ok(()))) {if let Err(panic)=outcome {carrier.panic=Some(panic);}
             shared.phase.store(QUARANTINED,Ordering::Release);return;}
+        drop(carrier);
+        drain.poll_off_app(&MachineControl{shared:shared.clone(),send:shared.send.clone()});
     }
 }
 
@@ -281,6 +285,7 @@ impl ManagedProjectApp<'_> {
 pub(crate) struct ManagedMachineRuntime {
     shared:Arc<Shared>,control:MachineControl,worker:Option<OwnedWorkerJoin>,apps:BTreeMap<String,ProjectApp>,app_thread:std::thread::ThreadId,
     panic:Option<Box<dyn Any+Send>>,
+    drain:Arc<retirement::RetainedMachineDrain>,
 }
 impl ManagedMachineRuntime {
     pub(crate) fn capture(bootstrap:ManagedMachineBootstrap)->Self {
@@ -288,21 +293,22 @@ impl ManagedMachineRuntime {
         let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),runtime_ready_data:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
             bootstrap,projects:BTreeMap::new(),seeds:BTreeMap::new(),retired_seeds:BTreeMap::new(),enrollments:BTreeMap::new(),root_rpc_held:false,root_private_held:false,
             registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new(),covered_reservations:runtime_drain::CoveredTaskGenerationAdmission::new(),producer_roots:producer_reservations::CoveredIngressFreshRoots::new()})});
-        Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None}
+        Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None,drain:retirement::RetainedMachineDrain::new()}
     }
     /// Spawn borrows an already retained carrier. Ordinary returned Err cannot
     /// drop the actual bootstrap; actual JoinHandle is stored before any App use.
     pub(crate) fn start_worker_retaining(&mut self)->Result<()> {
         ensure!(self.worker.is_none() && self.shared.phase.load(Ordering::Acquire)==STARTING,"managed machine worker already attempted");
         let shared=self.shared.clone();
+        let drain=self.drain.clone();
         let started=std::thread::Builder::new().name("rudder-machine-root-client".into()).spawn(move || {
-            if let Err(panic)=catch_unwind(AssertUnwindSafe(||worker(&shared))) {
+            if let Err(panic)=catch_unwind(AssertUnwindSafe(||worker(&shared,&drain))) {
                 shared.carrier.lock().unwrap_or_else(|p|p.into_inner()).panic=Some(panic);
                 shared.phase.store(QUARANTINED,Ordering::Release);
             }
             // Main and this thread keep the SAME actual carrier, including on
             // lost input/results. This is not a worker/backend drain receipt.
-            loop {std::hint::black_box(&shared);std::thread::sleep(Duration::from_secs(1));}
+            loop {drain.poll_off_app(&MachineControl{shared:shared.clone(),send:shared.send.clone()});std::hint::black_box((&shared,&drain));std::thread::sleep(Duration::from_secs(1));}
         });
         match started {Ok(worker)=>{self.worker=Some(OwnedWorkerJoin::new(worker));self.shared.worker_owned.store(true,Ordering::Release);Ok(())},Err(_)=>{
             self.shared.phase.store(QUARANTINED,Ordering::Release);Err(anyhow::anyhow!("managed machine worker spawn failed; bootstrap retained"))}}
@@ -345,10 +351,13 @@ impl ManagedMachineRuntime {
             if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {
                 if let Some(app)=slot.app.as_mut() {
                     let drain=slot.drain.get_or_insert_with(||crate::app_engine_lifecycle::ManagedAppDrain::capture(&carrier.owner));
-                    drain.poll(app,&mut carrier.owner,&self.shared.kernel.gate())?;
+                    if !drain.poll(app,&mut carrier.owner,&self.shared.kernel.gate())? {continue;}
                     // App joins alone cannot retire the machine owner. The
                     // covered runtime drain still reports other producers as
                     // Pending; retain its cleanup authority and original App.
+                    match self.drain.final_release_on_app(&self.control,self.worker.as_ref().unwrap(),app,&mut carrier.owner)? {
+                        retirement::MachineFinalRelease::Pending|retirement::MachineFinalRelease::Uncertain=>continue,
+                    }
                 }
                 continue;
             }
@@ -401,7 +410,10 @@ pub(crate) fn run_selected()->! {
         }
         let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
             if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {
-                if let Some(actual)=ingress.as_ref(){actual.fence_new_requests();}
+                if let Some(actual)=ingress.as_ref(){
+                    actual.fence_new_requests();
+                    runtime.drain.request_on_app(&runtime.control,actual.control())?;
+                }
             }
             runtime.poll_apps_on_app()?;
             #[cfg(feature="managed-ingress-genuine-fixture")]

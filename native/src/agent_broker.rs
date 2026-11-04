@@ -695,6 +695,8 @@ impl BrokerThreadOwner {
     }
     #[cfg(target_os="linux")]
     pub(crate) fn close(&self) { if let Some(inner) = &self.inner { inner.stop(); } }
+    #[cfg(not(target_os="linux"))]
+    pub(crate) fn close(&self) {}
     pub(crate) fn await_closed(&mut self, timeout: Duration) -> Result<BrokerThreadsSettled> {
         ensure!(!self.settled, "broker settlement already returned");
         self.close();

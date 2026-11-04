@@ -5,6 +5,8 @@ WORKDIR /src
 COPY native ./native
 COPY engine ./engine
 COPY vcs-bridge ./vcs-bridge
+# The command surface embeds the operations registry with include_str!.
+COPY src/operations ./src/operations
 # The binary embeds assets (the notifier icon) with include_bytes!.
 COPY assets ./assets
 COPY Cargo.toml Cargo.lock ./

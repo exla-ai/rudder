@@ -34,6 +34,12 @@ struct ForkAddArgs {
     message: String,
 }
 
+#[cfg(not(target_os = "linux"))]
+async fn fork_add(_ui: &mut Ui, _helper: &CommandHelper, _args: &ForkAddArgs) -> Result<(), CommandError> {
+    Err(jj_cli::command_error::user_error("rudder-fork-add needs Linux OverlayFS"))
+}
+
+#[cfg(target_os = "linux")]
 async fn fork_add(ui: &mut Ui, helper: &CommandHelper, args: &ForkAddArgs) -> Result<(), CommandError> {
     use jj_cli::command_error::{internal_error, user_error};
     use jj_lib::ref_name::WorkspaceNameBuf;
@@ -191,6 +197,7 @@ fn run() -> anyhow::Result<u8> {
     // Behaves like stock jj for normal repos; additionally loads repos on the
     // Rudder content store and rudder-overlay (fork) working copies.
     let mut factories = WorkingCopyFactories::new();
+    #[cfg(target_os = "linux")]
     factories.insert(
         rudder_engine::jj_working_copy::OverlayWorkingCopy::name().to_owned(),
         Box::new(rudder_engine::jj_working_copy::OverlayWorkingCopyFactory { lowers_root: None }),

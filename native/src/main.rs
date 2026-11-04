@@ -2218,6 +2218,10 @@ struct App {
     /// Runs we already tried to reopen when their pane was focused. One attempt
     /// each: a resume that fails must not respawn on every Enter.
     focus_resume_attempted: HashSet<String>,
+    /// Explicit restart recovery suppresses boot relaunch; quarantine also
+    /// requires custody reconciliation before an explicit conversation resume.
+    restart_home_boot_suppressed: HashSet<String>,
+    restart_quarantined_ids: HashSet<String>,
     /// Running on the cloud home machine (`RUDDER_CLOUD_RUNTIME=home`), read once
     /// at construction so a test setting the env cannot leak into another App.
     home_runtime: bool,
@@ -3447,6 +3451,8 @@ impl App {
             pending_migration_resumes,
             migration_resumes_attempted: false,
             focus_resume_attempted: HashSet::new(),
+            restart_home_boot_suppressed: HashSet::new(),
+            restart_quarantined_ids: HashSet::new(),
             home_runtime: !managed && home_runtime_from_env(),
             home_boot_reopen_done: false,
             boot_orphaned_ids: HashSet::new(),
@@ -10255,16 +10261,53 @@ Address the objection directly. If you disagree, say why inside \
         );
     }
 
-    /// `^W i`: open the selected reviewer's existing backend composer.
+    /// Keep notes for an existing retained pair available without reopening
+    /// the retired standalone pair workflow.
+    fn tell_gam_reviewer(&mut self, note: &str) {
+        let Some((generator_index, adversarial_index)) = self.gam_pair_indices_for_selected() else {
+            return;
+        };
+        let note = note.trim();
+        if note.is_empty() {
+            self.notice = Some("Type a note for the selected reviewer after /tell".to_string());
+            return;
+        }
+        let settled = self.agents[generator_index]
+            .gam
+            .as_ref()
+            .is_some_and(|gam| matches!(gam.phase, GamPhase::Settled(_)));
+        if settled && !self.live_inject_at(adversarial_index, &format!("[from the user] {note}")) {
+            self.notice = Some("The selected reviewer has no live pane; Enter on its row resumes it".to_string());
+            return;
+        }
+        for side in [generator_index, adversarial_index] {
+            if let Some(gam) = self.agents[side].gam.as_mut() {
+                if !settled { gam.user_notes.push(note.to_string()); }
+                gam.say(GamRole::Adversarial, GamMessageKind::Note, note);
+            }
+            if let Some(run) = self.agents.get(side) {
+                let _ = save_native_run_record(&self.cwd, run);
+            }
+        }
+        self.record_activity(format!("gam: you told the reviewer: {}", truncate_chars(note, 120)));
+        self.notice = Some(if settled {
+            "Sent to the selected reviewer's session".to_string()
+        } else {
+            "Noted; the selected reviewer gets it with its next review".to_string()
+        });
+        self.dirty = true;
+    }
+
+    /// `^W i`: prepare a note for the selected retained pair only.
     fn begin_gam_note(&mut self) {
-        let Some((_, reviewer)) = self.gam_pair_for_command() else {
+        let Some(_) = self.gam_pair_indices_for_selected() else {
             self.notice = Some("gam: no pair selected".to_string());
             return;
         };
-        self.selected_agent = reviewer;
-        self.focus = FocusPane::Worker;
+        self.replace_task_input("/tell ".to_string());
+        self.focus = FocusPane::Task;
         self.notice = Some(
-            "Send a follow-up in the reviewer's conversation".to_string(),
+            "Type a note and press Enter; it rides along with the selected reviewer's next review".to_string(),
         );
         self.dirty = true;
     }
@@ -10877,6 +10920,10 @@ Address the objection directly. If you disagree, say why inside \
         let Some(run) = self.agents.get(index) else {
             return false;
         };
+        if self.restart_quarantined_ids.contains(&run.id) {
+            self.notice = Some("runtime custody requires explicit reconciliation before resume".into());
+            return false;
+        }
         if run.managed_local.is_some() {
             self.notice = Some("managed source requires explicit owned recovery; checkout conversation resume is unavailable".into());
             return false;
@@ -10961,6 +11008,7 @@ Address the objection directly. If you disagree, say why inside \
                         && self.boot_orphaned_ids.contains(&run.id));
                 let workspace = run.workspace_path.as_ref().unwrap_or(&run.cwd);
                 was_live
+                    && !self.restart_home_boot_suppressed.contains(&run.id)
                     && run.terminal.is_none()
                     && matches!(run.mode, AgentMode::Main | AgentMode::Execute)
                     && !run.plain_process
@@ -11944,6 +11992,15 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn handle_command(&mut self, input: &str) -> bool {
+        // Recovery controls bind to the selected historical pair. Without that
+        // selection /tell remains a retired standalone command below.
+        if input.split_whitespace().next() == Some("/tell")
+            && self.gam_pair_indices_for_selected().is_some()
+        {
+            self.emit_command_used(input);
+            self.tell_gam_reviewer(command_rest(input, "/tell"));
+            return true;
+        }
         if let command_surface::ComposerInput::Refused(message) =
             command_surface::classify_composer(input, false, &command_surface::utc_date()) {
             self.notice = Some(message);

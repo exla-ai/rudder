@@ -547,3 +547,38 @@ fn failed_paused_record_write_cannot_advertise_clean_engine_shutdown() {
             .owner_active
     );
 }
+
+#[test]
+fn recovered_runtime_application_requires_app_custody_and_never_automatically_resumes() {
+    use crate::engine_host::restart::{ExpectedRuntimeAttempt,NativeRestartRecovery,RecoveredRuntimeDisposition};
+    let mut h=Harness::new();h.fake_backend();
+    let attempt=ExpectedRuntimeAttempt {run_id:"run-1".into(),run_epoch:1,attempt_id:"original-attempt".into()};
+    let mut recovery=NativeRestartRecovery {effects:rudder_engine::journal::Recovery {pending:vec![],uncertain:vec![]},
+        runtimes:vec![RecoveredRuntimeDisposition::Paused(attempt.clone())]};
+    assert!(apply_recovered_runtimes_on_app(&mut h.app,&recovery).is_err());
+    assert!(h.app.agents[0].terminal.is_some(),"recovery must retain actual live terminal custody");
+    shutdown_app(&mut h.app,"test original retirement").unwrap();
+    h.app.agents[0].status=AgentStatus::Running;
+    h.app.pending_migration_resumes.push(MigratedAgent {run_id:"run-1".into(),session_id:"prior-session".into(),workspace_path:h.app.cwd.clone(),fresh_prompt:None});
+    apply_recovered_runtimes_on_app(&mut h.app,&recovery).unwrap();
+    assert_eq!(h.record()["status"],"paused");assert!(h.record().get("process").is_none());
+    assert!(h.app.pending_migration_resumes.is_empty());
+    assert!(h.app.restart_home_boot_suppressed.contains("run-1"));
+    assert!(!h.app.focus_resume_attempted.contains("run-1"),"Paused still permits an explicit resume attempt");
+    h.app.home_runtime=true;
+    h.app.reopen_live_rows_after_home_boot();
+    assert!(h.app.agents[0].terminal.is_none(),"home boot cannot resume recovered rows");
+    h.app.agents[0].status=AgentStatus::Merged;
+    apply_recovered_runtimes_on_app(&mut h.app,&recovery).unwrap();
+    assert_eq!(h.record()["status"],"merged","process retirement cannot erase accepted integration");
+    recovery.runtimes=vec![RecoveredRuntimeDisposition::Quarantined {attempt,
+        reason:crate::engine_host::restart::RuntimeQuarantineReason::UncertainCustody}];
+    apply_recovered_runtimes_on_app(&mut h.app,&recovery).unwrap();
+    assert_eq!(h.record()["status"],"merged","quarantine preserves accepted integration");
+    h.app.agents[0].status=AgentStatus::Running;
+    apply_recovered_runtimes_on_app(&mut h.app,&recovery).unwrap();
+    assert_eq!(h.record()["status"],"orphaned");assert!(h.app.agents[0].terminal.is_none());
+    assert!(!h.app.reopen_conversation_at(0));
+    assert!(h.app.notice.as_deref().unwrap().contains("requires explicit reconciliation"));
+    h.finish(Ok(())).unwrap();
+}

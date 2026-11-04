@@ -409,6 +409,7 @@ fn two_original_runtimes_share_one_release_and_keep_each_actual_resource_owner()
     let mut second_fixture = fixture();
     second_fixture.observation.run_id = "other".into();
     second_fixture.observation.attempt_id = "other-attempt".into();
+    f.journal.observe_run_attempt(&f.owner, "other", "other-attempt", 2).unwrap();
     f.journal
         .observe_runtime(&f.owner, &second_fixture.observation, 2)
         .unwrap();

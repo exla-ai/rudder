@@ -75,6 +75,9 @@ impl AppEngineLifecycle {
             app.attach_server.is_none() && self.control.is_none(),
             "App ingress is already bound"
         );
+        if let Some(recovery) = owner.restart_recovery() {
+            apply_recovered_runtimes_on_app(app, recovery)?;
+        }
         app.attach_server = Some(AttachServer::start(
             app.attach_socket_path(),
             app.pty_output_waker.clone(),
@@ -147,6 +150,63 @@ impl AppEngineLifecycle {
         anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
         Ok(())
     }
+}
+
+/// Startup application is performed by the same App actor that owns PTYs.
+/// Recovery never substitutes a remembered PID for an owned live terminal.
+fn apply_recovered_runtimes_on_app(
+    app: &mut App,
+    recovery: &crate::engine_host::restart::NativeRestartRecovery,
+) -> Result<()> {
+    use crate::engine_host::restart::RecoveredRuntimeDisposition::*;
+    // Validate the entire batch before changing any App row. A remembered
+    // observation cannot retire a terminal still owned by this App actor.
+    for disposition in &recovery.runtimes {
+        let attempt = match disposition {
+            Paused(attempt) | Completed(attempt) | Failed(attempt) | Quarantined {attempt, ..} => attempt,
+        };
+        anyhow::ensure!(!app.agents.iter().any(|run|run.id == attempt.run_id && run.terminal.is_some()),
+            "recovered runtime still has an actual App terminal");
+    }
+    for disposition in &recovery.runtimes {
+        let attempt = match disposition {
+            Paused(attempt) | Completed(attempt) | Failed(attempt) | Quarantined {attempt, ..} => attempt,
+        };
+        let Some(run) = app.agents.iter_mut().find(|run|run.id == attempt.run_id) else {continue;};
+        run.needs_permission = false;
+        run.needs_user_input = false;
+        match disposition {
+            Paused(_) => {
+                if matches!(run.status, AgentStatus::Running | AgentStatus::Paused | AgentStatus::Migrated | AgentStatus::Orphaned) {
+                    run.status = AgentStatus::Paused;
+                    run.completed_at = None;
+                    run.last_error = Some("engine restarted; resume explicitly".into());
+                }
+            }
+            Quarantined {..} => {
+                if matches!(run.status, AgentStatus::Running | AgentStatus::Paused | AgentStatus::Migrated | AgentStatus::Orphaned) {
+                    run.status = AgentStatus::Orphaned;
+                    run.completed_at = None;
+                }
+                run.last_error = Some("runtime custody requires explicit reconciliation".into());
+            }
+            Completed(_) | Failed(_) => {
+                if matches!(run.status, AgentStatus::Running | AgentStatus::Paused | AgentStatus::Migrated | AgentStatus::Orphaned) {
+                    run.status = if matches!(disposition, Completed(_)) {AgentStatus::Done} else {AgentStatus::Failed};
+                }
+            }
+        }
+        app.pending_migration_resumes.retain(|entry|entry.run_id != attempt.run_id);
+        app.boot_orphaned_ids.remove(&attempt.run_id);
+        app.restart_home_boot_suppressed.insert(attempt.run_id.clone());
+        if matches!(disposition, Quarantined {..}) {
+            app.restart_quarantined_ids.insert(attempt.run_id.clone());
+        } else {
+            app.restart_quarantined_ids.remove(&attempt.run_id);
+        }
+        save_native_run_record(&app.cwd, run)?;
+    }
+    Ok(())
 }
 
 /// Explicit engine/task retirement only. Surface detach never calls this.

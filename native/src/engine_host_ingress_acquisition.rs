@@ -11,8 +11,12 @@ pub(crate) struct RetainedManagedAcquisition {
     repo_anchor:Option<File>,home_anchor:Option<File>,repo_id:Option<(u64,u64)>,home_id:Option<(u64,u64)>,
     config:Arc<HostIngressConfigOwner>,selection:AllowedPreparedProject,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
     attempted:bool,transfer_attempted:bool,transfer_ack:Option<OwnerFence>,acknowledged:bool,panic:Option<Box<dyn Any+Send>>,
+    restart_recovery:Option<restart::NativeRestartRecovery>,
 }
 impl RetainedManagedAcquisition {
+    /// Inspection only, including after the original request deadline. Reading
+    /// this report neither retries transfer nor acknowledges external custody.
+    pub(crate) fn restart_recovery(&self)->Option<&restart::NativeRestartRecovery> {self.restart_recovery.as_ref()}
     /// The caller's actual machine effect-start ACK already exists. Alias
     /// selects only from this actual immutable config, not arbitrary request
     /// paths or a copied prepared receipt. Stage BEFORE filesystem effects.
@@ -24,7 +28,7 @@ impl RetainedManagedAcquisition {
             anyhow::ensure!(!private.starts_with(&selection.checkout)&&!selection.checkout.starts_with(private),"host private namespace overlaps configured source checkout");
         }
         *out=Some(Self {owner:None,journal:None,held_journal:None,lock:None,repo_anchor:None,home_anchor:None,repo_id:None,home_id:None,
-            config,selection,original:original.clone(),cancelled,attempted:false,transfer_attempted:false,transfer_ack:None,acknowledged:false,panic:None});Ok(())
+            config,selection,original:original.clone(),cancelled,attempted:false,transfer_attempted:false,transfer_ack:None,acknowledged:false,panic:None,restart_recovery:None});Ok(())
     }
     fn time(&self)->Result<()> {if self.cancelled.load(Ordering::Acquire){self.original.cancel();bail!("original ingress acquisition cancelled");}self.original.remaining()?;self.config.assert_current()}
     fn custody(&self)->Result<()> {
@@ -63,7 +67,8 @@ impl RetainedManagedAcquisition {
         let previous=journal.project_state(&project)?.owner;
         let instance=uuid::Uuid::new_v4().to_string();let owner_id=format!("fabric:{instance}");
         self.time()?;self.transfer_attempted=true;
-        let fence=self.journal.as_mut().unwrap().transfer_owner(&previous,&owner_id,epoch_ms())?;
+        let fence=owner_restart::replace_locked_owner(self.journal.as_mut().unwrap(),&previous,&owner_id,
+            epoch_ms(),&mut self.restart_recovery)?;
         self.transfer_ack=Some(fence.clone()); // original transaction returned; BEFORE postchecks
         let lock=self.lock.take().unwrap();let journal=self.journal.take().unwrap();
         let record=OwnerRecord {format_version:ENGINE_FORMAT,repo:self.selection.checkout.clone(),authority:"fabric".into(),
@@ -72,9 +77,10 @@ impl RetainedManagedAcquisition {
         let lifetime=Arc::new(EngineOwnerLifetime {lock:Arc::new(lock),assigned:None,repo:record.repo.clone(),owner:fence.clone(),authority:NativeAuthority::Fabric,
             process_id:std::process::id(),revoked:AtomicBool::new(false)});
         self.owner=Some(EngineOwnership {lifetime,journal,fence,record_path:record.repo.join(".rudder/engine/owner.json"),record,
-            released:false,identity_home:self.selection.home.clone(),managed_store:None,migration_records:None});
+            released:false,identity_home:self.selection.home.clone(),managed_store:None,migration_records:None,
+            restart_recovery:self.restart_recovery.clone()});
         self.custody()?;
-        let actual=self.owner.as_mut().unwrap();actual.journal.recover(&actual.fence,epoch_ms())?;
+        let actual=self.owner.as_mut().unwrap();
         write_owner_record(&actual.record_path,&actual.record)?;
         actual.prepare_managed_project(&self.selection.prepare)?;actual.assert_current()?;
         self.custody()?;self.acknowledged=true;Ok(())

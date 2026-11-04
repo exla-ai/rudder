@@ -65,6 +65,7 @@ export type OperationArguments = {
   "diagnostic.context.v1": { argv: string[] };
   "diagnostic.improve.v1": { argv: string[] };
   "project.settings.v1": { setting: "model" | "effort" | "speed" | "notifications" | "sound" | "color" | "telemetry"; value: string };
+  "project.files.v1": { workspace_id?: string; path?: string };
 };
 export type OperationId = keyof OperationArguments;
 export type OperationRequest<K extends OperationId = OperationId> = K extends OperationId ? {
@@ -148,6 +149,11 @@ export function validateOperationRequest(input: unknown): OperationRequest {
   } else if (name === "project.settings.v1") {
     keys(args, ["setting", "value"]); text(args.value, 256);
     requireCondition(["model", "effort", "speed", "notifications", "sound", "color", "telemetry"].includes(String(args.setting)) && scope.selection === "project", "Unknown project setting");
+  } else if (name === "project.files.v1") {
+    keys(args, ["workspace_id", "path"]);
+    if (args.workspace_id !== undefined) text(args.workspace_id, 256);
+    if (args.path !== undefined) text(args.path, 4096);
+    requireCondition(scope.selection === "project", "Project files require project scope");
   } else {
     const passthrough = ["project.cloud.v1", "project.board.v1", "project.serve.v1", "diagnostic.mouse.v1", "diagnostic.feedback.v1", "diagnostic.context.v1", "diagnostic.improve.v1"];
     const empty = ["surface.open.v1", "agent.list.v1", "agent.status.v1", "agent.logs.v1", "agent.watch.v1", "agent.attach.v1", "agent.report.v1", "agent.find.v1", "change.sync.v1", "project.restart.v1", "auth.login.v1", "diagnostic.check.v1", "diagnostic.setup.v1"];

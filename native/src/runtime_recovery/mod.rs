@@ -4,21 +4,21 @@
 use super::recovery_journal::{Journal, OwnerFence, Recovery, RuntimePhase};
 use anyhow::{ensure, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ExpectedRuntimeAttempt {
     pub run_id: String,
     pub run_epoch: u64,
     pub attempt_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum RuntimeQuarantineReason {
     MissingObservation,
     ReplacedAttempt,
     UncertainCustody,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum RecoveredRuntimeDisposition {
     Paused(ExpectedRuntimeAttempt),
     Completed(ExpectedRuntimeAttempt),
@@ -29,6 +29,7 @@ pub(crate) enum RecoveredRuntimeDisposition {
     },
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct NativeRestartRecovery {
     pub effects: Recovery,
     pub runtimes: Vec<RecoveredRuntimeDisposition>,
@@ -47,27 +48,32 @@ pub(crate) fn recover_before_replacement(
 ) -> Result<NativeRestartRecovery> {
     ensure!(
         expected.len() <= 4096,
-        "native runtime recovery exceeds4096 attempts"
+        "native runtime recovery exceeds 4096 attempts"
     );
     let effects = journal.recover_runtime_restart(owner, now_ms)?;
+    // Historical terminal observations can legitimately precede the current
+    // owner epoch. They remain recovery evidence, although the live discovery
+    // API correctly hides them from scheduling and runtime control.
+    let observations=journal.recorded_runtime_inventory(owner)?.into_iter()
+        .map(|runtime|(runtime.run_id.clone(),runtime)).collect::<std::collections::BTreeMap<_,_>>();
     let mut runtimes = Vec::with_capacity(expected.len());
     for attempt in expected {
-        let runtime = journal.runtime_snapshot(owner, &attempt.run_id, now_ms)?;
+        let runtime = observations.get(&attempt.run_id);
         let disposition = match runtime {
             None => RecoveredRuntimeDisposition::Quarantined {
                 attempt: attempt.clone(),
                 reason: RuntimeQuarantineReason::MissingObservation,
             },
             Some(runtime)
-                if runtime.observation.run_epoch != attempt.run_epoch
-                    || runtime.observation.attempt_id != attempt.attempt_id =>
+                if runtime.run_epoch != attempt.run_epoch
+                    || runtime.attempt_id != attempt.attempt_id =>
             {
                 RecoveredRuntimeDisposition::Quarantined {
                     attempt: attempt.clone(),
                     reason: RuntimeQuarantineReason::ReplacedAttempt,
                 }
             }
-            Some(runtime) if !runtime.observation.pty_owned => match runtime.observation.phase {
+            Some(runtime) if !runtime.pty_owned => match runtime.phase {
                 RuntimePhase::Closed => RecoveredRuntimeDisposition::Paused(attempt.clone()),
                 RuntimePhase::Completed => RecoveredRuntimeDisposition::Completed(attempt.clone()),
                 RuntimePhase::Failed => RecoveredRuntimeDisposition::Failed(attempt.clone()),

@@ -48,6 +48,95 @@ fn public_status_never_exposes_the_control_nonce() {
     assert!(value.get("control_nonce").is_none());
 }
 
+fn restart_observation(owner:&mut EngineOwnership, owned:bool) -> rudder_engine::journal::RuntimeObservation {
+    use rudder_engine::journal::{RuntimeObservation,RuntimePhase};
+    owner.journal.observe_run_attempt(&owner.fence,"restart-run","original-attempt",1).unwrap();
+    let observation=RuntimeObservation {run_id:"restart-run".into(),run_epoch:1,attempt_id:"original-attempt".into(),
+        backend:"codex".into(),execution_profile:"codex-app-server".into(),thread_id:None,active_turn_id:None,
+        last_interrupted_turn_id:None,phase:if owned {RuntimePhase::Starting} else {RuntimePhase::Closed},
+        capabilities:["inspect".into()].into(),pty_owned:owned};
+    owner.journal.observe_runtime(&owner.fence,&observation,1).unwrap();observation
+}
+
+#[test]
+fn original_host_retains_lock_and_reports_quarantine_before_epoch_change() {
+    let scratch=Scratch::new();let (repo,_,mut owner,_)=managed_owner_fixture(&scratch);
+    let mut observation=restart_observation(&mut owner,true);let original=owner.fence.clone();let mut report=None;
+    let error=owner_restart::replace_locked_owner(&mut owner.journal,&original,"replacement",2,&mut report).unwrap_err();
+    let blocked=error.downcast_ref::<owner_restart::RestartBlocked>().unwrap();
+    assert!(matches!(&blocked.recovery.runtimes[0],restart::RecoveredRuntimeDisposition::Quarantined {..}));
+    assert_eq!(owner.journal.project_state(&original.project_id).unwrap().owner,original);
+    assert!(acquire_checkout_lock(&repo).is_err(),"original host lock survives rejection");
+    // Explicit external reconciliation, rather than retrying a lost PTY flag.
+    observation.pty_owned=false;observation.phase=rudder_engine::journal::RuntimePhase::Closed;
+    owner.journal.observe_runtime(&original,&observation,3).unwrap();
+    let replacement=owner_restart::replace_locked_owner(&mut owner.journal,&original,"replacement",4,&mut report).unwrap();
+    assert_eq!(replacement.epoch,original.epoch+1);
+    assert!(matches!(&report.unwrap().runtimes[0],restart::RecoveredRuntimeDisposition::Paused(_)));
+}
+
+#[test]
+fn actual_host_replacement_guards_inactive_projects_and_surface_reconnect_does_not_recover() {
+    let scratch=Scratch::new();let (repo,home,mut owner,_)=managed_owner_fixture(&scratch);
+    restart_observation(&mut owner,true);let original=owner.fence.clone();
+    let runtime=owner.journal.runtime_snapshot(&original,"restart-run",2).unwrap();
+    owner.ready(None).unwrap();owner.ready(None).unwrap();
+    assert_eq!(owner.journal.runtime_snapshot(&original,"restart-run",2).unwrap(),runtime);
+    // A legacy inactive flag is no retirement proof. The real acquisition
+    // path must refuse replacement even when the prior owner is inactive.
+    owner.journal.release_owner(&original,3).unwrap();
+    let inactive=owner.journal.project_state(&original.project_id).unwrap().owner;drop(owner);
+    assert!(EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).is_err());
+    let journal=Journal::open(&FabricPaths::new(&home).journal).unwrap();
+    assert_eq!(journal.project_state(&original.project_id).unwrap().owner,inactive);
+}
+
+#[test]
+fn failed_actual_host_acquisition_retains_original_lock_and_journal_for_reconciliation() {
+    let scratch=Scratch::new();let (repo,home,mut owner,_)=managed_owner_fixture(&scratch);
+    restart_observation(&mut owner,true);let original=owner.fence.clone();drop(owner);
+    let error=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).err().unwrap();
+    let retained=error.downcast_ref::<owner_restart::RetainedRestartFailure>().unwrap();
+    assert!(retained.recovery().is_some());
+    assert!(acquire_checkout_lock(&repo).is_err(),"failed replacement keeps the actual lock");
+    retained.reconcile(|journal,owner| {
+        assert_eq!(owner,&original);
+        assert_eq!(journal.project_state(&owner.project_id)?.owner,original);
+        let mut runtime=journal.runtime_snapshot(owner,"restart-run",3)?.unwrap().observation;
+        runtime.pty_owned=false;runtime.phase=rudder_engine::journal::RuntimePhase::Closed;
+        journal.observe_runtime(owner,&runtime,3)
+    }).unwrap();
+    assert!(acquire_checkout_lock(&repo).is_err(),"explicit reconciliation retains custody until caller releases it");
+    drop(error);
+    let replacement=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).unwrap();
+    assert_eq!(replacement.fence.epoch,original.epoch+1);
+}
+
+#[test]
+fn actual_host_quarantines_reserved_attempt_without_runtime_observation() {
+    let scratch=Scratch::new();let (repo,home,mut owner,_)=managed_owner_fixture(&scratch);
+    owner.journal.observe_run_attempt(&owner.fence,"unobserved","original",1).unwrap();
+    let original=owner.fence.clone();drop(owner);
+    let error=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).err().unwrap();
+    let retained=error.downcast_ref::<owner_restart::RetainedRestartFailure>().unwrap();
+    assert!(matches!(&retained.recovery().unwrap().runtimes[0],
+        restart::RecoveredRuntimeDisposition::Quarantined {reason:restart::RuntimeQuarantineReason::MissingObservation,..}));
+    retained.reconcile(|journal,owner| {assert_eq!(*owner,original);assert_eq!(journal.project_state(&owner.project_id)?.owner,original);Ok(())}).unwrap();
+    assert!(acquire_checkout_lock(&repo).is_err());
+}
+
+#[test]
+fn actual_host_can_restart_again_after_terminal_observation_predates_owner_epoch() {
+    let scratch=Scratch::new();let (repo,home,mut owner,_)=managed_owner_fixture(&scratch);
+    restart_observation(&mut owner,false);let original=owner.fence.clone();drop(owner);
+    for expected_epoch in [original.epoch+1,original.epoch+2] {
+        let replacement=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).unwrap();
+        assert_eq!(replacement.fence.epoch,expected_epoch);
+        assert!(matches!(&replacement.restart_recovery().unwrap().runtimes[0],restart::RecoveredRuntimeDisposition::Paused(_)));
+        drop(replacement);
+    }
+}
+
 fn managed_owner_fixture(scratch: &Scratch) -> (PathBuf, PathBuf, EngineOwnership, rudder_engine::journal::ManagedProjectPrepare) {
     let repo=scratch.0.join("repo"); let home=scratch.0.join("home"); fs::create_dir(&repo).unwrap();
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();

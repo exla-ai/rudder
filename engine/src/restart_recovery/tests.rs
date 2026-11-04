@@ -88,9 +88,8 @@ pub(super) fn fixture() -> Fixture {
     journal
         .observe_run_attempt(&owner, "target", "attempt", 1)
         .unwrap();
-    journal
-        .observe_run_attempt(&owner, "other", "other-attempt", 1)
-        .unwrap();
+    // This inspect-only fixture recipient never reserves a runtime instance.
+    journal.register_run(&owner, "other", 1).unwrap();
     let observation = RuntimeObservation {
         run_id: "target".into(),
         run_epoch: 1,
@@ -563,4 +562,101 @@ fn historical_completions_backfill_without_execution_and_repeated_recovery_does_
             .len(),
         1
     );
+}
+
+#[test]
+fn explicit_restart_backfills_every_historical_page_before_replacement_delivery() {
+    let mut f=fixture();
+    for index in 0..513 {
+        let accepted=f.journal.accept_command(&f.token,&request(&format!("historical-{index}"),"target"),2).unwrap();
+        let claim=f.journal.claim_effect(&f.owner,&accepted.command_id,2).unwrap().unwrap();
+        f.journal.finish_effect(&claim,&json!({"historical":index}),3).unwrap();
+    }
+    f.journal.conn.execute("DELETE FROM events WHERE kind='command-result-ready'",[]).unwrap();
+    let recovery=f.journal.recover_runtime_restart(&f.owner,4).unwrap();
+    assert!(recovery.pending.is_empty()&&recovery.uncertain.is_empty());
+    assert_eq!(f.journal.backfill_completion_outbox(&f.owner,256,5).unwrap(),0);
+    let count:i64=f.journal.conn.query_row("SELECT count(*) FROM events WHERE kind='command-result-ready'",[],|row|row.get(0)).unwrap();
+    assert_eq!(count,513);
+    let mut delivered=Vec::new();
+    loop {
+        let page=f.journal.completion_outbox(&f.owner,"history",128).unwrap();
+        if page.is_empty(){break;}
+        delivered.extend(page.iter().map(|item|item.receipt.command_id.clone()));
+        f.journal.acknowledge_completions(&f.owner,"history",page.last().unwrap().sequence,6).unwrap();
+    }
+    assert_eq!(delivered.len(),513);
+    delivered.sort();delivered.dedup();assert_eq!(delivered.len(),513);
+    assert!(f.journal.ready_commands(&f.owner,1000).unwrap().is_empty());
+}
+
+#[test]
+fn recorded_runtime_census_includes_inactive_original_without_granting_authority() {
+    let mut f=fixture();
+    assert_eq!(f.journal.recorded_runtime_inventory(&f.owner).unwrap(),vec![f.observation.clone()]);
+    // Legacy release is intentionally not a process join. Even an inactive
+    // project must expose retained runtime custody and fail guarded transfer.
+    f.journal.release_owner(&f.owner,2).unwrap();
+    let inactive=f.journal.project_state("p").unwrap().owner;
+    assert!(f.journal.recorded_runtime_inventory(&f.owner).is_err());
+    assert_eq!(f.journal.recorded_runtime_inventory(&inactive).unwrap(),vec![f.observation]);
+    assert!(f.journal.runtime_snapshot(&inactive,"target",3).is_err());
+    assert!(f.journal.transfer_recovered_owner(&inactive,"replacement",3).is_err());
+    assert!(!f.journal.project_state("p").unwrap().owner_active);
+}
+
+#[test]
+fn persisted_attempt_without_observation_blocks_retirement_and_active_or_inactive_replacement() {
+    let mut f=fixture();
+    // Crash after the durable App instance reservation, before the first
+    // process observation. An empty observation census is no custody proof.
+    f.journal.conn.execute("DELETE FROM runtime_observations",[]).unwrap();
+    let attempts=f.journal.recorded_runtime_attempt_inventory(&f.owner).unwrap();
+    assert_eq!(attempts,vec![("target".into(),1,"attempt".into())]);
+    assert!(f.journal.recorded_runtime_inventory(&f.owner).unwrap().is_empty());
+    f.journal.recover_runtime_restart(&f.owner,2).unwrap();
+    assert!(f.journal.transfer_recovered_owner(&f.owner,"replacement",3).is_err());
+    assert!(f.journal.release_drained_owner(&f.owner,3).is_err());
+    assert_eq!(f.journal.project_state("p").unwrap().owner,f.owner);
+    f.journal.release_owner(&f.owner,4).unwrap();
+    let inactive=f.journal.project_state("p").unwrap().owner;
+    assert!(f.journal.recorded_runtime_attempt_inventory(&f.owner).is_err());
+    assert_eq!(f.journal.recorded_runtime_attempt_inventory(&inactive).unwrap(),vec![("target".into(),2,"attempt".into())]);
+    assert!(f.journal.transfer_recovered_owner(&inactive,"replacement",5).is_err());
+    assert!(!f.journal.project_state("p").unwrap().owner_active);
+}
+
+#[test]
+fn old_terminal_observation_cannot_cover_a_new_instance_but_drained_epoch_bumps_can() {
+    let mut f=fixture();
+    f.observation.phase=RuntimePhase::Closed;f.observation.pty_owned=false;
+    f.observation.active_turn_id=None;f.observation.capabilities=["inspect".into()].into();
+    f.journal.observe_runtime(&f.owner,&f.observation,2).unwrap();
+    let epoch=f.journal.observe_run_attempt(&f.owner,"target","replacement-attempt",3).unwrap();
+    assert_eq!(epoch,2);
+    assert_eq!(f.journal.recorded_runtime_attempt_inventory(&f.owner).unwrap(),vec![("target".into(),2,"replacement-attempt".into())]);
+    assert_eq!(f.journal.recorded_runtime_inventory(&f.owner).unwrap()[0].attempt_id,"attempt");
+    assert!(f.journal.transfer_recovered_owner(&f.owner,"replacement",4).is_err());
+    assert!(f.journal.release_drained_owner(&f.owner,4).is_err());
+    // Explicitly reconcile the new instance. Its terminal observation remains
+    // valid physical evidence after a normal owner release bumps run epochs.
+    f.observation.run_epoch=epoch;f.observation.attempt_id="replacement-attempt".into();
+    f.journal.observe_runtime(&f.owner,&f.observation,5).unwrap();
+    f.journal.release_drained_owner(&f.owner,6).unwrap();
+    let inactive=f.journal.project_state("p").unwrap().owner;
+    assert_eq!(f.journal.recorded_runtime_attempt_inventory(&inactive).unwrap()[0].1,3);
+    let next=f.journal.transfer_recovered_owner(&inactive,"replacement",7).unwrap();
+    assert_eq!(next.epoch,inactive.epoch+1);
+}
+
+#[test]
+fn legacy_runs_without_reserved_instances_do_not_invent_runtime_custody() {
+    let dir=tempfile::tempdir().unwrap();let mut journal=Journal::open(dir.path().join("journal.sqlite")).unwrap();
+    let owner=journal.create_project("legacy","original","base",1).unwrap();
+    journal.register_run(&owner,"legacy-run",1).unwrap();
+    assert!(journal.recorded_runtime_attempt_inventory(&owner).unwrap().is_empty());
+    journal.release_drained_owner(&owner,2).unwrap();
+    let inactive=journal.project_state("legacy").unwrap().owner;
+    assert!(journal.recorded_runtime_attempt_inventory(&inactive).unwrap().is_empty());
+    journal.transfer_recovered_owner(&inactive,"replacement",3).unwrap();
 }

@@ -33,7 +33,7 @@ import {
   stopRequestPath,
 } from "./state.js";
 import type { BackendId, EffortLevel, JsonValue, MergeStrategy, RunRecord, RudderEvent, VerificationResult } from "./types.js";
-import { updateGraph } from "./graph.js";
+import { readGraph, updateGraph } from "./graph.js";
 import {
   appendEvent,
 } from "./state.js";
@@ -1685,6 +1685,9 @@ async function autoIntegrateFinishedWorker(repoRoot: string, run: RunRecord): Pr
   if (run.mode !== "execute" || !run.workspace?.enabled || !run.workspace.path) return;
   if (process.env.RUDDER_NO_AUTO_INTEGRATE === "1") return;
   try {
+    // Planned nodes integrate through the scheduler's trunk, not here.
+    const graph = await readGraph(repoRoot).catch(() => undefined);
+    if (graph && Object.values(graph.nodes ?? {}).some((node) => node.runId === run.id)) return;
     const command = projectCheckCommand(repoRoot);
     if (command) {
       const check = inFork(run.workspace.path, "sh", ["-c", `${command} 2>&1`]);

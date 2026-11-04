@@ -25,15 +25,24 @@ Only two docs steer work. Everything else is reference or evidence.
 | `DECISIONS.md` | Auto-written run log. Skim only. |
 | `/workspace/rudder-v4-restart-handoff.md` | Stale, outside the repo. |
 
-## 2. Where main is
+## 2. Where main is (step 9, 2026-11-04)
 
-- Local `main` holds every merged worker. Published: `v4.0.0-alpha.34`
-  (origin/main `368c72f2`). package.json is still `4.0.0-alpha.34`.
-- Gate rerun 2026-11-04: check and Cloud build pass. The 5 earlier Cloud
-  timeouts passed (load flakes). One real Node failure:
-  `tests/cloud-web-app.test.mjs:221`, a home row with status "deleting"
-  disappears after a passive `/api/app/state` poll. Cargo, build and TUI
-  results pending.
+PLAN.md section 0 steps 0-8 are merged. Step 9 results:
+
+- Full suites green: Node 943/943, TUI 59/59 (one load flake passes alone),
+  cargo workspace, Cloud build, release build.
+- Real sessions (Claude and Codex, local CLI) on a Python repo and a Node repo
+  with dependencies. Forks start in about 0.1-0.3s and use about 40K of disk
+  against 23M for a full checkout. Agents see current code plus warm
+  `node_modules`/build output, run tests inside the fork, and merge on their own.
+- Fixed during step 9: CLI workers never integrated; forks used the snapshot's
+  stale commit; headless backends ran outside the fork mount; login shells
+  inside forks picked stock jj; auto-integration raced the plan scheduler.
+
+Known follow-ups (after 4.0.0): fork repos still store commits in Git, not the
+content store; jj_store objects are not pinned against GC; the manual merge `m`
+skips checks; files moved into a fork lose the executable bit; `rudder ls`
+shows "model 0s" for headless runs.
 
 ## 3. Status of every agent
 

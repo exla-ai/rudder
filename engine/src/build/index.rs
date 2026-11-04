@@ -102,8 +102,9 @@ impl BuildIndex {
     pub(super) fn root(&self) -> &Path {
         &self.root
     }
-    pub(super) fn execution_guard(&self, key: &ObjectRef) -> Result<File> {
-        self.key_lock("execution", key)
+    pub(super) fn execution_guard_controlled(&self, key: &ObjectRef, control: &BuildExecutionControl) -> Result<File> {
+        digest(&key.digest)?;
+        super::frontend::lock_controlled(&self.locks.join(format!("execution-{}", key.digest)), control)
     }
     pub fn validate_prepared(&self, prepared: &PreparedEnvironment) -> Result<()> {
         let layout = environment_content(&self.store, &prepared.root)?.layout;

@@ -8,7 +8,8 @@ use anyhow::{ensure, Context, Result};
 use rudder_engine::{execution::finalization_budget::FinalizationBudget,
     journal::Journal, protocol::{canonical_json, ObjectKind, ObjectRef},
     snapshot::{decode_environment, decode_runnable, decode_source, RunnableRoot},
-    store::LocalStore, vfs::{VfsCheckpoint, VfsManager, VfsView}, workspace::WorkspaceProfile};
+    store::LocalStore, vfs::{VfsCheckpoint, VfsManager, VfsView}, workspace::{WorkspaceProfile,
+        ProjectionBudget, QualifiedRunnableBuildInput}};
 use rudder_vcs_bridge::vfs_provider::SourceProjectionPolicy;
 use std::{fs::{self, File, OpenOptions}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, TryLockError,
@@ -41,7 +42,9 @@ impl Anchor {
 #[derive(Clone, PartialEq, Eq)]
 struct Key { cache_format:u32, paged_format:u32, root:ObjectRef, runnable:RunnableRoot, snapshot:VfsCheckpoint }
 #[derive(Clone)]
-struct Floor { key:Key, metadata_bytes:u64,backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>> }
+struct Floor { key:Key, metadata_bytes:u64,backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
+    // A real qualifier owns its pin across cached floor and every live fork.
+    _sealed_input:Option<Arc<QualifiedRunnableBuildInput>> }
 struct State { ready:Vec<Floor>, preparations:u64 }
 
 pub(crate) struct ManagedPreparationCache {
@@ -164,12 +167,26 @@ impl ManagedPreparationCache {
         let runnable=decode_runnable(&self.store.read_object(root)?)?;
         ensure!(&runnable.source==source,"managed seed source differs from runnable selection");
         let decoded_source=decode_source(&self.store.read_object(source)?)?;
+        ensure!(runnable.consistency==rudder_engine::protocol::CheckpointConsistency::Quiesced
+            &&decoded_source.consistency==rudder_engine::protocol::CheckpointConsistency::Quiesced,
+            "managed preparation requires sealed input consistency");
         if let Some(environment)=&runnable.environment { decode_environment(&self.store.read_object(environment)?)?; }
         let profile:WorkspaceProfile=serde_json::from_slice(&self.store.read_object(&runnable.profile)?)?;
         profile.validate()?;
         let policy=SourceProjectionPolicy::from_import_policy(&profile.source_exclusions())?;
         ensure!(self.store.read_object(&decoded_source.projection_policy)?==canonical_json(&policy)?,
             "managed source projection differs from selected profile");
+        if let Some(backed)=&backed_inputs {
+            let verified=backed.verified_source().receipt();
+            ensure!(verified.source==*source&&verified.directory==decoded_source.directory
+                &&verified.projection_policy==decoded_source.projection_policy,
+                "managed backed preparation differs from its original verified source closure");
+            // The currently supported backed runtime profile is source-only.
+            // Do not infer partition equivalence for a future composed view.
+            ensure!(profile.prepared.is_empty()&&profile.scratch.is_empty()&&profile.vcs_local.is_empty()
+                &&runnable.view_root==decoded_source.directory,
+                "backed preparation requires its supported source-only sealed view");
+        }
         let snapshot=VfsCheckpoint { format_version:1,directory:runnable.view_root.clone(),hardlinks:runnable.hardlinks.clone() };
         let key=Key { cache_format:CACHE_FORMAT,paged_format:PAGED_VIEW_FORMAT,root:root.clone(),runnable,snapshot };
         let started=Instant::now(); let mut state=self.lock(cancelled,budget)?; let wait_ns=started.elapsed().as_nanos();
@@ -184,9 +201,20 @@ impl ManagedPreparationCache {
         let prep_start=Instant::now();
         let floor=if let Some(floor)=&hit { floor.clone() } else {
             state.preparations=state.preparations.checked_add(1).context("preparation counter overflow")?;
+            // Ordinary production callers prove the exact source complement,
+            // prepared partition and topology before a floor becomes reusable.
+            // Backed callers retain their existing original source/environment
+            // custody; they cannot be converted into an ordinary local pin.
+            let sealed_input=if backed_inputs.is_none() {
+                let proof_budget=ProjectionBudget { max_elapsed_ms:Self::time(cancelled,budget)?.as_millis()
+                    .min(30_000).max(1) as u64,..Default::default() };
+                Some(Arc::new(rudder_engine::workspace::runnable_build_input_view(&self.store,root,
+                    &decoded_source.projection_policy,&proof_budget)?))
+            }else{None};
+            self.before_effect(cancelled,budget)?;
             self.manager.prepare_paged_snapshot(&key.snapshot)?;
             Floor { metadata_bytes:key.snapshot.directory.size_bytes.checked_add(key.snapshot.hardlinks.size_bytes)
-                .context("preparation metadata size overflow")?,key,backed_inputs:backed_inputs.clone() }
+                .context("preparation metadata size overflow")?,key,backed_inputs:backed_inputs.clone(),_sealed_input:sealed_input }
         };
         let prepare_ns=if hit.is_some() { 0 } else { prep_start.elapsed().as_nanos() };
         Self::time(cancelled,budget)?; self.custody()?; fence.check_current(journal)?;

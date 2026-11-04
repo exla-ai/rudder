@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -75,8 +76,28 @@ impl Buck2Adapter {
         prepared: &PreparedEnvironment,
         workspace: impl AsRef<Path>,
     ) -> Result<BuildRun> {
+        self.build_controlled(index, profile, input, prepared, workspace,
+            &BuildExecutionControl::new(Duration::from_secs(180))?)
+    }
+
+    /// OFF actor. Retain the original control and input owners until this call
+    /// settles. Acknowledged cancellation cannot publish to the managed result
+    /// index. The host owns materialization and must exclude agent/peer writes
+    /// to this workspace and the index's materialized environment throughout
+    /// execution: pre/post verification alone cannot prove that exclusion or
+    /// prevent Buck2 from uploading an action before post-verification.
+    pub fn build_controlled(
+        &self,
+        index: &BuildIndex,
+        profile: &BuildProfile,
+        input: &BuildInputView,
+        prepared: &PreparedEnvironment,
+        workspace: impl AsRef<Path>,
+        control: &BuildExecutionControl,
+    ) -> Result<BuildRun> {
         let build_started = Instant::now();
         let mut stage_ms = BTreeMap::new();
+        control.check()?;
         profile.validate()?;
         ensure!(
             input.hardlink_group_count() == 0,
@@ -104,6 +125,8 @@ impl Buck2Adapter {
             "Buck2 executable checksum does not match the profile"
         );
         index.validate_prepared(prepared)?;
+        let mut sealed = super::sealed_inputs::SealedBuildInputs::acquire(index, input, prepared)?;
+        control.check()?;
         let store = index.store();
         kind(source, ObjectKind::SourceRoot)?;
         let source_directory = source_directory(store, source)?;
@@ -127,7 +150,7 @@ impl Buck2Adapter {
             fs::set_permissions(workspace, fs::Permissions::from_mode(0o700))?;
         }
         let workspace = workspace.canonicalize()?;
-        let _workspace_lock = lock(&workspace.join(".rudder-build-lock"), false)?;
+        let _workspace_lock = lock_controlled(&workspace.join(".rudder-build-lock"), control)?;
         let marker = workspace.join(".rudder-managed-build.json");
         if marker.exists() {
             let value: Value = serde_json::from_slice(&fs::read(&marker)?)?;
@@ -155,7 +178,8 @@ impl Buck2Adapter {
             kill.arg("kill")
                 .current_dir(&workspace)
                 .env_clear()
-                .env("PATH", "/usr/bin:/bin");
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", workspace.join(".driver/home"));
             bounded(
                 &mut kill,
                 Duration::from_secs(15),
@@ -235,7 +259,7 @@ impl Buck2Adapter {
             let action_key = contract.key(store)?;
             stage_ms.insert("contract".into(), millis(contract_started));
             let guard_started = Instant::now();
-            let _execution = index.execution_guard(&action_key)?;
+            let _execution = index.execution_guard_controlled(&action_key, control)?;
             stage_ms.insert("execution_guard_wait".into(), millis(guard_started));
             let frontend_started = Instant::now();
             let native_contract = serde_json::json!({"format_version":FORMAT_VERSION,"environment":prepared.root,"toolchains":preparation.toolchains,"platform":platform,"policy":profile.policy,"rules":rules,"frontend":frontend_executable,"input_topology":input.hardlinks()});
@@ -245,7 +269,7 @@ impl Buck2Adapter {
             atomic(
                 &inflight,
                 &canonical_json(
-                    &serde_json::json!({"source":source,"environment":prepared.root,"attempt":Uuid::new_v4().to_string()}),
+                    &serde_json::json!({"source":source,"environment":prepared.root,"attempt":Uuid::new_v4().to_string(),"retained_input_pin":sealed.pin_data(),"checkpoint":input.checkpoint()}),
                 )?,
             )?;
             let stdout = workspace.join(".driver-response.json");
@@ -257,8 +281,24 @@ impl Buck2Adapter {
                 .env_clear()
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
                 .stdin(File::open(&request_path)?);
-            let outcome = bounded(&mut command, Duration::from_secs(150), &stdout, &stderr);
+            sealed.mark_inflight();
+            let outcome = bounded_controlled(&mut command, Duration::from_secs(150), &stdout, &stderr, control);
             if outcome.is_ok() {
+                sealed.mark_settled();
+                fs::remove_file(&inflight)?;
+            } else {
+                // The driver can start a persistent Buck2 daemon outside its
+                // process group. Settle that original daemon before releasing
+                // workspace/input custody. Keep the inflight recovery marker
+                // if shutdown cannot be confirmed.
+                let mut kill = Command::new(&self.executable);
+                kill.arg("kill").current_dir(&workspace).env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", workspace.join(".driver/home"));
+                bounded(&mut kill, Duration::from_secs(15),
+                    &workspace.join(".cancel-kill.stdout"), &workspace.join(".cancel-kill.stderr"))
+                    .context("managed build failed and original frontend shutdown is unresolved; retain workspace recovery marker")?;
+                sealed.mark_settled();
                 fs::remove_file(&inflight)?;
             }
             outcome.with_context(|| {
@@ -268,6 +308,13 @@ impl Buck2Adapter {
                 )
             })?;
             stage_ms.insert("frontend_dispatch".into(), millis(frontend_started));
+            control.check()?;
+            // Verify both the actual materialized bytes and their immutable
+            // identities after the frontend has finished, before any result
+            // publication. A completion response alone is not input validity.
+            verify_directory(store, &source_directory, &workspace.join("inputs"))?;
+            verify_directory(store, &environment.directory, &prepared_path)?;
+            sealed.validate(input)?;
             let capture_started = Instant::now();
             // Never reacquire an expired lease over possibly swept inputs.
             // Renew only a still-live lease before creating result objects.
@@ -356,7 +403,7 @@ impl Buck2Adapter {
             };
             stage_ms.insert("result_capture".into(), millis(capture_started));
             let index_started = Instant::now();
-            let stored = index.record_build(&qualified)?;
+            let stored = control.publish(|| index.record_build(&qualified))?;
             stage_ms.insert("action_index".into(), millis(index_started));
             let publication_started = Instant::now();
             let receipt = metadata(
@@ -657,6 +704,18 @@ fn lock(path: &Path, shared: bool) -> Result<File> {
     }
     Ok(file)
 }
+pub(super) fn lock_controlled(path: &Path, control: &BuildExecutionControl) -> Result<File> {
+    let file = OpenOptions::new().create(true).read(true).write(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+    loop {
+        control.check()?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 fn millis(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -733,8 +792,54 @@ mod tests {
         fs::write(path.join("unmodeled"), b"new input").unwrap();
         assert!(materialize_environment(&index, &directory).is_err());
     }
+
+    #[test]
+    fn cancelled_real_subprocess_is_reaped_before_the_call_settles() {
+        let tmp=tempfile::tempdir().unwrap();
+        let ready=tmp.path().join("pid");
+        let control=std::sync::Arc::new(BuildExecutionControl::new(Duration::from_secs(10)).unwrap());
+        let worker_control=control.clone(); let worker_root=tmp.path().to_owned(); let worker_ready=ready.clone();
+        let worker=std::thread::spawn(move || {
+            let mut command=Command::new("/usr/bin/python3");
+            command.args(["-I","-c","import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"])
+                .arg(worker_ready);
+            bounded_controlled(&mut command,Duration::from_secs(10),&worker_root.join("stdout"),&worker_root.join("stderr"),&worker_control)
+        });
+        let until=Instant::now()+Duration::from_secs(5);
+        while !ready.exists() && Instant::now()<until { std::thread::sleep(Duration::from_millis(5)); }
+        assert!(ready.exists());
+        let pid:i32=fs::read_to_string(&ready).unwrap().parse().unwrap();
+        assert!(control.cancel().unwrap());
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(unsafe { libc::kill(pid,0) },-1,"original child must be reaped before custody release");
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn coalesced_action_wait_can_cancel_without_taking_another_producers_lock() {
+        let tmp=tempfile::tempdir().unwrap(); let path=tmp.path().join("action-lock");
+        let original=lock(&path,false).unwrap();
+        let control=std::sync::Arc::new(BuildExecutionControl::new(Duration::from_secs(10)).unwrap());
+        let worker_control=control.clone(); let worker_path=path.clone();
+        let worker=std::thread::spawn(move || lock_controlled(&worker_path,&worker_control));
+        control.cancel().unwrap();
+        assert!(worker.join().unwrap().is_err());
+        let contender=OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        assert!(FileExt::try_lock_exclusive(&contender).is_err());
+        drop(original);
+        FileExt::try_lock_exclusive(&contender).unwrap();
+    }
 }
 fn bounded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path) -> Result<()> {
+    bounded_controlled(command, timeout, stdout, stderr, &BuildExecutionControl::new(timeout)?)
+}
+fn bounded_controlled(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path,
+    control: &BuildExecutionControl) -> Result<()> {
+    control.check()?;
+    // The driver and ordinary children share this new process group. Kill and
+    // reap before returning cancellation; a requested interrupt is not stopped.
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
     command
         .stdout(Stdio::from(File::create(stdout)?))
         .stderr(Stdio::from(File::create(stderr)?));
@@ -745,10 +850,15 @@ fn bounded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Pat
             ensure!(status.success(), "build subprocess failed: {status}");
             return Ok(());
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("build subprocess exceeded its deadline");
+        if control.check().is_err() || Instant::now() >= deadline {
+            let pid = i32::try_from(child.id()).context("build child PID overflow")?;
+            let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                ensure!(error.raw_os_error() == Some(libc::ESRCH), "cannot stop build process group: {error}");
+            }
+            child.wait().context("build subprocess cancellation is unresolved")?;
+            anyhow::bail!("build subprocess cancelled or exceeded its deadline");
         }
         std::thread::sleep(Duration::from_millis(10));
     }

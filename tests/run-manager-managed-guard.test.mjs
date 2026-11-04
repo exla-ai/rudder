@@ -188,7 +188,7 @@ if (process.argv[2] === "--managed-guard-probe") {
       await execute(process.execPath, [filename, "--managed-guard-probe", mode, directory], {
         cwd: repo, timeout: 25_000, maxBuffer: 2 * 1024 * 1024,
         env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-          RUDDER_HOME: path.join(directory, "home"), RUDDER_GUARD_REPO: repo,
+          RUDDER_HOME: path.join(directory, "home"), RUDDER_GUARD_REPO: repo, RUDDER_JJ_BIN: path.join(bin, "jj"),
           RUDDER_GUARD_AUDIT: path.join(directory, "commands.ndjson"), RUDDER_FAKE_BACKEND: "1",
           RUDDER_DISABLE_AGENT_SKILLS: "1", RUDDER_DISABLE_UPDATE_CHECK: "1", RUDDER_DISABLE_AUTO_UPDATE: "1" },
       });

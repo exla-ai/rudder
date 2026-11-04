@@ -60,6 +60,7 @@ use crate::tasks::*;
 mod task_routing;
 use crate::task_routing::*;
 mod engine_host;
+mod app_engine_lifecycle;
 use crate::engine_host::*;
 mod fabric_cli;
 mod cloud_build_profile_cli;
@@ -21405,41 +21406,7 @@ What to do\n\
     }
 
     fn shutdown_with_reason(&mut self, reason: &str) -> Result<()> {
-        self.ensure_managed_source_shutdown_ready()?;
-        self.close_attach_clients(reason);
-        let mut failures = Vec::new();
-        for run in &mut self.agents {
-            if run.terminal.is_some() {
-                if run.managed_local.is_none() && run.backend == Backend::Codex && run.session_id.is_none() {
-                    run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
-                }
-                run.terminal = None;
-                if run.managed_local.is_some() {
-                    run.status = AgentStatus::Orphaned;
-                    run.completed_at = None;
-                    run.last_error = Some(format!("managed helper ownership ended because {reason}; no checkpoint acknowledged"));
-                }
-                if run.status == AgentStatus::Running {
-                    run.status = AgentStatus::Paused;
-                    run.needs_permission = false;
-                    run.needs_user_input = false;
-                    run.completed_at = None;
-                    run.last_error = Some(format!("paused because {reason}"));
-                }
-                // Save every detached terminal, including a Done process whose
-                // interactive CLI had not exited yet, so `process` is removed.
-                if let Err(error) = save_native_run_record(&self.cwd, run) {
-                    failures.push(format!("{}: {error:#}", run.id));
-                }
-            }
-        }
-        if let Err(error) = self.write_rudder_context_timed(None) {
-            failures.push(format!("context: {error:#}"));
-        }
-        if !failures.is_empty() {
-            bail!("could not persist paused engine state: {}", failures.join("; "));
-        }
-        Ok(())
+        app_engine_lifecycle::shutdown_app(self, reason)
     }
 }
 
@@ -21854,8 +21821,9 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    ownership.require_legacy_startup()?;
+    let mut lifecycle = app_engine_lifecycle::AppEngineLifecycle::prepare(&mut ownership)?;
     let mut app = App::new();
+    app.cwd = ownership.app_identity().0.to_path_buf();
     app.engine_headless = terminal.is_none();
     install_termination_handlers();
     if ownership.is_fabric() {
@@ -21920,30 +21888,8 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             .ok();
     }
 
-    let mut control = None;
     let result = (|| -> Result<()> {
-        // Bind before resuming migrated sessions or reporting readiness. Failure is
-        // fatal for an owner: a second scheduler must never quietly run unattached.
-        app.attach_server = Some(AttachServer::start(
-            app.attach_socket_path(),
-            app.pty_output_waker.clone(),
-        )?);
-        if ownership.is_fabric() {
-            control = Some(EngineControl::bind(
-                &ownership,
-                app.pty_output_waker.clone(),
-            )?);
-        }
-        app.resume_migrated_agents();
-        // Unfreeze finished-but-stuck in-flight work (e.g. merge resolvers that completed under
-        // an older binary) BEFORE trying to resume anything, so a restart makes the board progress
-        // instead of resurrecting dead processes in their stuck state.
-        app.reconcile_orphaned_runs();
-        // Reconcile graph.json with the restored in-memory state on startup so the board does
-        // not show stale "planned" nodes from a previous session (and reflects the restored
-        // plan queue / reloaded agents). last_mirror_signature is None here, so this runs once.
-        app.mirror_graph();
-        let ready = ownership.ready(control.as_ref().map(EngineControl::path))?;
+        let ready = lifecycle.start(&mut app, &mut ownership)?;
         if ownership.is_fabric() {
             println!("{}", serde_json::to_string(&ready)?);
             io::stdout().flush()?;
@@ -21959,19 +21905,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             if TERMINATION_REQUESTED.load(Ordering::SeqCst) {
                 break;
             }
-            ownership.assert_current()?;
-            if control
-                .as_mut()
-                .is_some_and(|server| server.poll(&mut ownership, &app))
-            {
-                break;
-            }
-            if ownership.is_fabric() {
-                let (journal, owner) = ownership.journal_parts();
-                managed_source_app::poll(&mut app, owner);
-                managed_app::poll(&mut app, journal, owner)?;
-                fabric_runtime::poll(&mut app, journal, owner)?;
-            }
+            if lifecycle.poll(&mut app, &mut ownership)? { break; }
             app.poll_agents();
             if terminal.is_some() {
                 app.refresh_tab_title();
@@ -22088,21 +22022,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
 
         Ok(())
     })();
-    let reason = if ownership.is_fabric() {
-        "the Rudder engine shut down; resume explicitly"
-    } else {
-        "the Rudder dashboard closed; resume explicitly"
-    };
-    let shutdown = app.shutdown_with_reason(reason);
-    let runtime_shutdown = if ownership.is_fabric() {
-        let (journal, owner) = ownership.journal_parts();
-        fabric_runtime::shutdown(&mut app, journal, owner)
-    } else {
-        Ok(())
-    };
-    drop(control);
-    let released = ownership.finish(result.is_ok() && shutdown.is_ok() && runtime_shutdown.is_ok());
-    result.and(shutdown).and(runtime_shutdown).and(released)
+    lifecycle.finish(&mut app, &mut ownership, result)
 }
 
 fn drain_ready_events(

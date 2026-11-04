@@ -238,11 +238,18 @@ impl EngineSourceLease {
 
     /// Off-App existing writer, anchored to the actual owner's held database.
     /// Opening it creates neither a project nor a scheduler or source grant.
-    #[cfg(target_os = "linux")]
     pub(crate) fn open_source_writer(&self) -> Result<Journal> {
         self.check_current()?;
         let journal = self.database.open_existing_writer(Duration::from_millis(100))?;
         self.check_journal(&journal)?;
+        let state = journal.project_state(&self.lifetime.owner.project_id).map_err(|error| {
+            self.lifetime.revoke();
+            error
+        })?;
+        if !state.owner_active || state.owner != self.lifetime.owner {
+            self.lifetime.revoke();
+            bail!("owner-bound App writer belongs to a retired epoch");
+        }
         self.check_current()?;
         Ok(journal)
     }
@@ -533,7 +540,7 @@ impl EngineOwnership {
     }
 
     pub(crate) fn ready(&mut self, control: Option<&Path>) -> Result<serde_json::Value> {
-        self.lifetime.check_active()?;
+        self.assert_current()?;
         anyhow::ensure!(
             matches!(self.record.state.as_str(), "starting" | "ready"),
             "native owner cannot become ready after stopping"
@@ -554,12 +561,43 @@ impl EngineOwnership {
         // Revoke before any fallible persistence or Journal release. Outstanding
         // callbacks retain the lock, but can never revive this owner lifetime.
         self.lifetime.revoke();
-        self.record.state = if clean { "stopped" } else { "uncertain" }.into();
+        // A fenced App must not overwrite its successor's projection, even to
+        // report uncertainty. Release must succeed before advertising stopped.
+        self.journal.hold_database_file()?.check_current()?;
+        let state = self.journal.project_state(&self.fence.project_id)?;
+        anyhow::ensure!(state.owner == self.fence && (state.owner_active || self.released),
+            "cannot reconcile a retired native owner over its successor");
+        if self.released { return write_owner_record(&self.record_path, &self.record); }
+        // First persist stopping, not stopped. A failed projection write keeps
+        // authority active for recovery; a failed release never advertises a
+        // completed stop. The second projection follows the release receipt.
+        self.record.state = if clean { "stopping" } else { "uncertain" }.into();
         write_owner_record(&self.record_path, &self.record)?;
         if clean {
-            self.journal.release_owner(&self.fence, epoch_ms())?;
+            if let Err(error) = self.journal.release_owner(&self.fence, epoch_ms()) {
+                self.record.state = "uncertain".into();
+                let _ = write_owner_record(&self.record_path, &self.record);
+                return Err(error);
+            }
             self.released = true;
+            self.record.state = "stopped".into();
+            write_owner_record(&self.record_path, &self.record)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn app_identity(&self) -> (&Path, &OwnerFence) {
+        (&self.record.repo, &self.fence)
+    }
+
+    /// Cleanup publication only, including after a startup projection failure
+    /// revoked new-work admission. This never revives the owner or a source
+    /// lease, and a successor epoch cannot be overwritten by local teardown.
+    pub(crate) fn assert_app_cleanup_epoch(&self) -> Result<()> {
+        self.journal.hold_database_file()?.check_current()?;
+        let state = self.journal.project_state(&self.fence.project_id)?;
+        anyhow::ensure!(state.owner_active && state.owner == self.fence,
+            "App cleanup belongs to a retired owner epoch");
         Ok(())
     }
 
@@ -843,6 +881,7 @@ fn prepare_control_stream(stream: &UnixStream) -> io::Result<()> {
 
 pub(crate) struct EngineControl {
     path: PathBuf,
+    identity: (u64, u64),
     rx: mpsc::Receiver<ControlEvent>,
     stopping: bool,
     stop: Arc<AtomicBool>,
@@ -874,6 +913,8 @@ impl EngineControl {
             fs::remove_file(&path)?;
         }
         let listener = UnixListener::bind(&path).context("bind engine control socket")?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let identity = (metadata.dev(), metadata.ino());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let (tx, rx) = mpsc::sync_channel(32);
@@ -915,6 +956,7 @@ impl EngineControl {
             })?;
         Ok(Self {
             path,
+            identity,
             rx,
             stopping: false,
             stop,
@@ -974,7 +1016,13 @@ impl Drop for EngineControl {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let _ = fs::remove_file(&self.path);
+        // A retired owner may still hold the old listener after another epoch
+        // replaced the pathname. Only unlink the endpoint this object bound.
+        if fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 

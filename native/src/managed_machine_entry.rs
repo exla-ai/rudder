@@ -255,7 +255,7 @@ impl MachineControl {
     }
 
 }
-struct ProjectApp {ticket:ProjectTicket,app:Option<App>}
+struct ProjectApp {ticket:ProjectTicket,app:Option<App>,drain:Option<crate::app_engine_lifecycle::ManagedAppDrain>}
 /// Borrow exists only on the original App thread; obtaining it consumes no
 /// caller packet/secret/helper owner. Use the existing typed task APIs directly.
 pub(crate) struct ManagedProjectApp<'a> {app:&'a mut App,carrier:std::sync::MutexGuard<'a,ProjectCarrier>,kernel:Arc<kernel_startup::KernelSlot>}
@@ -316,6 +316,7 @@ impl ManagedMachineRuntime {
     fn app_thread(&self)->Result<()> {ensure!(self.app_thread==std::thread::current().id(),"managed App used from another thread");Ok(())}
     pub(crate) fn project_adapter(&mut self,ticket:&ProjectTicket)->Result<Option<ManagedProjectApp<'_>>> {
         self.app_thread()?;ensure!(self.worker.is_some() && self.shared.phase.load(Ordering::Acquire)==SERVING,"managed machine worker unavailable/quarantined");
+        if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {return Ok(None);}
         let Some(slot)=self.apps.get_mut(&ticket.id) else {return Ok(None);};
         ensure!(Arc::ptr_eq(&slot.ticket.cell,&ticket.cell),"managed project ticket belongs to another actual owner");
         if slot.ticket.cell.phase.load(Ordering::Acquire)!=READY || slot.app.is_none() {return Ok(None);}
@@ -326,11 +327,12 @@ impl ManagedMachineRuntime {
     }
     pub(crate) fn poll_apps_on_app(&mut self)->Result<()> {
         self.app_thread()?;ensure!(self.worker.is_some(),"managed machine worker handle absent");
+        if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {self.shared.kernel.close();}
         if self.shared.phase.load(Ordering::Acquire)==STARTING {return Ok(());}
         ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"managed machine quarantined; actual Apps retained");
         let tickets=match self.shared.carrier.try_lock() {Ok(c)=>c.projects.values().cloned().collect::<Vec<_>>(),
             Err(TryLockError::WouldBlock)=>Vec::new(),Err(_)=>anyhow::bail!("managed machine carrier poisoned")};
-        for ticket in tickets {self.apps.entry(ticket.id.clone()).or_insert(ProjectApp {ticket,app:None});}
+        for ticket in tickets {self.apps.entry(ticket.id.clone()).or_insert(ProjectApp {ticket,app:None,drain:None});}
         for slot in self.apps.values_mut() {
             let phase=slot.ticket.cell.phase.load(Ordering::Acquire);
             if phase!=READY&&phase!=SHARED_FENCED&&phase!=STARTUP_CLOSED&&phase!=RECOVERY {continue;}
@@ -338,6 +340,16 @@ impl ManagedMachineRuntime {
                 Err(_)=>anyhow::bail!("managed project carrier poisoned")};
             if matches!(&carrier.purpose,ProjectPurpose::SourceOnly){ensure!(slot.app.is_none(),"source-only ticket cannot own an App");continue;}
             ensure!(phase!=RECOVERY,"managed project requires recovery; original App/owner retained");
+            if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {
+                if let Some(app)=slot.app.as_mut() {
+                    let drain=slot.drain.get_or_insert_with(||crate::app_engine_lifecycle::ManagedAppDrain::capture(&carrier.owner));
+                    drain.poll(app,&mut carrier.owner,&self.shared.kernel.gate())?;
+                    // App joins alone cannot retire the machine owner. The
+                    // covered runtime drain still reports other producers as
+                    // Pending; retain its cleanup authority and original App.
+                }
+                continue;
+            }
             if phase==SHARED_FENCED||phase==STARTUP_CLOSED {
                 // Existing original work keeps its PTY/backend/actor/completion
                 // polling. No App is created, no new task adopted and no state
@@ -368,6 +380,7 @@ pub(crate) mod ingress_genuine_fixture;
 /// Diverges after ANY managed selection/capture, including failure. The real
 /// worker/Apps remain retained. No legacy serve/default/smoke fallback exists.
 pub(crate) fn run_selected()->! {
+    crate::install_termination_handlers();
     let bootstrap=match root_storage_bootstrap::enter_managed_machine_early() {Ok(owner)=>owner,Err(failure)=>failure.retain_quarantined()};
     let mut runtime=ManagedMachineRuntime::capture(bootstrap);
     let mut ingress_error=None;
@@ -385,13 +398,16 @@ pub(crate) fn run_selected()->! {
                 std::hint::black_box((&runtime,&ingress,&ingress_error));std::thread::sleep(Duration::from_secs(1));}
         }
         let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
+            if crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {
+                if let Some(actual)=ingress.as_ref(){actual.fence_new_requests();}
+            }
             runtime.poll_apps_on_app()?;
             #[cfg(feature="managed-ingress-genuine-fixture")]
             if let Some(actual)=fixture.as_mut(){actual.poll_cached_on_app()?;}
             // The original Root worker sends HostServing only after its actual
             // JoinHandle latch. Start command effects only once that is true.
             if runtime.shared.phase.load(Ordering::Acquire)==SERVING {
-                if ingress.is_none() {
+                if ingress.is_none() && !crate::TERMINATION_REQUESTED.load(Ordering::SeqCst) {
                     if let Some(host)=runtime.take_host_offer_on_app()? {
                         ingress=Some(crate::managed_machine_ingress::ManagedMachineIngress::capture(host,runtime.control()));
                         let actual=ingress.as_mut().unwrap();

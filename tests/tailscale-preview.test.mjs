@@ -288,7 +288,20 @@ test("cloud preview JSON uses the existing authenticated home API and never wake
   const server = http.createServer((req, res) => {
     requests.push({ method: req.method, path: req.url, auth: req.headers.authorization });
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(payload));
+    if (req.url === "/api/rudder/home") {
+      res.end(JSON.stringify(payload));
+    } else if (req.url === "/api/app/previews?workspace=a") {
+      // Current discovery binds the registered process and owner, rather than
+      // treating remembered Home port hints as a preview grant.
+      res.end(JSON.stringify({ version: 1, previews: payload.home.connected ? [{
+        id: "a".repeat(64), tenantId: "account", projectId: "project-a", workspaceId: "execution-a",
+        attemptId: "attempt-a", deviceId: "device-a", processStart: "fixture-start", pid: 42,
+        dnsName: host, url: `https://${host}:3000/`, port: 3000, protocol: "https", ready: true,
+      }] : [] }));
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: "Unexpected preview API request" }));
+    }
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => {
@@ -310,8 +323,11 @@ test("cloud preview JSON uses the existing authenticated home API and never wake
   payload.home.connected = false;
   await runCloudCommand("cloud", ["preview", "--list"], { json: true });
   assert.deepEqual(JSON.parse(output.at(-1)).previews, []);
-  assert.equal(requests.length, 2);
-  assert.ok(requests.every((request) => request.method === "GET" && request.path === "/api/rudder/home" && request.auth === "Bearer rdr_preview_fixture"));
+  assert.deepEqual(requests.map(request => request.path), [
+    "/api/rudder/home", "/api/app/previews?workspace=a",
+    "/api/rudder/home", "/api/app/previews?workspace=a",
+  ]);
+  assert.ok(requests.every((request) => request.method === "GET" && request.auth === "Bearer rdr_preview_fixture"));
 });
 
 test("HTTP readiness and local reachability perform real bounded loopback checks", async (t) => {

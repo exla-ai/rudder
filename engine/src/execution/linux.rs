@@ -3103,7 +3103,11 @@ mod partial_source_lifetime_tests {
         assert!(weak.upgrade().is_some());
         drop(owner);
         wait_for(|| weak.upgrade().is_none());
-        fixture.contender.try_lock_exclusive().unwrap();
+        wait_for(|| match fixture.contender.try_lock_exclusive() {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("source contender lock failed: {error}"),
+        });
         FileExt::unlock(&fixture.contender).unwrap();
     }
     #[test]

@@ -114,7 +114,7 @@ mod tests {
     struct Fixture { _directory:tempfile::TempDir,path:PathBuf,journal:Journal,owner:OwnerFence,token:String }
     impl Fixture {
         fn new()->Self {
-            let root=Path::new("/workspace/rudder-scratch/n13");std::fs::create_dir_all(root).unwrap();
+            let root_buf=if Path::new("/workspace").is_dir(){PathBuf::from("/workspace/rudder-scratch/n13")}else{std::env::temp_dir().join("rudder-surface-receipts")};let root=root_buf.as_path();std::fs::create_dir_all(root).unwrap();
             let directory=tempfile::Builder::new().prefix("surface-receipts-").tempdir_in(root).unwrap();
             let path=directory.path().join("journal.sqlite");let mut journal=Journal::open(&path).unwrap();
             let owner=journal.create_project("surface-project","original","accepted-head",1).unwrap();

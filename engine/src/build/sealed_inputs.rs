@@ -91,6 +91,7 @@ pub(super) mod tests {
         assert!(!index.store().retention().unwrap().pins.contains_key(&settled_pin));
     }
     #[test]
+    #[cfg(target_os = "linux")] // the managed Buck2 compile profile is Linux-only
     fn production_caller_rejects_stale_proof_before_creating_build_scratch() {
         let (temp,index,prepared,mut input)=fixture();
         input.profile=index.store().put_blob(b"stale proof identity").unwrap();

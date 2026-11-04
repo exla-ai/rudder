@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -153,9 +154,46 @@ pub(crate) enum AttachEvent {
 /// `<repo>/.rudder/attach.sock` is a symlink to it, which is what clients
 /// look for and read.
 pub(crate) struct AttachServer {
-    link: PathBuf,
-    path: PathBuf,
+    link: AttachPath,
+    _endpoint: AttachPath,
     rx: Receiver<AttachEvent>,
+}
+
+/// Each name is retired independently, only while it still names the object
+/// we created. Inspect the link itself, never its target. Include ctime because
+/// an unlinked symlink's inode can be reused before this owner shuts down.
+struct AttachPath {
+    path: PathBuf,
+    identity: (u64, u64, i64, i64),
+}
+
+impl AttachPath {
+    fn capture(path: PathBuf) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        Ok(Self {
+            path,
+            identity: Self::identity(&metadata),
+        })
+    }
+
+    fn identity(metadata: &std::fs::Metadata) -> (u64, u64, i64, i64) {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    }
+}
+
+impl Drop for AttachPath {
+    fn drop(&mut self) {
+        if std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| Self::identity(&metadata) == self.identity)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl AttachServer {
@@ -175,11 +213,13 @@ impl AttachServer {
         }
         let listener = UnixListener::bind(&path)
             .with_context(|| format!("bind {}", path.display()))?;
+        let endpoint = AttachPath::capture(path.clone())?;
         if std::fs::symlink_metadata(&link).is_ok() {
             let _ = std::fs::remove_file(&link);
         }
         std::os::unix::fs::symlink(&path, &link)
             .with_context(|| format!("link {} -> {}", link.display(), path.display()))?;
+        let link = AttachPath::capture(link)?;
         let (tx, rx) = mpsc::channel::<AttachEvent>();
         let next_id = Arc::new(AtomicU64::new(1));
         std::thread::Builder::new()
@@ -194,7 +234,11 @@ impl AttachServer {
                 }
             })
             .context("spawn attach accept thread")?;
-        Ok(Self { link, path, rx })
+        Ok(Self {
+            link,
+            _endpoint: endpoint,
+            rx,
+        })
     }
 
     fn serve_connection(
@@ -257,14 +301,7 @@ impl AttachServer {
     }
 
     pub(crate) fn path(&self) -> &Path {
-        &self.link
-    }
-}
-
-impl Drop for AttachServer {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.link);
-        let _ = std::fs::remove_file(&self.path);
+        &self.link.path
     }
 }
 

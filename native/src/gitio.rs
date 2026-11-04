@@ -1822,7 +1822,7 @@ pub(crate) fn jj_change_in_trunk(repo_root: &Path, change_id: &str) -> Option<bo
     if change_id.is_empty() || !is_git_repo(repo_root) {
         return None;
     }
-    let output = Command::new("jj")
+    let output = Command::new(jj_program())
         .args([
             "log",
             "--no-graph",
@@ -1870,7 +1870,7 @@ pub(crate) fn jj_changes_in_trunk(
     const CHUNK: usize = 128;
     for chunk in ids.chunks(CHUNK) {
         let union = chunk.join("|");
-        let Ok(output) = Command::new("jj")
+        let Ok(output) = Command::new(jj_program())
             .args([
                 "log",
                 "--no-graph",
@@ -2068,7 +2068,7 @@ pub(crate) fn git_output_args(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 pub(crate) fn jj_workspace_change_id(cwd: &Path) -> Option<String> {
-    let output = Command::new("jj")
+    let output = Command::new(jj_program())
         .args(["log", "--no-graph", "-r", "@", "-T", "change_id"])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -2138,7 +2138,7 @@ pub(crate) fn jj_diff_text(cwd: &Path, max_chars: usize) -> String {
 /// TS-side recoverStaleWorkspace (src/jj.ts). None on any other failure.
 fn run_jj_with_stale_recovery(cwd: &Path, args: &[&str]) -> Option<String> {
     let run = || {
-        Command::new("jj")
+        Command::new(jj_program())
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::null())
@@ -2152,7 +2152,7 @@ fn run_jj_with_stale_recovery(cwd: &Path, args: &[&str]) -> Option<String> {
     if !stderr.contains("stale") {
         return None;
     }
-    let _ = Command::new("jj")
+    let _ = Command::new(jj_program())
         .args(["workspace", "update-stale"])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -2229,7 +2229,7 @@ pub(crate) fn describe_workspace_status(run: &AgentRun, status: &str) {
     } else {
         format!("{label}: {summary} [{status}]")
     };
-    let _ = Command::new("jj")
+    let _ = Command::new(jj_program())
         .args(["describe", "-m", &message])
         .current_dir(&run.cwd)
         .stdin(Stdio::null())
@@ -2257,16 +2257,55 @@ pub(crate) fn forget_jj_workspace(
     }
     // Forget from jj first (best-effort: a workspace jj already dropped is fine).
     if !workspace_name.trim().is_empty() {
-        let _ = Command::new("jj")
+        let _ = Command::new(jj_program())
             .args(["workspace", "forget", workspace_name])
             .current_dir(repo_root)
             .stdin(Stdio::null())
             .output();
     }
+    remove_fork_state(path);
     if path.exists() {
+        unlock_overlay_work(&path.join(".jj").join("working_copy").join("work"));
         fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+/// OverlayFS leaves a mode-000 `work/work` that blocks recursive removal.
+fn unlock_overlay_work(work: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = fs::set_permissions(work.join("work"), fs::Permissions::from_mode(0o700));
+}
+
+/// Removes an overlay fork's `<workspace>.fork/` state (see src/warm-snapshot.ts).
+pub(crate) fn remove_fork_state(workspace: &Path) {
+    let mut state = workspace.as_os_str().to_owned();
+    state.push(".fork");
+    let state = PathBuf::from(state);
+    if state.is_dir() {
+        unlock_overlay_work(&state.join("work"));
+        let _ = fs::remove_dir_all(&state);
+    }
+}
+
+/// `rudder-jj` next to this executable (jj plus Rudder's store backend and
+/// overlay working copy, needed for fork workspaces), else stock `jj`.
+/// `RUDDER_JJ_BIN` overrides; an empty value forces stock jj.
+pub(crate) fn jj_program() -> std::ffi::OsString {
+    static PROGRAM: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+    PROGRAM
+        .get_or_init(|| {
+            if let Some(value) = std::env::var_os("RUDDER_JJ_BIN") {
+                return if value.is_empty() { "jj".into() } else { value };
+            }
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("rudder-jj")))
+                .filter(|path| path.is_file())
+                .map(|path| path.into_os_string())
+                .unwrap_or_else(|| "jj".into())
+        })
+        .clone()
 }
 
 /// What preparing a finished worker for automatic integration found.
@@ -2341,7 +2380,7 @@ pub(crate) fn prepare_worker_integration(repo_root: &Path, workspace: &Path) -> 
     // "Current main change" is the newest bookmark under the main checkout's @.
     // If the revset does not resolve (no bookmark yet), skip the rebase; the
     // merge itself still reports conflicts.
-    let rebase_output = Command::new("jj")
+    let rebase_output = Command::new(jj_program())
         .args(["rebase", "-b", "@", "-d", "latest(heads(::default@ & bookmarks()))"])
         .current_dir(workspace)
         .stdin(Stdio::null())
@@ -2431,7 +2470,7 @@ fn run_integration_check(workspace: &Path, command: &str) -> IntegrationPrep {
 }
 
 pub(crate) fn jj_unresolved_conflicts(cwd: &Path) -> Vec<String> {
-    let Ok(output) = Command::new("jj")
+    let Ok(output) = Command::new(jj_program())
         .args(["resolve", "--list"])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -2456,7 +2495,7 @@ pub(crate) fn jj_unresolved_conflicts(cwd: &Path) -> Vec<String> {
 /// Change ids of the working-copy commit's parents. A 2-sided merge conflict has
 /// exactly two parents (the two sides being integrated); octopus merges have more.
 pub(crate) fn jj_parent_revs(cwd: &Path) -> Vec<String> {
-    let Ok(output) = Command::new("jj")
+    let Ok(output) = Command::new(jj_program())
         .args([
             "log",
             "--no-graph",
@@ -2486,7 +2525,7 @@ pub(crate) fn jj_parent_revs(cwd: &Path) -> Vec<String> {
 /// Contents of `path` at revision `rev`, or None if the file does not exist there
 /// (e.g. one side of a modify/delete conflict).
 pub(crate) fn jj_file_show(cwd: &Path, rev: &str, path: &str) -> Option<String> {
-    let output = Command::new("jj")
+    let output = Command::new(jj_program())
         .args(["file", "show", "--no-pager", "-r", rev, path])
         .current_dir(cwd)
         .stdin(Stdio::null())

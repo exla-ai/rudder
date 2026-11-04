@@ -1096,7 +1096,10 @@ impl TerminalPane {
         }
         // After trust: trust keys on the agent program, and the fork's
         // workspace path is the agent's cwd inside its namespace too.
-        let command = enter_fork(command, options.cwd.as_deref());
+        let command = enter_fork(
+            with_tool_cache_env(command, std::env::var("RUDDER_AGENT_TOOL_ENV").ok().as_deref()),
+            options.cwd.as_deref(),
+        );
         let mut builder = command_builder(command, &options.term)?;
         if let Some(cwd) = &options.cwd {
             builder.cwd(cwd);
@@ -2147,6 +2150,22 @@ impl TerminalPane {
     }
 }
 
+/// Adds the shared tool cache env (src/tool-cache.ts `toolCacheEnv("agent")`,
+/// passed down by the TS launcher as `RUDDER_AGENT_TOOL_ENV` JSON) to an agent
+/// command. Keys the command already sets win.
+pub(crate) fn with_tool_cache_env(command: Option<TerminalCommand>, json: Option<&str>) -> Option<TerminalCommand> {
+    let mut command = command?;
+    let Some(map) = json.and_then(|json| serde_json::from_str::<std::collections::BTreeMap<String, String>>(json).ok()) else {
+        return Some(command);
+    };
+    for (key, value) in map {
+        if !command.env.iter().any(|(existing, _)| *existing == key) {
+            command.env.push((key, value));
+        }
+    }
+    Some(command)
+}
+
 /// An agent workspace that is an overlay fork of the warm snapshot (see
 /// src/warm-snapshot.ts) has `<workspace>.fork/enter`; its files exist only
 /// inside the fork's mount namespace, so the command runs through it.
@@ -2225,6 +2244,18 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_commands_get_the_shared_tool_cache_env() {
+        let mut command = TerminalCommand::with_args("claude", ["--x"]);
+        command.env.push(("CARGO_HOME".into(), "/mine".into()));
+        let json = r#"{"SCCACHE_DIR":"/c/sccache","CARGO_HOME":"/c/cargo"}"#;
+        let out = with_tool_cache_env(Some(command), Some(json)).unwrap();
+        assert!(out.env.contains(&("SCCACHE_DIR".into(), "/c/sccache".into())));
+        assert!(out.env.contains(&("CARGO_HOME".into(), "/mine".into())));
+        assert!(!out.env.contains(&("CARGO_HOME".into(), "/c/cargo".into())));
+        assert!(with_tool_cache_env(None, Some(json)).is_none());
+    }
 
     #[test]
     fn full_output_queue_stops_the_producer_and_teardown_releases_it() {

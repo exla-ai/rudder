@@ -3158,8 +3158,19 @@ async function runAttach(
         return;
       }
       if (!hasControl) {
-        session.showStatus("Read-only · another terminal has control");
-        return;
+        if (socket.readyState !== WebSocket.OPEN) {
+          session.showStatus("Read-only · another terminal has control");
+          return;
+        }
+        // Typing here picks this terminal: take control from the other one
+        // (often a laptop that slept) instead of dropping the keys. The relay
+        // handles the request, the size and then the keys in order. An older
+        // relay answers read-only again and the badge comes back.
+        socket.send(JSON.stringify({ type: "take-control" }));
+        hasControl = true;
+        sendResize();
+        requestRepaint();
+        session.clearStatus();
       }
       // The machine end is away (its dashboard restarting, the machine
       // waking). Forwarding Ctrl+C would kill the next dashboard as soon as it
@@ -3570,7 +3581,7 @@ async function runAttach(
       // Past the splash nothing is written into the dashboard's picture: the
       // state goes in the corner badge and comes off when it is over.
       if (!hasControl) {
-        session.showStatus("Read-only · another terminal has control");
+        session.showStatus("Another terminal has control · type to take it");
       } else if (workerState === "down") {
         session.showStatus(message.state === "worker-waiting"
           ? "Waiting for the cloud machine · your typing is kept"

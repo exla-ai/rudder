@@ -318,6 +318,30 @@ test("input is injected into the worker and output is read back", async (t) => {
   assert.ok(!observerTraffic.some((item) => item.text.includes("observer-must-not-type")));
   assert.ok(!observerTraffic.some((item) => item.text.includes('"cols":55')));
 
+  // Typing in the read-only terminal takes control: the request, its size and
+  // its keys arrive in order. The terminal that had control turns read-only
+  // and its keys stop reaching the worker, until it types to take it back.
+  const oldControllerStatuses = [];
+  clientWs.on("message", (data, isBinary) => {
+    if (!isBinary) {
+      try { oldControllerStatuses.push(JSON.parse(Buffer.from(data).toString("utf8"))); } catch { /* ignore */ }
+    }
+  });
+  replayClient.send(JSON.stringify({ type: "take-control" }));
+  replayClient.send(JSON.stringify({ type: "resize", cols: 77, rows: 20 }));
+  replayClient.send(Buffer.from("typed-to-take-control", "utf8"), { binary: true });
+  await waitFor(() => workspaceReceived.some((item) => item.text.includes("typed-to-take-control")));
+  assert.ok(workspaceReceived.some((item) => item.text.includes('"cols":77')), "the new controller's size applies");
+  await waitFor(() => oldControllerStatuses.some((item) => item.control === "read-only"));
+  const beforeOldController = workspaceReceived.length;
+  clientWs.send(Buffer.from("old-controller-is-read-only", "utf8"), { binary: true });
+  await sleep(150);
+  assert.ok(!workspaceReceived.slice(beforeOldController).some((item) => item.text.includes("old-controller-is-read-only")));
+  clientWs.send(JSON.stringify({ type: "take-control" }));
+  await waitFor(() => oldControllerStatuses.some((item) => item.state === "controller-promoted"));
+  await waitFor(() => replayStatuses.filter((item) => item.control === "read-only").length >= 2);
+  replayStatuses.length = 0;
+
   // When the controller leaves, the waiting viewer is promoted and sends its
   // own current dimensions. Stale bytes/size from the old controller are not
   // inherited across the ownership change.

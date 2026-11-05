@@ -1143,7 +1143,8 @@ function attachClient(kind: ChannelKind, id: string, ws: WebSocket, clientId?: s
   // One terminal owns input + PTY geometry at a time. A second observer must
   // not steal control merely by connecting: doing so resized the shared PTY to
   // the observer's dimensions and made the original terminal appear frozen.
-  // Control moves only when the current controller disconnects.
+  // Control moves when the current controller disconnects, or when another
+  // terminal asks for it by typing (take-control below).
   const becomesController = !isOpen(channel.controller);
   if (becomesController) {
     channel.controller = ws;
@@ -1164,6 +1165,10 @@ function attachClient(kind: ChannelKind, id: string, ws: WebSocket, clientId?: s
 
   ws.on("message", (data, isBinary) => {
     if (channel.controller !== ws) {
+      if (!isBinary && data instanceof Buffer && isTakeControlMessage(data.toString("utf8"))) {
+        takeControl(channel, ws);
+        return;
+      }
       sendSocket(ws, JSON.stringify({ type: "status", state: "read-only" }));
       return;
     }
@@ -1218,6 +1223,36 @@ function attachClient(kind: ChannelKind, id: string, ws: WebSocket, clientId?: s
     disposeChannelIfEmpty(kind, id);
   });
   ws.on("error", () => undefined);
+}
+
+/**
+ * A read-only terminal the user typed into takes control: its keys used to be
+ * dropped while another terminal (often a laptop that slept, whose dead socket
+ * keeps control until two pings fail) held it. The terminal giving it up turns
+ * read-only and takes it back the same way.
+ */
+function takeControl(channel: Channel, ws: WebSocket): void {
+  const previous = channel.controller;
+  channel.controller = ws;
+  // Buffered input and geometry belong to the controller that produced them.
+  channel.pendingInput = [];
+  channel.pendingInputBytes = 0;
+  channel.latestResize = undefined;
+  if (previous && isOpen(previous)) {
+    sendSocket(previous, JSON.stringify({ type: "status", state: "read-only", control: "read-only" }));
+  }
+  sendSocket(ws, JSON.stringify({ type: "status", state: "controller-promoted", control: "active" }));
+}
+
+function isTakeControlMessage(text: string): boolean {
+  if (text.length > 64) {
+    return false;
+  }
+  try {
+    return (JSON.parse(text) as { type?: unknown }).type === "take-control";
+  } catch {
+    return false;
+  }
 }
 
 function containsNonReplayableInterrupt(data: Buffer): boolean {

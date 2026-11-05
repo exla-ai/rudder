@@ -5324,6 +5324,30 @@ fn codex_launches_carry_the_efficiency_policy_and_an_explicit_effort() {
     assert_eq!(default_effort_for(Backend::Claude, "opus"), Some(EffortLevel::High));
 }
 
+/// Codex runs its commands in an environment of its own, so the shared tool
+/// cache goes into its shell policy on every launch (workers and planners).
+#[test]
+fn codex_launches_put_the_tool_cache_in_codex_shell_policy() {
+    let _env = env_guard();
+    std::env::set_var(
+        "RUDDER_AGENT_TOOL_ENV",
+        r#"{"npm_config_cache":"/cache/rudder/npm","CARGO_HOME":"/cache/rudder/cargo","bad name":"x"}"#,
+    );
+    let has = |args: &[String], value: &str| {
+        args.windows(2).any(|window| window[0] == "-c" && window[1] == value)
+    };
+    let fork = codex_fork_command("gpt-test", None, "sid-codex", None);
+    assert!(has(&fork.args, r#"shell_environment_policy.set.npm_config_cache="/cache/rudder/npm""#), "{:?}", fork.args);
+    assert!(has(&fork.args, r#"shell_environment_policy.set.CARGO_HOME="/cache/rudder/cargo""#));
+    assert!(!fork.args.iter().any(|arg| arg.contains("bad name")), "invalid names are skipped");
+    let mut planner = Vec::new();
+    push_codex_planner_config_overrides(&mut planner, None);
+    assert!(has(&planner, r#"shell_environment_policy.set.npm_config_cache="/cache/rudder/npm""#));
+    std::env::remove_var("RUDDER_AGENT_TOOL_ENV");
+    let bare = codex_fork_command("gpt-test", None, "sid-codex", None);
+    assert!(!bare.args.iter().any(|arg| arg.starts_with("shell_environment_policy")));
+}
+
 #[test]
 fn plan_commands_use_read_only_backend_profiles() {
     // This asserts the HEADLESS decomposer profile, which is now the opt-out path

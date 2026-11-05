@@ -874,6 +874,33 @@ fn push_codex_common_config_overrides(args: &mut Vec<String>, effort: Option<Eff
     };
     args.push("-c".to_string());
     args.push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
+    push_codex_tool_cache_env(args);
+}
+
+/// The shared tool cache (src/tool-cache.ts, passed down by the TS launcher as
+/// `RUDDER_AGENT_TOOL_ENV`) set inside Codex's shell policy. Codex builds its
+/// own environment for the commands it runs, and a policy such as
+/// `inherit = "core"` drops every other variable, so the PTY env alone does
+/// not reach them (src/codex-binary.ts `codexShellEnvConfigArgs` does the same
+/// for TS launches). Claude passes its environment through unchanged.
+fn push_codex_tool_cache_env(args: &mut Vec<String>) {
+    let Some(vars) = env::var("RUDDER_AGENT_TOOL_ENV")
+        .ok()
+        .and_then(|json| serde_json::from_str::<std::collections::BTreeMap<String, String>>(&json).ok())
+    else {
+        return;
+    };
+    for (name, value) in vars {
+        let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            continue;
+        }
+        // A JSON string is a valid TOML basic string.
+        let value = serde_json::to_string(&value).unwrap_or_default();
+        args.push("-c".to_string());
+        args.push(format!("shell_environment_policy.set.{name}={value}"));
+    }
 }
 
 /// Implementation, review, and shipping agents match a direct Codex session:

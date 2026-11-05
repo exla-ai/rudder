@@ -162,14 +162,12 @@ on the control plane and the webhook turned on in the Linear OAuth app.
 4.2 external home host (2026-11-05): `rudder cloud host <ssh-target>` runs
 the home on any Linux box with Docker (engineering reference §9.6). The
 user's home moved off Fly to an AWS m8azn.6xlarge (us-west-2, 5GHz, 24 vCPU,
-92GB, 500GB gp3) as a stopgap until a bare-metal box is ready. The move was
-done before 4.2 was deployed: the 4.1.2 image runs there under the old Fly
-identity, and the Fly machine is stopped with `init.exec` set to sleep so the
-control plane cannot start a second home. After the 4.2 image and control
-plane are deployed, run `rudder cloud host` against that box once to switch
-it to external mode (rotates the token); then the Fly machine can be
-destroyed. Agent scratch now lives in `/workspace/scratch/<run>` and is
-cleaned hourly.
+92GB, 500GB gp3) as a stopgap until a bare-metal box is ready. The disk was
+copied under the 4.1.2 image with the Fly machine stopped (`init.exec` set to
+sleep); on 2026-11-05 after the 4.2.0 deploy, `rudder cloud host` switched it
+to external mode on `rudder-workers-exla:4.2.0`. The old Fly machine and
+volume are kept until the user says to destroy them. Agent scratch now lives
+in `/workspace/scratch/<run>` and is cleaned hourly.
 
 ## 8. Disk
 

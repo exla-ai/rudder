@@ -16999,9 +16999,14 @@ Address the objection directly. If you disagree, say why inside \
     /// isolated workers started from the dashboard. Main, one-off, orchestrator,
     /// swarm experiments and rows that already need the user are left alone.
     fn is_auto_integration_candidate(&self, run: &AgentRun) -> bool {
+        // A worker's turn ending is not the work being finished: the user may still
+        // be talking to it. Only planned nodes merge on their own (the plan waits on
+        // them), and only while nobody has typed a follow-up into them. Workers
+        // started from the dashboard merge when the user presses `m`.
+        let user_turns = run.turns.iter().filter(|turn| turn.source == "user").count();
         run.status == AgentStatus::Done
-            && (run.node_id.is_some()
-                || (run.mode == AgentMode::Execute && run.has_merge_source()))
+            && run.node_id.is_some()
+            && user_turns <= 1
             && !run.swarm_experiment
             && !run.is_main()
             && !run.is_oneoff()

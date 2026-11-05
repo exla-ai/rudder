@@ -28707,7 +28707,7 @@ fn integration_prep_runs_project_checks_in_the_workspace() {
 }
 
 #[test]
-fn finished_isolated_workers_are_integrated_automatically() {
+fn only_untouched_planned_nodes_are_integrated_automatically() {
     let finished = |id: &str| {
         let mut run = test_agent_run(id, "manual worker");
         run.status = AgentStatus::Done;
@@ -28715,17 +28715,28 @@ fn finished_isolated_workers_are_integrated_automatically() {
         run
     };
     let mut app = App::new();
+    // A dashboard worker whose turn ended may still be in conversation: `m` merges it.
     let worker = finished("worker");
+    assert!(!app.is_auto_integration_candidate(&worker));
+    let mut node = finished("node");
+    node.node_id = Some("n1".to_string());
+    assert!(app.is_auto_integration_candidate(&node));
+    // Once the user types a follow-up into a planned node, it waits for `m` too.
+    let mut talked = finished("talked");
+    talked.node_id = Some("n4".to_string());
+    record_agent_prompt(&mut talked, "one more thing".to_string(), "user");
+    assert!(!app.is_auto_integration_candidate(&talked));
     let mut oneoff = finished("oneoff");
+    oneoff.node_id = Some("n2".to_string());
     oneoff.mode = AgentMode::OneOff;
     let mut experiment = finished("experiment");
+    experiment.node_id = Some("n3".to_string());
     experiment.swarm_experiment = true;
-    assert!(app.is_auto_integration_candidate(&worker));
     assert!(!app.is_auto_integration_candidate(&oneoff));
     assert!(!app.is_auto_integration_candidate(&experiment));
-    app.agents = vec![worker];
-    app.apply_integration_prep("worker", IntegrationPrep::Ready);
-    assert!(app.integration_prepared.contains("worker"));
+    app.agents = vec![node];
+    app.apply_integration_prep("node", IntegrationPrep::Ready);
+    assert!(app.integration_prepared.contains("node"));
 }
 
 #[test]

@@ -3583,7 +3583,7 @@ pub(crate) fn render_drawer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
     frame.render_widget(
         Paragraph::new(lines).style(app_style()).block(pane_block(
-            &format!("{} · {}", bucket.label(), members.len()),
+            &format!("{} · {} · enter reopens · esc back", bucket.label(), members.len()),
             focused,
             app.nav_mode,
         )),

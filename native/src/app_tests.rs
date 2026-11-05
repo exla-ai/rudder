@@ -18343,13 +18343,6 @@ fn enter_opens_the_drawer_and_esc_closes_it() {
         app.selected_agent, 2,
         "opening highlights the first member so m/d/b act on it"
     );
-
-    // Enter again on the same header closes it (the chevron is a toggle).
-    app.handle_agents_key(KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.drawer_open(), None);
-
-    app.handle_agents_key(KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.drawer_open(), Some(Bucket::Done));
     app.handle_agents_key(KeyEvent::from(KeyCode::Esc));
     assert_eq!(app.drawer_open(), None);
     assert_eq!(
@@ -18357,6 +18350,46 @@ fn enter_opens_the_drawer_and_esc_closes_it() {
         Some(Bucket::Done),
         "esc backs out to the header, not out of the sidebar"
     );
+}
+
+#[test]
+fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
+    let mut app = drawer_fleet();
+    app.focus = FocusPane::Agents;
+    app.drawer_cursor = Some(Bucket::Done);
+    app.handle_agents_key(KeyEvent::from(KeyCode::Enter));
+    app.move_drawer_selection(1);
+    assert_eq!(app.selected_agent, 3);
+
+    app.handle_agents_key(KeyEvent::from(KeyCode::Enter));
+    assert_eq!(app.drawer_open(), None);
+    assert_eq!(app.selected_agent, 3, "the highlighted run stays selected");
+    assert_eq!(app.focus, FocusPane::Worker, "its pane is focused, ready to type");
+    assert!(app.notice.as_deref().unwrap_or("").starts_with("reopened "));
+}
+
+#[test]
+fn finished_agents_older_than_the_retention_are_stale() {
+    let repo = unique_test_repo("finished-retention");
+    let mut merged = test_agent_run("run-merged", "merged work");
+    merged.status = AgentStatus::Merged;
+    let mut review = test_agent_run("run-review", "waiting for review");
+    review.status = AgentStatus::Done;
+    for run in [&merged, &review] {
+        let dir = native_run_dir(&repo, &run.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("run.json"), "{}").unwrap();
+    }
+    let week = Duration::from_secs(7 * 24 * 60 * 60);
+    assert!(!finished_agent_is_stale(&repo, &merged, week), "touched just now");
+    assert!(finished_agent_is_stale(&repo, &merged, Duration::ZERO));
+    assert!(
+        !finished_agent_is_stale(&repo, &review, Duration::ZERO),
+        "work waiting for review is never cleaned up"
+    );
+    let missing = test_agent_run("run-missing", "no record");
+    assert!(!finished_agent_is_stale(&repo, &missing, Duration::ZERO));
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]

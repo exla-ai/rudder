@@ -2167,6 +2167,8 @@ struct App {
     integration_prep_rx: mpsc::Receiver<(String, IntegrationPrep)>,
     integration_prep_inflight: HashSet<String>,
     integration_prepared: HashSet<String>,
+    /// When finished agents older than FINISHED_RETENTION were last swept.
+    finished_cleanup_at: Option<Instant>,
     /// (run id, turn count) whose main/one-off summary was already read.
     direct_summary_read: HashSet<(String, usize)>,
     last_user_activity: Instant,
@@ -3357,6 +3359,7 @@ impl App {
             integration_prep_rx,
             integration_prep_inflight: HashSet::new(),
             integration_prepared: HashSet::new(),
+            finished_cleanup_at: None,
             direct_summary_read: HashSet::new(),
             last_user_activity: Instant::now(),
             mouse_debug: env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
@@ -4758,7 +4761,7 @@ impl App {
                 if let Some(bucket) = self.drawer_cursor {
                     self.delete_pending = None;
                     if self.drawer_open() == Some(bucket) {
-                        self.close_drawer();
+                        self.reopen_drawer_selection();
                     } else {
                         self.open_drawer(bucket);
                     }
@@ -4985,9 +4988,9 @@ impl App {
                     self.close_drawer();
                     self.focus = FocusPane::Agents;
                 }
-                // Enter drops into the highlighted run itself: close the drawer and
-                // hand the pane back to that run's session.
-                KeyCode::Enter => self.close_drawer(),
+                // Enter reopens the highlighted run: close the drawer and hand the
+                // pane to that run's session, ready to type into.
+                KeyCode::Enter => self.reopen_drawer_selection(),
                 KeyCode::Char('q') => return self.confirm_or_quit(),
                 _ => {}
             }
@@ -5478,6 +5481,25 @@ impl App {
             selected: next,
         });
         self.sync_selection_to_drawer();
+    }
+
+    /// Enter in an open finished-work drawer: select the highlighted agent, close
+    /// the drawer and focus its pane. Typing there continues the same session
+    /// (`reopen_selected_finished_worker` flips it back to Running).
+    fn reopen_drawer_selection(&mut self) {
+        let Some(index) = self.drawer_selected_agent() else {
+            self.close_drawer();
+            return;
+        };
+        self.selected_agent = index;
+        self.close_drawer();
+        self.drawer_cursor = None;
+        self.worker_view = WorkerView::Terminal;
+        self.worker_selection = None;
+        self.focus = FocusPane::Worker;
+        let label = self.agents[index].task_summary.clone();
+        self.notice = Some(format!("reopened {label} · type to continue it"));
+        self.dirty = true;
     }
 
     fn sync_selection_to_drawer(&mut self) {
@@ -17117,6 +17139,7 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn integrate_ready_plan_nodes(&mut self) {
+        self.cleanup_stale_finished_agents();
         // Hold integration steady for a plan whose structural rebase is in flight: merging
         // would shift a RUNNING node into the MERGED zone mid-diff and the build-forward
         // apply would compute its zones against a moving target. Asked per plan below,
@@ -17699,6 +17722,38 @@ Address the objection directly. If you disagree, say why inside \
         if clean_exit {
             self.notice = Some("agent already finished".into());
         }
+    }
+
+    /// Merged, failed and stopped agents untouched for FINISHED_RETENTION leave the
+    /// list (and their workspaces are removed), checked at most hourly. Their history
+    /// stays in jj. Agents waiting for review are never cleaned up.
+    fn cleanup_stale_finished_agents(&mut self) {
+        if self
+            .finished_cleanup_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60 * 60))
+        {
+            return;
+        }
+        self.finished_cleanup_at = Some(Instant::now());
+        let stale: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|run| finished_agent_is_stale(&self.cwd, run, FINISHED_RETENTION))
+            .map(|run| run.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for id in &stale {
+            if let Some(index) = self.agents.iter().position(|run| &run.id == id) {
+                let _ = self.delete_agent_now(index);
+            }
+        }
+        self.notice = Some(format!(
+            "cleaned up {} finished agent(s) older than 7 days",
+            stale.len()
+        ));
+        self.dirty = true;
     }
 
     fn delete_selected_agent(&mut self) {
@@ -21789,6 +21844,26 @@ fn load_plan_queue(cwd: &Path) -> Option<PlanQueueFile> {
 /// disk must not relaunch), and which PLANNER ROWS survive is decided by which plans came
 /// back (every plan that ever ran left a planner row behind). Restoring them separately is
 /// what made the concurrent-plan collapse possible.
+/// How long a merged, failed or stopped agent stays in the list.
+const FINISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// A merged, failed or stopped agent with no live terminal whose run record has
+/// not changed for `retention`. Agents waiting for review (Done) are never stale.
+fn finished_agent_is_stale(repo_root: &Path, run: &AgentRun, retention: Duration) -> bool {
+    if run.is_main() || run.is_orchestrator() || run.terminal.is_some() {
+        return false;
+    }
+    if !matches!(run.status, AgentStatus::Merged | AgentStatus::Failed | AgentStatus::Stopped) {
+        return false;
+    }
+    let record = native_run_dir(repo_root, &run.id).join("run.json");
+    std::fs::metadata(&record)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= retention)
+}
+
 fn restore_persisted_state(cwd: &Path) -> (Vec<AgentRun>, Vec<PlanState>) {
     let mut agents = load_persisted_agents(cwd);
     // Restore the approval-gate queue (queued nodes + gate state) so a mid-plan restart

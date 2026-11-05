@@ -229,6 +229,27 @@ export class AttachSession {
     }
   }
 
+  /**
+   * Keys a connection took but never confirmed (it died first), or could not
+   * take at all, kept for the next one: `first` puts them ahead of keys typed
+   * since. An interrupt is never replayed, as in onGapInput.
+   */
+  keepUnsent(chunks: Buffer[], first: boolean): void {
+    const kept: Buffer[] = [];
+    let bytes = 0;
+    for (const chunk of chunks) {
+      if (chunk.length === 0 || containsCtrlC(chunk) || this.queuedBytes + bytes + chunk.length > QUEUE_LIMIT_BYTES) {
+        continue;
+      }
+      kept.push(Buffer.from(chunk));
+      bytes += chunk.length;
+    }
+    if (kept.length) {
+      this.queued = first ? [...kept, ...this.queued] : [...this.queued, ...kept];
+      this.queuedBytes += bytes;
+    }
+  }
+
   /** Keys typed while the link was down, in order, for the new connection. */
   takeQueued(): Buffer | null {
     if (this.queuedBytes === 0) {

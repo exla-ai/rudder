@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { AttachSession, containsCtrlC } from "./attach-session.js";
+import { InputReceipts } from "./input-receipts.js";
 import { PasteBridge, readLocalClipboard } from "./paste-bridge.js";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -2850,6 +2851,9 @@ type AttachTarget = {
 const ATTACH_PING_MS = 5_000;
 const ATTACH_PONG_TIMEOUT_MS = 20_000;
 const ATTACH_SLEEP_GAP_MS = 15_000;
+// Typed keys normally confirm within one round trip; this long without a
+// receipt means the link is gone even though the socket still says open.
+const ATTACH_RECEIPT_TIMEOUT_MS = 4_000;
 // Retry at once (a blip, a deploy), then back off; never more than 5s apart,
 // so coming back to a reachable cloud never waits long.
 const ATTACH_RETRY_DELAYS_MS = [250, 1_000, 2_000, 3_000, 5_000];
@@ -3052,6 +3056,31 @@ async function runAttach(
     let hasControl = true;
     let result: AttachResult = "failed";
 
+    // Keys sent but not yet known to have reached the relay (src/input-receipts.ts):
+    // a link that dies first hands them to the next connection.
+    const receipts = new InputReceipts();
+    const sendPing = () => {
+      socket.ping(receipts.nextPing());
+    };
+    const sendInput = (data: Buffer) => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        session.keepUnsent([data], false);
+        return;
+      }
+      // Typing into a link whose receipts stopped coming: it is dead, so stop
+      // feeding it and let the reconnect carry these keys.
+      if (receipts.oldestPingAge() > ATTACH_RECEIPT_TIMEOUT_MS) {
+        session.keepUnsent([data], false);
+        socket.terminate();
+        return;
+      }
+      socket.send(data, { binary: true });
+      predictor?.onInput(data);
+      if (receipts.sent(data)) {
+        try { sendPing(); } catch { /* the liveness check handles a dead socket */ }
+      }
+    };
+
     const splashAllowed = isInteractive && !options.json && !options.quietBanner && !resuming;
     const splash = splashAllowed ? new AttachSplash(stdout, target.label) : null;
     // Predictive local echo (src/predict.ts): typed characters appear at the
@@ -3088,12 +3117,7 @@ async function runAttach(
     // Files and clipboard images from this computer reach the cloud machine
     // as uploads (src/paste-bridge.ts); only the home's repo rows take them.
     const paste = new PasteBridge({
-      send: (data) => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(data, { binary: true });
-          predictor?.onInput(data);
-        }
-      },
+      send: sendInput,
       upload: (file, name) => uploadPastedFile(baseUrl, token, target.id, file, name),
       readClipboard: target.kind === "workspace" && isInteractive ? readLocalClipboard : undefined,
       status: (text) => (text ? session.showStatus(text) : session.clearStatus()),
@@ -3177,12 +3201,14 @@ async function runAttach(
     // as a dropped connection, which attachWithReconnect reopens.
     let lastHeard = Date.now();
     let lastTick = Date.now();
-    let pingSentAt = 0;
-    socket.on("pong", () => {
+    socket.on("pong", (data: Buffer) => {
       lastHeard = Date.now();
-      if (pingSentAt) {
-        predictor?.noteRtt(Date.now() - pingSentAt);
-        pingSentAt = 0;
+      const { rtt, again } = receipts.pong(data);
+      if (rtt !== null) {
+        predictor?.noteRtt(rtt);
+      }
+      if (again) {
+        try { sendPing(); } catch { /* the liveness check handles a dead socket */ }
       }
     });
     socket.on("message", () => { lastHeard = Date.now(); });
@@ -3193,13 +3219,12 @@ async function runAttach(
       if (socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (slept || now - lastHeard > ATTACH_PONG_TIMEOUT_MS) {
+      if (slept || now - lastHeard > ATTACH_PONG_TIMEOUT_MS || (receipts.unconfirmed > 0 && receipts.oldestPingAge() > ATTACH_RECEIPT_TIMEOUT_MS)) {
         socket.terminate();
         return;
       }
       try {
-        socket.ping();
-        pingSentAt = Date.now();
+        sendPing();
       } catch {
         socket.terminate();
       }
@@ -3230,6 +3255,7 @@ async function runAttach(
       process.off("SIGINT", onSigint);
       splash?.stop();
       if (keepTerminal) {
+        session.keepUnsent(receipts.takeUnconfirmed(), true);
         session.enterGap();
       } else {
         session.release();
@@ -3335,8 +3361,7 @@ async function runAttach(
       session.exitGap();
       // Measure the round trip at once: predictive echo waits on it.
       try {
-        socket.ping();
-        pingSentAt = Date.now();
+        sendPing();
       } catch {
         // the liveness timer retries
       }
@@ -3381,7 +3406,7 @@ async function runAttach(
       // Typed while the link was down: sent first, in order.
       const queued = session.takeQueued();
       if (queued) {
-        socket.send(queued, { binary: true });
+        sendInput(queued);
       }
       requestRepaint();
       if (session.theme?.known) {

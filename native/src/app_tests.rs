@@ -8311,7 +8311,7 @@ fn esc_dismisses_the_notice_without_being_consumed() {
 fn notice_style_colors_errors_and_pending_confirms() {
     assert_eq!(
         notice_style("merge stopped: boom", true).fg,
-        Some(FAILED_COLOR)
+        Some(pal().failed)
     );
     assert_eq!(
         notice_style(
@@ -8319,7 +8319,7 @@ fn notice_style_colors_errors_and_pending_confirms() {
             true
         )
         .fg,
-        Some(RUNNING_COLOR)
+        Some(pal().waiting)
     );
     assert_eq!(
         notice_style("integrated 2 nodes locally · dependents unblocked", true).fg,

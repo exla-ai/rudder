@@ -352,6 +352,7 @@ pub(crate) const SPINNER_FRAMES: [&str; 10] = [
     "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280F}",
 ];
+#[cfg_attr(not(test), allow(dead_code))]
 const AGENT_PANE_HINTS: &[&str] = &[
     "j/k move",
     // ⌥v/⌥b share this line rather than taking one of their own: the hint

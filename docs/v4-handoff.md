@@ -53,6 +53,15 @@ phase times for headless runs; `LocalStore::gc` refuses stores that hold jj
 objects. Fork commits stay in Git on purpose: a fork is a workspace of the
 user's colocated repo, so it shares that repo's backend.
 
+Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
+then a colored status line with elapsed time and +N -N; the selected card is a
+rounded outline), a header row (wordmark, project, branch, version), a
+one-line prompt pill, a footer with the keys for the current pane and `?` for
+all keys. Motion only while something moves (about 11 fps cap): a 600ms
+startup reveal any key skips, a shimmer on working cards, a short glow when a
+card changes state. Notices show as a pill and then settle into the footer and
+never resize the prompt.
+
 ## 3. Status of every agent
 
 Plan lanes (all merged locally):

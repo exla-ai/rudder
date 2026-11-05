@@ -5055,9 +5055,9 @@ pub(crate) fn notice_style(text: &str, focused: bool) -> Style {
     const CONFIRM_MARKERS: &[&str] = &["press d again", "press q / ctrl+c again", "still running"];
     let lower = text.to_ascii_lowercase();
     if CONFIRM_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        Style::default().fg(RUNNING_COLOR)
+        Style::default().fg(pal().waiting)
     } else if ERROR_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        Style::default().fg(FAILED_COLOR)
+        Style::default().fg(pal().failed)
     } else {
         muted_style(focused)
     }
@@ -6782,11 +6782,17 @@ pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
         app.notice_seen = Some((text.to_string(), now));
     }
     let since = app.notice_seen.as_ref().map(|(_, at)| *at).unwrap_or(now);
-    let error = notice_style(text, true).fg == Some(pal().failed);
+    let color = notice_style(text, true).fg;
+    let error = color == Some(pal().failed);
     let ttl = if error { NOTICE_ERROR_PILL_FOR } else { NOTICE_PILL_FOR };
-    // A long notice (a /help listing) is meant to be read: it stays up until
-    // Esc or the next notice instead of shrinking into the footer.
-    notice_in_progress(text) || text.chars().count() > 140 || now.duration_since(since) < ttl
+    // A pending confirmation ("press d again") and a long notice (a /help
+    // listing) are meant to be acted on or read: they stay up until Esc or the
+    // next notice instead of shrinking into the footer.
+    let confirm = color == Some(pal().waiting);
+    notice_in_progress(text)
+        || confirm
+        || text.chars().count() > 140
+        || now.duration_since(since) < ttl
 }
 
 pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -6832,13 +6838,10 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     };
     let glyph_color = if color == p.muted { p.accent } else { color };
     let text_color = if color == p.muted { p.on_surface } else { color };
-    // Short notices stay a small pill; a long one (a /help listing, an error
-    // with its cause) widens and grows so none of it is cut off.
-    let max_w = if text.chars().count() > 140 {
-        (area.width as usize).saturating_sub(6).clamp(12, 110)
-    } else {
-        (area.width as usize * 2 / 3).clamp(12, 72)
-    };
+    // The pill is as wide as its text: a short notice stays small, a long one
+    // (a /help listing, an error with its cause) widens and wraps only when
+    // it must, so a sentence is not broken across rows needlessly.
+    let max_w = (area.width as usize).saturating_sub(6).clamp(12, 120);
     let wrapped = wrap_text(&text, max_w.saturating_sub(2) as u16);
     let max_rows = (area.height as usize).saturating_sub(3).max(1);
     let lines: Vec<Line<'static>> = wrapped

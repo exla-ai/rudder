@@ -143,6 +143,13 @@ before step 9.
 the rudder-native cargo suite pass. Not yet released or deployed; see
 PLAN.md section 0 "After 4.0.0" for what remains.
 
+Linear tasks (2026-11-05, not deployed): Settings links Linear projects to
+Rudder projects, "Generate tasks" turns a goal into `rudder`-labeled issues
+(OpenAI `gpt-6-luna`, Claude Haiku 5.5 fallback), the Linear webhook starts
+an agent per labeled issue, and run start / needs-you / merge sync back to
+the issue (engineering reference §9.8.2). Needs `RUDDER_LINEAR_WEBHOOK_SECRET`
+on the control plane and the webhook turned on in the Linear OAuth app.
+
 ## 8. Disk
 
 Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj

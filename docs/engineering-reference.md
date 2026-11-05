@@ -1394,6 +1394,32 @@ on the user's own Claude Code / Codex subscription.
   distribution on. Linear app: callback `<base>/api/integrations/linear/callback`.
   The older env-only shared-channel glue (`slack.ts`, `/api/slack/events`) is
   untouched and separate.
+- **Linear tasks** (`integrations.ts`, `linear.ts`, `linear-tasks.ts`, 2026-11-05):
+  each Linear project (or team) links to one Rudder project per install
+  (`rudder_linear_links`; account_id is whose home runs the agents; admins set
+  it, names like Libra -> libra are suggested). `POST /api/app/linear/generate`
+  {goal, linearProjectId | teamId, projectId?} asks OpenAI Responses
+  (`RUDDER_TASKGEN_MODEL`, default `gpt-6-luna`, reasoning none, strict JSON
+  schema) for 3 to 10 tasks, falling back to Claude Haiku 5.5 via
+  `@anthropic-ai/sdk` when `OPENAI_API_KEY` is unset or the call fails
+  (`ANTHROPIC_API_KEY`, plus `anthropic-workspace-id` from
+  `ANTHROPIC_WORKSPACE_ID` for a user key); no key is a 503. Output is
+  validated strictly, then created as issues labeled `rudder` (label found or
+  created per team). The public webhook
+  `https://rudder-cloud-control.fly.dev/api/integrations/linear/webhook`
+  checks `Linear-Signature` (hex HMAC-SHA256 of the raw body with
+  `RUDDER_LINEAR_WEBHOOK_SECRET`, unset is 503) and a 60s `webhookTimestamp`
+  window, answers 200 at once, and starts an agent for an Issue create/update
+  carrying the `rudder` label, routed by the issue's Linear project, then its
+  team. The install is found by `organizationId`, stored in `team_id` at
+  connect (older installs fill it in when the Linear settings load).
+  `rudder_linear_issue_runs` dedupes per issue (app starts too) and maps issue
+  to run: `onHomeState` matches the run by its "Linear ENG-7:" task text, moves
+  the issue to the team's first started state with a comment, comments once
+  when it needs you (held like Slack's), and moves it to completed when it
+  merges. Rows are claimed before each Linear call; failures are logged only.
+  Linear OAuth app setup: Webhooks on, Issues events, that URL; the signing
+  secret is `RUDDER_LINEAR_WEBHOOK_SECRET`.
 - **Plans on the phone/web**: the supervisor reads `.rudder/graph.json` and
   `.rudder/plan-queue.json` (`cloud/worker/plan.mjs`, re-read on mtime) into each
   project's `plan` in home state; `homeProjects` passes it through. Approve is a

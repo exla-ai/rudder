@@ -1476,26 +1476,53 @@ on the user's own Claude Code / Codex subscription.
   secret is `RUDDER_LINEAR_WEBHOOK_SECRET`.
 - **Linear tracking** (`integrations.ts` `syncTrackedRuns`, `linear-track.ts`,
   2026-11-05): on by default for every linked project, no setting. Each new
-  agent there is decided once, in the background, by one `structuredJson` call
-  (the taskgen model and fallback): attach to one of the Linear project's open
-  issues (read at most every 5 minutes), create an issue, or skip (questions,
-  chores, tests, small tweaks, renames, "summarize X", follow-ups). The prompt
-  gets the `userTask` text, the open issues and the project's recently tracked
-  agents; decisions in one project run one at a time, so the second agent sees
-  the issue the first created. Never decided: runs created before
-  `rudder_linear_meta.track_started_at` or before the project was linked, runs
-  from a Linear issue ("Linear ENG-7:" or in `rudder_linear_issue_runs`),
-  `/swarm` experiments (`swarmExperiment` from home.mjs), main, orchestrator,
-  review-all, one-off and gam-adversarial rows, and private agents under an
-  org install. `rudder_linear_tracked_runs` keeps every decision, skips
-  included (a `deciding` claim older than 10 minutes is retried; a model or
-  Linear failure becomes a skip, logged once). No model key: nothing is
-  tracked, logged once per process. Created issues go to the link's project
-  and team without labels, titled by outcome, describing the task with the
-  agent URL. Sync is quiet: started from backlog/unstarted at decision time,
-  one "Merged: <summary line>" comment plus the agent URL at merge, completed
-  only when this run created the issue. Nothing for needs-you or unmerged
-  finishes. Each step is claimed in the row before Linear is called.
+  piece of work there is decided once, in the background, by one
+  `structuredJson` call (the taskgen model and fallback): attach to one of the
+  Linear project's open issues (read at most every 5 minutes) when one covers
+  it, otherwise create an issue for any real work (code, config, docs, infra,
+  investigating a bug to fix it, onboarding or outreach; small fixes get their
+  own small issue), and skip only non-work (questions, explanations, chat or
+  "help", empty or one-word prompts, read-only asks like "summarize the
+  README"). A prompt of fewer than two words is skipped without the model. The
+  prompt gets the `userTask` text, the open issues and the project's recently
+  tracked agents, plans and turns; decisions in one project run one at a time,
+  so the second sees the issue the first created. A piece of work is:
+  - an agent (`rudder_linear_tracked_runs`);
+  - a Rudder plan (`rudder_linear_tracked_plans`, keyed by `planId`): decided
+    from its goal (the plan queue's `plan_request`, else the orchestrator's
+    task, else the workers' "Original request:") and the pieces its workers
+    took. Every worker attaches to the plan's issue without a model call; each
+    worker merge comments, at most 10 merge comments per issue
+    (`merge_commented`). A plan issue Rudder created is completed once the
+    plan's last worker merged: the queue counts from plan.mjs (`pending`,
+    `launched`, `merged`) show nothing left and no worker is live; older homes
+    without counts need every tracked worker merged and no unlaunched graph
+    node;
+  - a branch ("Branch of: <parent task>"; there is no parent id, so the
+    parent is the newest other agent, created no later, whose `userTask`
+    matches): it follows the parent's row, attach to the same issue or skip,
+    without a model call; a missing parent is a skip;
+  - a user turn of a main row (`rudder_linear_tracked_turns`, keyed by run id
+    and turn index): home.mjs publishes `userTurns`, `lastUserPrompt` and
+    `lastUserAt` for main rows (older homes lack them and are skipped). At
+    most one model call per row per minute. Attach or create moves the issue
+    to started; no merge comment and no completion, the user closes these.
+    When turn tracking first starts (`turn_track_started_at`) only the newest
+    turn of a running row, at most 12 hours old, is backfilled.
+  Never decided: runs created before `rudder_linear_meta.track_started_at` or
+  before the project was linked, runs from a Linear issue ("Linear ENG-7:" or
+  in `rudder_linear_issue_runs`), `/swarm` experiments (`swarmExperiment` from
+  home.mjs), orchestrator, review-all, one-off and gam-adversarial rows, and
+  private agents under an org install. Every decision is kept, skips included
+  (a `deciding` claim older than 10 minutes is retried; a model or Linear
+  failure becomes a skip, logged once). No model key: nothing is tracked,
+  logged once per process. Created issues go to the link's project and team
+  without labels, titled by outcome, describing the task with the agent URL.
+  Sync is quiet: started from backlog/unstarted at decision time, one
+  "Merged: <summary line>" comment plus the agent URL per merge, completed only
+  when Rudder created the issue for this run or plan. Nothing for needs-you or
+  unmerged finishes. Each step is claimed in a row before Linear is called.
+  Columns added after the first release are migrated with `alter table`.
 - **Plans on the phone/web**: the supervisor reads `.rudder/graph.json` and
   `.rudder/plan-queue.json` (`cloud/worker/plan.mjs`, re-read on mtime) into each
   project's `plan` in home state; `homeProjects` passes it through. Approve is a

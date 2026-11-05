@@ -43,6 +43,7 @@
   "files": [
     "dist/",
     "assets/",
+    "cloud/host/",
     "scripts/copy-native.mjs",
     "scripts/native-artifacts.mjs",
     "scripts/postinstall.mjs",

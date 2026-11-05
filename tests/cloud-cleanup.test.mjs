@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  actionsSince,
   buildInventory,
   cleanupPrompt,
   createCleanupJob,
@@ -16,6 +17,7 @@ import {
   parkAgent,
   readMachine,
   stopRefusal,
+  sweepScratch,
 } from "../cloud/worker/cleanup.mjs";
 
 const MIN = 60_000;
@@ -242,4 +244,138 @@ test("the job runs a small model limited to the cleanup command, one run at a ti
   assert.ok(lines.includes("cleanup: off (RUDDER_HOME_CLEANUP=0)"));
   assert.doesNotMatch(cleanupPrompt({ trigger: "hourly" }), /memory is short right now/);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+// Agents' scratch under /workspace/scratch/<run id> and top-level .tmp* dirs:
+// fixed rules by run state and mtime, and nothing else on the volume.
+test("scratch goes once its run is finished, deleted or stale; live, recent and every other top-level dir stays", async () => {
+  const { root, paths, addProcess } = fakeMachine();
+  const HOUR = 60 * MIN;
+  const volume = path.dirname(paths.codeDir);
+  const scratch = path.join(volume, "scratch");
+  // Sets an mtime on a whole tree, deepest first (creating a child bumps its parent).
+  const age = (file, ageMs) => {
+    const stat = fs.lstatSync(file);
+    if (stat.isDirectory()) for (const name of fs.readdirSync(file)) age(path.join(file, name), ageMs);
+    const when = new Date(NOW - ageMs);
+    fs.lutimesSync(file, when, when);
+  };
+  const dir = (rel, ageMs, files = { "tmp/out.log": "x".repeat(1000) }) => {
+    const base = path.join(volume, rel);
+    fs.mkdirSync(base, { recursive: true });
+    for (const [name, text] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(base, name)), { recursive: true });
+      fs.writeFileSync(path.join(base, name), text);
+    }
+    age(base, ageMs);
+    return base;
+  };
+  const run = (runId, status, updatedAgoMs, pid) => {
+    const runDir = path.join(paths.codeDir, "libra", ".rudder", "runs", runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, "run.json"), JSON.stringify({
+      id: runId, status, updatedAt: new Date(NOW - updatedAgoMs).toISOString(), ...(pid ? { process: { pid } } : {}),
+    }));
+  };
+
+  run("run-merged", "merged", 25 * HOUR);
+  dir("scratch/run-merged", 1 * HOUR);
+  run("run-done-recent", "completed", 2 * HOUR);
+  dir("scratch/run-done-recent", 2 * HOUR);
+  run("run-cancelled-live", "cancelled", 30 * HOUR, 4242);
+  dir("scratch/run-cancelled-live", 30 * HOUR);
+  run("run-completed-env", "completed", 48 * HOUR);
+  dir("scratch/run-completed-env", 48 * HOUR);
+  addProcess({ pid: 5100, ppid: 1, comm: "bash", cmdline: "bash", ageMin: 60, rssMb: 5 });
+  fs.writeFileSync(path.join(paths.procRoot, "5100", "environ"), `PATH=/bin\0RUDDER_SCRATCH=${scratch}/run-completed-env\0`);
+  dir("scratch/run-gone", 30 * HOUR);
+  const fresh = dir("scratch/run-gone-fresh", 30 * HOUR);
+  fs.utimesSync(path.join(fresh, "tmp", "out.log"), new Date(NOW - HOUR), new Date(NOW - HOUR));
+  dir("scratch/run-cwd", 30 * HOUR);
+  addProcess({ pid: 5200, ppid: 1, comm: "node", cmdline: "node server.js", ageMin: 60, rssMb: 50, cwd: path.join(scratch, "run-cwd", "tmp") });
+  run("run-paused-old", "paused", 9 * 24 * HOUR);
+  dir("scratch/run-paused-old", 8 * 24 * HOUR);
+  run("run-paused-week", "paused", 6 * 24 * HOUR);
+  dir("scratch/run-paused-week", 6 * 24 * HOUR);
+  // A link in scratch goes as a link; what it points at stays.
+  fs.symlinkSync(paths.codeDir, path.join(scratch, "link-out"));
+  fs.lutimesSync(path.join(scratch, "link-out"), new Date(NOW - 30 * HOUR), new Date(NOW - 30 * HOUR));
+  // Top level: only .tmp* directories, and only old ones.
+  dir(".tmpQ1w2e3", 30 * HOUR);
+  dir(".tmpNew", 1 * HOUR);
+  fs.writeFileSync(path.join(volume, ".tmpfile"), "a file, not a dir");
+  age(path.join(volume, ".tmpfile"), 30 * 24 * HOUR);
+  fs.symlinkSync(path.join(volume, "cache"), path.join(volume, ".tmp-link"));
+  const untouchable = ["rudder-a10-x9", "rudder-covered-ingress-1", "home", "cache", "home-cache", ".pnpm-store", "rudder-build"];
+  for (const name of untouchable) dir(name, 30 * 24 * HOUR);
+  age(path.join(volume, "code"), 30 * 24 * HOUR);
+
+  const result = sweepScratch({ paths, alive: (pid) => pid === 4242 || pid === 5100 || pid === 5200, now: NOW });
+  const gone = Object.fromEntries(result.removed.map((entry) => [path.relative(volume, entry.path), entry.reason]));
+  assert.deepEqual(gone, {
+    "scratch/run-merged": "run merged over 24 hours ago",
+    "scratch/run-gone": "run deleted, untouched for 24 hours",
+    "scratch/link-out": "run deleted, untouched for 24 hours",
+    "scratch/run-paused-old": "untouched for 7 days",
+    ".tmpQ1w2e3": "temp dir untouched for 24 hours",
+  });
+  assert.deepEqual(result.failed, []);
+  for (const rel of ["scratch/run-done-recent", "scratch/run-cancelled-live", "scratch/run-completed-env", "scratch/run-gone-fresh",
+    "scratch/run-cwd", "scratch/run-paused-week", ".tmpNew", ".tmpfile", ".tmp-link", "code/libra/.rudder/runs/run-merged/run.json", ...untouchable]) {
+    assert.ok(fs.existsSync(path.join(volume, rel)) || fs.lstatSync(path.join(volume, rel)), `${rel} stays`);
+  }
+  assert.ok(result.freedBytes >= 4 * 1000, `freed ${result.freedBytes}`);
+  assert.equal(result.freedBytes, result.removed.reduce((sum, entry) => sum + entry.bytes, 0));
+  const audit = fs.readFileSync(path.join(paths.rudderHome, "cleanup", "actions.jsonl"), "utf8");
+  assert.equal(audit.trim().split("\n").filter((line) => JSON.parse(line).action === "scratch").length, 5);
+  assert.deepEqual(actionsSince(paths, new Date(0).toISOString()), { park: 0, stop: 0 }, "scratch is not a park or a stop");
+
+  // Without a readable ~/code nothing counts as deleted; only the 7-day rule applies.
+  dir("scratch/run-orphan", 30 * HOUR);
+  fs.renameSync(paths.codeDir, `${paths.codeDir}.away`);
+  assert.deepEqual(sweepScratch({ paths, alive: () => false, now: NOW }).removed.map((entry) => path.basename(entry.path)), []);
+  fs.renameSync(`${paths.codeDir}.away`, paths.codeDir);
+
+  // The hourly run sweeps and reports what it freed; a memory-short run does not touch the disk.
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  };
+  const lines = [];
+  const runs = [];
+  dir(".tmpOld2", 30 * HOUR);
+  const job = createCleanupJob({ env: { HOME: paths.home }, paths, spawnImpl, log: (line) => lines.push(line), onRun: (entry) => runs.push(entry) });
+  assert.equal(job.runNow("memory"), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(fs.existsSync(path.join(volume, ".tmpOld2")));
+  assert.equal(runs[0].scratchFreedBytes, 0);
+  assert.equal(job.runNow("hourly"), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(!fs.existsSync(path.join(volume, ".tmpOld2")));
+  assert.ok(lines.some((line) => /^cleanup: scratch freed \d+ bytes \(\d+ removed\)$/.test(line)), lines.join("\n"));
+  assert.ok(runs[1].scratchFreedBytes > 0);
+  const last = JSON.parse(fs.readFileSync(path.join(paths.rudderHome, "cleanup", "last.json"), "utf8"));
+  assert.equal(last.scratch.freedBytes, runs[1].scratchFreedBytes);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a detached worker on a Linux home gets its own scratch and TMPDIR; anywhere else, nothing", async () => {
+  const { homeScratchEnv } = await import("../dist/home-scratch.js");
+  const volume = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-scratch-env-"));
+  const env = { RUDDER_CLOUD_RUNTIME: "home", RUDDER_HOME_VOLUME: volume };
+  assert.deepEqual(homeScratchEnv("run-7f3a", env, "linux"), {
+    RUDDER_SCRATCH: path.join(volume, "scratch", "run-7f3a"),
+    TMPDIR: path.join(volume, "scratch", "run-7f3a", "tmp"),
+  });
+  assert.ok(fs.statSync(path.join(volume, "scratch", "run-7f3a", "tmp")).isDirectory());
+  assert.deepEqual(homeScratchEnv("run-7f3a", env, "darwin"), {}, "a Mac keeps its own temp dir");
+  assert.deepEqual(homeScratchEnv("run-7f3a", { RUDDER_HOME_VOLUME: volume }, "linux"), {}, "only on the cloud home");
+  for (const bad of ["", "..", "../code", "a/b", ".hidden"]) {
+    assert.deepEqual(homeScratchEnv(bad, env, "linux"), {}, JSON.stringify(bad));
+  }
+  fs.rmSync(volume, { recursive: true, force: true });
 });

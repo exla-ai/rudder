@@ -35,6 +35,7 @@ reference, plan or task history for a small change.
 | Engine, storage and peer tools | `engine/src/`, native `engine_host.rs`, `fabric_runtime.rs`, `agent_mcp.rs` | `PLAN.md` §§4–6, 10–11, 14 |
 | Cloud and private access | `cloud/src/server.ts`, `cloud/worker/`, `src/cloud.ts` | reference §9 |
 | Burst build pool | `cloud/src/builders.ts`, `cloud/worker/builder.mjs`, `burst.mjs` | reference §9 |
+| External home host | `cloud/src/home-host.ts`, `cloud/host/`, `cloud/worker/home-host.mjs`, `src/cloud-host.ts` | reference §9.6 |
 | Planning, prompts, integration | native `tasks.rs`, `src/brain.ts`, `scheduler.ts` | reference §14 |
 | Metrics, dashboards, scaler | `observability/`, `cloud/worker/telemetry.mjs`, `cloud/src/telemetry.ts` | `observability/README.md` |
 
@@ -53,7 +54,9 @@ reference, plan or task history for a small change.
   interrupt request is not confirmation that work stopped. Intentional PTY
   shutdown persists Paused and removes the live `process` object.
 - jj is the history authority, colocated with Git. Use `jj status`/`jj diff` in
-  workspaces. Preserve old runs and recovery paths. The shipped jj pin is 0.40.0;
+  workspaces. Keep crash recovery paths, but put scratch in `$RUDDER_SCRATCH`
+  (or the system temp dir), never at the top of `/workspace`; Rudder deletes
+  agent scratch after the work finishes. The shipped jj pin is 0.40.0;
   newer colocated workspaces need newer Git. Do not casually change the pin or
   use raw Git history mutations inside managed workers.
 - TS JSON writes use `writeJson`/`updateJson`. Engine commands use transactional

@@ -1,0 +1,17 @@
+[Unit]
+Description=Rudder Cloud home (worker container)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/workspace
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rudder-home-start --keep
+ExecStop=/usr/bin/docker stop -t 90 rudder-home
+TimeoutStartSec=20min
+TimeoutStopSec=150
+
+[Install]
+WantedBy=multi-user.target

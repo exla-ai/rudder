@@ -176,6 +176,7 @@ export async function startHomeTelemetry({
   const reconnects = meter.createCounter("rudder.home.control.reconnects", { unit: "{reconnect}", description: "Control socket reconnects" });
   const cleanupRuns = meter.createCounter("rudder.home.cleanup.runs", { unit: "{run}", description: "Cleanup job runs" });
   const cleanupActions = meter.createCounter("rudder.home.cleanup.actions", { unit: "{action}", description: "Agents parked and processes stopped by the cleanup job" });
+  const scratchFreed = meter.createCounter("rudder.home.cleanup.scratch_freed", { unit: "By", description: "Agent scratch and temp dirs deleted by the cleanup job" });
   // Start every series at 0: increase() cannot see a counter whose first
   // sample is already 1, so the first cleanup run would otherwise vanish.
   reconnects.add(0);
@@ -183,6 +184,7 @@ export async function startHomeTelemetry({
     for (const outcome of ["ok", "failed", "timeout"]) cleanupRuns.add(0, { trigger, outcome });
   }
   for (const action of ["park", "stop"]) cleanupActions.add(0, { action });
+  scratchFreed.add(0);
 
   // The supervisor stalling is what users feel as "reconnecting", so measure
   // its event loop directly rather than infer it from machine load.
@@ -231,11 +233,12 @@ export async function startHomeTelemetry({
       reconnects.add(1);
     },
     /** One finished cleanup run; `actions` counts what it did ({park, stop}). */
-    recordCleanupRun({ trigger, outcome, actions = {} }) {
+    recordCleanupRun({ trigger, outcome, actions = {}, scratchFreedBytes = 0 }) {
       cleanupRuns.add(1, { trigger, outcome });
       for (const [action, count] of Object.entries(actions)) {
         if (count > 0) cleanupActions.add(count, { action });
       }
+      if (scratchFreedBytes > 0) scratchFreed.add(scratchFreedBytes);
     },
     async flush() {
       await reader.forceFlush().catch(() => undefined);

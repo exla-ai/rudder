@@ -152,6 +152,7 @@ COPY cloud/worker/supervisor.mjs ./supervisor.mjs
 COPY cloud/worker/active-runs.mjs ./active-runs.mjs
 COPY cloud/worker/home.mjs ./home.mjs
 COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
+COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/hook-paths.mjs ./hook-paths.mjs
 COPY cloud/worker/asks.mjs ./asks.mjs

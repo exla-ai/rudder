@@ -4,7 +4,8 @@
 // nobody has touched for hours to sleep and stops processes agents started and
 // forgot (dev servers, watchers, test runners). Without it the machine filled
 // 16 GB with resumed sessions idle for days, thrashed, and every terminal
-// attached to it dropped while the supervisor starved.
+// attached to it dropped while the supervisor starved. Each hourly run also
+// deletes finished agents' scratch by fixed rules, no model (sweepScratch).
 //
 // The model decides; this file is all it can act through (it runs with Bash
 // limited to `node cleanup.mjs ...`), and the rules that make a wrong call
@@ -43,9 +44,11 @@ const CLK_TCK = 100;
 /** Where things live; overridable so tests run against a fake machine. */
 export function cleanupPaths(env = process.env) {
   const home = env.HOME || os.homedir();
+  const volume = env.RUDDER_HOME_VOLUME || "/workspace";
   return {
     home,
-    codeDir: path.join(env.RUDDER_HOME_VOLUME || "/workspace", "code"),
+    volume,
+    codeDir: path.join(volume, "code"),
     rudderHome: env.RUDDER_HOME || path.join(home, ".rudder"),
     procRoot: env.RUDDER_CLEANUP_PROC || "/proc",
   };
@@ -400,6 +403,192 @@ function appendAction(paths, entry) {
 }
 
 // ---------------------------------------------------------------------------
+// Scratch. Each Cloud agent writes temporary files under its own
+// <volume>/scratch/<run id> (RUDDER_SCRATCH, with TMPDIR inside it; set by
+// native/src/signals.rs and src/home-scratch.ts). Fixed rules, no model, and
+// nothing else on the volume is ever touched:
+//   - a run's scratch, 24 hours after the run merged, completed or was
+//     cancelled, or after its run.json is gone (deleted) and nothing in it
+//     changed for 24 hours
+//   - any scratch entry with nothing in it newer than 7 days
+//   - top-level <volume>/.tmp* directories with nothing newer than 24 hours
+// Never one a live process still uses: the run's agent is alive, or some
+// process has it as RUDDER_SCRATCH or as its working directory.
+// ---------------------------------------------------------------------------
+
+const HOUR_MS = 60 * MINUTE;
+const FINISHED_RUN = new Set(["merged", "completed", "cancelled"]);
+const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
+
+/** run id -> { status, finishedAt, live } from every run.json under ~/code; null when ~/code is unreadable. */
+export function readRunStates(codeDir, alive = pidAlive) {
+  let projects;
+  try {
+    projects = fs.readdirSync(codeDir);
+  } catch {
+    return null;
+  }
+  const runs = new Map();
+  for (const project of projects) {
+    const runsDir = path.join(codeDir, project, ".rudder", "runs");
+    let ids = [];
+    try {
+      ids = fs.readdirSync(runsDir);
+    } catch {
+      continue;
+    }
+    for (const runId of ids) {
+      let record;
+      try {
+        record = JSON.parse(fs.readFileSync(path.join(runsDir, runId, "run.json"), "utf8"));
+      } catch {
+        continue;
+      }
+      if (!record || record.id !== runId) continue;
+      const pids = [record.process?.pid, record.process?.backendPid, record.process?.controllerPid];
+      const state = {
+        status: String(record.status ?? ""),
+        finishedAt: Math.max(toMillis(record.updatedAt) ?? 0, toMillis(record.process?.endedAt) ?? 0),
+        live: pids.some((pid) => Number.isInteger(pid) && pid > 1 && alive(pid)),
+      };
+      // The same id in two projects: whichever may still need its scratch wins.
+      const seen = runs.get(runId);
+      const rank = (run) => (run.live ? 2 : FINISHED_RUN.has(run.status) ? 0 : 1);
+      if (!seen || rank(state) > rank(seen) || (rank(state) === rank(seen) && state.finishedAt > seen.finishedAt)) {
+        runs.set(runId, state);
+      }
+    }
+  }
+  return runs;
+}
+
+/** Top-level entries of `root` some live process uses (its RUDDER_SCRATCH or its cwd). */
+export function scratchInUse(procRoot, root) {
+  const used = new Set();
+  let names = [];
+  try {
+    names = fs.readdirSync(procRoot);
+  } catch {
+    return used;
+  }
+  const note = (file) => {
+    if (file && file.startsWith(`${root}${path.sep}`)) used.add(file.slice(root.length + 1).split(path.sep)[0]);
+  };
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    note(/(?:^|\0)RUDDER_SCRATCH=([^\0]*)/.exec(readText(path.join(procRoot, name, "environ")))?.[1]);
+    try {
+      note(fs.readlinkSync(path.join(procRoot, name, "cwd")));
+    } catch {
+      // gone, or not ours
+    }
+  }
+  return used;
+}
+
+// Whether anything in the tree, the root included, changed after `cutoff`.
+// Stops at the first such entry; symlinks are not followed.
+function touchedSince(root, cutoff) {
+  const stack = [root];
+  while (stack.length) {
+    const file = stack.pop();
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      continue;
+    }
+    if (stat.mtimeMs > cutoff) return true;
+    if (!stat.isDirectory()) continue;
+    try {
+      for (const name of fs.readdirSync(file)) stack.push(path.join(file, name));
+    } catch {
+      // unreadable: judged by what was readable
+    }
+  }
+  return false;
+}
+
+function treeBytes(root) {
+  let bytes = 0;
+  const stack = [root];
+  while (stack.length) {
+    const file = stack.pop();
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch {
+      continue;
+    }
+    bytes += stat.size;
+    if (!stat.isDirectory()) continue;
+    try {
+      for (const name of fs.readdirSync(file)) stack.push(path.join(file, name));
+    } catch {
+      // counted what was readable
+    }
+  }
+  return bytes;
+}
+
+function isRealDir(file) {
+  try {
+    return fs.lstatSync(file).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Delete scratch by the rules above. Returns { removed: [{ path, reason, bytes }], failed, freedBytes }. */
+export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = Date.now(), log = appendAction } = {}) {
+  const volume = paths.volume ?? path.dirname(paths.codeDir);
+  const scratchRoot = path.join(volume, "scratch");
+  const runs = readRunStates(paths.codeDir, alive);
+  const inUse = scratchInUse(paths.procRoot, scratchRoot);
+  const candidates = [];
+  if (isRealDir(scratchRoot)) {
+    for (const name of fs.readdirSync(scratchRoot)) {
+      const run = runs?.get(name);
+      if (inUse.has(name) || run?.live) continue;
+      const file = path.join(scratchRoot, name);
+      if (run && FINISHED_RUN.has(run.status) && run.finishedAt && now - run.finishedAt > 24 * HOUR_MS) {
+        candidates.push({ file, reason: `run ${run.status} over 24 hours ago` });
+      } else if (runs && !run && RUN_ID_RE.test(name) && !touchedSince(file, now - 24 * HOUR_MS)) {
+        candidates.push({ file, reason: "run deleted, untouched for 24 hours" });
+      } else if (!touchedSince(file, now - 7 * 24 * HOUR_MS)) {
+        candidates.push({ file, reason: "untouched for 7 days" });
+      }
+    }
+  }
+  let topLevel = [];
+  try {
+    topLevel = fs.readdirSync(volume);
+  } catch {
+    // no volume, nothing to do
+  }
+  for (const name of topLevel) {
+    const file = path.join(volume, name);
+    if (name.startsWith(".tmp") && isRealDir(file) && !touchedSince(file, now - 24 * HOUR_MS)) {
+      candidates.push({ file, reason: "temp dir untouched for 24 hours" });
+    }
+  }
+  const result = { removed: [], failed: [], freedBytes: 0 };
+  for (const { file, reason } of candidates) {
+    const bytes = treeBytes(file);
+    try {
+      fs.rmSync(file, { recursive: true, force: true, maxRetries: 2 });
+    } catch (error) {
+      result.failed.push({ path: file, error: error.message });
+      continue;
+    }
+    result.removed.push({ path: file, reason, bytes });
+    result.freedBytes += bytes;
+    log(paths, { action: "scratch", path: file, reason, bytes });
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // The job: a small model, once an hour or when memory is short.
 // ---------------------------------------------------------------------------
 
@@ -455,6 +644,11 @@ export function createCleanupJob({
     const startedAt = new Date().toISOString();
     const before = safe(() => readMachine(paths.procRoot));
     log(`cleanup: starting (${trigger}; ${before?.memAvailableMb ?? "?"} of ${before?.memTotalMb ?? "?"} MB free)`);
+    // Disk, not memory: hourly only, so a memory-short run adds no IO.
+    const scratch = trigger === "hourly" ? safe(() => sweepScratch({ paths })) : null;
+    if (scratch && (scratch.removed.length || scratch.failed.length)) {
+      log(`cleanup: scratch freed ${scratch.freedBytes} bytes (${scratch.removed.length} removed${scratch.failed.length ? `, ${scratch.failed.length} failed` : ""})`);
+    }
     const args = [
       "-p", cleanupPrompt({ trigger }),
       "--model", model,
@@ -490,7 +684,12 @@ export function createCleanupJob({
     const finish = (code) => {
       clearTimeout(timer);
       running = false;
-      safe(() => onRun({ trigger, outcome: timedOut ? "timeout" : code === 0 ? "ok" : "failed", actions: actionsSince(paths, startedAt) }));
+      safe(() => onRun({
+        trigger,
+        outcome: timedOut ? "timeout" : code === 0 ? "ok" : "failed",
+        actions: actionsSince(paths, startedAt),
+        scratchFreedBytes: scratch?.freedBytes ?? 0,
+      }));
       const after = safe(() => readMachine(paths.procRoot));
       const report = out.trim() || err.trim() || `claude exited ${code}`;
       for (const line of report.split("\n").slice(0, 40)) {
@@ -500,6 +699,7 @@ export function createCleanupJob({
       safe(() => fs.writeFileSync(path.join(workDir, "last.json"), JSON.stringify({
         trigger, model, startedAt, finishedAt: new Date().toISOString(), exitCode: code,
         memAvailableMbBefore: before?.memAvailableMb ?? null, memAvailableMbAfter: after?.memAvailableMb ?? null,
+        scratch: scratch ? { freedBytes: scratch.freedBytes, removed: scratch.removed, failed: scratch.failed } : null,
         report,
       }, null, 2)));
     };

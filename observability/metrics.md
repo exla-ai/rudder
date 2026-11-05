@@ -56,6 +56,7 @@ start for every attribute set listed, so `increase()` sees the first event.
 | `rudder.home.control.reconnects` | counter | {reconnect} | | `rudder_home_control_reconnects_total` |
 | `rudder.home.cleanup.runs` | counter | {run} | `trigger` = hourly\|memory\|boot, `outcome` = ok\|failed\|timeout | `rudder_home_cleanup_runs_total` |
 | `rudder.home.cleanup.actions` | counter | {action} | `action` = park\|stop | `rudder_home_cleanup_actions_total` |
+| `rudder.home.cleanup.scratch_freed` | counter | By | | `rudder_home_cleanup_scratch_freed_bytes_total` (agent scratch and `.tmp*` dirs deleted) |
 
 Agent `state` meanings: `working` (a live turn), `waiting` (live, asking the
 user), `idle` (live process, no turn), `asleep` (parked by the cleanup),

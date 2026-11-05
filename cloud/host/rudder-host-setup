@@ -1,0 +1,65 @@
+#!/bin/sh
+# Prepares a Linux host (Ubuntu or Debian, as root) to run a Rudder Cloud home:
+# Docker, rsync, the sysctls agents need, the data disk at /srv/workspace and
+# the systemd units. Safe to run again. It does not start the home: `rudder
+# cloud host` writes /etc/rudder/home.env and /etc/rudder/image, then starts
+# rudder-home.service.
+#
+#   sudo ./rudder-host-setup [--data-disk /dev/nvme1n1]
+#
+# The data disk is formatted only when it holds no filesystem and no partitions.
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+DATA=/srv/workspace
+LABEL=rudder-ws
+DISK=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data-disk) DISK=${2:?--data-disk needs a device}; shift 2 ;;
+    --data-disk=*) DISK=${1#*=}; shift ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) echo "rudder-host-setup: unknown argument $1" >&2; exit 64 ;;
+  esac
+done
+
+[ "$(id -u)" = 0 ] || { echo "rudder-host-setup: run it as root (sudo)" >&2; exit 1; }
+
+if ! command -v docker >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -q
+  apt-get install -y -q docker.io rsync
+fi
+systemctl enable --now docker >/dev/null
+
+install -m 644 "$HERE/90-rudder.conf" /etc/sysctl.d/90-rudder.conf
+systemctl restart systemd-sysctl.service 2>/dev/null || sysctl -e -q -p /etc/sysctl.d/90-rudder.conf || true
+
+mkdir -p "$DATA"
+if [ -n "$DISK" ]; then
+  [ -b "$DISK" ] || { echo "rudder-host-setup: $DISK is not a block device" >&2; exit 1; }
+  if [ "$(blkid -s LABEL -o value "$DISK" 2>/dev/null || true)" = "$LABEL" ]; then
+    : # set up by an earlier run
+  elif blkid -p "$DISK" >/dev/null 2>&1 || [ "$(lsblk -n -o NAME "$DISK" | wc -l)" -ne 1 ]; then
+    echo "rudder-host-setup: $DISK already holds a filesystem or partitions; not touching it" >&2
+    exit 1
+  else
+    echo "rudder-host-setup: formatting $DISK as ext4 ($LABEL)"
+    mkfs.ext4 -q -L "$LABEL" -m 0 "$DISK"
+  fi
+  grep -q "^LABEL=$LABEL " /etc/fstab || echo "LABEL=$LABEL $DATA ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+  systemctl daemon-reload
+  mountpoint -q "$DATA" || mount "$DATA"
+fi
+# The worker runs as uid 1500 (cloud/worker/root-bootstrap.sh).
+chown 1500:1500 "$DATA"
+
+mkdir -p /etc/rudder
+chmod 700 /etc/rudder
+install -m 755 "$HERE/rudder-home-start" /usr/local/bin/rudder-home-start
+install -m 755 "$HERE/rudder-home-apply-update" /usr/local/bin/rudder-home-apply-update
+install -m 644 "$HERE/rudder-home.service" "$HERE/rudder-home-update.service" "$HERE/rudder-home-update.path" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable rudder-home.service rudder-home-update.path >/dev/null 2>&1
+systemctl start rudder-home-update.path
+echo "rudder-host-setup: ready ($DATA: $(df -h --output=size "$DATA" | tail -n 1 | tr -d ' '))"

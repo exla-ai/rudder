@@ -1,0 +1,37 @@
+#!/bin/sh
+# Runs the Rudder home container on an external host from /etc/rudder/image
+# and /etc/rudder/home.env (0600, written by `rudder cloud host`). Installed by
+# rudder-host-setup; run by rudder-home.service with --keep, and with no flag
+# by rudder-home-apply-update to recreate the container on a new image or token.
+set -eu
+
+CONF=${RUDDER_HOST_CONF:-/etc/rudder}
+DATA=${RUDDER_HOST_DATA:-/srv/workspace}
+NAME=rudder-home
+
+IMAGE=$(cat "$CONF/image" 2>/dev/null || true)
+[ -n "$IMAGE" ] || { echo "rudder-home-start: $CONF/image is missing; run \`rudder cloud host\` first" >&2; exit 1; }
+[ -s "$CONF/home.env" ] || { echo "rudder-home-start: $CONF/home.env is missing; run \`rudder cloud host\` first" >&2; exit 1; }
+HOST_NAME=$(cat "$CONF/hostname" 2>/dev/null || echo rudder-home)
+
+# --keep: a boot after Docker already restarted the container leaves it alone.
+if [ "${1:-}" = "--keep" ] \
+  && [ "$(docker inspect -f '{{.State.Running}} {{.Config.Image}}' "$NAME" 2>/dev/null || true)" = "true $IMAGE" ]; then
+  exit 0
+fi
+
+if docker container inspect "$NAME" >/dev/null 2>&1; then
+  # The supervisor persists every agent as paused on SIGTERM; give it time.
+  docker stop -t 90 "$NAME" >/dev/null || true
+  docker rm "$NAME" >/dev/null || true
+fi
+
+# --privileged: FUSE, swap and the agents' user-namespace sandboxes, as on Fly.
+# /workspace must be its own mount (root-bootstrap.sh checks mountinfo).
+docker run -d --name "$NAME" --restart unless-stopped \
+  --privileged --init --hostname "$HOST_NAME" \
+  --shm-size 16g --ulimit nofile=1048576:1048576 \
+  --log-opt max-size=50m --log-opt max-file=5 \
+  --env-file "$CONF/home.env" -e RUDDER_HOST_IMAGE="$IMAGE" \
+  -v "$DATA:/workspace" "$IMAGE" >/dev/null
+echo "rudder-home-start: running $IMAGE"

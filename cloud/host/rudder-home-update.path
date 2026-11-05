@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for an image update the Rudder home asked for
+
+[Path]
+PathExists=/srv/workspace/.rudder-host/desired.json
+Unit=rudder-home-update.service
+
+[Install]
+WantedBy=multi-user.target

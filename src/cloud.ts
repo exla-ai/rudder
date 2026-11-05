@@ -26,6 +26,7 @@ import { runLaptopOnboarding, type CloudRepoSummary } from "./onboarding.js";
 import { renderQrForTerminal } from "./qr.js";
 import { describeSync, exportWork, importWork, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
 import { pullFromHome } from "./cloud-pull.js";
+import { hostCommand } from "./cloud-host.js";
 import { localTailnetStatus, previewReachable } from "./tailscale-preview.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
@@ -252,6 +253,12 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "home":
       await homeCommand(rest, options);
+      return;
+    case "host":
+      if (process.env.RUDDER_CLOUD_RUNTIME === "home") {
+        throw new Error("run this from your laptop: moving the home to another host restarts it.");
+      }
+      await hostCommand(rest, await cloudClient({ requireToken: true }), options);
       return;
     case "preview":
       await cloudPreviewCommand(rest, options);
@@ -3683,6 +3690,10 @@ Usage:
       holds every repo) and attach to its dashboard. --snapshot uploads this
       folder to its own machine instead.
   rudder cloud home [status|start|stop|open <owner/repo>]
+  rudder cloud host <ssh-target> [--data-disk /dev/X] [--hostname <name>] [--skip-setup] [--copy-from-fly] [--yes]
+      run your home on any Linux host with Docker instead of Fly: sets the
+      host up, then switches the home there (its Fly machine and volume stay
+      as they are). --copy-from-fly prints how to copy the Fly disk first
   rudder cloud preview [preview-id] [--list] [--json]
       list registered private previews; open the exact preview-id over Tailscale
   rudder cloud move [runId...] [--yes]

@@ -12,6 +12,7 @@ import { getBackend } from "./backends.js";
 import { efficiencyContext, learnIntegratedRun } from "./agent-efficiency/production.js";
 import { nativeAgentCommand } from "./native-agents.js";
 import { toolCacheEnv } from "./tool-cache.js";
+import { homeScratchEnv } from "./home-scratch.js";
 import { mergeGeneratedRudderMd, withRudderMdLock } from "./rudder-md.js";
 import {
   createRunRecord,
@@ -405,7 +406,7 @@ export function spawnWorker(repoRoot: string, runId: string, attemptId?: string)
     ], {
       cwd: repoRoot,
       detached: true,
-      env: { ...process.env, ...toolCacheEnv("agent") },
+      env: { ...process.env, ...toolCacheEnv("agent"), ...homeScratchEnv(runId) },
       stdio: stderrFd === undefined ? "ignore" : ["ignore", "ignore", stderrFd],
     });
     worker.unref();

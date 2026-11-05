@@ -731,6 +731,10 @@ pub(crate) fn augment_worker_command(
     mode: AgentMode,
     run_id: &str,
 ) {
+    if cfg!(target_os = "linux") && home_runtime_from_env() {
+        let volume = std::env::var("RUDDER_HOME_VOLUME").unwrap_or_else(|_| "/workspace".to_string());
+        with_home_scratch(command, Path::new(&volume), run_id);
+    }
     if !worker_wants_signals(backend, mode) {
         return;
     }
@@ -794,6 +798,52 @@ pub(crate) fn augment_worker_command(
             command.program = exe.display().to_string();
             command.args = vec!["fabric".into(), "launch-error".into()];
         }
+    }
+}
+
+/// On the cloud home each agent gets its own scratch directory,
+/// `<volume>/scratch/<run id>`, as `RUDDER_SCRATCH`, with `TMPDIR` inside it,
+/// so temporary files stop piling up at the top of the volume. The hourly
+/// cleanup (cloud/worker/cleanup.mjs) deletes it after the run finishes; it is
+/// created at every launch, so a resumed agent gets it back.
+pub(crate) fn with_home_scratch(command: &mut TerminalCommand, volume: &Path, run_id: &str) {
+    let valid = !run_id.is_empty()
+        && !run_id.starts_with('.')
+        && run_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !valid {
+        return;
+    }
+    let scratch = volume.join("scratch").join(run_id);
+    let tmp = scratch.join("tmp");
+    if std::fs::create_dir_all(&tmp).is_err() {
+        return;
+    }
+    command.env.retain(|(key, _)| key != "RUDDER_SCRATCH" && key != "TMPDIR");
+    command.env.push(("RUDDER_SCRATCH".into(), scratch.display().to_string()));
+    command.env.push(("TMPDIR".into(), tmp.display().to_string()));
+}
+
+#[cfg(test)]
+mod home_scratch_tests {
+    use super::*;
+
+    #[test]
+    fn each_agent_gets_its_own_scratch_and_temp_dir() {
+        let volume = std::env::temp_dir().join(format!("rudder-scratch-{}", std::process::id()));
+        let mut command = TerminalCommand::with_args("claude", ["--x"]);
+        command.env.push(("TMPDIR".into(), "/tmp".into()));
+        with_home_scratch(&mut command, &volume, "run-1a2b");
+        let scratch = volume.join("scratch").join("run-1a2b");
+        assert!(scratch.join("tmp").is_dir());
+        assert!(command.env.contains(&("RUDDER_SCRATCH".into(), scratch.display().to_string())));
+        assert!(command.env.contains(&("TMPDIR".into(), scratch.join("tmp").display().to_string())));
+        assert_eq!(command.env.iter().filter(|(key, _)| key == "TMPDIR").count(), 1);
+        for bad in ["", "..", "../code", "a/b", ".hidden"] {
+            let mut other = TerminalCommand::with_args("claude", ["--x"]);
+            with_home_scratch(&mut other, &volume, bad);
+            assert!(other.env.is_empty(), "{bad:?} gets no scratch");
+        }
+        let _ = std::fs::remove_dir_all(&volume);
     }
 }
 

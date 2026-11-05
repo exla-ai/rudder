@@ -743,6 +743,33 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
   (with `arm64` detection) that `startByoVmWorkerOverSsh` runs over SSH (under `nohup`
   unless `RUDDER_BYOC_AUTOSTART=0`). BYOC cannot pause/resume (only stop); its state
   comes from heartbeats only.
+- **External home host (4.2):** the home can run on any Linux host with Docker instead
+  of a Fly machine (`rudder_workspaces.host_kind = 'external'`; helpers in
+  `cloud/src/home-host.ts`, host side in `cloud/host/`).
+  - `rudder cloud host <ssh-target> [--data-disk /dev/X] [--hostname N]` (`src/cloud-host.ts`)
+    runs `rudder-host-setup` (docker.io, rsync, `90-rudder.conf` sysctls, an empty data
+    disk formatted as `LABEL=rudder-ws` at `/srv/workspace`, units), checks the host can
+    pull the image, then `POST /api/rudder/home/host {kind:"external"}`. That rotates the
+    home and home-repo worker tokens (the Fly machine can no longer connect; its sockets
+    are dropped) and returns `{env, image}` once. The CLI writes `/etc/rudder/home.env`
+    (0600, over ssh stdin) and `/etc/rudder/image`, then starts `rudder-home.service`.
+    `--copy-from-fly` only prints the manual rsync steps; the disk copy is the operator's.
+  - The control plane never calls Fly for an external home: `ensureHomeRunning` and
+    `startHome` answer from the control socket (503 when it is down), the idle stop sweep
+    skips it, region moves and stop are 409, deletion leaves the Fly machine and volume
+    alone. The row is `stopped` until the supervisor connects (`markExternalHomeRunning`).
+  - Updates: the supervisor reports `host: {kind, image}` in its state
+    (`cloud/worker/home-host.mjs`). When idle on another image, `updateExternalHome`
+    sets a next token and sends the `update` RPC `{image, workerToken}`; `home.mjs`
+    writes `/workspace/.rudder-host/desired.json` (0600) and acks; the host's
+    `rudder-home-update.path` runs `rudder-home-apply-update` (same repository only,
+    pull, swap the token line in `home.env`, recreate). A refusal clears the next token;
+    a timeout keeps it pending, as with Fly. Images before 4.2 report no image and are
+    never updated this way.
+  - `POST /api/rudder/home/host {kind:"fly"}` goes back: the old Fly machine is destroyed
+    and a new one is made on the old volume with a new token. Nothing is copied back.
+  - Private registries: the host needs `docker login` for the image's registry, or
+    updates fail at pull (the request is kept as `desired.failed.json`).
 
 ### 9.6.1 Deleting cloud things (request + reaper)
 Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
@@ -1030,6 +1057,19 @@ brain lives in the cloud, and the phone is a first-class client.
   each line of it to the supervisor log as `cleanup: ...`. Steer kinds a dashboard
   does not know now FAIL; they used to fall through to typed input, which would
   have sent a park reason to an older dashboard's agent as a prompt.
+- **Agent scratch (4.2).** The home's volume had 100+ top-level leftovers
+  (`rudder-a10-*`, `.tmp*`) from agents' test runs. Every agent on a Linux home
+  now launches with `RUDDER_SCRATCH=/workspace/scratch/<run id>` and `TMPDIR`
+  inside it (`with_home_scratch` in `native/src/signals.rs`, `homeScratchEnv`
+  for the detached `__worker`), created at each launch. Each hourly cleanup run
+  first calls `sweepScratch` (fixed rules, no model): a run's scratch 24h after
+  it merged/completed/was cancelled or its run.json disappeared (and nothing in
+  it changed for 24h), any scratch entry untouched for 7 days, and top-level
+  `/workspace/.tmp*` directories untouched for 24h. Never one in use (the run's
+  pid is alive, or a process has it as `RUDDER_SCRATCH` or cwd), never anything
+  else at the top level, and with `~/code` unreadable no run counts as deleted.
+  Freed bytes go to the log (`cleanup: scratch freed N bytes`), `last.json`,
+  `actions.jsonl` (`action: "scratch"`) and `rudder.home.cleanup.scratch_freed`.
 - **Swap at boot (`provision_home_swap`, root-bootstrap.sh).** A home has no
   swap unless it makes one, and without swap the kernel can only evict program
   text, so the same incident thrashed instead of paging idle agents out. Before

@@ -1,0 +1,66 @@
+#!/bin/sh
+# Applies an image update the home asked for. The supervisor writes
+# desired.json on the volume when the control plane sends it an `update` RPC
+# (cloud/worker/home-host.mjs); rudder-home-update.path runs this as root:
+# pull the image, put the new worker token in home.env, recreate the container.
+#
+# The token is never printed. A request that cannot be applied is set aside as
+# desired.failed.json so the path unit does not retry it in a loop; the control
+# plane keeps accepting the old token until the home connects with the new one.
+set -eu
+umask 077
+
+CONF=${RUDDER_HOST_CONF:-/etc/rudder}
+DATA=${RUDDER_HOST_DATA:-/srv/workspace}
+START=${RUDDER_HOME_START:-/usr/local/bin/rudder-home-start}
+DESIRED="$DATA/.rudder-host/desired.json"
+FAILED="$DATA/.rudder-host/desired.failed.json"
+
+[ -f "$DESIRED" ] || exit 0
+
+fail() {
+  echo "rudder-home-apply-update: $1" >&2
+  mv -f "$DESIRED" "$FAILED" 2>/dev/null || rm -f "$DESIRED"
+  exit 1
+}
+
+# One field of the single-line object home-host.mjs writes. Both values are
+# checked against strict shapes before docker or the env file sees them.
+field() {
+  sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$DESIRED" | head -n 1
+}
+
+# An image reference without its tag or digest.
+repository() {
+  ref=${1%%@*}
+  case ${ref##*/} in
+    *:*) ref=${ref%:*} ;;
+  esac
+  printf '%s\n' "$ref"
+}
+
+IMAGE=$(field image)
+TOKEN=$(field workerToken)
+printf '%s\n' "$IMAGE" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}' || fail "the requested image is not a valid reference"
+printf '%s\n' "$TOKEN" | grep -Eqx 'rdrw_[A-Za-z0-9_-]{16,200}' || fail "the requested worker token is malformed"
+
+# The volume is writable from inside the container, so a request may only move
+# to another tag or digest of the image this host already runs.
+CURRENT=$(cat "$CONF/image" 2>/dev/null || true)
+if [ -n "$CURRENT" ] && [ "$(repository "$IMAGE")" != "$(repository "$CURRENT")" ]; then
+  fail "refusing $IMAGE: not the same repository as $CURRENT"
+fi
+
+echo "rudder-home-apply-update: pulling $IMAGE"
+docker pull -q "$IMAGE" >/dev/null || fail "docker pull $IMAGE failed (is this host logged in to its registry?)"
+
+# Every other line of the env file stays; only the token changes.
+grep -v '^RUDDER_WORKER_TOKEN=' "$CONF/home.env" > "$CONF/home.env.tmp" || true
+printf 'RUDDER_WORKER_TOKEN=%s\n' "$TOKEN" >> "$CONF/home.env.tmp"
+chmod 600 "$CONF/home.env.tmp"
+mv -f "$CONF/home.env.tmp" "$CONF/home.env"
+printf '%s\n' "$IMAGE" > "$CONF/image.tmp"
+mv -f "$CONF/image.tmp" "$CONF/image"
+rm -f "$DESIRED" "$FAILED"
+
+"$START"

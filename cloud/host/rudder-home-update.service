@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply the image update the Rudder home asked for
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rudder-home-apply-update
+TimeoutStartSec=30min

@@ -35,12 +35,13 @@ import { annotateAgent } from "./agent-status.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
-import { HomeControlSessions } from "./home-control-sessions.js";
+import { HomeControlSessions, HomeRpcEffectUnknownError } from "./home-control-sessions.js";
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
 import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
 import { startControlTelemetry, type ControlSnapshot, type ControlTelemetry } from "./telemetry.js";
 import { BuilderPoolError, builderPolicy, createBuilderPool, type BuilderFly, type BuilderPool } from "./builders.js";
+import { externalHomeNeedsUpdate, externalHomeRefusal, HOME_HOST_OFFLINE, homeHostEnv, homeHostKind, parseHomeHostKind, type HomeHostKind } from "./home-host.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -120,6 +121,8 @@ type Workspace = {
   failureReason?: string;
   // Set on "home-repo" rows the user pinned to the top of the phone app.
   pinnedAt?: string;
+  // "home" rows: where the home runs (home-host.ts). Fly unless switched.
+  hostKind?: HomeHostKind;
   lastActivityAt?: string;
   lastHeartbeatAt?: string;
   activeAgents?: number;
@@ -336,6 +339,9 @@ ensureColumn("rudder_workspaces", "home_id", "text");
 ensureColumn("rudder_workspaces", "failure_reason", "text");
 ensureColumn("rudder_sails", "failure_reason", "text");
 ensureColumn("rudder_workspaces", "pinned_at", "text");
+// A home on an external host (cloud/host/) instead of a Fly machine: null or
+// 'fly' is the original shape, 'external' means never call Fly for it.
+ensureColumn("rudder_workspaces", "host_kind", "text");
 // The morning digest (cloud/src/digest.ts): one row per account per local day,
 // and the time zone the phone last reported, which decides when 9:01 is.
 database.exec(`
@@ -592,6 +598,17 @@ const promoteWorkerToken = database.transaction((nextHash: string, updatedAt: st
     promoteHomeWorkerToken.run({ homeId: home.id, nextHash, updatedAt });
   }
 });
+// An update the home refused will never use its replacement token.
+const clearNextWorkerToken = database.prepare(`
+  update rudder_workspaces
+  set worker_token_next_hash = null,
+      updated_at = @updatedAt
+  where (id = @homeId or (home_id = @homeId and source_kind = 'home-repo'))
+    and worker_token_next_hash = @nextHash
+`);
+const setHomeHostKind = database.prepare(
+  "update rudder_workspaces set host_kind = @hostKind, updated_at = @updatedAt where id = @id and source_kind = 'home'",
+);
 const updateWorkspaceActivity = database.prepare(`
   update rudder_workspaces
   set last_activity_at = @lastActivityAt,
@@ -1509,14 +1526,17 @@ async function reapDeletion(kind: DeletionKind, id: string): Promise<string | un
     const runtime = optionalString(row.runtime) ?? "fly";
     // A BYO VM sail's machine is the user's own: there is nothing of ours to
     // destroy, and its worker is refused from here on (heartbeat 410).
-    const ownsMachine = kind === "workspace" || runtime === "fly";
+    // An external home's host and disk are the user's too; switching it there
+    // already let its Fly machine go.
+    const external = kind === "workspace" && homeHostKind(row.host_kind) === "external";
+    const ownsMachine = !external && (kind === "workspace" || runtime === "fly");
     if (ownsMachine && machineId) {
       if (!flyApiToken || !flyAppName) {
         throw new Error("Fly is not configured; cannot destroy the machine");
       }
       await destroyFlyMachine(machineId);
     }
-    const volumeId = kind === "workspace" ? optionalString(row.volume_id) : undefined;
+    const volumeId = kind === "workspace" && !external ? optionalString(row.volume_id) : undefined;
     if (volumeId) {
       await destroyWorkspaceVolume(volumeId);
     }
@@ -1594,6 +1614,10 @@ async function sweepIdleWorkspaces(): Promise<void> {
       continue;
     }
     const isHome = workspace.sourceKind === "home";
+    // An external host is not ours to stop.
+    if (isHome && workspace.hostKind === "external") {
+      continue;
+    }
     // The home machine is idle only when nobody is attached to ANY of its repos.
     if (isHome && homeRepos(workspace.id).some((repo) => Array.from(workspaceChannels.get(repo.id)?.clients ?? []).some(isOpen))) {
       continue;
@@ -4080,6 +4104,12 @@ async function mutateWorkspace(workspace: Workspace, action: string): Promise<Wo
     }
     return rowToWorkspace(findWorkspaceById.get(workspace.id));
   }
+  if (workspace.hostKind === "external") {
+    if (action === "resume") {
+      return externalHomeRunning(workspace);
+    }
+    throw httpError(409, externalHomeRefusal("stop"));
+  }
   if (!workspace.machineId) {
     throw badRequest("workspace does not have a Fly machine yet");
   }
@@ -4212,6 +4242,7 @@ function rowToWorkspace(row: unknown): Workspace {
     homeId: optionalString(value.home_id),
     failureReason: optionalString(value.failure_reason),
     pinnedAt: optionalString(value.pinned_at),
+    hostKind: homeHostKind(value.host_kind),
     lastActivityAt: optionalString(value.last_activity_at),
     lastHeartbeatAt: optionalString(value.last_heartbeat_at),
     activeAgents: Number.isFinite(Number(value.active_agents)) && value.active_agents !== null
@@ -5184,6 +5215,12 @@ function unauthorized(): Error {
   return error;
 }
 
+function httpError(status: number, message: string): Error {
+  const error = new Error(message);
+  (error as Error & { status?: number }).status = status;
+  return error;
+}
+
 function payloadTooLarge(): Error {
   const error = new Error("payload too large");
   (error as Error & { status?: number }).status = 413;
@@ -5239,6 +5276,8 @@ type HomeState = {
   tailnet?: JsonRecord;
   credentials?: JsonRecord;
   logins?: JsonRecord;
+  /** What the home runs on: { kind, image } (home.mjs hostInfo). */
+  host?: JsonRecord;
   updatedAt: string;
   /** The control socket that sent it: the state is live only while that
    * socket is the open control socket (homeStateLive). */
@@ -5292,6 +5331,10 @@ async function ensureHomeRunning(accountId: string, region?: string | null): Pro
   if (known && known.status === "running" && isOpen(homeControls.get(known.id))) {
     return known;
   }
+  // An external host starts and stops on that host, never from here.
+  if (known?.hostKind === "external") {
+    return externalHomeRunning(known);
+  }
   const inFlight = homeStarts.get(accountId);
   if (inFlight) {
     return await inFlight;
@@ -5301,9 +5344,26 @@ async function ensureHomeRunning(accountId: string, region?: string | null): Pro
   return await promise;
 }
 
+// An external home is running exactly when its supervisor holds the control
+// socket: there is no provider to ask and nothing to start.
+function externalHomeRunning(home: Workspace): Workspace {
+  if (!isOpen(homeControls.get(home.id))) {
+    throw httpError(503, HOME_HOST_OFFLINE);
+  }
+  if (home.status !== "running") {
+    const now = new Date().toISOString();
+    updateWorkspaceMachine.run({ id: home.id, status: "running", machineId: home.machineId ?? null, machineState: "external", updatedAt: now });
+    setHomeRepoStatus.run({ homeId: home.id, status: "running", updatedAt: now });
+  }
+  return rowToWorkspace(findWorkspaceById.get(home.id));
+}
+
 async function startHome(accountId: string, region?: string | null): Promise<Workspace> {
-  ensureCloudRuntimeConfigured("fly");
   const existing = findHomeRow(accountId);
+  if (existing?.hostKind === "external") {
+    return externalHomeRunning(existing);
+  }
+  ensureCloudRuntimeConfigured("fly");
   if (!existing) {
     return await createHome(accountId, region ?? null);
   }
@@ -5488,6 +5548,18 @@ async function moveHomeRegion(home: Workspace, move: HomeRegionMove): Promise<vo
   console.log(`home ${home.id} moved ${move.from} -> ${move.to}; old volume ${move.oldVolumeId} kept as a backup`);
 }
 
+// An external home's control socket is its only sign of life, so connecting
+// is what makes it "running" (a stopped row would ignore its heartbeats).
+function markExternalHomeRunning(homeId: string): void {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || homeHostKind(row.host_kind) !== "external" || ["running", "deleting"].includes(String(row.status))) {
+    return;
+  }
+  const now = new Date().toISOString();
+  updateWorkspaceMachine.run({ id: homeId, status: "running", machineId: optionalString(row.machine_id) ?? null, machineState: "external", updatedAt: now });
+  setHomeRepoStatus.run({ homeId, status: "running", updatedAt: now });
+}
+
 function closeHomeControl(homeId: string): void {
   const control = homeControls.get(homeId);
   if (control) {
@@ -5495,6 +5567,74 @@ function closeHomeControl(homeId: string): void {
     homeControls.delete(homeId);
     try { control.close(); } catch { /* ignore */ }
   }
+}
+
+// Switching hosts rotates the worker token first, so the old host cannot open
+// new sockets; this drops the ones it already holds.
+function fenceHomeHost(homeId: string): void {
+  closeHomeControl(homeId);
+  for (const repo of homeRepos(homeId)) {
+    try { workspaceChannels.get(repo.id)?.worker?.close(4001, "home host changed"); } catch { /* already closed */ }
+  }
+}
+
+function rotateHomeWorkerToken(homeId: string, updatedAt: string): string {
+  const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+  const hash = tokenHash(workerToken);
+  updateWorkspaceWorkerToken.run({ id: homeId, workerTokenHash: hash, updatedAt });
+  setHomeRepoTokens.run({ homeId, workerTokenHash: hash, updatedAt });
+  return workerToken;
+}
+
+// To an external host: a new token (the Fly machine's stops working) handed out
+// once, inside the env file the host's container reads. The Fly machine and
+// volume are left exactly as they are; nothing here calls Fly. Called again on
+// an external home, it moves the home to a new host the same way.
+function switchHomeToExternal(home: Workspace): JsonRecord {
+  const now = new Date().toISOString();
+  const workerToken = database.transaction(() => {
+    const token = rotateHomeWorkerToken(home.id, now);
+    setHomeHostKind.run({ id: home.id, hostKind: "external", updatedAt: now });
+    // Stopped until the host's supervisor connects (markExternalHomeRunning).
+    updateWorkspaceMachine.run({ id: home.id, status: "stopped", machineId: home.machineId ?? null, machineState: "external", updatedAt: now });
+    setHomeRepoStatus.run({ homeId: home.id, status: "stopped", updatedAt: now });
+    return token;
+  })();
+  fenceHomeHost(home.id);
+  schedulePersistDatabase();
+  console.log(`[home] ${home.id} switched to an external host`);
+  return {
+    home: homeSummary(rowToWorkspace(findWorkspaceById.get(home.id))),
+    hostKind: "external",
+    image: flyWorkerImage,
+    env: homeHostEnv({ homeId: home.id, accountId: home.accountId, workerToken, cloudUrl: baseURL }),
+  };
+}
+
+// Back to Fly: the machine kept from before the switch boots with a token that
+// no longer works, so it goes (its volume stays) and the home gets a new machine
+// and token on that volume. Whatever the external host wrote since the switch
+// stays on the host's disk; copying it back is the operator's step.
+async function switchHomeToFly(home: Workspace): Promise<Workspace> {
+  ensureCloudRuntimeConfigured("fly");
+  if (home.hostKind === "external") {
+    const now = new Date().toISOString();
+    database.transaction(() => {
+      rotateHomeWorkerToken(home.id, now);
+      setHomeHostKind.run({ id: home.id, hostKind: null, updatedAt: now });
+      updateWorkspaceMachine.run({ id: home.id, status: "stopped", machineId: null, machineState: null, updatedAt: now });
+      setHomeRepoStatus.run({ homeId: home.id, status: "stopped", updatedAt: now });
+    })();
+    fenceHomeHost(home.id);
+    schedulePersistDatabase();
+    console.log(`[home] ${home.id} switched back to Fly`);
+    if (home.machineId) {
+      await destroyFlyMachine(home.machineId).catch((error) => {
+        console.log(`[home] ${home.id} old Fly machine ${home.machineId} not destroyed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }
+  return await ensureHomeRunning(home.accountId);
 }
 
 // ---------------------------------------------------------------------------
@@ -5578,13 +5718,12 @@ async function homeMachineImage(machineId: string): Promise<{ image: string | nu
 }
 
 async function sweepIdleHomeUpdates(): Promise<void> {
-  if (!flyApiToken || !flyAppName) {
-    return;
-  }
+  const flyReady = Boolean(flyApiToken && flyAppName);
   const now = Date.now();
   for (const raw of listHomeRows.all() as Record<string, unknown>[]) {
     const home = rowToWorkspace(raw);
-    if (!home.machineId || !isOpen(homeControls.get(home.id))) {
+    const external = home.hostKind === "external";
+    if (!isOpen(homeControls.get(home.id))) {
       continue;
     }
     if (!homeStates.has(home.id) || homeBusyNow.get(home.id) !== false) {
@@ -5600,6 +5739,14 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     if (now - quietSince < HOME_IDLE_UPDATE_MS || now - (homeUpdating.get(home.id) ?? 0) < 15 * 60_000) {
       continue;
     }
+    if (external) {
+      await updateExternalHome(home, now);
+      continue;
+    }
+    const machineId = home.machineId;
+    if (!flyReady || !machineId) {
+      continue;
+    }
     const checked = homeImageChecked.get(home.id);
     if (checked && now - checked.at < 5 * 60_000 && checked.image === flyWorkerImage) {
       continue;
@@ -5607,7 +5754,7 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     // Claim before the first await: a slow provider GET can overlap sweeps.
     homeUpdateFlights.add(home.id);
     try {
-      const { image, config } = await homeMachineImage(home.machineId);
+      const { image, config } = await homeMachineImage(machineId);
       homeImageChecked.set(home.id, { at: now, image });
       if (!config || !image || image === flyWorkerImage) {
         continue;
@@ -5615,7 +5762,7 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       // The home may have become busy or been replaced while the GET waited.
       const current = findWorkspaceById.get(home.id) as Record<string, unknown> | undefined;
       const stillQuietSince = Math.max(homeBusyAt.get(home.id) ?? Date.now(), Date.parse(String(current?.last_activity_at ?? "")) || 0);
-      if (!current || current.status === "deleting" || current.machine_id !== home.machineId
+      if (!current || current.status === "deleting" || current.machine_id !== machineId
         || current.worker_token_hash !== raw.worker_token_hash || optionalString(current.worker_token_next_hash)
         || !isOpen(homeControls.get(home.id)) || homeBusyNow.get(home.id) !== false
         || Date.now() - stillQuietSince < HOME_IDLE_UPDATE_MS) {
@@ -5631,7 +5778,7 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       setNextWorkerToken.run({ homeId: home.id, nextHash: tokenHash(workerToken), updatedAt: new Date().toISOString() });
       const env = config.env && typeof config.env === "object" ? config.env as JsonRecord : {};
       await flyRequest<FlyMachine>(
-        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}`,
+        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(machineId)}`,
         { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken, ...homeTelemetryEnv() } } } },
       );
       homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
@@ -5642,6 +5789,34 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       // remains in SQLite through failure/uncertainty until authenticated use.
       homeUpdateFlights.delete(home.id);
     }
+  }
+}
+
+// An external host pulls and restarts itself (cloud/host/rudder-home-apply-update).
+// The home reports the image it runs, and the update travels over its control
+// socket with the same accepted-alongside replacement token as a Fly update.
+async function updateExternalHome(home: Workspace, now: number): Promise<void> {
+  const reportedImage = optionalString(homeStates.get(home.id)?.host?.image);
+  if (!externalHomeNeedsUpdate({ reportedImage, targetImage: flyWorkerImage, pendingNextToken: false })) {
+    return;
+  }
+  homeUpdateFlights.add(home.id);
+  homeUpdating.set(home.id, now);
+  const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+  const nextHash = tokenHash(workerToken);
+  try {
+    console.log(`[home] ${home.id} idle on ${reportedImage} (external host); updating to ${flyWorkerImage}`);
+    setNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
+    await homeRpc(home.id, "update", { image: flyWorkerImage, workerToken }, 30_000);
+  } catch (error) {
+    // A refusal means nothing will ever use the replacement token. An unknown
+    // effect (timeout, closed socket) keeps it pending, as a Fly update does.
+    if (!(error instanceof HomeRpcEffectUnknownError)) {
+      clearNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
+    }
+    console.log(`[home] ${home.id} external update failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    homeUpdateFlights.delete(home.id);
   }
 }
 
@@ -6056,6 +6231,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
   };
   attach();
   enableSocketLiveness(ws);
+  markExternalHomeRunning(homeId);
   pushHomeRepos(homeId);
   flushPendingHomeDeletes(homeId);
   ws.on("message", (data) => {
@@ -6076,6 +6252,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         tailnet: objectField(message, "tailnet"),
         credentials: objectField(message, "credentials"),
         logins: objectField(message, "logins"),
+        host: objectField(message, "host"),
         updatedAt: new Date().toISOString(),
         via: ws,
       });
@@ -6486,6 +6663,8 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     logins: state?.logins ?? null,
     stateUpdatedAt: state?.updatedAt ?? null,
     stateLive: homeStateLive(home.id),
+    hostKind: home.hostKind ?? "fly",
+    hostImage: optionalString(state?.host?.image) ?? null,
   };
 }
 
@@ -6696,6 +6875,36 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     sendJson(res, 200, { home: homeSummary(home) });
     return;
   }
+  // Where the home runs (home-host.ts, `rudder cloud host`). The env bundle,
+  // which holds the new worker token, is in this response and nowhere else.
+  if (url.pathname === "/api/rudder/home/host") {
+    const home = findHomeRow(authContext.accountId);
+    if (req.method === "GET") {
+      sendJson(res, 200, { hostKind: home?.hostKind ?? null, image: flyWorkerImage, home: homeSummary(home) });
+      return;
+    }
+    if (req.method === "POST") {
+      const kind = parseHomeHostKind(stringField(await readJsonBody(req), "kind"));
+      if (!kind) {
+        throw badRequest('kind must be "external" or "fly"');
+      }
+      if (!home) {
+        sendJson(res, 404, { error: "no home machine" });
+        return;
+      }
+      const moving = homeRegionMoves.get(authContext.accountId);
+      if (home.status === "deleting" || (moving && moving.state !== "done" && moving.state !== "failed")) {
+        sendJson(res, 409, { error: "the home machine is being deleted or moved; try again when that finishes" });
+        return;
+      }
+      if (kind === "external") {
+        sendJson(res, 200, switchHomeToExternal(home));
+        return;
+      }
+      sendJson(res, 200, { home: homeSummary(await switchHomeToFly(home)), hostKind: "fly", image: flyWorkerImage });
+      return;
+    }
+  }
   // Move the home machine to another region (closer to the person using it).
   // The disk is COPIED (a Fly volume fork), and the old one is kept as a
   // backup: nothing on it is deleted here. Runs in the background; GET reports.
@@ -6713,6 +6922,10 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
       const home = findHomeRow(authContext.accountId);
       if (!home) {
         sendJson(res, 404, { error: "no home machine" });
+        return;
+      }
+      if (home.hostKind === "external") {
+        sendJson(res, 409, { error: externalHomeRefusal("region") });
         return;
       }
       const running = homeRegionMoves.get(authContext.accountId);

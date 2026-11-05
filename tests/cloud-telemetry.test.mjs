@@ -176,6 +176,8 @@ test("one collection observes every catalog instrument with the right attributes
   assert.equal(calls.counters["rudder.home.cleanup.runs"].length, 9);
   assert.ok(calls.counters["rudder.home.cleanup.runs"].every(([value]) => value === 0));
   assert.deepEqual(calls.counters["rudder.home.cleanup.actions"], [[0, { action: "park" }], [0, { action: "stop" }]]);
+  assert.deepEqual(calls.counters["rudder.home.cleanup.scratch_freed"], [[0, undefined]]);
+  assert.ok(fs.readFileSync(new URL("../observability/metrics.md", import.meta.url), "utf8").includes("`rudder.home.cleanup.scratch_freed`"));
   for (const name of Object.keys(calls.counters)) calls.counters[name] = [];
 
   hooks.recordReconnect();
@@ -183,5 +185,8 @@ test("one collection observes every catalog instrument with the right attributes
   assert.deepEqual(calls.counters["rudder.home.control.reconnects"], [[1, undefined]]);
   assert.deepEqual(calls.counters["rudder.home.cleanup.runs"], [[1, { trigger: "memory", outcome: "ok" }]]);
   assert.deepEqual(calls.counters["rudder.home.cleanup.actions"], [[2, { action: "park" }]]);
+  assert.deepEqual(calls.counters["rudder.home.cleanup.scratch_freed"], [], "nothing freed, nothing added");
+  hooks.recordCleanupRun({ trigger: "hourly", outcome: "ok", scratchFreedBytes: 4096 });
+  assert.deepEqual(calls.counters["rudder.home.cleanup.scratch_freed"], [[4096, undefined]]);
   await hooks.shutdown();
 });

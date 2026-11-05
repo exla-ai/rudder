@@ -36,6 +36,7 @@ import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
+import { hostInfo, writeHostUpdate } from "./home-host.mjs";
 
 let projectFiles;
 async function fileService() {
@@ -527,6 +528,16 @@ async function handleRpc(method, params) {
         fs.rmSync(project.dir, { recursive: true, force: true });
       }
     }
+    return { ok: true };
+  }
+  if (method === "update") {
+    // Only an external host has a path unit watching for this (home-host.mjs).
+    // The file holds the next worker token; it is never logged.
+    if (process.env.RUDDER_HOST_KIND !== "external") {
+      throw new Error("update: this home is not on an external host");
+    }
+    writeHostUpdate({ volume: VOLUME, image: params.image, workerToken: params.workerToken });
+    log(`update: ${params.image} requested; the host applies it`);
     return { ok: true };
   }
   if (method === "repos") {
@@ -1031,7 +1042,7 @@ async function publishState() {
         .map(({ port, url, id }) => ({ port, label: "Project preview", url, https: true, access: "tailnet", previewId: id })),
     });
   }
-  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot() };
+  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot(), host: hostInfo(process.env) };
   const json = JSON.stringify(state);
   if (json === lastStateJson) {
     return;

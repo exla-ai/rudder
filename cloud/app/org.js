@@ -511,7 +511,7 @@ export function SettingsScreen() {
 
   function linearCard(org, data) {
     const l = data?.linear || {};
-    const card = integrationCard({ svg: LINEAR_SVG, name: "Linear", blurb: "Start an agent on a Linear issue from a project's task box." });
+    const card = integrationCard({ svg: LINEAR_SVG, name: "Linear", blurb: "Turn goals into Linear issues, and start agents on them." });
     const act = card.querySelector(".in-act");
     const sub = card.querySelector(".in-sub");
     if (!l.configured) { setText(sub, "Not set up on this server yet"); card.classList.add("off"); return card; }
@@ -519,6 +519,9 @@ export function SettingsScreen() {
     setText(sub, `Connected to ${l.workspace?.name || "your workspace"}`);
     card.classList.add("on");
     if (data.canManage) act.appendChild(disconnectBtn("linear", "Linear", org));
+    const extra = card.querySelector(".in-extra");
+    extra.hidden = false;
+    extra.appendChild(linearPanel(org));
     return card;
   }
 
@@ -540,6 +543,180 @@ export function SettingsScreen() {
   window.addEventListener("focus", onFocus);
   document.addEventListener("visibilitychange", onFocus);
   return { el, update, destroy() { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); } };
+}
+
+/* Linear: projects linked to Rudder projects, and Generate tasks ----- */
+
+// Each Linear project (or team) links to one Rudder project: issues labeled
+// rudder there start an agent in that project, and "Generate tasks" turns a
+// goal into such issues. Suggested links (Libra -> libra) only need a Confirm.
+function linearPanel(org) {
+  const wrap = h(`<div class="lmap"><div class="sk sk-card" style="height:120px"></div></div>`);
+  let setup = null;
+  let lastResult = null;
+
+  async function load() {
+    try {
+      setup = await api(`/api/app/linear/setup${scopeQuery(org)}`);
+      paint();
+    } catch (err) {
+      wrap.replaceChildren(note(err.status === 404 ? "Linear projects are not available on this server yet." : err.message, err.status === 404 ? "" : "err"));
+    }
+  }
+
+  const projectName = (workspaceId) => setup.projects.find((p) => p.workspaceId === workspaceId)?.name;
+  const itemLabel = (item, kind) => (kind === "team" ? `${item.key} · ${item.name}` : item.name);
+
+  async function saveLink(kind, item, workspace) {
+    const res = await api("/api/app/linear/mapping", { method: "POST", body: { ...scopeBody(org), kind, linearId: item.id, workspace: workspace || null } });
+    item.link = res?.link || null;
+    item.suggestion = null;
+    track("linear_project_linked", { kind, linked: !!item.link });
+  }
+
+  function mapRow(item, kind) {
+    const row = h(`<div class="lmap-row"><span class="lmap-name"></span><span class="lmap-pick"></span><span class="lmap-act"></span></div>`);
+    setText(row.querySelector(".lmap-name"), itemLabel(item, kind));
+    const sel = h(`<select class="role-select"></select>`);
+    sel.setAttribute("aria-label", `Rudder project for ${itemLabel(item, kind)}`);
+    sel.appendChild(new Option("Not linked", ""));
+    for (const p of setup.projects) sel.appendChild(new Option(p.name, p.workspaceId));
+    if (item.link && !projectName(item.link.workspaceId)) {
+      sel.appendChild(new Option(`${item.link.projectName || "Project"} (another member's machine)`, item.link.workspaceId));
+    }
+    // A suggestion is preselected only for someone who can confirm it.
+    sel.value = item.link?.workspaceId || (setup.canManage ? item.suggestion?.workspaceId : "") || "";
+    sel.disabled = !setup.canManage;
+    row.querySelector(".lmap-pick").appendChild(sel);
+    const act = row.querySelector(".lmap-act");
+    if (!item.link && item.suggestion && setup.canManage) {
+      const ok = h(`<button type="button" class="btn small accent">Confirm</button>`);
+      ok.title = `Link ${item.name} to ${item.suggestion.name}`;
+      ok.addEventListener("click", async () => {
+        ok.disabled = true;
+        try { await saveLink(kind, item, sel.value); toast(sel.value ? `${item.name} is linked to ${projectName(sel.value) || "the project"}` : `${item.name} is not linked`); paint(); }
+        catch (err) { showError(err); ok.disabled = false; }
+      });
+      act.appendChild(ok);
+    }
+    sel.addEventListener("change", async () => {
+      if (!item.link && item.suggestion) return; // Confirm saves it
+      try {
+        await saveLink(kind, item, sel.value);
+        toast(sel.value ? `${item.name} is linked to ${projectName(sel.value) || "the project"}` : `${item.name} is no longer linked`);
+        paint();
+      } catch (err) { showError(err); paint(); }
+    });
+    return row;
+  }
+
+  function generateBox() {
+    const box = h(`<div class="lmap-gen">
+      <label class="field-label">Generate tasks</label>
+      <textarea class="input lmap-goal" rows="3" maxlength="4000" placeholder="What should get done? For example: make uploads reliable on slow networks" aria-label="Goal for the new tasks"></textarea>
+      <div class="lmap-gen-row"><select class="role-select" aria-label="Linear project for the new tasks"></select><button type="button" class="btn accent">Create issues</button></div>
+      <div class="hint lmap-gen-hint"></div>
+      <div class="lmap-out" role="list"></div>
+    </div>`);
+    const goal = box.querySelector("textarea");
+    const sel = box.querySelector("select");
+    const btn = box.querySelector("button");
+    const hint = box.querySelector(".lmap-gen-hint");
+    const out = box.querySelector(".lmap-out");
+    const targets = [
+      ...setup.linearProjects.filter((p) => p.link).map((p) => ({ value: `project:${p.id}`, label: `${p.name} · ${p.link.projectName || "project"}`, project: p.link.projectName })),
+      ...setup.teams.filter((t) => t.link).map((t) => ({ value: `team:${t.id}`, label: `${t.key} team · ${t.link.projectName || "project"}`, project: t.link.projectName })),
+    ];
+    if (!targets.length) {
+      box.querySelector(".lmap-gen-row").hidden = true;
+      goal.hidden = true;
+      setText(hint, "Link a Linear project to a Rudder project above, then describe a goal here.");
+      return box;
+    }
+    for (const t of targets) sel.appendChild(new Option(t.label, t.value));
+    setText(hint, setup.autoStart
+      ? "Creates 3 to 10 small issues labeled rudder. An agent starts on each one."
+      : "Creates 3 to 10 small issues labeled rudder. Agents start on them once Linear webhooks are set up on this server.");
+    const sync = () => { btn.disabled = !goal.value.trim(); };
+    goal.addEventListener("input", sync);
+    sync();
+    const showResult = (res) => {
+      out.replaceChildren();
+      if (!res) return;
+      for (const issue of res.issues || []) {
+        const a = h(`<a class="lmap-issue" role="listitem" target="_blank" rel="noopener noreferrer"><span class="lmap-id"></span><span class="lmap-title"></span></a>`);
+        a.href = issue.url;
+        setText(a.querySelector(".lmap-id"), issue.identifier);
+        setText(a.querySelector(".lmap-title"), issue.title);
+        a.addEventListener("click", (e) => { if (NATIVE) { e.preventDefault(); openExternal(issue.url); } });
+        out.appendChild(a);
+      }
+      if (res.error) out.appendChild(note(res.error, "err"));
+    };
+    showResult(lastResult);
+    btn.addEventListener("click", async () => {
+      const text = goal.value.trim();
+      if (!text) return;
+      const [kind, id] = sel.value.split(":");
+      btn.disabled = true;
+      setText(btn, "Creating…");
+      try {
+        const res = await api("/api/app/linear/generate", {
+          method: "POST",
+          body: { ...scopeBody(org), goal: text, ...(kind === "project" ? { linearProjectId: id } : { teamId: id }) },
+        });
+        lastResult = res;
+        track("linear_tasks_generated", { count: res?.issues?.length || 0 });
+        const target = targets.find((t) => t.value === sel.value);
+        toast(`Created ${res?.issues?.length || 0} issues${res?.autoStart && target?.project ? `; agents start in ${target.project}` : ""}`);
+        goal.value = "";
+        showResult(res);
+      } catch (err) { showError(err); }
+      setText(btn, "Create issues");
+      sync();
+    });
+    return box;
+  }
+
+  function paint() {
+    const parts = [];
+    const pending = setup.linearProjects.filter((p) => !p.link && p.suggestion);
+    const head = h(`<div class="lmap-head"><label class="field-label">Linear projects</label></div>`);
+    if (pending.length > 1 && setup.canManage) {
+      const all = h(`<button type="button" class="btn small">Confirm all</button>`);
+      all.title = "Link every suggested project";
+      all.addEventListener("click", async () => {
+        all.disabled = true;
+        try {
+          for (const item of pending) await saveLink("project", item, item.suggestion.workspaceId);
+          toast(`Linked ${pending.length} projects`);
+        } catch (err) { showError(err); }
+        paint();
+      });
+      head.appendChild(all);
+    }
+    parts.push(head);
+    if (setup.linearProjects.length) {
+      const list = h(`<div class="lmap-list"></div>`);
+      list.append(...setup.linearProjects.map((p) => mapRow(p, "project")));
+      parts.push(list);
+    } else {
+      parts.push(note("No projects in this Linear workspace yet."));
+    }
+    parts.push(h(`<div class="hint">Issues labeled <code>rudder</code> in a linked Linear project start an agent in its Rudder project.${setup.autoStart ? "" : " Linear webhooks are not set up on this server yet, so nothing starts on its own."}</div>`));
+    if (setup.teams.length) {
+      const details = h(`<details class="lmap-teams"><summary>Link a whole team instead</summary><div class="lmap-list"></div></details>`);
+      if (setup.teams.some((t) => t.link)) details.open = true;
+      details.querySelector(".lmap-list").append(...setup.teams.map((t) => mapRow(t, "team")));
+      parts.push(details);
+    }
+    if (setup.generate) parts.push(generateBox());
+    else parts.push(h(`<div class="hint">Generating tasks is not set up on this server yet.</div>`));
+    wrap.replaceChildren(...parts);
+  }
+
+  load();
+  return wrap;
 }
 
 function openCreateOrg(onCreated) {

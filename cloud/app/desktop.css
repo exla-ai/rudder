@@ -196,6 +196,27 @@
 .in-extra { margin-top: 4px; padding-top: 2px; }
 .in-extra .role-select { width: 100%; height: 42px; }
 .in-extra .hint code { font-family: var(--mono); }
+.lmap { margin-top: 2px; }
+.lmap-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lmap-head .btn { margin-top: 6px; }
+.lmap-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.lmap-row + .lmap-row { border-top: 1px solid var(--line); }
+.lmap-name { flex: 1 1 35%; min-width: 0; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lmap-pick { flex: 1 1 50%; min-width: 0; }
+.in-extra .lmap-row .role-select { height: 36px; }
+.lmap-act { flex: none; }
+.lmap-act:empty { display: none; }
+.lmap-teams { margin-top: 10px; }
+.lmap-teams summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); padding: 4px 2px; }
+.lmap-goal { display: block; width: 100%; height: auto; min-height: 84px; box-sizing: border-box; padding: 10px 12px; font: 15px/1.4 var(--font); resize: vertical; }
+.lmap-gen-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.in-extra .lmap-gen-row .role-select { flex: 1 1 200px; width: auto; height: 40px; }
+.lmap-gen-row .btn { min-height: 40px; }
+.lmap-out { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.lmap-issue { display: flex; gap: 8px; align-items: baseline; padding: 6px 2px; color: var(--ink); text-decoration: none; font-size: 14px; }
+.lmap-issue:hover .lmap-title { text-decoration: underline; }
+.lmap-id { flex: none; font: 12.5px/1 var(--mono); color: var(--muted); }
+.lmap-title { min-width: 0; overflow-wrap: anywhere; }
 .center-card { text-align: center; align-items: center; }
 .center-card h1 { font-size: 24px; margin: 18px 0 8px; text-wrap: balance; }
 .center-card p { margin: 0 0 12px; }

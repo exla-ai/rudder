@@ -296,6 +296,9 @@ function integ(scope) {
 }
 const mine = (o) => o.members.find((m) => m.accountId === ME);
 const orgList = () => [...orgs.values()].filter(mine).map((o) => ({ id: o.id, name: o.name, role: mine(o).role, memberCount: o.members.length, createdAt: o.createdAt }));
+const LINEAR_TEAMS = [{ id: "team_eng", key: "EXL", name: "Exla" }];
+const LINEAR_PROJECTS = ["Libra", "Offstage", "Rudder"].map((name) => ({ id: `lp_${name.toLowerCase()}`, name, teams: LINEAR_TEAMS }));
+const linearLinks = new Map();
 const ISSUES = [
   { id: "lin_1", identifier: "EXL-142", title: "Preview links should open in the phone app", url: "https://linear.app/exla/issue/EXL-142", state: "In Progress", priority: 2, team: "Rudder" },
   { id: "lin_2", identifier: "EXL-139", title: "Digest misses agents merged after midnight", url: "https://linear.app/exla/issue/EXL-139", state: "Todo", priority: 1, team: "Rudder" },
@@ -431,6 +434,39 @@ function orgRoutes(req, res, p, url, body) {
     const text = `${issue.identifier}: ${issue.title}\n\n${issue.url}`;
     if (proj) proj.agents.unshift(agent({ id: `run_l${Date.now() % 1e6}`, title: issue.title, task: text, status: "working", backend: "claude", model: "opus", createdAt: now(), updatedAt: now(), fresh: true, lastMessage: "Starting on the Linear issue." }));
     return send(200, { ok: true, text });
+  }
+  if (p === "/api/app/linear/setup" && m === "GET") {
+    const list = (freshProjects ?? projects).map((x) => ({ workspaceId: x.workspaceId, name: x.name, repo: x.repo ?? null }));
+    const pick = (name) => list.find((x) => x.name.toLowerCase().endsWith(name.toLowerCase()));
+    const view = (kind, item) => {
+      const link = linearLinks.get(`${scope}:${kind}:${item.id}`) || null;
+      const s = link ? null : pick(item.name);
+      return { ...item, link, suggestion: s ? { workspaceId: s.workspaceId, name: s.name } : null };
+    };
+    return send(200, {
+      linearProjects: LINEAR_PROJECTS.map((x) => view("project", x)),
+      teams: LINEAR_TEAMS.map((x) => view("team", x)),
+      projects: list,
+      canManage,
+      generate: true,
+      autoStart: true,
+    });
+  }
+  if (p === "/api/app/linear/mapping" && m === "POST") {
+    if (!canManage) return send(403, { error: "only an org admin can change its integrations" });
+    const key = `${scope}:${body.kind || "project"}:${body.linearId}`;
+    if (!body.workspace) { linearLinks.delete(key); return send(200, { link: null }); }
+    const proj = (freshProjects ?? projects).find((x) => x.workspaceId === body.workspace);
+    if (!proj) return send(404, { error: "project not found" });
+    const link = { workspaceId: proj.workspaceId, projectName: proj.name, teamId: "team_eng", mine: true };
+    linearLinks.set(key, link);
+    return send(200, { link });
+  }
+  if (p === "/api/app/linear/generate" && m === "POST") {
+    if (!String(body.goal || "").trim()) return send(400, { error: "goal is required" });
+    const titles = ["Add retry to the upload client", "Show upload progress", "Log upload failures"];
+    const issues = titles.map((title, i) => ({ id: `gen_${i}`, identifier: `EXL-${200 + i}`, title, url: `https://linear.app/exla/issue/EXL-${200 + i}` }));
+    return send(200, { issues, provider: "openai", model: "gpt-6-luna", link: null, autoStart: true });
   }
   if ((r = p.match(/^\/api\/app\/link\/slack\/([^/]+)$/)) && m === "POST") {
     if (r[1] === "expired") return send(410, { error: "This link has expired. Run /rudder link in Slack again." });

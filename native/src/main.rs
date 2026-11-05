@@ -28,7 +28,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use rudder_native::pty_terminal::{
@@ -212,6 +212,8 @@ const CLAUDE_NAV_MAX_PAGES: u16 = 200;
 /// Animation-only redraw cadence. Real PTY output wakes the loop immediately; this
 /// interval only advances the idle spinner.
 const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// Card and notice spinners: slower than planning, still reads as motion.
+const CARD_SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(160);
 /// How fast the tab glyph turns while agents are running. Slower than the in-app
 /// spinner: a tab is glanced at, not watched, and a fast cycle there is noise in
 /// the corner of the eye.
@@ -1933,6 +1935,11 @@ struct App {
     model: String,
     effort: Option<EffortLevel>,
     notice: Option<String>,
+    /// The notice text last drawn and when it first appeared, so it shows as a
+    /// pill for a few seconds and then settles into the footer.
+    notice_seen: Option<(String, Instant)>,
+    /// The `?` keys overlay is open.
+    show_keys: bool,
     /// Machine notices are projected into independent attached views only when
     /// this App has no local terminal surface.
     engine_headless: bool,
@@ -3265,6 +3272,8 @@ impl App {
             model: selection.model,
             effort: selection.effort,
             notice: None,
+            notice_seen: None,
+            show_keys: false,
             engine_headless: false,
             machine_notice: None,
             machine_notice_cursor: 0,
@@ -3610,9 +3619,30 @@ impl App {
     }
 
     fn advance_spinner_if_due(&mut self, now: Instant) -> bool {
-        if !self.has_planning_orchestrator()
-            || now.duration_since(self.last_spinner_advance) < SPINNER_FRAME_INTERVAL
+        // A notice pill that has just run out needs one more frame so it can
+        // settle into the footer; nothing else would redraw an idle screen.
+        if let Some((_, since)) = &self.notice_seen {
+            let age = now.duration_since(*since);
+            let crossed = |ttl: Duration| {
+                age >= ttl && age < ttl + SPINNER_FRAME_INTERVAL * 3
+            };
+            if crossed(NOTICE_PILL_FOR) || crossed(NOTICE_ERROR_PILL_FOR) {
+                self.dirty = true;
+            }
+        }
+        // Planning spins at full speed; a busy card or an in-progress notice
+        // spins at a calmer cadence so a fleet of running agents does not turn
+        // into a redraw loop.
+        let interval = if self.has_planning_orchestrator() {
+            SPINNER_FRAME_INTERVAL
+        } else if self.notice.as_deref().is_some_and(notice_in_progress)
+            || self.agents.iter().any(agent_is_busy)
         {
+            CARD_SPINNER_FRAME_INTERVAL
+        } else {
+            return false;
+        };
+        if now.duration_since(self.last_spinner_advance) < interval {
             return false;
         }
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -4095,6 +4125,11 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return self.confirm_or_quit();
+        }
+        // The keys overlay is read-only: any key closes it and is spent there.
+        if self.show_keys {
+            self.show_keys = false;
+            return false;
         }
         // Any other key dismisses the pending quit confirmation. A repeated q
         // confirms; Ctrl+C re-enters confirm_or_quit above and confirms there.
@@ -4838,6 +4873,7 @@ impl App {
             KeyCode::Char('P') => self.open_main_model_switcher(),
             KeyCode::Char('o') => self.open_web_ui(),
             KeyCode::Char('U') => self.open_usage_dashboard(),
+            KeyCode::Char('?') => self.show_keys = true,
             // Esc backs out of an open drawer, leaving the cursor on its header row.
             KeyCode::Esc | KeyCode::Left if self.drawer.is_some() => self.close_drawer(),
             _ => {}
@@ -5358,7 +5394,7 @@ impl App {
                 };
                 let width = self
                     .task_area
-                    .map(block_inner)
+                    .map(task_text_rect)
                     .map(task_inner_width)
                     .unwrap_or(80);
                 let lines = task_input_lines(&self.task_input, self.task_cursor, width);
@@ -5859,7 +5895,7 @@ impl App {
     /// which makes row motion fall back to logical lines.
     fn task_wrap_width(&self) -> u16 {
         self.task_area
-            .map(|area| area.width.saturating_sub(2).max(1))
+            .map(|area| task_text_rect(area).width.max(1))
             .unwrap_or(u16::MAX)
     }
 
@@ -5883,6 +5919,15 @@ impl App {
 
     fn handle_task_key(&mut self, key: KeyEvent) -> bool {
         self.task_selection = None;
+        // `?` on an empty prompt opens the keys overlay; anywhere in a draft it
+        // is just a question mark.
+        if key.code == KeyCode::Char('?')
+            && self.task_input.is_empty()
+            && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.show_keys = true;
+            return false;
+        }
         // Before the history and palette claims below: a draft with rows above or
         // below the cursor owns Up/Down. Losing a half-written multi-line task to
         // a history entry on the first Up was the worst of the multiline gaps.
@@ -6733,7 +6778,7 @@ impl App {
             .filter(|area| rect_contains(*area, mouse.column, mouse.row))
         {
             self.worker_selection = None;
-            if self.handle_task_selection_mouse(mouse, block_inner(task_area)) {
+            if self.handle_task_selection_mouse(mouse, task_text_rect(task_area)) {
                 return true;
             }
             return false;

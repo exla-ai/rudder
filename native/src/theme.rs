@@ -114,21 +114,97 @@ pub(crate) const ST_FAILED: Color = FAILED_COLOR; // red
 /// Filled-circle glyph used as a colored status badge in the agent list.
 pub(crate) const BADGE: &str = "\u{25CF}"; // ●
 
-/// Color for an agent's status. Done and Merged are a visible green.
+/// Color for an agent's status. Done is green, merged takes the accent (the
+/// work landed), and anything that needs you reads amber.
 pub(crate) fn status_color(status: AgentStatus) -> Color {
+    let p = pal();
     match status {
-        AgentStatus::Running => ST_RUNNING,
-        AgentStatus::Done | AgentStatus::Merged => ST_MERGED,
-        AgentStatus::Failed => ST_FAILED,
-        AgentStatus::Stopped => MUTED,
-        AgentStatus::Paused => MUTED,
-        AgentStatus::Orphaned => FAILED_COLOR,
-        AgentStatus::Migrated => ACCENT,
+        AgentStatus::Running => p.running,
+        AgentStatus::Done => p.done,
+        AgentStatus::Merged => p.merged,
+        AgentStatus::Failed | AgentStatus::Orphaned => p.failed,
+        AgentStatus::Stopped | AgentStatus::Paused => p.muted,
+        AgentStatus::Migrated => p.accent,
     }
 }
 
 /// Section-header style ("main" / "workspaces" / "merged"): a quiet, thin label.
 /// No bold (the theme is thin); hierarchy comes from color + spacing.
 pub(crate) fn header_style(focused: bool) -> Style {
-    Style::default().fg(if focused { MUTED } else { FAINT })
+    let p = pal();
+    Style::default().fg(if focused { p.muted } else { p.faint })
+}
+
+// --- 4.2 palette ------------------------------------------------------------
+//
+// One accent, four status colors and three greys, tuned twice: once for dark
+// terminals and once for light ones (and paper mode). Which one applies comes
+// from the outer terminal's background (term_colors.rs asks it at startup), so
+// the chrome follows the same light/dark answer the agents in the panes get.
+
+/// The resolved palette for the current frame.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Palette {
+    pub accent: Color,
+    pub running: Color,
+    pub waiting: Color,
+    pub done: Color,
+    pub merged: Color,
+    pub failed: Color,
+    /// Secondary text.
+    pub muted: Color,
+    /// Hairlines and the quietest text.
+    pub faint: Color,
+    /// A soft fill behind the selected card and the notice pill.
+    pub surface: Color,
+    /// Text drawn on top of `surface`.
+    pub on_surface: Color,
+}
+
+const DARK: Palette = Palette {
+    accent: Color::Rgb(0xA3, 0x94, 0xFF),
+    running: Color::Rgb(0x6C, 0xB6, 0xFF),
+    waiting: Color::Rgb(0xF5, 0xC2, 0x4C),
+    done: Color::Rgb(0x5F, 0xD3, 0x8D),
+    merged: Color::Rgb(0xA3, 0x94, 0xFF),
+    failed: Color::Rgb(0xFF, 0x7A, 0x7A),
+    muted: Color::Rgb(0x8C, 0x93, 0xA3),
+    faint: Color::Rgb(0x4E, 0x55, 0x63),
+    surface: Color::Rgb(0x25, 0x26, 0x38),
+    on_surface: Color::Rgb(0xE6, 0xE6, 0xF0),
+};
+
+const LIGHT: Palette = Palette {
+    accent: Color::Rgb(0x5B, 0x45, 0xD6),
+    running: Color::Rgb(0x1F, 0x6F, 0xEB),
+    waiting: Color::Rgb(0xA8, 0x5B, 0x00),
+    done: Color::Rgb(0x16, 0x83, 0x45),
+    merged: Color::Rgb(0x5B, 0x45, 0xD6),
+    failed: Color::Rgb(0xD0, 0x30, 0x30),
+    muted: Color::Rgb(0x6B, 0x72, 0x80),
+    faint: Color::Rgb(0xB4, 0xBA, 0xC4),
+    surface: Color::Rgb(0xEC, 0xEA, 0xFB),
+    on_surface: Color::Rgb(0x1A, 0x1A, 0x1A),
+};
+
+thread_local! {
+    static DARK_CHROME: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Re-read light or dark once per frame (a lock read, so not per span). An
+/// unknown terminal is treated as dark, the common case; paper mode is light.
+pub(crate) fn refresh_palette() {
+    let dark = color_mode() == ColorMode::Terminal
+        && rudder_native::term_colors::terminal_colors()
+            .map(|colors| colors.is_dark())
+            .unwrap_or(true);
+    DARK_CHROME.with(|cell| cell.set(dark));
+}
+
+pub(crate) fn pal() -> Palette {
+    if DARK_CHROME.with(std::cell::Cell::get) {
+        DARK
+    } else {
+        LIGHT
+    }
 }

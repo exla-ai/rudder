@@ -7,6 +7,7 @@ use crate::plan_stream::{PlanEntry, PlanEntryKind};
 pub(crate) const NARROW_LAYOUT_WIDTH: u16 = 90;
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
+    refresh_palette();
     let area = frame.area();
     frame.render_widget(Clear, area);
     // In terminal-background mode this leaves the terminal foreground/background
@@ -54,20 +55,30 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         }
         render_cloud_prompt(frame, area, app);
         render_merge_prompt(frame, area, app);
+        render_notice_pill(frame, area, app);
+        render_keys_overlay(frame, area, app);
         render_mouse_debug(frame, area, app);
         return;
     }
 
+    // Header (wordmark, project, branch) and footer (the keys that matter right
+    // now) are one quiet row each, and give way on a very short screen.
+    let chrome_rows = u16::from(area.height >= 14);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),
-            Constraint::Length(1),
+            Constraint::Length(chrome_rows),
+            Constraint::Min(6),
             Constraint::Length(task_height),
+            Constraint::Length(chrome_rows),
         ])
         .split(area);
+    let header_row = rows[0];
+    let footer_row = rows[3];
+    let rows = [rows[1], rows[3], rows[2]];
 
     app.task_area = Some(rows[2]);
+    render_header(frame, header_row, app);
 
     // Narrow (zoomed in, a split, a small window): a 34-column sidebar next to
     // the worker leaves neither readable, so one of them takes the width. The
@@ -89,11 +100,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
             app.worker_area = Some(rows[0]);
             render_worker(frame, rows[0], app);
         }
-        render_gutter(frame, rows[1], Gutter::Horizontal);
+        render_footer(frame, footer_row, app);
+        render_notice_pill(frame, rows[0], app);
         render_task(frame, rows[2], app);
         render_suggestions(frame, rows[2], app);
         render_cloud_prompt(frame, area, app);
         render_merge_prompt(frame, area, app);
+        render_keys_overlay(frame, area, app);
         render_mouse_debug(frame, area, app);
         render_perf_hud(frame, area, app);
         return;
@@ -140,11 +153,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         app.diff_area = None;
         render_worker(frame, main[2], app);
     }
-    render_gutter(frame, rows[1], Gutter::Horizontal);
+    render_footer(frame, footer_row, app);
+    render_notice_pill(frame, rows[0], app);
     render_task(frame, rows[2], app);
     render_suggestions(frame, rows[2], app);
     render_cloud_prompt(frame, area, app);
     render_merge_prompt(frame, area, app);
+    render_keys_overlay(frame, area, app);
     render_mouse_debug(frame, area, app);
     render_perf_hud(frame, area, app);
 }
@@ -405,36 +420,11 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     trailing: &[Span<'a>],
 ) {
     let row_start = lines.len();
-    let selected = index == app.selected_agent;
-    // The selected row must read clearly EVEN WHEN THE PANE IS UNFOCUSED (you navigate the
-    // tree from either pane), so its marker + title use the accent color + BOLD
-    // unconditionally instead of fading to FAINT the way accent_style(false) did — that
-    // fade is why the arrow was sometimes invisible. A filled glyph reads better than ">".
-    // A selected row must pop unmistakably from EITHER pane (you navigate the tree
-    // from both). The marker is a big, bold, slow-blinking arrow in the accent color,
-    // and the title gets a solid accent "pill" (white ink on teal) so the highlighted
-    // agent reads at a glance instead of a faint one-shade shift.
-    let selected_marker_style = Style::default()
-        .fg(ACCENT)
-        .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
-    let selected_label_style = Style::default()
-        .fg(PAPER)
-        .bg(ACCENT)
-        .add_modifier(Modifier::BOLD);
-    let marker = if selected { "▶ " } else { "  " };
-    let marker_style = if selected {
-        selected_marker_style
-    } else {
-        accent_style(focused)
-    };
-    let task_style = if selected {
-        selected_label_style
-    } else {
-        pane_text_style(focused)
-    };
+    let selected = index == app.selected_agent && app.drawer_cursor.is_none();
+    let p = pal();
     // The rename box comes first: a main row used to take its summary
     // before this check, so `r` opened an editor nobody could see.
-    let task_label = if selected && app.rename_input.is_some() {
+    let task_label = if index == app.selected_agent && app.rename_input.is_some() {
         let buf = app.rename_input.clone().unwrap_or_default();
         format!("✎ {buf}")
     } else if agent.is_main() {
@@ -453,21 +443,14 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     } else {
         task_label
     };
+    let task_label = if is_cloud_agent(agent) {
+        format!("☁ {task_label}")
+    } else {
+        task_label
+    };
 
-    let mut first = prefix.to_vec();
-    first.extend([
-        Span::styled(marker, marker_style),
-        if is_cloud_agent(agent) {
-            Span::styled("☁ ", cloud_style(true, focused))
-        } else {
-            Span::raw("")
-        },
-        // Two rows of title (the list wraps it), not one cut short.
-        Span::styled(truncate_chars(&task_label, task_width * 2), task_style),
-    ]);
-    first.extend(trailing.iter().cloned());
-    lines.push((Line::from(first)));
-
+    // Line 2: status glyph, status, elapsed, diff, and a tag for anything that
+    // is not a plain run (main, plan, cloud, a plan node id).
     let (status_label, status_style): (String, Style) =
         if agent.is_main() && agent.terminal.is_none() {
             ("idle".to_string(), muted_style(focused))
@@ -482,81 +465,254 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     } else {
         status_label
     };
-    let badge_style = Style::default().fg(status_style.fg.unwrap_or(MUTED));
-
-    let mode_span = if agent.is_main() {
-        Span::styled("main", accent_style(focused))
-    } else if is_cloud_agent(agent) {
-        Span::styled("cloud", accent_style(focused))
-    } else if agent.mode == AgentMode::RudderPlan {
-        Span::styled("rudder-plan", accent_style(focused))
-    } else if agent.mode == AgentMode::ReviewAll {
-        Span::styled("review-all", accent_style(focused))
-    } else if agent.mode == AgentMode::Plan {
-        Span::styled("plan", accent_style(focused))
-    } else if let Some(node_id) = agent.node_id.as_deref() {
-        // Plan workers carry their DAG node id so the row is matchable against the
-        // orchestrator pane's "n2 <title>" line at a glance.
-        Span::styled(format!("run {node_id}"), muted_style(focused))
+    let status_color = status_style.fg.unwrap_or(p.muted);
+    let glyph = if agent_is_busy(agent) {
+        app.spinner_glyph()
     } else {
-        Span::styled("run", muted_style(focused))
+        match agent.status {
+            _ if agent_waits_for_you(agent) => BADGE,
+            AgentStatus::Done | AgentStatus::Merged => "\u{2713}",
+            AgentStatus::Failed | AgentStatus::Orphaned => "\u{2715}",
+            AgentStatus::Stopped | AgentStatus::Paused => "\u{25cb}",
+            _ => BADGE,
+        }
     };
-
-    // The status head (badge + status + mode) always fits; the model tail
-    // (backend + model + effort) is what overflows the ~30-col pane and gets the
-    // model name clipped mid-word ("opus[1m]" -> "opus[1"). Keep it inline when it
-    // fits, otherwise wrap it onto its own indented line so the model shows in full.
-    let mut status_head = cont_prefix.to_vec();
-    status_head.extend([
-        Span::raw("  "),
-        Span::styled(BADGE, badge_style),
+    let dot = Span::styled(" \u{b7} ", Style::default().fg(p.faint));
+    let mut status = vec![
+        Span::styled(glyph, Style::default().fg(status_color)),
         Span::raw(" "),
         Span::styled(status_label, status_style),
-        Span::raw("  "),
-        mode_span,
-    ]);
-    let model_tail = vec![
-        Span::styled(agent.backend.as_str().to_string(), muted_style(focused)),
-        Span::raw("  "),
-        Span::styled(agent.model.clone(), model_style(focused)),
-        Span::styled(
-            format!("({})", effort_label(agent.effort)),
-            model_style(focused),
-        ),
     ];
-    let head_width: usize = status_head.iter().map(Span::width).sum();
-    let tail_width: usize = model_tail.iter().map(Span::width).sum();
-    if head_width + 2 + tail_width <= task_width {
-        let mut status_line = status_head;
-        status_line.push(Span::raw("  "));
-        status_line.extend(model_tail);
-        lines.push((Line::from(status_line)));
-    } else {
-        lines.push((Line::from(status_head)));
-        let mut model_line = cont_prefix.to_vec();
-        model_line.push(Span::raw("    "));
-        model_line.extend(model_tail);
-        lines.push((Line::from(model_line)));
+    if agent.status == AgentStatus::Running {
+        if let Some(elapsed) = run_elapsed_label(agent) {
+            status.push(dot.clone());
+            status.push(Span::styled(elapsed, muted_style(focused)));
+        }
     }
+    if let Some(summary) = diff.as_deref() {
+        let diff_spans = diff_stat_spans(summary, focused);
+        if !diff_spans.is_empty() {
+            status.push(dot.clone());
+            status.extend(diff_spans);
+        }
+    }
+    let tag = if agent.is_main() {
+        Some("main".to_string())
+    } else if is_cloud_agent(agent) {
+        Some("cloud".to_string())
+    } else if agent.mode == AgentMode::RudderPlan {
+        Some("rudder-plan".to_string())
+    } else if agent.mode == AgentMode::ReviewAll {
+        Some("review-all".to_string())
+    } else if agent.mode == AgentMode::Plan {
+        Some("plan".to_string())
+    } else {
+        agent.node_id.clone()
+    };
+    if let Some(tag) = tag {
+        status.push(dot.clone());
+        status.push(Span::styled(tag, Style::default().fg(p.accent)));
+    }
+
+    let mut extra: Vec<Vec<Span<'a>>> = Vec::new();
     if let Some(detail) = integration_detail(agent) {
-        let mut integration_line = cont_prefix.to_vec();
-        integration_line.extend([Span::raw("  "), Span::styled(detail, muted_style(focused))]);
-        lines.push((Line::from(integration_line)));
+        extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }
     if let Some(detail) = delivery_detail(agent) {
-        let mut delivery_line = cont_prefix.to_vec();
-        delivery_line.extend([Span::raw("  "), Span::styled(detail, muted_style(focused))]);
-        lines.push((Line::from(delivery_line)));
+        extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }
-    if let Some(summary) = diff {
-        let mut diff_line = cont_prefix.to_vec();
-        diff_line.extend([
-            Span::raw("  "),
-            Span::styled(compact_diff_stat(&summary), muted_style(focused)),
-        ]);
-        lines.push((Line::from(diff_line)));
+
+    let inner = task_width + 2;
+    let prefix_w = spans_width(prefix);
+    if selected {
+        // The selected card: a rounded accent outline around title and status.
+        let box_w = inner.saturating_sub(prefix_w).max(8);
+        let body_w = box_w.saturating_sub(4);
+        let border = Style::default().fg(p.accent);
+        let edge = |left: &'static str, right: &'static str| -> Vec<Span<'a>> {
+            let mut row = cont_prefix.to_vec();
+            row.push(Span::styled(
+                format!("{left}{}{right}", "─".repeat(box_w.saturating_sub(2))),
+                border,
+            ));
+            row
+        };
+        let framed = |pre: &[Span<'a>], body: Vec<Span<'a>>| -> Line<'a> {
+            let mut row = pre.to_vec();
+            row.push(Span::styled("│ ", border));
+            row.extend(fit_spans(body, body_w));
+            row.push(Span::styled(" │", border));
+            Line::from(row)
+        };
+        lines.push(Line::from(edge("╭", "╮")));
+        let title_style = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
+        let title_rows = wrap_title(&task_label, body_w, 2);
+        let last = title_rows.len().saturating_sub(1);
+        for (row_index, row) in title_rows.into_iter().enumerate() {
+            let mut title = vec![Span::styled(row, title_style)];
+            if row_index == last {
+                title.extend(trailing.iter().cloned());
+            }
+            lines.push(framed(if row_index == 0 { prefix } else { cont_prefix }, title));
+        }
+        lines.push(framed(cont_prefix, status));
+        for row in extra {
+            lines.push(framed(cont_prefix, row));
+        }
+        lines.push(Line::from(edge("╰", "╯")));
+        record_agent_rows(row_start, lines.len(), index);
+    } else {
+        // Every other card: no outline, two quiet lines and a gap.
+        let body_w = inner.saturating_sub(prefix_w + 2).max(4);
+        let finished = matches!(
+            agent.status,
+            AgentStatus::Merged | AgentStatus::Stopped | AgentStatus::Paused
+        );
+        let title_style = if finished || !focused {
+            Style::default().fg(p.muted)
+        } else {
+            pane_text_style(true)
+        };
+        let title_rows = wrap_title(&task_label, body_w, 2);
+        let last = title_rows.len().saturating_sub(1);
+        for (row_index, row) in title_rows.into_iter().enumerate() {
+            let mut title = if row_index == 0 { prefix.to_vec() } else { cont_prefix.to_vec() };
+            title.push(Span::raw("  "));
+            title.push(Span::styled(row, title_style));
+            if row_index == last {
+                title.extend(trailing.iter().cloned());
+            }
+            lines.push(Line::from(title));
+        }
+        let mut row = cont_prefix.to_vec();
+        row.push(Span::raw("  "));
+        row.extend(status);
+        lines.push(Line::from(row));
+        for detail in extra {
+            let mut row = cont_prefix.to_vec();
+            row.push(Span::raw("  "));
+            row.extend(detail);
+            lines.push(Line::from(row));
+        }
+        record_agent_rows(row_start, lines.len(), index);
+        lines.push(Line::default());
     }
-    record_agent_rows(row_start, lines.len(), index);
+}
+
+/// How long a running agent has been going, from its creation stamp. Under a
+/// minute says nothing: the spinner already shows it just started.
+fn run_elapsed_label(agent: &AgentRun) -> Option<String> {
+    let created: u128 = agent.created_at.trim().parse().ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let secs = (now.checked_sub(created)? / 1000) as u64;
+    if secs < 60 {
+        return None;
+    }
+    let minutes = secs / 60;
+    Some(if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 48 * 60 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{}d", minutes / (60 * 24))
+    })
+}
+
+/// `+120 -8` from a `--shortstat` summary, additions green and deletions red.
+fn diff_stat_spans(summary: &str, focused: bool) -> Vec<Span<'static>> {
+    let p = pal();
+    let mut ins = None;
+    let mut del = None;
+    for part in summary.split(',') {
+        let part = part.trim();
+        let Some(num) = part.split_whitespace().next() else {
+            continue;
+        };
+        if part.contains("insertion") {
+            ins = Some(num.to_string());
+        } else if part.contains("deletion") {
+            del = Some(num.to_string());
+        }
+    }
+    if ins.is_none() && del.is_none() {
+        let compact = compact_diff_stat(summary);
+        return if compact.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::styled(compact, muted_style(focused))]
+        };
+    }
+    let mut spans = Vec::new();
+    if let Some(ins) = ins {
+        spans.push(Span::styled(format!("+{ins}"), Style::default().fg(p.done)));
+    }
+    if let Some(del) = del {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(format!("-{del}"), Style::default().fg(p.failed)));
+    }
+    spans
+}
+
+/// Clip `spans` to exactly `width` columns: cut with an ellipsis when too wide,
+/// pad with spaces when short.
+fn fit_spans<'a>(spans: Vec<Span<'a>>, width: usize) -> Vec<Span<'a>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    let total = spans_width(&spans);
+    let limit = if total > width { width.saturating_sub(1) } else { width };
+    for span in spans {
+        let w = span.width();
+        if used + w <= limit {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let mut cut = String::new();
+        for ch in span.content.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cw > limit {
+                break;
+            }
+            used += cw;
+            cut.push(ch);
+        }
+        out.push(Span::styled(cut, span.style));
+        break;
+    }
+    if total > width && width > 0 {
+        out.push(Span::styled("\u{2026}", Style::default().fg(pal().muted)));
+        used += 1;
+    }
+    if used < width {
+        out.push(Span::raw(" ".repeat(width - used)));
+    }
+    out
+}
+
+/// A card title on at most `max_rows` rows of `width` columns, broken at
+/// words, with an ellipsis when it still does not fit.
+fn wrap_title(text: &str, width: usize, max_rows: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut rows = wrap_text(text, width as u16);
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+        let last = rows.last_mut().expect("at least one row");
+        let keep = width.saturating_sub(1);
+        let mut cut: String = last.chars().take(keep).collect();
+        while unicode_width::UnicodeWidthStr::width(cut.as_str()) > keep {
+            cut.pop();
+        }
+        *last = format!("{}\u{2026}", cut.trim_end());
+    }
+    rows
 }
 
 /// Compress `git diff --shortstat` output ("34 files changed, 3162 insertions(+),
@@ -1633,44 +1789,12 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             })
             .collect()
     };
-    let run_count = app.agents.iter().filter(|a| !a.is_main()).count();
-    let mut lines = vec![
-        (Line::from(Span::styled("rudder", pane_text_style(focused)))),
-        (Line::from(vec![
-            Span::styled(home_relative(&app.cwd), pane_text_style(focused)),
-            Span::raw(" "),
-            Span::styled(
-                app.branch.as_deref().unwrap_or("no-branch"),
-                muted_style(focused),
-            ),
-        ])),
-        (Line::from(vec![
-            Span::styled("agents ", pane_text_style(focused)),
-            Span::styled(run_count.to_string(), accent_style(focused)),
-            Span::styled(" runs", pane_text_style(focused)),
-            Span::styled("  ·  ", muted_style(focused)),
-            Span::styled("plan integration automatic", accent_style(focused)),
-        ])),
-        (Line::default()),
-    ];
-    if let Some((current, latest)) = read_update_notice() {
-        lines.insert(
-            lines.len() - 1,
-            (Line::from(vec![
-                Span::styled("\u{2191} ", accent_style(focused)),
-                Span::styled(
-                    format!("update: {current} -> {latest}"),
-                    pane_text_style(focused),
-                ),
-            ])),
-        );
-        lines.insert(
-            lines.len() - 1,
-            (Line::from(Span::styled(
-                "  npm i -g @exla/rudder",
-                muted_style(focused),
-            ))),
-        );
+    // Project, branch and version live in the header row now; the card list
+    // starts with the cards.
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    if app.nest_view {
+        lines.push(Line::from(Span::styled("nest view", header_style(focused))));
+        lines.push(Line::default());
     }
     // The board URL is intentionally NOT shown in the UI; the "o web ui" hint below
     // (and /web) opens this project's board in the browser. Keeping the URL off-screen
@@ -1680,43 +1804,15 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // inside a cloud worker. Showing "cloud connected" in a plain local
         // rudder session is misleading: it reflects whether the user has saved
         // cloud auth, not whether anything is attached.
-        let insert_at = lines.len().saturating_sub(1);
-        lines.insert(
-            insert_at,
-            (Line::from(vec![
-                Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
-                Span::styled(
-                    if app.cloud_connected {
-                        "cloud connected"
-                    } else {
-                        "cloud offline"
-                    },
-                    cloud_style(app.cloud_connected, focused),
-                ),
-            ])),
-        );
-        let insert_at = lines.len().saturating_sub(1);
-        lines.insert(
-            insert_at,
-            (Line::from(vec![
-                Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
-                Span::styled(
-                    cloud_workspace_label(app.cloud_workspace.as_ref()),
-                    cloud_style(app.cloud_workspace.is_some(), focused),
-                ),
-            ])),
-        );
+        lines.push(Line::from(vec![
+            Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
+            Span::styled(
+                cloud_workspace_label(app.cloud_workspace.as_ref()),
+                cloud_style(app.cloud_workspace.is_some(), focused),
+            ),
+        ]));
+        lines.push(Line::default());
     }
-
-    // The key list is 17 rows. Zoomed in, the pane is short as well as narrow,
-    // and the list pushed the agents themselves below the fold, so it gives
-    // way to one line when it would leave the agents less than half the pane.
-    // Decided once the rows are built (below), when it is known what fits.
-    let hint_rows = lines.len()..lines.len() + AGENT_PANE_HINTS.len();
-    for hint in AGENT_PANE_HINTS {
-        lines.push(Line::from(Span::styled(*hint, muted_style(focused))));
-    }
-    lines.push((Line::default()));
 
     let task_width = area.width.saturating_sub(4).max(12) as usize;
 
@@ -1754,10 +1850,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // every agent, ignoring status sections.
         render_agents_nest_into(&mut lines, app, focused, task_width, &diff_summaries);
         if main_count == 0 && run_total == 0 {
-            lines.push((Line::from(Span::styled(
-                "no agents yet  ·  type a task or /main",
-                muted_style(focused),
-            ))));
+            push_empty_state(&mut lines, focused);
         }
     } else {
         // Default view: main agents first, then status sections (todo / in progress
@@ -1868,10 +1961,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             && run_total == 0
             && app.plans.iter().all(|plan| plan.planned_nodes.is_empty())
         {
-            lines.push((Line::from(Span::styled(
-                "no agents yet  ·  type a task or /main",
-                muted_style(focused),
-            ))));
+            push_empty_state(&mut lines, focused);
         }
     }
 
@@ -1879,35 +1969,21 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // of letting the list clip it: zoomed in (Cmd+), the 34-column sidebar cut
     // titles, statuses and the repo path mid-word. Every row stays one screen
     // row, so the recorded spans are shifted to the rows they now occupy.
-    let room = area.height.saturating_sub(2) as usize;
     let inner = area.width.saturating_sub(2) as usize;
-    let needed: usize = lines.iter().map(|line| line.width().max(1).div_ceil(inner.max(1))).sum();
-    if needed > room {
-        let removed = hint_rows.len() - 1;
-        lines.splice(
-            hint_rows.clone(),
-            [Line::from(Span::styled(
-                "j/k move · Enter focus · ^W keys",
-                muted_style(focused),
-            ))],
-        );
-        let shift = |row: usize| if row >= hint_rows.end { row - removed } else { row };
-        AGENT_ROW_SPANS.with(|spans| {
-            for span in spans.borrow_mut().iter_mut() {
-                *span = (shift(span.0), shift(span.1), span.2);
-            }
-        });
-        DRAWER_ROW_SPANS.with(|spans| {
-            for span in spans.borrow_mut().iter_mut() {
-                span.0 = shift(span.0);
-            }
-        });
-    }
     let lines = {
         let mut wrapped = Vec::with_capacity(lines.len());
         let mut starts = Vec::with_capacity(lines.len() + 1);
+        // Cards and sections each bring their own breathing room; two blank
+        // rows in a row (a card's gap, then a section's) collapse into one, and
+        // the list never starts with one.
+        let mut last_blank = true;
         for line in lines {
             starts.push(wrapped.len());
+            let blank = line.width() == 0;
+            if blank && last_blank {
+                continue;
+            }
+            last_blank = blank;
             wrapped.extend(wrap_sidebar_line(line, inner));
         }
         starts.push(wrapped.len());
@@ -2002,20 +2078,13 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
     app.agents_scroll = offset;
 
+    // Borderless: the cards are the structure. The list keeps a one-cell inset
+    // (block_inner) so mouse hit-testing and scroll math stay unchanged.
     let mut list_state = ratatui::widgets::ListState::default().with_offset(offset);
+    frame.render_widget(Block::default().style(app_style()), area);
     frame.render_stateful_widget(
-        List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>())
-            .style(app_style())
-            .block(pane_block(
-            if app.nest_view {
-                "agents · nest"
-            } else {
-                "agents"
-            },
-            focused,
-            app.nav_mode,
-        )),
-        area,
+        List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>()).style(app_style()),
+        block_inner(area),
         &mut list_state,
     );
 }
@@ -3695,27 +3764,39 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // workers, matching the n0/n1 ids in the orchestrator DAG) plus a short task
     // label. Without this the pane just said "worker" and the user had to infer
     // the mapping from the agents-pane highlight.
+    // The title is what runs in the pane: backend, model and the run's key.
+    // The task itself is on the selected card; only when the card list is
+    // hidden (narrow or solo) does the title repeat it.
+    let sidebar_visible = app.agents_area.is_some();
     let identity = app.agents.get(app.selected_agent).map(|run| {
         let id = worker_title_id(app, run);
-        let label = if run.task_summary.trim().is_empty() {
-            summarize_task(&run.task)
+        let model = if run.model.trim().is_empty() {
+            run.backend.as_str().to_string()
         } else {
-            run.task_summary.clone()
+            format!(
+                "{} {}({})",
+                run.backend.as_str(),
+                run.model,
+                effort_label(run.effort)
+            )
         };
-        format!("{id} · {}", truncate_chars(&label, 36))
+        if sidebar_visible {
+            format!("{model} · {id}")
+        } else {
+            let label = if run.task_summary.trim().is_empty() {
+                summarize_task(&run.task)
+            } else {
+                run.task_summary.clone()
+            };
+            format!("{} · {model} · {id}", truncate_chars(&label, 36))
+        }
     });
     let title = match app.worker_view {
-        WorkerView::Terminal => {
-            let role = if selected_is_orchestrator {
-                "orchestrator"
-            } else {
-                "worker"
-            };
-            match &identity {
-                Some(identity) if !selected_is_orchestrator => format!("{role} · {identity}"),
-                _ => role.to_string(),
-            }
-        }
+        WorkerView::Terminal => match &identity {
+            Some(identity) if !selected_is_orchestrator => identity.clone(),
+            _ if selected_is_orchestrator => "orchestrator".to_string(),
+            _ => "terminal".to_string(),
+        },
         WorkerView::PlanReview => format!(
             "plan review · {} · Ctrl+S save · Ctrl+Enter approve · Esc hide",
             app.plan().plan_review.field.label()
@@ -4977,18 +5058,65 @@ pub(crate) fn task_pane_title(app: &App) -> String {
     )
 }
 
+/// The model tag on the prompt's border: what a new task runs on.
+pub(crate) fn task_model_tag(app: &App) -> String {
+    task_pane_title(app)
+        .strip_prefix("task · ")
+        .map(str::to_string)
+        .unwrap_or_else(|| task_pane_title(app))
+}
+
+/// Width of the right-aligned "⏎ run" label inside the prompt pill.
+fn task_run_label_width(inner: Rect) -> u16 {
+    if inner.width >= 32 {
+        8
+    } else {
+        0
+    }
+}
+
+/// Columns before the draft: one cell of padding and the "› " mark.
+const TASK_MARK_WIDTH: u16 = 3;
+
+/// Where the draft text is drawn inside the prompt pill: after the "› " mark
+/// and clear of the run label. Rendering, cursor placement, wrapping and
+/// mouse selection all use this one rect.
+pub(crate) fn task_text_rect(area: Rect) -> Rect {
+    let inner = block_inner(area);
+    let label = task_run_label_width(inner);
+    Rect {
+        x: inner.x.saturating_add(TASK_MARK_WIDTH),
+        y: inner.y,
+        width: inner.width.saturating_sub(TASK_MARK_WIDTH + label + 1).max(1),
+        height: inner.height,
+    }
+}
+
+/// Placeholder for an empty prompt: what typing here will do right now.
+fn task_placeholder(app: &App) -> &'static str {
+    if app.plan().planner_paused_for_input {
+        "answer the planner's question"
+    } else if app.plan().awaiting_approval {
+        "refine the plan, or press enter to approve"
+    } else if app.cloud_mode {
+        "describe a task for Rudder Cloud\u{2026}"
+    } else if app.plan_is_active() || app.has_running_interactive_orchestrator() {
+        "talk to the orchestrator\u{2026}"
+    } else {
+        "describe a task\u{2026}"
+    }
+}
+
 pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let focused = app.focus == FocusPane::Task;
-    let default_hint = task_default_hint(app);
-    let hint = app.notice.as_deref().unwrap_or(&default_hint);
-    let inner_width = area.width.saturating_sub(2).max(1);
-    let input_lines = task_input_lines(&app.task_input, app.task_cursor, inner_width);
+    let p = pal();
+    let text = task_text_rect(area);
+    let inner = block_inner(area);
+    let width = text.width;
+    let input_lines = task_input_lines(&app.task_input, app.task_cursor, width);
     let (cursor_line, cursor_column) =
-        task_cursor_position(&app.task_input, app.task_cursor, inner_width);
-    let wrapped_hint = wrap_text(hint, inner_width);
-    let hint_line_count = wrapped_hint.len().max(1);
-    let available_lines = area.height.saturating_sub(2).max(1) as usize;
-    let max_input_lines = available_lines.saturating_sub(hint_line_count).max(1);
+        task_cursor_position(&app.task_input, app.task_cursor, width);
+    let max_input_lines = text.height.max(1) as usize;
     let input_start = if input_lines.len() > max_input_lines {
         cursor_line.saturating_sub(max_input_lines.saturating_sub(1))
     } else {
@@ -5002,104 +5130,102 @@ pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .map(normalize_selection)
             .filter(|selection| !selection_is_empty(*selection))
     };
-    let mut lines = input_lines
+    let lines = input_lines
         .iter()
         .skip(input_start)
         .take(max_input_lines)
         .enumerate()
         .map(|(offset, line)| {
-            let display = if app.task_input.is_empty() {
-                if app.plan().awaiting_approval {
-                    "Type to refine the plan, or press Enter to approve"
-                } else if app.cloud_mode {
-                    "Type a task to run in Rudder Cloud"
-                } else {
-                    "Type a task to plan and run"
-                }
-            } else {
-                line.as_str()
-            };
-            let style = if app.task_input.is_empty() {
-                muted_style(focused)
-            } else {
-                pane_text_style(focused)
-            };
+            if app.task_input.is_empty() {
+                return Line::from(Span::styled(
+                    task_placeholder(app),
+                    Style::default().fg(if focused { p.muted } else { p.faint }),
+                ));
+            }
             let row = input_start + offset;
             styled_plain_line(
-                display,
-                style,
-                selection_for_row(task_selection, row).filter(|_| !app.task_input.is_empty()),
+                line.as_str(),
+                pane_text_style(true),
+                selection_for_row(task_selection, row),
             )
         })
         .collect::<Vec<_>>();
 
-    if app.notice.is_some() {
-        let style = notice_style(hint, focused);
-        for line in wrapped_hint {
-            lines.push(Line::from(Span::styled(line, style)));
-        }
-    } else {
-        let first_hint = wrapped_hint.first().cloned().unwrap_or_default();
-        lines.push(Line::from(vec![
-            Span::styled(first_hint, muted_style(focused)),
-            Span::raw("  "),
-            Span::styled(
-                if app.plan().awaiting_approval {
-                    "refine"
-                } else {
-                    "run"
-                },
-                accent_style(focused),
-            ),
-            // The model used to be repeated here; it lives in the pane title now,
-            // where a notice cannot hide it.
-        ]));
-        for line in wrapped_hint.into_iter().skip(1) {
-            lines.push(Line::from(Span::styled(line, muted_style(focused))));
-        }
+    let border = Style::default().fg(if focused { p.accent } else { p.faint });
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .title_top(
+            Line::from(Span::styled(
+                format!(" {} ", task_model_tag(app)),
+                Style::default().fg(if focused { p.muted } else { p.faint }),
+            ))
+            .right_aligned(),
+        )
+        .style(app_style());
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
     }
-
-    // The model belongs in the TITLE, not only on the hint line: the hint is
-    // replaced by every notice, so the one place that answers "what will this run
-    // on?" kept disappearing exactly when the user was acting.
-    let paragraph = Paragraph::new(lines).style(app_style()).block(pane_block(
-        &task_pane_title(app),
-        focused,
-        app.nav_mode,
-    ));
-
-    frame.render_widget(paragraph, area);
+    let mark = Rect {
+        x: inner.x.saturating_add(1),
+        y: inner.y,
+        width: inner.width.saturating_sub(1).min(2),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "\u{203a} ",
+            Style::default()
+                .fg(if focused { p.accent } else { p.muted })
+                .add_modifier(Modifier::BOLD),
+        ))),
+        mark,
+    );
+    frame.render_widget(Paragraph::new(lines).style(app_style()), text);
+    let label_w = task_run_label_width(inner);
+    if label_w > 0 {
+        let label = if app.plan().awaiting_approval { "refine" } else { "run" };
+        let rect = Rect {
+            x: inner.right().saturating_sub(label_w + 1),
+            y: inner.y + inner.height.saturating_sub(1),
+            width: label_w,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("\u{23ce} ", Style::default().fg(p.faint)),
+                Span::styled(
+                    label,
+                    Style::default().fg(if focused { p.accent } else { p.muted }),
+                ),
+            ]))
+            .right_aligned(),
+            rect,
+        );
+    }
 
     if app.focus == FocusPane::Task {
         let visible_cursor_line = cursor_line.saturating_sub(input_start);
-        let x = area.x + 1 + cursor_column as u16;
-        let y = area.y + 1 + visible_cursor_line as u16;
-        if x < area.right().saturating_sub(1) && y < area.bottom().saturating_sub(1) {
+        let x = text.x + cursor_column as u16;
+        let y = text.y + visible_cursor_line as u16;
+        if x < inner.right() && y < text.bottom() {
             frame.set_cursor_position((x, y));
         }
     }
 }
 
 pub(crate) fn task_pane_height(app: &App, width: u16) -> u16 {
-    let default_hint = task_default_hint(app);
-    // Only the focused task bar grows for a long notice. Anywhere else a notice
-    // coming or going changed the worker pane's height, which resized the
-    // agent's PTY: Claude and Codex repaint their whole screen on every resize
-    // (the flicker), and over Cloud the resize cascades through the nested
-    // dashboard too. Unfocused, a long notice is clipped to the hint's rows.
-    let hint = match app.notice.as_deref() {
-        Some(notice) if app.focus == FocusPane::Task => notice,
-        _ => &default_hint,
-    };
-    let inner_width = width.saturating_sub(2).max(1);
-    let input_lines = task_input_lines(&app.task_input, app.task_cursor, inner_width)
+    // The prompt is the draft and nothing else: notices show as a pill and
+    // then in the footer, so a notice coming or going never changes the
+    // worker pane's height (a resize makes Claude and Codex repaint their
+    // whole screen, the flicker, and over Cloud it cascades further).
+    let text = task_text_rect(Rect::new(0, 0, width, 3));
+    let input_lines = task_input_lines(&app.task_input, app.task_cursor, text.width)
         .len()
         .max(1) as u16;
-    let hint_lines = wrap_text(hint, inner_width).len().max(1) as u16;
-    2_u16
-        .saturating_add(input_lines)
-        .saturating_add(hint_lines)
-        .clamp(4, 10)
+    2_u16.saturating_add(input_lines).clamp(3, 9)
 }
 
 pub(crate) fn render_suggestions(frame: &mut Frame<'_>, task_area: Rect, app: &App) {
@@ -5527,28 +5653,16 @@ pub(crate) fn centered_modal(area: Rect, desired_width: u16, desired_height: u16
 }
 
 pub(crate) fn pane_block(title: &str, focused: bool, nav_mode: bool) -> Block<'static> {
-    let border_style = if focused {
-        Style::default().fg(FOCUS_COLOR)
-    } else {
-        Style::default().fg(INACTIVE_COLOR)
-    };
-
-    // Focused: white text on a teal title fill. Unfocused: a quiet label with
-    // no forced background in terminal-background mode.
-    let title_style = if focused {
-        Style::default().fg(PAPER).bg(FOCUS_COLOR)
-    } else if terminal_background_mode() {
-        Style::default().fg(MUTED)
-    } else {
-        Style::default().fg(MUTED).bg(PAPER)
-    };
+    let p = pal();
     let _ = nav_mode;
-
-    // Carry the configured base style so pane interiors are consistent with the
-    // selected color mode.
+    // Rounded hairline, accent when focused. The title is a quiet label, not a
+    // filled tab: the border color already says which pane has the keyboard.
+    let border_style = Style::default().fg(if focused { p.accent } else { p.faint });
+    let title_style = Style::default().fg(if focused { p.muted } else { p.faint });
     Block::default()
         .title(Line::from(Span::styled(format!(" {title} "), title_style)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .style(app_style())
 }
@@ -5667,16 +5781,18 @@ pub(crate) fn pane_text_style(focused: bool) -> Style {
     if focused {
         app_style()
     } else {
-        Style::default().fg(MUTED)
+        Style::default().fg(pal().muted)
     }
 }
 
 pub(crate) fn muted_style(focused: bool) -> Style {
-    Style::default().fg(if focused { MUTED } else { FAINT })
+    let p = pal();
+    Style::default().fg(if focused { p.muted } else { p.faint })
 }
 
 pub(crate) fn accent_style(focused: bool) -> Style {
-    Style::default().fg(if focused { FOCUS_COLOR } else { FAINT })
+    let p = pal();
+    Style::default().fg(if focused { p.accent } else { p.muted })
 }
 
 pub(crate) fn model_style(focused: bool) -> Style {
@@ -5701,7 +5817,7 @@ pub(crate) fn app_style() -> Style {
 }
 
 pub(crate) fn error_style() -> Style {
-    Style::default().fg(FAILED_COLOR)
+    Style::default().fg(pal().failed)
 }
 
 pub(crate) fn block_inner(area: Rect) -> Rect {
@@ -6095,12 +6211,19 @@ pub(crate) fn agent_awaits_merge(agent: &AgentRun) -> bool {
 }
 
 pub(crate) fn agent_status_style(agent: &AgentRun) -> Style {
-    if agent.needs_permission || agent.needs_user_input {
-        Style::default().fg(RUNNING_COLOR)
+    let p = pal();
+    if agent.needs_permission
+        || agent.needs_user_input
+        || matches!(
+            agent.wait_signal,
+            Some(WaitSignal::Idle) | Some(WaitSignal::Interrupted)
+        )
+    {
+        Style::default().fg(p.waiting)
     } else if agent.turn_error().is_some() {
-        Style::default().fg(FAILED_COLOR)
+        Style::default().fg(p.failed)
     } else if agent.has_merge_conflict() {
-        Style::default().fg(FAILED_COLOR)
+        Style::default().fg(p.failed)
     } else if agent.status == AgentStatus::Done
         && agent.delivery.required
         && matches!(
@@ -6108,12 +6231,12 @@ pub(crate) fn agent_status_style(agent: &AgentRun) -> Style {
             DeliveryStatus::Blocked | DeliveryStatus::Failed
         )
     {
-        Style::default().fg(FAILED_COLOR)
+        Style::default().fg(p.failed)
     } else if agent.status == AgentStatus::Done
         && agent.delivery.required
         && !agent.delivery.is_verified()
     {
-        Style::default().fg(RUNNING_COLOR)
+        Style::default().fg(p.waiting)
     } else {
         status_style(agent.status)
     }
@@ -6363,4 +6486,482 @@ fn render_gods_view_tile(
         }
     };
     frame.render_widget(Paragraph::new(lines).style(app_style()).block(block), tile);
+}
+
+// --- 4.2 chrome: header, footer, notice pill, keys overlay --------------------
+
+/// The Rudder version this binary was built with: the repo's package.json,
+/// which `npm version` bumps before the release build.
+fn rudder_version() -> Option<&'static str> {
+    const PACKAGE_JSON: &str = include_str!("../../package.json");
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            serde_json::from_str::<serde_json::Value>(PACKAGE_JSON)
+                .ok()?
+                .get("version")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .as_deref()
+}
+
+/// Display width of a run of spans.
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+/// `left` flush left and `right` flush right on one row; the right side is
+/// dropped when both do not fit, never overlapped.
+fn split_row<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<'a> {
+    let lw = spans_width(&left);
+    let rw = spans_width(&right);
+    if rw > 0 && lw + rw + 2 <= width {
+        left.push(Span::raw(" ".repeat(width - lw - rw)));
+        left.extend(right);
+    }
+    Line::from(left)
+}
+
+/// Counts of the fleet by what it needs from you, for the header.
+fn fleet_counts(app: &App) -> (usize, usize, usize) {
+    let mut running = 0;
+    let mut waiting = 0;
+    let mut failed = 0;
+    for agent in app.agents.iter().filter(|a| !a.is_main() || a.terminal.is_some()) {
+        if agent_waits_for_you(agent) {
+            waiting += 1;
+        } else if agent.status == AgentStatus::Running {
+            running += 1;
+        } else if agent.status == AgentStatus::Failed {
+            failed += 1;
+        }
+    }
+    (running, waiting, failed)
+}
+
+/// True when the agent is blocked on the user: a question, a permission, an
+/// interrupted turn or a conflict only the user can settle.
+pub(crate) fn agent_waits_for_you(agent: &AgentRun) -> bool {
+    agent.needs_permission
+        || agent.needs_user_input
+        || matches!(
+            agent.wait_signal,
+            Some(WaitSignal::Idle) | Some(WaitSignal::Interrupted)
+        )
+        || (agent.has_merge_conflict() && agent.status == AgentStatus::Done)
+}
+
+/// True while the agent is visibly busy, so its card gets the spinner.
+pub(crate) fn agent_is_busy(agent: &AgentRun) -> bool {
+    (agent.status == AgentStatus::Running
+        && !agent_waits_for_you(agent)
+        && agent.turn_error().is_none())
+        || agent.integration.phase == IntegrationPhase::Integrating
+}
+
+pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let p = pal();
+    let project = app
+        .cwd
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| home_relative(&app.cwd));
+    let mut left = vec![
+        Span::raw(" "),
+        Span::styled("rudder", Style::default().fg(p.accent).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(project, app_style()),
+    ];
+    if let Some(branch) = app.branch.as_deref() {
+        left.push(Span::styled(format!("  \u{2387} {branch}"), Style::default().fg(p.muted)));
+    }
+    if let Some(version) = rudder_version() {
+        left.push(Span::styled(format!("  {version}"), Style::default().fg(p.faint)));
+    }
+    if is_cloud_worker_session() {
+        let connected = app.cloud_connected;
+        left.push(Span::styled(
+            if connected { "  \u{2601} cloud connected" } else { "  \u{2601} cloud offline" },
+            Style::default().fg(if connected { p.accent } else { p.faint }),
+        ));
+    }
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if let Some((_, latest)) = read_update_notice() {
+        right.push(Span::styled(
+            format!("\u{2191} {latest} available  "),
+            Style::default().fg(p.accent),
+        ));
+    }
+    let (running, waiting, failed) = fleet_counts(app);
+    for (count, label, color) in [
+        (running, "running", p.running),
+        (waiting, "need you", p.waiting),
+        (failed, "failed", p.failed),
+    ] {
+        if count > 0 {
+            right.push(Span::styled(BADGE, Style::default().fg(color)));
+            right.push(Span::styled(format!(" {count} {label}  "), Style::default().fg(p.muted)));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(split_row(left, right, area.width as usize)).style(app_style()),
+        area,
+    );
+}
+
+/// The four or five keys that matter in the current context.
+pub(crate) fn footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+    if app.show_keys {
+        return vec![("esc", "close")];
+    }
+    if app.rename_input.is_some() {
+        return vec![("enter", "save"), ("esc", "cancel")];
+    }
+    match app.focus {
+        FocusPane::Agents => {
+            if app.drawer_cursor.is_some() || app.drawer.is_some() {
+                return vec![("enter", "open"), ("j/k", "move"), ("esc", "close"), ("?", "keys")];
+            }
+            match app.agents.get(app.selected_agent) {
+                Some(agent) if agent.status == AgentStatus::Running => vec![
+                    ("enter", "open"),
+                    ("x", "stop"),
+                    ("b", "branch"),
+                    ("r", "rename"),
+                    ("?", "keys"),
+                ],
+                Some(agent) if agent.status == AgentStatus::Done => vec![
+                    ("enter", "open"),
+                    ("m", "merge"),
+                    ("b", "branch"),
+                    ("dd", "delete"),
+                    ("?", "keys"),
+                ],
+                Some(_) => vec![
+                    ("enter", "resume"),
+                    ("b", "branch"),
+                    ("dd", "delete"),
+                    ("g", "nest"),
+                    ("?", "keys"),
+                ],
+                None => vec![
+                    ("\u{2325}3", "prompt"),
+                    ("o", "web ui"),
+                    ("P", "model"),
+                    ("?", "keys"),
+                ],
+            }
+        }
+        FocusPane::Worker => vec![
+            ("\u{2325}1", "agents"),
+            ("\u{2325}3", "prompt"),
+            ("\u{2325}d", "diff"),
+            ("\u{2325}h", "full screen"),
+            ("^W", "pane keys"),
+        ],
+        FocusPane::Diff => vec![
+            ("j/k", "scroll"),
+            ("\u{2325}d", "close"),
+            ("\u{2325}2", "terminal"),
+        ],
+        FocusPane::Task => {
+            if app.task_input.is_empty() {
+                vec![
+                    ("enter", "run"),
+                    ("/", "commands"),
+                    ("\u{2191}", "history"),
+                    ("\u{2325}1", "agents"),
+                    ("?", "keys"),
+                ]
+            } else if app.task_input.contains('\n') {
+                vec![
+                    ("enter", "runs it"),
+                    ("\u{2325}\u{23ce} \u{21e7}\u{23ce} ^J", "adds a line"),
+                    ("\u{2191}\u{2193}", "move between lines"),
+                ]
+            } else {
+                vec![
+                    ("enter", "run"),
+                    ("\u{2325}\u{23ce}", "new line"),
+                    ("\u{2325}1", "agents"),
+                ]
+            }
+        }
+    }
+}
+
+fn key_spans(keys: &[(&str, &str)]) -> Vec<Span<'static>> {
+    let p = pal();
+    let mut spans = vec![Span::raw(" ")];
+    for (index, (key, label)) in keys.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  \u{b7}  ", Style::default().fg(p.faint)));
+        }
+        spans.push(Span::styled((*key).to_string(), Style::default().fg(p.muted)));
+        spans.push(Span::styled(format!(" {label}"), Style::default().fg(p.faint)));
+    }
+    spans
+}
+
+/// How long a notice shows as a pill before it settles into the footer.
+pub(crate) const NOTICE_PILL_FOR: Duration = Duration::from_secs(4);
+pub(crate) const NOTICE_ERROR_PILL_FOR: Duration = Duration::from_secs(10);
+
+/// A notice that ends in an ellipsis is work in progress ("refining the
+/// plan…"), so its pill carries the spinner.
+pub(crate) fn notice_in_progress(text: &str) -> bool {
+    let text = text.trim_end();
+    text.ends_with('\u{2026}') || text.ends_with("...")
+}
+
+/// True while the current notice still shows as a pill. Remembers when each
+/// distinct notice first appeared.
+pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
+    let Some(text) = app.notice.as_deref() else {
+        app.notice_seen = None;
+        return false;
+    };
+    let fresh = match &app.notice_seen {
+        Some((seen, _)) => seen != text,
+        None => true,
+    };
+    if fresh {
+        app.notice_seen = Some((text.to_string(), now));
+    }
+    let since = app.notice_seen.as_ref().map(|(_, at)| *at).unwrap_or(now);
+    let error = notice_style(text, true).fg == Some(pal().failed);
+    let ttl = if error { NOTICE_ERROR_PILL_FOR } else { NOTICE_PILL_FOR };
+    notice_in_progress(text) || now.duration_since(since) < ttl
+}
+
+pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if area.height == 0 {
+        return;
+    }
+    let keys = key_spans(&footer_keys(app));
+    // A notice past its pill time stays readable here until Esc or the next one.
+    let settled = match app.notice.clone() {
+        Some(text) if !notice_pill_visible(app, Instant::now()) => {
+            let room = (area.width as usize).saturating_sub(spans_width(&keys) + 4);
+            vec![
+                Span::styled(truncate_chars(&text, room), notice_style(&text, false)),
+                Span::raw(" "),
+            ]
+        }
+        _ => Vec::new(),
+    };
+    frame.render_widget(
+        Paragraph::new(split_row(keys, settled, area.width as usize)).style(app_style()),
+        area,
+    );
+}
+
+/// The notice as a small rounded pill at the bottom right of `area`.
+pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    if !notice_pill_visible(app, Instant::now()) || area.height < 3 || area.width < 16 {
+        return;
+    }
+    let Some(text) = app.notice.clone() else {
+        return;
+    };
+    let p = pal();
+    let color = notice_style(&text, true).fg.unwrap_or(p.muted);
+    let glyph = if notice_in_progress(&text) {
+        app.spinner_glyph()
+    } else if color == p.failed {
+        "\u{2715}"
+    } else if color == p.waiting {
+        "!"
+    } else {
+        "\u{2713}"
+    };
+    let glyph_color = if color == p.muted { p.accent } else { color };
+    let text_color = if color == p.muted { p.on_surface } else { color };
+    let max_w = (area.width as usize * 2 / 3).clamp(12, 72);
+    let wrapped = wrap_text(&text, max_w.saturating_sub(2) as u16);
+    let lines: Vec<Line<'static>> = wrapped
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, row)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 { format!("{glyph} ") } else { "  ".to_string() },
+                    Style::default().fg(glyph_color),
+                ),
+                Span::styled(row.clone(), Style::default().fg(text_color)),
+            ])
+        })
+        .collect();
+    let inner_w = lines.iter().map(Line::width).max().unwrap_or(0);
+    let w = (inner_w as u16 + 4).min(area.width);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    // Bottom right, just above the prompt: the corner a toast is expected in,
+    // clear of pane titles and the top of whatever the pane is showing.
+    let rect = Rect {
+        x: area.right().saturating_sub(w + 2).max(area.x),
+        y: area.bottom().saturating_sub(h + 1).max(area.y),
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).style(app_style()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(if color == p.muted { p.faint } else { color }))
+                .padding(ratatui::widgets::Padding::horizontal(1))
+                .style(app_style()),
+        ),
+        rect,
+    );
+}
+
+/// Every key, grouped. `?` opens it from the agents list or an empty prompt.
+pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
+    (
+        "agents",
+        &[
+            ("j k", "move"),
+            ("enter", "open or resume"),
+            ("m", "merge"),
+            ("b", "branch"),
+            ("x", "stop"),
+            ("dd", "delete"),
+            ("r", "rename"),
+            ("u", "undo merge"),
+            ("cc", "clear merged"),
+            ("g", "nest view"),
+            ("v", "plan review"),
+            ("P", "model"),
+            ("o", "web ui"),
+            ("U", "usage"),
+            ("H", "move all home"),
+            ("q", "quit"),
+        ],
+    ),
+    (
+        "anywhere",
+        &[
+            ("\u{2325}1 2 3 4", "agents, terminal, prompt, diff"),
+            ("^W", "pane keys, then a key"),
+            ("\u{2325}[ ]", "previous, next agent"),
+            ("\u{2325}j k", "scroll"),
+            ("\u{2325}v b", "previous, next message"),
+            ("\u{2325}h", "hide panes"),
+            ("\u{2325}d", "diff"),
+            ("\u{2325}g", "god's view"),
+            ("esc", "dismiss notice"),
+            ("^C", "quit"),
+        ],
+    ),
+    (
+        "prompt",
+        &[
+            ("enter", "run"),
+            ("\u{2325}\u{23ce} ^J", "new line"),
+            ("/", "commands"),
+            ("\u{2191} \u{2193}", "history"),
+            ("?", "keys, when empty"),
+        ],
+    ),
+];
+
+pub(crate) fn render_keys_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if !app.show_keys {
+        return;
+    }
+    let p = pal();
+    let group_lines = |group: &(&str, &[(&str, &str)])| -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(Span::styled(
+            group.0.to_string(),
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        ))];
+        for (key, label) in group.1 {
+            let pad = 10usize.saturating_sub(Span::raw(*key).width());
+            lines.push(Line::from(vec![
+                Span::styled(format!("{key}{}", " ".repeat(pad)), app_style()),
+                Span::styled((*label).to_string(), Style::default().fg(p.muted)),
+            ]));
+        }
+        lines.push(Line::default());
+        lines
+    };
+    let mut left: Vec<Line<'static>> = group_lines(&KEYS_OVERLAY[0]);
+    let mut right: Vec<Line<'static>> = Vec::new();
+    for group in &KEYS_OVERLAY[1..] {
+        right.extend(group_lines(group));
+    }
+    for column in [&mut left, &mut right] {
+        while column.last().is_some_and(|line| line.width() == 0) {
+            column.pop();
+        }
+    }
+    let col_w = 30usize;
+    let right_w = 42usize;
+    let two_columns = area.width as usize >= col_w + right_w + 6;
+    let mut lines: Vec<Line<'static>> = if two_columns {
+        let rows = left.len().max(right.len());
+        (0..rows)
+            .map(|row| {
+                let mut spans = left.get(row).cloned().unwrap_or_default().spans;
+                let w = spans_width(&spans);
+                spans.push(Span::raw(" ".repeat(col_w.saturating_sub(w))));
+                spans.extend(right.get(row).cloned().unwrap_or_default().spans);
+                Line::from(spans)
+            })
+            .collect()
+    } else {
+        left.into_iter().chain(right).collect()
+    };
+    while lines.last().is_some_and(|line| line.width() == 0) {
+        lines.pop();
+    }
+    let width = if two_columns {
+        (col_w + right_w + 4) as u16
+    } else {
+        right_w as u16 + 4
+    };
+    let height = lines.len() as u16 + 2;
+    let rect = centered_modal(area, width, height);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).style(app_style()).block(
+            Block::default()
+                .title(Line::from(Span::styled(" keys ", Style::default().fg(p.muted))))
+                .title_bottom(
+                    Line::from(Span::styled(" esc close ", Style::default().fg(p.faint)))
+                        .right_aligned(),
+                )
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(p.accent))
+                .padding(ratatui::widgets::Padding::horizontal(1))
+                .style(app_style()),
+        ),
+        rect,
+    );
+}
+
+/// The card list before the first agent: what to do, in two quiet lines.
+fn push_empty_state(lines: &mut Vec<Line<'_>>, focused: bool) {
+    let p = pal();
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  no agents yet",
+        Style::default().fg(if focused { p.muted } else { p.faint }),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  describe a task below,",
+        Style::default().fg(p.faint),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  or /main for this checkout",
+        Style::default().fg(p.faint),
+    )));
 }

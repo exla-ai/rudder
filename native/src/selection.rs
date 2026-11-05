@@ -85,14 +85,9 @@ pub(crate) fn task_visible_input_start(app: &App, area: Rect, input_lines: &[Str
 }
 
 pub(crate) fn task_visible_input_count(app: &App, area: Rect, input_line_count: usize) -> usize {
-    // Keep legacy task-selection math aligned with task_pane_height.
-    let default_hint = crate::render::task_default_hint(app);
-    let hint = app.notice.as_deref().unwrap_or(&default_hint);
-    let hint_line_count = wrap_text(hint, task_inner_width(area)).len().max(1);
-    (area.height.max(1) as usize)
-        .saturating_sub(hint_line_count)
-        .max(1)
-        .min(input_line_count.max(1))
+    // `area` is the prompt's text rect (task_text_rect): every row is input.
+    let _ = app;
+    (area.height.max(1) as usize).min(input_line_count.max(1))
 }
 
 pub(crate) fn task_inner_width(area: Rect) -> u16 {

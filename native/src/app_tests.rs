@@ -7735,7 +7735,7 @@ fn key_choices_read_as_buttons_not_prose() {
     let keys: Vec<&str> = line
         .spans
         .iter()
-        .filter(|span| span.style.fg == Some(ACCENT))
+        .filter(|span| span.style.fg == Some(pal().accent))
         .map(|span| span.content.as_ref())
         .collect();
     assert_eq!(keys, vec!["y", "Esc"], "every key is accent-coloured");
@@ -7947,9 +7947,13 @@ fn nest_view_first_child_line_carries_connector_prefix_span() {
         "root task line has no connector glyph"
     );
 
-    // The child task-label line (third entry: root label, root status, child
-    // label) carries a hard corner connector styled MUTED (Rgb 154,147,132).
-    let child_dbg = nest_line_text(&lines[2]);
+    // The child task-label line carries a hard corner connector styled MUTED.
+    // The root is the selected card, so its outline rows come first.
+    let child_dbg = lines
+        .iter()
+        .map(nest_line_text)
+        .find(|text| text.contains("child task"))
+        .expect("child row rendered");
     assert!(
         child_dbg.contains('\u{2570}'),
         "single hard child uses the corner connector"
@@ -11365,9 +11369,13 @@ fn selected_agent_row_renders_a_visible_marker() {
     ];
     app.selected_agent = 1;
     let screen = render_screen(&mut app, 120, 40);
+    let sidebar: String = screen
+        .lines()
+        .map(|line| line.chars().take(34).collect::<String>() + "\n")
+        .collect();
     assert!(
-        screen.contains('\u{25b6}'),
-        "the selected agent row shows the marker glyph (big ▶ arrow):\n{screen}"
+        sidebar.contains('\u{256d}') && sidebar.contains('\u{2570}'),
+        "the selected agent card gets a rounded outline:\n{screen}"
     );
 }
 
@@ -11693,7 +11701,7 @@ fn render_screen_shows_bottom_task_bar() {
     let screen = render_screen(&mut app, 100, 30);
 
     assert!(
-        screen.contains("Type a task to plan and run"),
+        screen.contains("describe a task"),
         "the bottom task bar should render:\n{screen}"
     );
 }
@@ -14381,7 +14389,7 @@ fn oneoff_worker_title_uses_friendly_identity_not_run_id() {
 
     let text = render_worker_text(&mut app, 100, 12);
     assert!(
-        text.contains("worker · q1 · read slack threads cedar-amil status"),
+        text.contains("read slack threads cedar-amil status · ") && text.contains(" · q1 "),
         "one-off worker title should be human-readable:\n{text}"
     );
     assert!(
@@ -17885,7 +17893,7 @@ fn a_readable_run_id_names_its_publish_branch_and_worker_title() {
     app.agents = vec![test_agent_run("launch-video-k3f9q", "launch video")];
     app.selected_agent = 0;
     let text = render_worker_text(&mut app, 100, 12);
-    assert!(text.contains("worker · k3f9q · launch video"), "{text}");
+    assert!(text.contains("launch video · ") && text.contains(" · k3f9q "), "{text}");
     assert!(!text.contains("launch-video-k3f9q"), "{text}");
 
     // A row from before keeps a short handle instead of its whole id.
@@ -17894,7 +17902,7 @@ fn a_readable_run_id_names_its_publish_branch_and_worker_title() {
         "launch video",
     )];
     let text = render_worker_text(&mut app, 100, 12);
-    assert!(text.contains("worker · 6000 · launch video"), "{text}");
+    assert!(text.contains("launch video · ") && text.contains(" · 6000 "), "{text}");
     assert!(!text.contains("1793065526747296000"), "{text}");
 }
 
@@ -22339,11 +22347,7 @@ fn row_motion_on_a_rendered_pane_follows_the_width_the_user_can_see() {
     app.task_cursor = app.task_input.chars().count();
 
     let screen = render_screen(&mut app, 60, 30);
-    let inner_width = app
-        .task_area
-        .expect("render records the task area")
-        .width
-        .saturating_sub(2);
+    let inner_width = task_text_rect(app.task_area.expect("render records the task area")).width;
     assert!(
         inner_width < 120,
         "the draft is wider than the pane, so it wraps"
@@ -24225,7 +24229,7 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
     app.focus = FocusPane::Worker;
 
     let before = render_screen(&mut app, 160, 30);
-    assert!(!before.contains("┌ diff"), "closed by default:\n{before}");
+    assert!(!before.contains("╭ diff"), "closed by default:\n{before}");
 
     app.handle_key(alt('d'));
     assert!(app.diff_panel.open);
@@ -24233,7 +24237,7 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
     assert_eq!(app.diff_panel.run_id.as_deref(), Some("diff-app"));
     let open = render_screen(&mut app, 160, 30);
     assert!(
-        open.contains("┌ diff"),
+        open.contains("╭ diff"),
         "the panel has its own titled pane:\n{open}"
     );
     assert!(
@@ -24250,7 +24254,7 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
 
     // Narrow screen: the panel takes the worker's place rather than squeezing both.
     let narrow = render_screen(&mut app, 100, 30);
-    assert!(narrow.contains("┌ diff"));
+    assert!(narrow.contains("╭ diff"));
     assert!(app.worker_area.is_none() && app.diff_area.is_some());
 
     // Keys while focused: scroll, then Esc closes and hands focus back.
@@ -24271,7 +24275,7 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
     assert!(!app.diff_panel.open);
     assert_eq!(app.focus, FocusPane::Worker);
     let closed = render_screen(&mut app, 160, 30);
-    assert!(!closed.contains("┌ diff"), "{closed}");
+    assert!(!closed.contains("╭ diff"), "{closed}");
 
     // The typographic fallback (Option+d without an Alt modifier) and /diff work too.
     app.handle_key(KeyEvent::new(KeyCode::Char('\u{2202}'), KeyModifiers::NONE));
@@ -24304,7 +24308,7 @@ fn soloing_with_the_diff_panel_focused_shows_only_the_diff_and_alt_h_restores() 
     app.handle_key(alt('h'));
     assert!(app.solo_pane);
     let solo = render_screen(&mut app, 160, 30);
-    assert!(solo.contains("┌ diff"), "{solo}");
+    assert!(solo.contains("╭ diff"), "{solo}");
     assert!(app.agents_area.is_none() && app.worker_area.is_none());
     assert_eq!(app.diff_area.map(|a| a.width), Some(160), "full width");
 
@@ -24312,7 +24316,7 @@ fn soloing_with_the_diff_panel_focused_shows_only_the_diff_and_alt_h_restores() 
     assert!(!app.solo_pane);
     let back = render_screen(&mut app, 160, 30);
     assert!(
-        back.contains("┌ diff"),
+        back.contains("╭ diff"),
         "panel comes back with the split: {back}"
     );
     assert!(app.agents_area.is_some() && app.worker_area.is_some() && app.diff_area.is_some());
@@ -24364,7 +24368,7 @@ fn alt_4_and_leader_4_focus_the_diff_panel_opening_it_first_and_never_closing_it
     app.handle_key(alt('h'));
     let solo = render_screen(&mut app, 160, 30);
     assert!(
-        solo.contains("┌ diff") && !solo.contains("┌ worker"),
+        solo.contains("╭ diff") && !solo.contains("╭ worker"),
         "{solo}"
     );
     app.handle_key(alt('h'));

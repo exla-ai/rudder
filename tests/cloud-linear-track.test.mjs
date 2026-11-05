@@ -30,9 +30,9 @@ function seedBareMetal(ctx, extra = {}) {
   seedIssue(ctx, { id: "iss-bm", identifier: "OPS-50", title: "Move Rudder to bare metal", projectId: "lp-rudder", teamId: "team-ops", stateType: "unstarted", ...extra });
 }
 
-const rudderState = (agents) => [
+const rudderState = (agents, plan = null) => [
   { workspaceId: "ws-libra", name: "libra", repo: "exla-ai/libra", agents: [] },
-  { workspaceId: "ws-rudder", name: "exla-ai-rudder", repo: "exla-ai/rudder", agents },
+  { workspaceId: "ws-rudder", name: "exla-ai-rudder", repo: "exla-ai/rudder", agents, plan },
 ];
 
 const agentAt = (ctx) => (id, task, extra = {}) => ({
@@ -71,7 +71,7 @@ test("track: attach moves a related open issue to started, with no comment", asy
     assert.deepEqual(sent.text.format.schema.required, ["action", "issue_identifier", "title", "reason"]);
     assert.deepEqual(sent.text.format.schema.properties.action.enum, ["attach", "create", "skip"]);
     assert.match(sent.instructions, /Prefer attaching/);
-    assert.match(sent.instructions, /summarize X/);
+    assert.match(sent.instructions, /skip only when the task is not work/);
     assert.match(sent.instructions, /never the prompt/);
     assert.match(sent.input, /Rudder project: exla-ai-rudder \(exla-ai\/rudder\)\nLinear project: Rudder/);
     assert.match(sent.input, /- OPS-50 \[Todo\] Move Rudder to bare metal/);
@@ -477,5 +477,372 @@ test("track: a private agent stays out of an org's Linear; a personal install tr
     assert.equal(classifyCalls(personal).length, 1);
   } finally {
     await personal.close();
+  }
+});
+
+// ---- the classifier leans toward creating ----
+
+test("track: a small real fix creates its own issue; help and summarize the README still skip", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    ctx.upstream.handlers.classify = (body) => (body.input.split("<agent_task>")[1].includes("typo")
+      ? trackDecision({ action: "create", title: "Fix the signup button typo" })
+      : trackDecision({ action: "skip", reason: "A read-only request." }));
+    const agent = agentAt(ctx);
+    await ctx.integrations.onHomeState("alice", rudderState([
+      agent("run-typo", "fix the typo in the signup button"),
+      agent("run-help", "help"),
+      agent("run-readme", "summarize the README"),
+    ]));
+    await ctx.integrations.idle();
+    const [call] = classifyCalls(ctx);
+    const instructions = JSON.parse(call.body).instructions;
+    assert.match(instructions, /Small fixes count: a small fix gets its own small issue/);
+    assert.match(instructions, /create for any other real work: changing code, config, docs or infrastructure/);
+    assert.match(instructions, /skip only when the task is not work: a question, an explanation, chat or a request for help, an empty or one-word prompt/);
+    assert.match(instructions, /"summarize the README"/);
+    assert.equal(classifyCalls(ctx).length, 2, "a one-word prompt never reaches the model");
+    assert.deepEqual(ctx.upstream.linearState.created.map((input) => input.title), ["Fix the signup button typo"]);
+    assert.equal(trackedRow(ctx, "run-typo").action, "create");
+    assert.equal(trackedRow(ctx, "run-help").action, "skip");
+    assert.match(trackedRow(ctx, "run-help").reason, /one-word/);
+    assert.equal(trackedRow(ctx, "run-readme").action, "skip");
+  } finally {
+    await ctx.close();
+  }
+});
+
+// ---- plans: one issue per plan ----
+
+const PLAN_GOAL = "Harden the cloud home: retries, health checks and alerting";
+const workerTask = (node, title, goal = PLAN_GOAL) =>
+  `This task was spawned by Rudder from a /rudder-plan coordinator.\n\nWorker node: ${node}\n\nOriginal request:\n${goal}\n\nWorker task: ${title}\n\nImplement ${title.toLowerCase()}.`;
+const planRowOf = (ctx, planId) => ctx.database.prepare("select * from rudder_linear_tracked_plans where plan_id = ?").get(planId);
+
+test("track plans: one decision from the plan's goal, every worker attaches, and the issue closes when the last worker merges", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    const prompts = [];
+    ctx.upstream.handlers.classify = (body) => {
+      prompts.push(body.input);
+      return trackDecision({ action: "create", title: "Harden the cloud home" });
+    };
+    const agent = agentAt(ctx);
+    const orchestrator = agent("run-orch", PLAN_GOAL, { mode: "rudder-plan", planId: "plan-a" });
+    const worker = (id, node, title, extra) => agent(id, workerTask(node, title), { planId: "plan-a", nodeId: node, ...extra });
+    const plan = (counts) => ({ nodes: [], plans: [{ id: "plan-a", request: PLAN_GOAL, summary: null, ...counts }] });
+    const workers = (done = {}) => [
+      worker("w-1", "harden-10", "Retry home reconnects", done["w-1"]),
+      worker("w-2", "harden-11", "Add health checks", done["w-2"]),
+      worker("w-3", "harden-12", "Alert on failed homes", done["w-3"]),
+    ];
+    await ctx.integrations.onHomeState("alice", rudderState([orchestrator, ...workers()], plan({ pending: 1, launched: 3, merged: 0 })));
+    await ctx.integrations.idle();
+
+    assert.equal(classifyCalls(ctx).length, 1, "one model call for the whole plan");
+    assert.match(prompts[0], /This is a Rudder plan/);
+    assert.match(prompts[0], /Pieces:\n- Retry home reconnects\n- Add health checks\n- Alert on failed homes/);
+    assert.match(prompts[0], /<plan_goal>\nHarden the cloud home: retries, health checks and alerting\n<\/plan_goal>/);
+    assert.doesNotMatch(prompts[0], /spawned by Rudder/, "the model sees the goal, not the worker framing");
+    const { created, stateUpdates, comments } = ctx.upstream.linearState;
+    assert.equal(created.length, 1);
+    assert.equal(created[0].title, "Harden the cloud home");
+    assert.equal(created[0].labelIds, undefined);
+    assert.match(created[0].description, /Tracked from a Rudder plan in exla-ai-rudder\.\n\nhttps:\/\/cloud\.test\/app\/p\/ws-rudder\/a\/run-orch$/);
+    const planRow = planRowOf(ctx, "plan-a");
+    assert.equal(planRow.action, "create");
+    assert.equal(planRow.created_issue, 1);
+    for (const id of ["w-1", "w-2", "w-3"]) {
+      const row = trackedRow(ctx, id);
+      assert.deepEqual([row.action, row.issue_id, row.plan_id, row.created_issue], ["attach", planRow.issue_id, "plan-a", 0], id);
+    }
+    assert.equal(trackedRow(ctx, "run-orch"), undefined, "the orchestrator row is the plan itself");
+    assert.deepEqual(stateUpdates, [{ id: planRow.issue_id, stateId: "st-progress" }], "started once for the plan");
+
+    // A worker launched later joins the same issue without a model call.
+    const later = (extra) => worker("w-4", "harden-13", "Document the runbook", extra);
+    await ctx.integrations.onHomeState("alice", rudderState([orchestrator, ...workers(), later()], plan({ pending: 0, launched: 4, merged: 0 })));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 1);
+    assert.equal(trackedRow(ctx, "w-4").issue_id, planRow.issue_id);
+
+    // One comment per worker merge; the plan's issue stays open until the last one.
+    const merged = { status: "merged", summary: "Merged this piece." };
+    await ctx.integrations.onHomeState("alice", rudderState([orchestrator, ...workers({ "w-1": merged, "w-2": merged }), later()], plan({ pending: 0, launched: 4, merged: 2 })));
+    await ctx.integrations.idle();
+    assert.equal(comments.length, 2);
+    assert.equal(stateUpdates.length, 1, "not completed on the first merge");
+    const allMerged = () => rudderState([orchestrator, ...workers({ "w-1": merged, "w-2": merged, "w-3": merged }), later(merged)], plan({ pending: 0, launched: 4, merged: 4 }));
+    await ctx.integrations.onHomeState("alice", allMerged());
+    await ctx.integrations.onHomeState("alice", allMerged());
+    await ctx.integrations.idle();
+    assert.equal(comments.length, 4);
+    assert.ok(comments.every((comment) => comment.issueId === planRow.issue_id && comment.body.startsWith("Merged: Merged this piece.")));
+    assert.deepEqual(stateUpdates.slice(1), [{ id: planRow.issue_id, stateId: "st-done" }], "completed once, after the last merge");
+    assert.equal(planRowOf(ctx, "plan-a").closed, 1);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("track plans: at most 10 merge comments per issue; without counts from an older home, the issue closes once every worker merged and nothing waits to launch", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    ctx.upstream.handlers.classify = () => trackDecision({ action: "create", title: "Harden the cloud home" });
+    const agent = agentAt(ctx);
+    const ids = Array.from({ length: 12 }, (_, i) => `w-${i + 1}`);
+    const workers = (extra) => ids.map((id, i) => agent(id, workerTask(`n${i}`, `Piece ${i + 1} of the hardening`), { planId: "plan-b", nodeId: `n${i}`, ...extra }));
+    const waiting = { nodes: [{ id: "n12", title: "Last piece", status: "planned", runId: null }], plans: [] };
+    await ctx.integrations.onHomeState("alice", rudderState(workers(), waiting));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 1);
+    const issueId = planRowOf(ctx, "plan-b").issue_id;
+    assert.equal(ctx.database.prepare("select count(*) as n from rudder_linear_tracked_runs where plan_id = 'plan-b' and issue_id = ?").get(issueId).n, 12);
+
+    const merged = { status: "merged", summary: "Merged this piece." };
+    await ctx.integrations.onHomeState("alice", rudderState(workers(merged), waiting));
+    await ctx.integrations.idle();
+    const { comments, stateUpdates } = ctx.upstream.linearState;
+    assert.equal(comments.length, 10, "capped at 10 per issue");
+    assert.equal(stateUpdates.length, 1, "a node still waits to launch: not completed");
+
+    await ctx.integrations.onHomeState("alice", rudderState(workers(merged), { nodes: [], plans: [] }));
+    await ctx.integrations.idle();
+    assert.equal(comments.length, 10);
+    assert.deepEqual(stateUpdates.at(-1), { id: issueId, stateId: "st-done" });
+    assert.equal(stateUpdates.length, 2);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("track plans: a skipped plan skips its workers; a plan attached to the user's issue is never closed", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    seedBareMetal(ctx);
+    ctx.upstream.handlers.classify = (body) => (body.input.split("<plan_goal>")[1].includes("bare metal")
+      ? trackDecision({ action: "attach", issue: "OPS-50" })
+      : trackDecision({ action: "skip", reason: "Only questions." }));
+    const agent = agentAt(ctx);
+    const goalQ = "Answer questions about how the scheduler works";
+    const goalM = "Cut Rudder over to the bare metal hosts";
+    const q = (id, node) => agent(id, workerTask(node, `Question ${node}`, goalQ), { planId: "plan-q", nodeId: node });
+    const m = (id, node, extra) => agent(id, workerTask(node, `Move ${node}`, goalM), { planId: "plan-m", nodeId: node, ...extra });
+    await ctx.integrations.onHomeState("alice", rudderState([q("q-1", "n0"), q("q-2", "n1"), m("m-1", "n0"), m("m-2", "n1")]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 2);
+    assert.equal(planRowOf(ctx, "plan-q").action, "skip");
+    assert.equal(trackedRow(ctx, "q-1").action, "skip");
+    assert.match(trackedRow(ctx, "q-1").reason, /part of plan plan-q, which is not tracked/);
+    assert.equal(trackedRow(ctx, "m-2").identifier, "OPS-50");
+    const merged = { status: "merged", summary: "Moved it." };
+    await ctx.integrations.onHomeState("alice", rudderState([m("m-1", "n0", merged), m("m-2", "n1", merged)], { nodes: [], plans: [{ id: "plan-m", pending: 0, launched: 2, merged: 2 }] }));
+    await ctx.integrations.idle();
+    assert.equal(ctx.upstream.linearState.comments.length, 2);
+    assert.deepEqual(ctx.upstream.linearState.stateUpdates, [{ id: "iss-bm", stateId: "st-progress" }], "the user's own issue is never completed");
+    assert.equal(ctx.upstream.linearState.created.length, 0);
+  } finally {
+    await ctx.close();
+  }
+});
+
+// ---- branches follow their parent ----
+
+test("track branches: branches attach to the parent's issue without a model call; a skipped or missing parent skips them", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    ctx.upstream.handlers.classify = (body) => (body.input.split("<agent_task>")[1].includes("Explain")
+      ? trackDecision({ action: "skip", reason: "A question." })
+      : trackDecision({ action: "create", title: "Fix Rudder's Slack replies" }));
+    const agent = agentAt(ctx);
+    // The record keeps the parent's task as typed; the home strips Rudder's framing from the parent's own row.
+    const raw = "Objective: Fix replies\nDone when: replies stay on topic\n\nRudder's Slack replies drift off topic and out of character; fix the reply prompt";
+    const parent = agent("run-p", "Rudder's Slack replies drift off topic and out of character; fix the reply prompt");
+    const branch = (id, at, extra) => agent(id, `Branch of: ${raw}`, { createdAt: ctx.clock.t + at, ...extra });
+    const question = agent("run-q", "Explain how the Slack reply prompt is built");
+    // Newest first, as the home sends them: every branch is listed before its parent.
+    await ctx.integrations.onHomeState("alice", rudderState([
+      branch("b-3", 4000),
+      branch("b-2", 3000),
+      branch("b-1", 2000),
+      agent("b-q", "Branch of: Explain how the Slack reply prompt is built", { createdAt: ctx.clock.t + 2500 }),
+      agent("b-lost", "Branch of: Some task whose run was deleted long ago", { createdAt: ctx.clock.t + 2500 }),
+      parent,
+      question,
+    ]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 2, "only the two parents reach the model");
+    assert.equal(ctx.upstream.linearState.created.length, 1, "one issue, not one per branch");
+    const issueId = trackedRow(ctx, "run-p").issue_id;
+    for (const id of ["b-1", "b-2", "b-3"]) {
+      const row = trackedRow(ctx, id);
+      assert.deepEqual([row.action, row.issue_id, row.created_issue], ["attach", issueId, 0], id);
+    }
+    assert.match(trackedRow(ctx, "b-1").reason, /branch of run-p/);
+    assert.equal(trackedRow(ctx, "b-q").action, "skip");
+    assert.match(trackedRow(ctx, "b-q").reason, /branch of run-q, which is not tracked/);
+    assert.equal(trackedRow(ctx, "b-lost").action, "skip");
+
+    // A branch of a branch follows it too; a branch merge comments but never closes the parent's issue.
+    await ctx.integrations.onHomeState("alice", rudderState([
+      agent("b-b", `Branch of: Branch of: ${raw}`, { createdAt: ctx.clock.t + 6000 }),
+      branch("b-1", 2000, { status: "merged", summary: "Kept replies on topic." }),
+      parent,
+    ]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 2);
+    assert.equal(trackedRow(ctx, "b-b").issue_id, issueId);
+    assert.deepEqual(ctx.upstream.linearState.comments, [{ issueId, body: `Merged: Kept replies on topic.\n\n${AGENT_URL("b-1")}` }]);
+    assert.deepEqual(ctx.upstream.linearState.stateUpdates, [{ id: issueId, stateId: "st-progress" }]);
+  } finally {
+    await ctx.close();
+  }
+});
+
+// ---- long sessions (main rows): one decision per user turn ----
+
+const MAIN_ID = "1793356272010755150-main-branch-24944";
+const offstageState = (agents) => [{ workspaceId: "ws-offstage", name: "offstage", repo: "exla-ai/offstage", agents }];
+async function linkOffstage(ctx) {
+  const res = await ctx.call("POST", "/api/app/linear/mapping", { account: "alice", body: { kind: "project", linearId: "lp-offstage", workspace: "ws-offstage" } });
+  assert.equal(res.status, 200, JSON.stringify(res.data));
+}
+const mainRow = (ctx, turns, prompt, extra = {}) => ({
+  id: MAIN_ID,
+  title: "Read RUDDER.md if it exists",
+  task: "Read RUDDER.md if it exists, then briefly tell me what this project does",
+  status: "working",
+  mode: "main",
+  createdAt: Date.parse("2026-10-30T10:00:00Z"),
+  userTurns: turns,
+  lastUserPrompt: prompt,
+  lastUserAt: ctx.clock.t + 1000,
+  ...extra,
+});
+const turnRows = (ctx) => ctx.database.prepare("select turn, action, identifier from rudder_linear_tracked_turns order by turn").all().map((row) => ({ ...row }));
+
+test("track sessions: each new user turn of a main row is decided once, at most once a minute, follow-ups attach, and nothing closes", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    await linkOffstage(ctx);
+    const prompts = [];
+    ctx.upstream.handlers.classify = (body) => {
+      prompts.push(body.input);
+      return prompts.length === 1
+        ? trackDecision({ action: "create", title: "Build the Offstage dashboard" })
+        : trackDecision({ action: "attach", issue: "ENG-1" });
+    };
+    const dashboard = "Build the Offstage dashboard: the outreach funnel and reply rates per campaign";
+    await ctx.integrations.onHomeState("alice", offstageState([mainRow(ctx, 230, dashboard)]));
+    await ctx.integrations.onHomeState("alice", offstageState([mainRow(ctx, 230, dashboard)]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 1);
+    assert.match(prompts[0], /<agent_task>\nBuild the Offstage dashboard: the outreach funnel/);
+    const { created, stateUpdates, comments } = ctx.upstream.linearState;
+    assert.deepEqual(created.map((input) => [input.title, input.projectId, input.teamId]), [["Build the Offstage dashboard", "lp-offstage", "team-eng"]]);
+    assert.match(created[0].description, /Tracked from a Rudder session in offstage\.\n\nhttps:\/\/cloud\.test\/app\/p\/ws-offstage\/a\/1793356272010755150-main-branch-24944$/);
+    assert.deepEqual(stateUpdates, [{ id: "iss-1", stateId: "st-progress" }]);
+
+    // A follow-up 30 seconds later waits out the minute, then attaches to the same issue.
+    ctx.clock.t += 30_000;
+    const chart = mainRow(ctx, 231, "Add a replies per day chart to the dashboard");
+    await ctx.integrations.onHomeState("alice", offstageState([chart]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 1, "rate limited");
+    ctx.clock.t += 31_000;
+    await ctx.integrations.onHomeState("alice", offstageState([chart]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 2);
+    assert.match(prompts[1], /Agents already tracked in this project:\n- "Build the Offstage dashboard: the outreach funnel and reply rates per campaign" -> ENG-1/);
+    assert.equal(created.length, 1);
+
+    // A one-word turn is skipped without the model; a restart decides nothing again.
+    await ctx.integrations.onHomeState("alice", offstageState([mainRow(ctx, 232, "thanks!")]));
+    await ctx.integrations.idle();
+    const again = ctx.restart();
+    await again.onHomeState("alice", offstageState([mainRow(ctx, 232, "thanks!", { status: "waiting" })]));
+    await again.idle();
+    assert.equal(classifyCalls(ctx).length, 2);
+    assert.deepEqual(turnRows(ctx), [
+      { turn: 230, action: "create", identifier: "ENG-1" },
+      { turn: 231, action: "attach", identifier: "ENG-1" },
+      { turn: 232, action: "skip", identifier: null },
+    ]);
+    assert.equal(comments.length, 0, "a session has no merge comment");
+    assert.equal(stateUpdates.length, 1, "and is never completed by Rudder");
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("track sessions: once, at start, a running main row's newest prompt is backfilled; idle rows and older homes are not", async () => {
+  const ctx = await setup();
+  try {
+    await linked(ctx);
+    await linkOffstage(ctx);
+    ctx.upstream.handlers.classify = () => trackDecision({ action: "create", title: "Build the Offstage dashboard" });
+    const before = ctx.clock.t - 3 * 60 * 60_000;
+    const running = mainRow(ctx, 233, "Build the Offstage dashboard with the outreach funnel", { lastUserAt: before });
+    const idle = { ...mainRow(ctx, 40, "Add Stripe webhooks to Libra", { lastUserAt: before, status: "paused" }), id: "libra-main" };
+    const old = { ...mainRow(ctx, 12, "Rewrite the pricing page"), id: "old-home-main", userTurns: undefined, lastUserPrompt: undefined, lastUserAt: undefined };
+    await ctx.integrations.onHomeState("alice", [
+      ...offstageState([running, old]),
+      { workspaceId: "ws-libra", name: "libra", agents: [idle] },
+    ]);
+    await ctx.integrations.onHomeState("alice", offstageState([running]));
+    await ctx.integrations.idle();
+    assert.equal(classifyCalls(ctx).length, 1, "only the running row's newest prompt");
+    assert.deepEqual(ctx.database.prepare("select run_id, turn, action from rudder_linear_tracked_turns").all().map((row) => ({ ...row })), [
+      { run_id: MAIN_ID, turn: 233, action: "create" },
+    ]);
+  } finally {
+    await ctx.close();
+  }
+
+  // Seen only after the backfill window: an old prompt is never decided, a new one is.
+  const late = await setup();
+  try {
+    await linked(late);
+    await linkOffstage(late);
+    late.upstream.handlers.classify = () => trackDecision({ action: "create", title: "Build the Offstage dashboard" });
+    late.clock.t += 13 * 60 * 60_000;
+    await late.integrations.onHomeState("alice", offstageState([mainRow(late, 233, "Build the dashboard", { lastUserAt: late.clock.t - 14 * 60 * 60_000 })]));
+    await late.integrations.idle();
+    assert.equal(classifyCalls(late).length, 0);
+    await late.integrations.onHomeState("alice", offstageState([mainRow(late, 234, "Add the reply rate chart to the dashboard")]));
+    await late.integrations.idle();
+    assert.equal(classifyCalls(late).length, 1);
+  } finally {
+    await late.close();
+  }
+});
+
+test("track: a database from the first tracking release gains the plan and comment columns", async () => {
+  const ctx = await setup();
+  try {
+    ctx.database.exec(`
+      drop table rudder_linear_tracked_runs;
+      create table rudder_linear_tracked_runs (
+        workspace_id text not null, run_id text not null, account_id text not null, owner_kind text not null,
+        owner_id text not null, action text not null, issue_id text, identifier text,
+        created_issue integer not null default 0, started_synced integer not null default 0,
+        merged_synced integer not null default 0, agent_title text, reason text,
+        created_at integer not null, updated_at integer not null, primary key (workspace_id, run_id)
+      );
+      insert into rudder_linear_tracked_runs (workspace_id, run_id, account_id, owner_kind, owner_id, action, created_at, updated_at)
+        values ('ws-rudder', 'run-old', 'alice', 'account', 'alice', 'skip', 1, 1);
+    `);
+    ctx.restart();
+    const columns = ctx.database.prepare("pragma table_info(rudder_linear_tracked_runs)").all().map((column) => column.name);
+    assert.ok(columns.includes("plan_id") && columns.includes("merge_commented"));
+    assert.deepEqual({ ...ctx.database.prepare("select action, plan_id, merge_commented from rudder_linear_tracked_runs").get() }, { action: "skip", plan_id: null, merge_commented: 0 });
+  } finally {
+    await ctx.close();
   }
 });

@@ -1,9 +1,12 @@
-// Rudder tracks your work in Linear: each new agent in a project linked to
-// Linear is decided once, by one model call, as attach (it moves an open issue
-// forward), create (new work a person would track) or skip (questions, chores,
-// small tweaks, follow-ups). integrations.ts persists the decision per run and
-// syncs progress quietly; this file holds the prompt, the strict schema, the
-// validation and the text that lands in Linear.
+// Rudder tracks your work in Linear: each piece of new work in a project linked
+// to Linear is decided once, by one model call, as attach (an open issue covers
+// it), create (any other real work, small fixes included) or skip (not work:
+// questions, chat, one-word or read-only prompts). A piece of work is an agent,
+// a whole Rudder plan (judged by its goal), or one user turn of a long session
+// (main row). Branches follow their parent's decision without a model call.
+// integrations.ts persists the decisions and syncs progress quietly; this file
+// holds the prompt, the strict schema, the validation, the plan and branch
+// helpers and the text that lands in Linear.
 
 import { structuredJson, type CallWording } from "./linear-tasks.js";
 import type { LinearIssue } from "./linear.js";
@@ -16,7 +19,13 @@ export type TrackAgent = {
   swarmExperiment?: boolean | null;
   summary?: string | null;
   lastMessage?: string | null;
+  createdAt?: number | null;
+  planId?: string | null;
+  nodeId?: string | null;
 };
+
+/** What a plan is, for the classifier: its goal and the pieces its workers took. */
+export type PlanContext = { goal: string; pieces: string[] };
 
 export type TrackDecision =
   | { action: "attach"; issue: LinearIssue; reason: string }
@@ -51,6 +60,95 @@ export function userTask(raw: unknown): string {
   return text.trim();
 }
 
+// A branch (`b` in the dashboard) is started with "Branch of: <the parent's task>".
+const BRANCH_PREFIX = /^\s*Branch of: /;
+const COMPARE_CHARS = 300;
+const PIECE_LIMIT = 15;
+
+/** The parent's task a branch was made from, or null when the run is not a branch. */
+export function branchSourceTask(task: unknown): string | null {
+  const text = String(task ?? "");
+  return BRANCH_PREFIX.test(text) ? userTask(text.replace(BRANCH_PREFIX, "")) : null;
+}
+
+const compareKey = (text: string) => text.replace(/\s+/g, " ").trim().slice(0, COMPARE_CHARS).toLowerCase();
+
+/**
+ * The run a branch was made from: the newest other run in the same project,
+ * created before the branch, whose task is the one the branch names. Both
+ * sides are clipped by the home, so the first few hundred characters decide.
+ */
+export function findBranchParent<T extends TrackAgent>(branch: T, agents: T[]): T | null {
+  const source = branchSourceTask(branch.task);
+  if (!source) {
+    return null;
+  }
+  const wanted = compareKey(source);
+  if (!wanted) {
+    return null;
+  }
+  const createdAt = typeof branch.createdAt === "number" ? branch.createdAt : Infinity;
+  let best: T | null = null;
+  for (const candidate of agents) {
+    if (!candidate?.id || candidate.id === branch.id) {
+      continue;
+    }
+    const at = typeof candidate.createdAt === "number" ? candidate.createdAt : null;
+    if (at !== null && at > createdAt) {
+      continue;
+    }
+    if (compareKey(userTask(candidate.task)) !== wanted) {
+      continue;
+    }
+    if (!best || (at ?? 0) > (typeof best.createdAt === "number" ? best.createdAt : 0)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+// A plan worker's prompt (native rudder_plan_worker_prompt): "Worker node: <id>
+// Original request: <goal> Worker task: <title> ...", sometimes after a line
+// saying it was spawned from a /rudder-plan coordinator.
+const ORIGINAL_REQUEST = /(?:^|\n)Original request:\s*\n([\s\S]*?)\n\s*\nWorker task:/;
+const WORKER_TASK = /(?:^|\n)Worker task:[ \t]*([^\n]+)/;
+
+/** The one-line piece of a plan this worker took. */
+export function planPiece(agent: TrackAgent, nodes: Array<{ runId?: string | null; title?: string | null }> = []): string {
+  const node = nodes.find((candidate) => candidate?.runId && candidate.runId === agent.id);
+  const fromTask = WORKER_TASK.exec(String(agent.task ?? ""))?.[1]?.trim();
+  return clip(String(node?.title || fromTask || agent.title || "").replace(/\s+/g, " "), ISSUE_TITLE_LIMIT);
+}
+
+/**
+ * A plan's goal, from the best source the home publishes: the plan's request
+ * in its queue entry, else the orchestrator row's task, else the "Original
+ * request" quoted in a worker's prompt, else that worker's own task.
+ */
+export function planContext(params: {
+  planId: string;
+  agents: TrackAgent[];
+  plans?: Array<{ id?: string | null; request?: string | null; summary?: string | null }> | null;
+  nodes?: Array<{ runId?: string | null; title?: string | null }> | null;
+}): PlanContext {
+  const workers = params.agents.filter((agent) => agent?.planId === params.planId && agent.mode !== "rudder-plan");
+  const entry = (params.plans ?? []).find((plan) => plan?.id === params.planId);
+  const orchestrator = params.agents.find((agent) => agent?.planId === params.planId && agent.mode === "rudder-plan");
+  const quoted = workers.map((agent) => ORIGINAL_REQUEST.exec(String(agent.task ?? ""))?.[1]?.trim() ?? "").find(Boolean);
+  const request = [entry?.request, userTask(orchestrator?.task), quoted, userTask(workers[0]?.task)]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean) ?? "";
+  const summary = String(entry?.summary ?? "").trim();
+  const goal = summary && !request.includes(summary) ? `${request}\n\nPlan summary: ${summary}` : request;
+  const pieces = [...new Set(workers.map((agent) => planPiece(agent, params.nodes ?? [])).filter(Boolean))].slice(0, PIECE_LIMIT);
+  return { goal, pieces };
+}
+
+/** Empty or one word ("help", "continue", "thanks"): not work, decided without a model call. */
+export function trivialTask(task: unknown): boolean {
+  return String(task ?? "").trim().split(/\s+/).filter(Boolean).length < 2;
+}
+
 /** Why a run is never tracked, before any model call, or null for a candidate. */
 export function untrackedReason(agent: TrackAgent): string | null {
   const id = String(agent.id ?? "");
@@ -83,11 +181,12 @@ export const TRACK_SCHEMA = {
 } as const;
 
 export const TRACK_SYSTEM = [
-  "You keep a person's Linear project in step with the coding agents they start in Rudder. Linear is where they see progress on work they care about, so it holds pieces of work a person would track: a feature, a bug fix, an integration, a customer onboarding, an infrastructure change. One issue per piece of work, never one per agent.",
-  "You get one agent's task, the open issues of the linked Linear project, and the agents already tracked in this project. Decide in this order:",
-  "1. skip when the task is not progress a person would track: a question or explanation, a review or investigation that changes nothing, tests or chores on their own, a small tweak, a rename, \"summarize X\", a typo fix, or a follow-up to work an already tracked agent did (a fix, a retry or a small change to it).",
-  "2. attach when the task moves one of the open issues forward. Prefer attaching over creating whenever an open issue is related. Set issue_identifier to that issue's identifier exactly as listed.",
-  "3. create only for new work a person would track that no open issue covers. Set title.",
+  "You keep a person's Linear project in step with the coding agents they run in Rudder. Linear is where they see what is being worked on and how far it got. One issue per piece of work, never one per agent: related work shares an issue.",
+  "You get one task (an agent's task, a plan's goal, or the newest prompt in a long session), the open issues of the linked Linear project, and the work already tracked in this project. Decide in this order:",
+  "1. skip only when the task is not work: a question, an explanation, chat or a request for help, an empty or one-word prompt, or a read-only request such as \"summarize the README\" or \"what does X do\".",
+  "2. attach when an open issue covers the task: it continues, fixes, finishes or extends that work, including a follow-up to work already tracked here. Prefer attaching over creating whenever an open issue is related. Set issue_identifier to that issue's identifier exactly as listed.",
+  "3. create for any other real work: changing code, config, docs or infrastructure, investigating a bug in order to fix it, running an onboarding or outreach task, and so on. Small fixes count: a small fix gets its own small issue when no open issue covers it. Set title.",
+  "A Rudder plan is one goal several agents split into pieces: judge the goal as a whole, never the plan's framing.",
   "title (create only): the outcome in a few words, the way the person would name it in Linear, such as \"Onboard Bild\", \"Move Rudder to bare metal\" or \"Fix login on Safari\". Describe the outcome, never the prompt or what the agent was asked. No trailing period.",
   "reason: one short sentence.",
   "issue_identifier and title are null when they do not apply.",
@@ -117,6 +216,7 @@ export function trackUserPrompt(params: {
   linearName?: string | null;
   issues: LinearIssue[];
   tracked: Array<{ title: string; identifier: string }>;
+  plan?: { pieces: string[] } | null;
 }): string {
   const issues = params.issues.length
     ? params.issues.map((issue) => `- ${issue.identifier} [${issue.state ?? issue.stateType ?? "open"}] ${clip(issue.title, ISSUE_TITLE_LIMIT)}`).join("\n")
@@ -134,9 +234,15 @@ export function trackUserPrompt(params: {
     "Agents already tracked in this project:",
     tracked,
     "",
-    "<agent_task>",
-    clip(params.task, TASK_LIMIT),
-    "</agent_task>",
+    ...(params.plan
+      ? [
+        "This is a Rudder plan: several agents split the goal below into pieces and work on them together.",
+        ...(params.plan.pieces.length ? ["Pieces:", ...params.plan.pieces.map((piece) => `- ${piece}`), ""] : []),
+        "<plan_goal>",
+        clip(params.task, TASK_LIMIT),
+        "</plan_goal>",
+      ]
+      : ["<agent_task>", clip(params.task, TASK_LIMIT), "</agent_task>"]),
   ].join("\n");
 }
 
@@ -182,6 +288,7 @@ export async function classifyWork(params: {
   linearName?: string | null;
   issues: LinearIssue[];
   tracked: Array<{ title: string; identifier: string }>;
+  plan?: { pieces: string[] } | null;
   log?: (message: string) => void;
 }): Promise<TrackDecision> {
   const answer = await structuredJson({
@@ -214,11 +321,13 @@ export async function classifyWork(params: {
   return { action: "skip", reason: decision.reason };
 }
 
-/** A created issue's description: what the agent is doing, and where to watch it. */
-export function trackedIssueDescription(task: string, projectName: string, agentUrl: string): string {
+const SOURCE_WORDS = { agent: "a Rudder agent", plan: "a Rudder plan", session: "a Rudder session" } as const;
+
+/** A created issue's description: what the work is, and where to watch it. */
+export function trackedIssueDescription(task: string, projectName: string, agentUrl: string, source: keyof typeof SOURCE_WORDS = "agent"): string {
   const first = task.trim().split(/\n\s*\n/)[0] ?? "";
   const summary = clip(first.replace(/\s+/g, " "), SUMMARY_LIMIT);
-  return [summary, `Tracked from a Rudder agent in ${projectName}.`, agentUrl].filter(Boolean).join("\n\n");
+  return [summary, `Tracked from ${SOURCE_WORDS[source]} in ${projectName}.`, agentUrl].filter(Boolean).join("\n\n");
 }
 
 /**

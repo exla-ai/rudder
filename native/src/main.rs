@@ -359,7 +359,7 @@ const AGENT_PANE_HINTS: &[&str] = &[
     // list is as long as the agents pane can afford, and an extra row costs
     // every user a row of agents forever.
     "⌥j/k scroll · ⌥v/b msg",
-    "⌥h hide panes",
+    "⌥h worker only",
     "⌥[/] agents",
     "Enter focus",
     "r rename",
@@ -3769,22 +3769,52 @@ impl App {
     fn toggle_solo_pane(&mut self) {
         self.solo_pane = !self.solo_pane;
         if self.solo_pane {
-            // The task line is not drawn in solo, so focus cannot stay on it --
-            // keystrokes would land in an input the user cannot see.
-            if self.focus == FocusPane::Task {
-                self.solo_restore_focus = Some(FocusPane::Task);
-                self.focus = FocusPane::Worker;
-            } else {
+            // Full screen is only ever the worker (or the open diff panel): the
+            // agent list and the task line are never useful on their own. Focus
+            // on either moves to the worker, or keystrokes would land in a pane
+            // the user cannot see; ⌥h again puts it back.
+            let soloable = self.focus == FocusPane::Worker
+                || (self.focus == FocusPane::Diff && self.diff_panel.open);
+            if soloable {
                 self.solo_restore_focus = None;
+            } else {
+                self.solo_restore_focus = Some(self.focus);
+                self.focus = FocusPane::Worker;
             }
         } else if let Some(previous) = self.solo_restore_focus.take() {
-            self.focus = previous;
+            // The diff panel may have closed while the worker had the screen.
+            self.focus = if previous == FocusPane::Diff && !self.diff_panel.open {
+                FocusPane::Worker
+            } else {
+                previous
+            };
         }
         self.notice = Some(if self.solo_pane {
             "full screen · ⌥h restores the panes".to_string()
         } else {
             "panes restored".to_string()
         });
+        self.dirty = true;
+    }
+
+    /// Full screen shows only the worker or the open diff panel. A key that
+    /// moved focus to the agent list or the task line (⌥1, ⌥3, Tab, Esc) asked
+    /// for that pane, so the split comes back with focus where it went; focus
+    /// left on a diff panel that just closed goes to the worker on screen.
+    fn reconcile_solo_focus(&mut self) {
+        if !self.solo_pane
+            || self.focus == FocusPane::Worker
+            || (self.focus == FocusPane::Diff && self.diff_panel.open)
+        {
+            return;
+        }
+        if self.focus == FocusPane::Diff {
+            self.focus = FocusPane::Worker;
+        } else {
+            self.solo_pane = false;
+            self.solo_restore_focus = None;
+            self.notice = Some("panes restored".to_string());
+        }
         self.dirty = true;
     }
 
@@ -4132,6 +4162,12 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        let quit = self.dispatch_key(key);
+        self.reconcile_solo_focus();
+        quit
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) -> bool {
         self.note_user_activity();
         if self.rename_input.is_some() {
             self.handle_rename_key(key);
@@ -4317,7 +4353,7 @@ impl App {
                 self.toggle_diff_panel();
                 return false;
             }
-            // Alt+h HIDES the other panes. It previously stepped to the previous
+            // Alt+h shows the worker full screen. It previously stepped to the previous
             // agent, but that was only an alias: the stepper's real binding is
             // Alt+[ / Alt+], which still works. Hiding is the more valuable thing
             // to reach with one hand on a key you can find by feel.
@@ -6722,6 +6758,12 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let handled = self.dispatch_mouse(mouse);
+        self.reconcile_solo_focus();
+        handled
+    }
+
+    fn dispatch_mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.reveal_started.take().is_some() {
             self.dirty = true;
         }

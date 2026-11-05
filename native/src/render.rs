@@ -29,29 +29,28 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let task_height = task_pane_height(app, area.width);
 
-    // SOLO: the focused pane takes the whole screen and the others are not drawn.
-    // The task line stays regardless — it is where you type, and a mode that hid it
-    // would strand you in a view you cannot act from.
+    // SOLO: the worker (or the open diff panel) takes the whole screen and the
+    // others are not drawn.
     if app.solo_pane {
-        // FULL SCREEN: the focused pane and nothing else -- no sidebar, no task
-        // line, no gutters. Soloing from the task pane moves focus to the worker
-        // (toggle_solo_pane does it) so keystrokes still land somewhere you can see;
-        // ⌥h restores both the split and the focus you had.
-        let solo = match app.focus {
-            FocusPane::Agents => FocusPane::Agents,
-            FocusPane::Diff if app.diff_panel.open => FocusPane::Diff,
-            _ => FocusPane::Worker,
+        // FULL SCREEN: no sidebar, no task line, no gutters. The agent list and the
+        // task line are never shown alone; toggle_solo_pane moves focus off them
+        // so keystrokes still land somewhere you can see, and ⌥h restores both the
+        // split and the focus you had.
+        let solo = if app.focus == FocusPane::Diff && app.diff_panel.open {
+            FocusPane::Diff
+        } else {
+            FocusPane::Worker
         };
         // Areas the hit-testing and scroll code read: a hidden pane gets NONE, so a
         // stale rect cannot take a click meant for the pane that is actually drawn.
-        app.agents_area = (solo == FocusPane::Agents).then_some(area);
+        app.agents_area = None;
         app.worker_area = (solo == FocusPane::Worker).then_some(area);
         app.diff_area = (solo == FocusPane::Diff).then_some(area);
         app.task_area = None;
-        match solo {
-            FocusPane::Agents => render_agents(frame, area, app),
-            FocusPane::Diff => render_diff_panel(frame, area, app),
-            _ => render_worker(frame, area, app),
+        if solo == FocusPane::Diff {
+            render_diff_panel(frame, area, app);
+        } else {
+            render_worker(frame, area, app);
         }
         render_cloud_prompt(frame, area, app);
         render_merge_prompt(frame, area, app);

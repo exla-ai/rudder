@@ -19543,6 +19543,13 @@ fn solo_hides_the_other_panes_and_toggles_back() {
         FocusPane::Task,
         "and comes back when the panes do"
     );
+
+    // The agent list is never shown alone either: full screen is the worker.
+    app.focus = FocusPane::Agents;
+    app.toggle_solo_pane();
+    assert_eq!(app.focus, FocusPane::Worker, "focus leaves the hidden agent list");
+    app.toggle_solo_pane();
+    assert_eq!(app.focus, FocusPane::Agents, "and comes back with the split");
 }
 
 #[test]
@@ -19564,12 +19571,33 @@ fn solo_leaves_no_stale_rect_for_the_hidden_pane() {
     // clicks over the full-screen pane now drawn where it used to be.
     assert!(app.task_area.is_none(), "the hidden task line owns none");
 
+    // Focus on the agent list still draws the worker: the list never takes the
+    // whole screen.
     app.focus = FocusPane::Agents;
     terminal
         .draw(|frame| crate::render::render(frame, &mut app))
         .expect("draw");
-    assert!(app.agents_area.is_some());
-    assert!(app.worker_area.is_none());
+    assert!(app.agents_area.is_none());
+    assert!(app.worker_area.is_some());
+}
+
+#[test]
+fn moving_focus_to_a_hidden_pane_brings_the_split_back() {
+    // In full screen only the worker (or the open diff) is drawn. ⌥1 and ⌥3 ask
+    // for the agent list and the task line, so the split returns with focus
+    // there instead of keys landing in a pane nobody can see.
+    for (key, pane) in [('1', FocusPane::Agents), ('3', FocusPane::Task)] {
+        let mut app = App::new();
+        app.focus = FocusPane::Worker;
+        app.handle_key(alt('h'));
+        assert!(app.solo_pane);
+
+        app.handle_key(alt(key));
+        assert!(!app.solo_pane, "⌥{key} restores the split");
+        assert_eq!(app.focus, pane);
+        let screen = render_screen(&mut app, 120, 30);
+        assert!(app.agents_area.is_some() && app.worker_area.is_some(), "{screen}");
+    }
 }
 
 #[test]
@@ -19583,10 +19611,12 @@ fn alt_h_hides_the_panes_and_stepping_is_brackets_only() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
     assert!(app.solo_pane, "Alt+h hides the other panes");
+    assert_eq!(app.focus, FocusPane::Worker, "the worker has the screen");
     assert_eq!(app.selected_agent, 1, "and does not move the selection");
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
     assert!(!app.solo_pane, "Alt+h again restores the split");
+    assert_eq!(app.focus, FocusPane::Agents, "with focus back on the list");
 
     // Stepping is Alt+[ / Alt+] only — the letter aliases are gone.
     app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT));
@@ -24322,6 +24352,67 @@ fn soloing_with_the_diff_panel_focused_shows_only_the_diff_and_alt_h_restores() 
         "panel comes back with the split: {back}"
     );
     assert!(app.agents_area.is_some() && app.worker_area.is_some() && app.diff_area.is_some());
+}
+
+fn diff_solo_app(id: &str) -> App {
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    let mut run = test_agent_run(id, "tighten the parser");
+    run.cwd = app.cwd.clone();
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Worker;
+    app
+}
+
+#[test]
+fn closing_the_diff_in_full_screen_leaves_the_worker_full_screen() {
+    let mut app = diff_solo_app("diff-close-solo");
+    app.handle_key(alt('d'));
+    app.handle_key(alt('h'));
+    assert!(app.solo_pane && app.focus == FocusPane::Diff);
+
+    // ⌥d closes the panel; the worker takes the screen and the focus.
+    app.handle_key(alt('d'));
+    assert!(app.solo_pane, "closing the diff does not leave full screen");
+    assert_eq!(app.focus, FocusPane::Worker);
+    render_screen(&mut app, 120, 30);
+    assert!(app.worker_area.is_some() && app.diff_area.is_none() && app.agents_area.is_none());
+
+    app.handle_key(alt('h'));
+    assert!(!app.solo_pane);
+    assert_eq!(app.focus, FocusPane::Worker);
+}
+
+#[test]
+fn opening_the_diff_in_full_screen_shows_it_and_alt_h_restores_the_old_focus() {
+    let mut app = diff_solo_app("diff-open-solo");
+    app.focus = FocusPane::Agents;
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Worker);
+
+    app.handle_key(alt('d'));
+    assert!(app.solo_pane, "⌥d keeps full screen");
+    assert_eq!(app.focus, FocusPane::Diff);
+    render_screen(&mut app, 120, 30);
+    assert!(app.diff_area.is_some() && app.worker_area.is_none());
+
+    app.handle_key(alt('h'));
+    assert!(!app.solo_pane);
+    assert_eq!(app.focus, FocusPane::Agents, "focus from before full screen");
+    assert!(app.diff_panel.open, "the panel stays open beside the worker");
+}
+
+#[test]
+fn full_screen_never_restores_focus_to_a_closed_diff_panel() {
+    let mut app = diff_solo_app("diff-stale-focus");
+    // A focus left on the diff after it closed is not a pane to solo or return to.
+    app.focus = FocusPane::Diff;
+    assert!(!app.diff_panel.open);
+    app.toggle_solo_pane();
+    assert_eq!(app.focus, FocusPane::Worker);
+    app.toggle_solo_pane();
+    assert_eq!(app.focus, FocusPane::Worker, "not the closed diff");
 }
 
 #[test]

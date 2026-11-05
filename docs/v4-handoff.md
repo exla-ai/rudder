@@ -215,16 +215,16 @@ Fly cleanup and builds (2026-11-05): the failed home-223b (still running on
 Fly), 26 stale v2/v3 workspaces, 14 old sails and 24 orphan volumes were
 deleted through the control plane's delete reaper and `flyctl`; the empty
 `rudder-v4-qualification` app is gone; the karna-montage v3 workspace is
-stopped. Left on Fly: the control plane, the old home above, three stopped
+stopped. Left on Fly: the control plane, three stopped
 homes of other accounts (two people and the App Store review account) and the
 stopped dad-job-apply workspace. The burst pool stays off (an external host
 cannot reach Fly's private network); `rudder-burst` now runs the command on
 the home instead of failing. 4.2.4 ships sccache in the worker image with
 per-workspace keys; 4.2.5 keeps the tool cache (and CARGO_HOME) where it was,
-since a moved CARGO_HOME rebuilds every dependency. These reach the home
-when it next updates while idle. Warm snapshots were rebuilt by hand for the
+since a moved CARGO_HOME rebuilds every dependency. Cloud runs the 4.2.5 image
+(2026-11-06); these reach the home when it next updates while idle. Warm snapshots were rebuilt by hand for the
 jj projects with something to build (exla-ai-rudder, libra, offstage,
-vibeprint, viraat-gazette); an earlier Rudder one failed inside an old sccache
+vibeprint; viraat-gazette needs an uncommitted data file to build); an earlier Rudder one failed inside an old sccache
 binary. Repos without root lockfiles (smol, snap, raindrop, ...) get a plain
 checkout, and non-jj repos get a snapshot after their first worktree agent.
 

@@ -1054,10 +1054,8 @@ function readAgents(repoDir, options = {}) {
   }
   const agents = [];
   for (const id of entries) {
-    let record;
-    try {
-      record = JSON.parse(fs.readFileSync(path.join(runsDir, id, "run.json"), "utf8"));
-    } catch {
+    const record = readRunJson(path.join(runsDir, id, "run.json"));
+    if (!record) {
       continue;
     }
     if (!record || typeof record !== "object" || record.id !== id) {
@@ -1097,6 +1095,34 @@ function readAgents(repoDir, options = {}) {
   return agents.slice(0, 60);
 }
 
+
+// State is published every STATE_INTERVAL_MS. Parse a run record again only
+// when its file changed: re-reading every record of every project each time
+// kept this process busy all day.
+const runJsonCache = new Map(); // path -> { mtimeMs, size, record }
+
+function readRunJson(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    runJsonCache.delete(file);
+    return null;
+  }
+  const cached = runJsonCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.record;
+  }
+  let record = null;
+  try {
+    record = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    // mid-write: try again next time
+    return null;
+  }
+  runJsonCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, record });
+  return record;
+}
 
 function agentSummary(record, options = {}) {
   const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
@@ -1523,7 +1549,10 @@ function persistHomeDirs() {
   // ensureRustToolchain) lives on the volume too, so it survives restarts.
   // com.vercel.cli: the cloud's own `vercel login` (its refresh token rotates,
   // so it cannot be a copy of the laptop's).
-  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go"]) {
+  // .cache, .npm and the pnpm store: package and browser caches (Rudder's tool
+  // cache, npx, Playwright) filled the 8G root disk, after which writes there
+  // failed. The volume has room, and the caches stay warm across restarts.
+  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go", ".cache", ".npm", ".local/share/pnpm/store"]) {
     const live = path.join(HOME, name);
     const stored = path.join(PERSIST_HOME, name);
     fs.mkdirSync(stored, { recursive: true });

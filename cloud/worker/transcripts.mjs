@@ -47,13 +47,20 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
 
 // The newest assistant text, for the agent list's preview line. Re-reads only
 // when the transcript file changed.
-export function lastAssistantText(record, { home, cache }) {
-  const file = transcriptFile(record, home);
+// A working agent's transcript changes every second; its preview line only
+// needs to keep up with a person glancing at the phone.
+const PREVIEW_REFRESH_MS = 5_000;
+
+export function lastAssistantText(record, { home, cache, now = Date.now() }) {
+  const file = transcriptFile(record, home, now);
   if (!file) {
     return null;
   }
+  if (cache && cache.file === file && now - (cache.readAt ?? 0) < PREVIEW_REFRESH_MS) {
+    return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
+  }
   const stat = fs.statSync(file);
-  if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs) {
+  if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) {
     return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
   }
   const { text } = readTail(file, PREVIEW_TAIL_BYTES);
@@ -62,7 +69,7 @@ export function lastAssistantText(record, { home, cache }) {
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
   const remoteUrl = record.backend === "codex" ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
-  const entry = { file, mtimeMs: stat.mtimeMs, text: preview, remoteUrl };
+  const entry = { file, mtimeMs: stat.mtimeMs, size: stat.size, readAt: now, text: preview, remoteUrl };
   return { text: preview, remoteUrl, cacheEntry: entry };
 }
 
@@ -127,11 +134,30 @@ function readRunRecord(repoDir, runId) {
   }
 }
 
-export function transcriptFile(record, home) {
+// Where each session's transcript lives, found once. A miss means searching
+// every Claude project folder (hundreds on a long-lived home), so it is
+// remembered too and searched again at most every MISS_RECHECK_MS.
+const MISS_RECHECK_MS = 30_000;
+const transcriptPaths = new Map(); // sessionId -> { file, checkedAt }
+
+export function transcriptFile(record, home, now = Date.now()) {
   const sessionId = record?.session?.nativeSessionId;
   if (!sessionId || !/^[A-Za-z0-9-]+$/.test(sessionId)) {
     return null;
   }
+  const known = transcriptPaths.get(sessionId);
+  if (known?.file && fs.existsSync(known.file)) {
+    return known.file;
+  }
+  if (known && !known.file && now - known.checkedAt < MISS_RECHECK_MS) {
+    return null;
+  }
+  const file = findTranscript(record, home, sessionId);
+  transcriptPaths.set(sessionId, { file, checkedAt: now });
+  return file;
+}
+
+function findTranscript(record, home, sessionId) {
   if ((record.backend || "claude") === "codex") {
     return codexRollout(home, sessionId);
   }

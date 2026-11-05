@@ -14,7 +14,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
-import { readTranscript, lastAssistantText } from "../cloud/worker/transcripts.mjs";
+import { readTranscript, lastAssistantText, transcriptFile } from "../cloud/worker/transcripts.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -478,6 +478,31 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
   assert.equal(preview.text, "Fixed; tests pass.");
   assert.equal(preview.remoteUrl, "https://claude.ai/code/session_01AbCdEf", "the Remote Control session link");
   assert.throws(() => readTranscript(repo, "../../etc", { home }), /agent not found/);
+});
+
+nodeTest("transcript lookups and previews are remembered between state publishes", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  try {
+    const sessionId = "5f1d2c3b-aaaa-bbbb-cccc-000000000001";
+    const record = { id: "run-x", backend: "claude", session: { nativeSessionId: sessionId }, workspace: { path: "/nowhere" } };
+    // A miss searches every project folder, so it is not repeated right away.
+    assert.equal(transcriptFile(record, home, 1_000), null);
+    const projectDir = path.join(home, ".claude", "projects", "-elsewhere");
+    fs.mkdirSync(projectDir, { recursive: true });
+    const file = path.join(projectDir, `${sessionId}.jsonl`);
+    const say = (text) => fs.writeFileSync(file, `${JSON.stringify({ type: "assistant", uuid: text, message: { role: "assistant", content: [{ type: "text", text }] } })}\n`);
+    say("first");
+    assert.equal(transcriptFile(record, home, 2_000), null, "still the remembered miss");
+    assert.equal(transcriptFile(record, home, 40_000), file, "searched again after the recheck window");
+    // A busy transcript is read again at most every few seconds.
+    const first = lastAssistantText(record, { home, now: 40_000 });
+    assert.equal(first.text, "first");
+    say("second");
+    assert.equal(lastAssistantText(record, { home, cache: first.cacheEntry, now: 41_000 }).text, "first");
+    assert.equal(lastAssistantText(record, { home, cache: first.cacheEntry, now: 46_000 }).text, "second");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls", () => {

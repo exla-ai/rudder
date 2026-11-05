@@ -1137,7 +1137,11 @@ brain lives in the cloud, and the phone is a first-class client.
   the warm snapshot builder and the supervisor share the same npm, pnpm, uv,
   pip, cargo, Turborepo, Nx and sccache directories. The worker image ships a
   pinned sccache, so every Rust build there goes through one read-write sccache
-  server per machine (`src/tool-cache.ts` explains why not read-only).
+  server per machine (`src/tool-cache.ts` explains why not read-only). Each
+  agent and the warm builder pass their build directory as `SCCACHE_BASEDIRS`
+  (sccache keys hold absolute target paths), so crates compiled in one
+  workspace hit in another. Incremental compiles (a crate's own debug build)
+  are never cached; dependencies and release builds are.
 - **`/sync` also shows the agents.** After syncing it lists the cloud's agents for
   the repo (needs you / working / done, from the home's last state) and the laptop's
   still-running movable agents; `/sync move` hands those over through the same

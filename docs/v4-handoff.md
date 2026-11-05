@@ -204,11 +204,26 @@ user's home moved off Fly to an AWS m8azn.6xlarge (us-west-2, 5GHz, 24 vCPU,
 92GB, 500GB gp3) as a stopgap until a bare-metal box is ready. The disk was
 copied under the 4.1.2 image with the Fly machine stopped (`init.exec` set to
 sleep); on 2026-11-05 after the 4.2.0 deploy, `rudder cloud host` switched it
-to external mode on `rudder-workers-exla:4.2.0`. The old Fly machine and
-volume are kept until the user says to destroy them. Agent scratch now lives
+to external mode on `rudder-workers-exla:4.2.0`. The old Fly machine
+(8edd225a7d0378) and its 150GB volume are kept until the user says to destroy
+them; Cloud never calls Fly for an external home. Agent scratch now lives
 in `/workspace/scratch/<run>` and is cleaned hourly. Release worker images:
 `node scripts/worker-image.mjs <version>` after npm publish (about 2 minutes,
 no Rust compile; see cloud/README.md).
+
+Fly cleanup and builds (2026-11-05): the failed home-223b (still running on
+Fly), 26 stale v2/v3 workspaces, 14 old sails and 24 orphan volumes were
+deleted through the control plane's delete reaper and `flyctl`; the empty
+`rudder-v4-qualification` app is gone; the karna-montage v3 workspace is
+stopped. Left on Fly: the control plane, the old home above, three stopped
+homes of other accounts (two people and the App Store review account) and the
+stopped dad-job-apply workspace. The burst pool stays off (an external host
+cannot reach Fly's private network); `rudder-burst` now runs the command on
+the home instead of failing. 4.2.4 ships sccache in the worker image, one
+read-write cache per machine (`RUDDER_CACHE_DIR`), and these reach the home
+when it next updates while idle. The Rudder repo's warm snapshot rebuilds on
+the next agent launch (one failed inside an old sccache binary, one lost its
+ready marker in the machine move); Offstage has never built one.
 
 Cloud link clicks (2026-11-05, not released): a click on a link in a
 `rudder cloud` pane ran `xdg-open` on the home, which has none. The dashboard

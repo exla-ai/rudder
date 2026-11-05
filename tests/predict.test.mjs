@@ -222,10 +222,11 @@ test("a cloud frame that lands before the echo keeps the cursor after the typed 
   predictor.onServerData(frameWith("", 3));
   await settle();
   predictor.onInput("hi");
-  // An animation frame (a spinner elsewhere) parks the cloud's caret at col 3.
+  // An animation frame (a spinner elsewhere) parks the cloud's caret at col 3:
+  // the frame redraws the predictions and parks the cursor after them.
   const spinner = SYNC("\x1b[6;1H*\x1b[?25h\x1b[3;3H");
   const written = predictor.decorate(spinner);
-  assert.equal(written, SYNC("\x1b[6;1H*\x1b[?25h\x1b[3;3H\x1b[3;5H"));
+  assert.equal(written, SYNC("\x1b[6;1H*\x1b[?25h\x1b[3;3H\x1b[3;3H\x1b[0mh\x1b[3;4H\x1b[0mi\x1b[0m\x1b[3;5H"));
   predictor.onServerData(spinner);
   await settle();
   // Once the echo is in, frames pass through untouched.
@@ -235,4 +236,97 @@ test("a cloud frame that lands before the echo keeps the cursor after the typed 
   // A chunk that ends inside an open frame is left alone.
   predictor.onInput("!");
   assert.equal(predictor.decorate("\x1b[?2026h\x1b[6;1H*"), "\x1b[?2026h\x1b[6;1H*");
+});
+
+test("keys typed while the cloud catches up are drawn once it has, at normal typing speed", async () => {
+  const { predictor, out, tick } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("", 3));
+  await settle();
+  // Ctrl+U: the model cannot know what it did, so prediction holds.
+  predictor.onInput("\x15");
+  for (const key of "abc") {
+    tick(40);
+    predictor.onInput(key);
+  }
+  assert.equal(out.length, 0, "nothing is guessed before the cloud answers the hold");
+  // The cloud has drawn Ctrl+U's effect and the first held key; b and c are in flight.
+  predictor.onServerData(frameWith("a", 4));
+  await settle();
+  tick(100);
+  predictor.onInput("d");
+  const drawn = out.join("");
+  assert.match(drawn, /\x1b\[3;4H\x1b\[0mb/, "a key still on its way is drawn after the echoed one");
+  assert.match(drawn, /\x1b\[3;5H\x1b\[0mc/);
+  assert.match(drawn, /\x1b\[3;6H\x1b\[0md/, "the key typed now comes after them");
+  out.length = 0;
+  for (const key of "ef") {
+    tick(40);
+    predictor.onInput(key);
+  }
+  assert.match(out.join(""), /\x1b\[3;8H\x1b\[0mf/, "later keys predict at once: the hold did not re-arm");
+  predictor.onServerData(frameWith("abcdef", 9));
+  await settle();
+  assert.equal(predictor.confirmed, 5);
+  assert.equal(predictor.rollbacks, 0);
+});
+
+test("Rudder's own slate-grey task hint is typed over like any hint", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  const hint = "\x1b[38;2;140;147;163mdescribe a task…\x1b[0m";
+  predictor.onServerData(SYNC(`\x1b[2J\x1b[3;1H> ${hint}\x1b[?25h\x1b[3;3H`));
+  await settle();
+  predictor.onInput("x");
+  assert.ok(out.join("").includes("x"), "the first key into an empty task input is predicted");
+});
+
+test("an echo frame that repaints the input never wipes keys still in flight", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(hintFrame());
+  await settle();
+  predictor.onInput("okay");
+  // The first echo repaints the whole input row: "o", then blanks where the hint was.
+  const echo = SYNC(`\x1b[2J\x1b[3;1H\x1b[48;2;30;30;30m  o           \x1b[0m\x1b[?25h\x1b[3;4H`);
+  const written = predictor.decorate(echo);
+  const close = written.lastIndexOf("\x1b[?2026l");
+  const inside = written.slice(0, close);
+  for (const [col, ch] of [[4, "k"], [5, "a"], [6, "y"]]) {
+    assert.ok(inside.includes(`\x1b[3;${col}H`) && inside.includes(ch), `${ch} is redrawn inside the echo frame`);
+  }
+  out.length = 0;
+  predictor.onServerData(echo);
+  await settle();
+  assert.equal(predictor.confirmed, 1);
+  assert.equal(predictor.rollbacks, 0);
+});
+
+test("a prediction drawn in a frame takes the echo's look when the guess was off", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("", 3));
+  await settle();
+  predictor.onInput("h");
+  // The echo draws the character bold: decorate redraws it plain on top.
+  const echo = SYNC("\x1b[2J\x1b[3;1H> \x1b[1mh\x1b[0m\x1b[?25h\x1b[3;4H");
+  predictor.decorate(echo);
+  out.length = 0;
+  predictor.onServerData(echo);
+  await settle();
+  assert.equal(predictor.confirmed, 1);
+  assert.match(out.join(""), /\x1b\[3;3H\x1b\[0;1mh/, "the confirmed cell is repainted as the cloud drew it");
+});
+
+test("a chunk that closes the echo frame and opens the next still redraws the predictions", async () => {
+  const { predictor } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("", 3));
+  await settle();
+  predictor.onInput("hi");
+  const chunk = `${SYNC("\x1b[3;1H> h\x1b[?25h\x1b[3;4H")}\x1b[?2026h\x1b[6;1H*`;
+  const written = predictor.decorate(chunk);
+  const close = written.indexOf("\x1b[?2026l");
+  assert.ok(written.slice(0, close).includes("\x1b[3;4H\x1b[0mi"), "the key in flight is redrawn before the first frame closes");
+  assert.ok(written.endsWith("\x1b[?2026h\x1b[6;1H*"), "the frame left open is untouched");
 });

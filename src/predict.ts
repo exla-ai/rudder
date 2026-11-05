@@ -60,6 +60,8 @@ export class EchoPredictor {
   private readonly predict: boolean;
   private readonly now: () => number;
   private predictions: Prediction[] = [];
+  // Confirmed predictions whose look is checked against the echo (restyleConfirmed).
+  private restyle: Prediction[] = [];
   // The grey hint an empty input shows under its caret ("Ask anything…"),
   // hidden while the first characters typed over it wait for their echo.
   private placeholder: { row: number; start: number; end: number; sgr: string } | null = null;
@@ -75,8 +77,15 @@ export class EchoPredictor {
   // in ways the model has not seen yet: hold until the cloud catches up.
   private hold = false;
   private holdSince = 0;
+  // Printable keys typed during a hold. The cloud draws them after the key that
+  // set it; re-arming the hold on each of them kept prediction off for as long
+  // as someone typed faster than about five keys a second.
+  private heldKeys: string[] = [];
   private suspendedUntil = 0;
   private srtt: number | null = null;
+  // Smoothed keystroke-to-echo time from confirmed predictions. The ping round
+  // trip only covers the laptop-to-relay leg; the echo also crosses to the home.
+  private echoRtt: number | null = null;
   private timer: NodeJS.Timeout | null = null;
   rollbacks = 0;
   confirmed = 0;
@@ -151,22 +160,32 @@ export class EchoPredictor {
    * cloud frame ends by parking the cursor on the cloud's caret, which sits
    * behind characters still waiting for their echo; show() then moved it back
    * after them, so while an agent animated (opencode redraws ~40 times a
-   * second) the cursor flickered between the two cells. A frame that closes in
-   * this chunk now parks it after the last prediction, inside the frame. A
-   * frame that contradicts the prediction is rolled back, which puts the
-   * cursor where the cloud left it. Feed the ORIGINAL bytes to onServerData.
+   * second) the cursor flickered between the two cells. Each frame that closes
+   * in this chunk now redraws the predictions and parks the cursor after the
+   * last one, inside the frame: an echo frame that repaints the whole input (the
+   * first key clears the hint) no longer wipes the keys still in flight for a
+   * moment. A frame that contradicts the prediction is rolled back, which puts
+   * the cursor where the cloud left it. Feed the ORIGINAL bytes to onServerData.
    */
   decorate(data: Buffer | string): Buffer | string {
-    const last = this.predictions[this.predictions.length - 1];
-    if (!last || !last.shown) {
+    // Keys typed mid-frame are drawn at the next boundary; park after the last drawn one.
+    let last: Prediction | undefined;
+    for (const prediction of this.predictions) {
+      if (prediction.shown) {
+        last = prediction;
+      }
+    }
+    if (!last) {
       return data;
     }
     const text = typeof data === "string" ? data : data.toString("utf8");
-    const end = text.lastIndexOf(SYNC_END);
-    if (end === -1 || text.lastIndexOf(SYNC_BEGIN) > end) {
+    if (!text.includes(SYNC_END)) {
       return data;
     }
-    return `${text.slice(0, end)}\x1b[${last.row + 1};${last.col + 2}H${text.slice(end)}`;
+    // Every frame that closes here gets it: while an agent streams, one chunk
+    // often closes the echo frame and opens the next one.
+    const overlay = `${this.paintPredictions(false)}\x1b[0m\x1b[${last.row + 1};${last.col + 2}H`;
+    return text.split(SYNC_END).join(`${overlay}${SYNC_END}`);
   }
 
   /** Bytes the cloud drew. Call after writing them to the real terminal. */
@@ -207,18 +226,20 @@ export class EchoPredictor {
     }
     for (const byte of bytes) {
       if (byte >= 0x20 && byte <= 0x7e) {
-        if (!this.predictChar(String.fromCharCode(byte))) {
+        const ch = String.fromCharCode(byte);
+        if (this.hold && !this.releaseHold()) {
+          this.heldKeys.push(ch);
+        } else if (!this.predictChar(ch)) {
           this.setHold();
-          return;
         }
       } else if (byte === 0x7f || byte === 0x08) {
-        if (!this.predictBackspace()) {
+        if (this.hold && this.heldKeys.length > 0) {
+          this.heldKeys.pop();
+        } else if (this.hold || !this.predictBackspace()) {
           this.setHold();
-          return;
         }
       } else {
         this.setHold();
-        return;
       }
     }
   }
@@ -230,18 +251,52 @@ export class EchoPredictor {
   private setHold(): void {
     this.hold = true;
     this.holdSince = this.now();
+    this.heldKeys = [];
+  }
+
+  /**
+   * Lift the hold once the cloud has had time to draw the key that set it and
+   * the model has caught up. Keys typed since are drawn first: the ones the
+   * model does not show yet are still on their way, so they are predicted at
+   * the caret before the key being typed now.
+   */
+  private releaseHold(): boolean {
+    const settle = Math.max((this.srtt ?? 0) * 1.5 + 50, (this.echoRtt ?? 0) * 1.25 + 20);
+    if (!this.atBoundary() || this.now() - this.holdSince < settle) {
+      return false;
+    }
+    this.hold = false;
+    const held = this.heldKeys;
+    this.heldKeys = [];
+    for (const ch of held.slice(this.echoedCount(held))) {
+      if (!this.predictChar(ch)) {
+        this.setHold();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** How many of `held` (in order) the model already shows just before the caret. */
+  private echoedCount(held: string[]): number {
+    if (this.predictions.length > 0 || !this.caret) {
+      // Pending predictions come before every held key, so none has echoed.
+      return 0;
+    }
+    const { row, col } = this.caret;
+    for (let count = Math.min(held.length, col); count > 0; count -= 1) {
+      let match = true;
+      for (let index = 0; index < count && match; index += 1) {
+        match = (this.cellChar(row, col - count + index) || " ") === held[index];
+      }
+      if (match) {
+        return count;
+      }
+    }
+    return 0;
   }
 
   private predictChar(ch: string): boolean {
-    if (this.hold) {
-      // The key that set the hold has had time to come back only after about
-      // one round trip, and the model must have caught up with it.
-      const settle = (this.srtt ?? 0) * 1.5 + 50;
-      if (this.pendingWrites !== 0 || this.now() - this.holdSince < settle) {
-        return false;
-      }
-      this.hold = false;
-    }
     if (!this.sawFrame || !this.cursorVisible || this.now() < this.suspendedUntil) {
       return false;
     }
@@ -305,6 +360,11 @@ export class EchoPredictor {
     if (this.predictions.length === 0) {
       return;
     }
+    this.out(`${this.paintPredictions(true)}\x1b[0m`);
+  }
+
+  /** Bytes that clear the hint and draw the predictions (`all`: also unshown ones, marking them shown). */
+  private paintPredictions(all: boolean): string {
     let text = "";
     const hint = this.placeholder;
     if (hint) {
@@ -312,16 +372,20 @@ export class EchoPredictor {
       text += `\x1b[${hint.row + 1};${hint.start + 1}H${hint.sgr}${" ".repeat(hint.end - hint.start)}`;
     }
     for (const prediction of this.predictions) {
+      if (!all && !prediction.shown) {
+        continue;
+      }
       text += `\x1b[${prediction.row + 1};${prediction.col + 1}H${prediction.sgr}${prediction.ch}`;
       prediction.shown = true;
     }
-    this.out(`${text}\x1b[0m`);
+    return text;
   }
 
   private reconcile(): void {
     if (this.pendingWrites !== 0) {
       return;
     }
+    this.restyleConfirmed();
     if (this.predictions.length === 0) {
       return;
     }
@@ -332,10 +396,16 @@ export class EchoPredictor {
         break;
       }
       this.predictions.shift();
+      if (first.shown) {
+        this.restyle.push(first);
+      }
       this.confirmed += 1;
+      const echo = this.now() - first.at;
+      this.echoRtt = this.echoRtt === null ? echo : this.echoRtt * 0.8 + echo * 0.2;
       // The cloud echoed over the hint, so it has cleared it itself.
       this.placeholder = null;
     }
+    this.restyleConfirmed();
     if (this.predictions.length === 0) {
       this.placeholder = null;
       return;
@@ -358,6 +428,32 @@ export class EchoPredictor {
       // The cloud's frame may have repainted these cells: draw them again.
       this.show();
     }
+  }
+
+  /**
+   * A prediction drawn inside a cloud frame (decorate) lands on top of the
+   * cloud's echo of it. The cloud only redraws cells that change, so where the
+   * guessed look differs from the echo's, repaint the cell from the model.
+   */
+  private restyleConfirmed(): void {
+    if (this.restyle.length === 0 || !this.atBoundary()) {
+      return;
+    }
+    let text = "";
+    for (const prediction of this.restyle) {
+      const paint = this.cellPaint(prediction.row, prediction.col);
+      if (paint !== `${prediction.sgr}${prediction.ch}`) {
+        text += `\x1b[${prediction.row + 1};${prediction.col + 1}H${paint}`;
+      }
+    }
+    this.restyle = [];
+    if (!text) {
+      return;
+    }
+    const last = this.predictions[this.predictions.length - 1];
+    const buffer = this.model.buffer.active;
+    const cursor = last?.shown ? `\x1b[${last.row + 1};${last.col + 2}H` : `\x1b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`;
+    this.out(`${text}\x1b[0m${cursor}`);
   }
 
   /** Repaint every predicted cell from the model and put the cursor back. */
@@ -510,7 +606,9 @@ function isHintLook(cell: IBufferCell): boolean {
     const r = (c >> 16) & 255;
     const g = (c >> 8) & 255;
     const b = c & 255;
-    return Math.max(r, g, b) - Math.min(r, g, b) <= 16 && Math.max(r, g, b) >= 64 && Math.max(r, g, b) <= 170;
+    // Neutral or slate grey: Rudder's own hint (#8C93A3 dark, #6B7280 light)
+    // leans blue by about 23.
+    return Math.max(r, g, b) - Math.min(r, g, b) <= 24 && Math.max(r, g, b) >= 64 && Math.max(r, g, b) <= 170;
   }
   if (cell.isFgPalette()) {
     const n = cell.getFgColor();

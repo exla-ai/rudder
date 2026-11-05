@@ -13,6 +13,7 @@ import {
   assertPrerequisites,
   fakeBackends,
   launchRudder,
+  mergeFinishedWorker,
   removeScratch,
   scratchRepo,
 } from "./helpers.mjs";
@@ -26,10 +27,12 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
   const session = await launchRudder(t, { repo, claudeBin: completer });
   const story = journey(session, "finished work collapses into a drawer");
 
-  await story.step("a finished worker integrates automatically into the done drawer", async () => {
+  await story.step("a worker merged with m collapses into the done drawer", async () => {
     await session.waitForText("Type a task", { timeout: 20_000 });
     await session.type("write the done marker");
     await session.press("Enter");
+    // A dashboard worker waits in review when its turn ends; m merges it.
+    await mergeFinishedWorker(session);
     // One collapsed row with a count and a closed chevron — not a per-run row.
     await session.waitForText("done 1", { timeout: 20_000 });
     const screen = await session.screen();

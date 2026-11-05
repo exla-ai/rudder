@@ -15,6 +15,7 @@ import {
   assertPrerequisites,
   fakeBackends,
   launchRudder,
+  mergeFinishedWorker,
   removeScratch,
   scratchRepo,
 } from "./helpers.mjs";
@@ -33,25 +34,27 @@ async function waitFile(file, present, timeout = 20_000) {
   }
 }
 
-test("two workers auto-merge, undo takes the work back out", { timeout: 180_000 }, async (t) => {
+test("two workers merge, undo takes the work back out", { timeout: 180_000 }, async (t) => {
   const repo = await scratchRepo("rudder-tui-lifecycle-");
   t.after(() => removeScratch(repo));
   const { completerUnique } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completerUnique });
-  const story = journey(session, "auto-merge then undo: work lands, work leaves");
+  const story = journey(session, "merge then undo: work lands, work leaves");
 
   await story.step("dashboard boots", async () => {
     await session.waitForText("Type a task", { timeout: 20_000 });
   });
 
-  await story.step("two workers finish and integrate automatically", async () => {
+  await story.step("two workers finish and merge with m", async () => {
     await session.type("first unique task");
     await session.press("Enter");
+    await mergeFinishedWorker(session);
     await session.waitForText("done 1", { timeout: 30_000 });
     await session.press("Ctrl+W");
     await session.press("3");
     await session.type("second unique task");
     await session.press("Enter");
+    await mergeFinishedWorker(session);
     await session.waitForText("done 2", { timeout: 60_000 });
     // Each fake worker writes DONE-<workspace-slug>.txt; exactly two land.
     const deadline = Date.now() + 20_000;
@@ -59,7 +62,7 @@ test("two workers auto-merge, undo takes the work back out", { timeout: 180_000 
       const files = (await fsp.readdir(repo)).filter((name) => name.startsWith("DONE-"));
       if (files.length === 2) break;
       if (Date.now() >= deadline) {
-        throw new Error(`expected 2 DONE-* files after auto-merge, found: ${files.join(", ")}`);
+        throw new Error(`expected 2 DONE-* files after both merges, found: ${files.join(", ")}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
@@ -98,7 +101,20 @@ test("a single merge then undo round-trips the checkout", { timeout: 120_000 }, 
 
   await session.type("write the done marker");
   await session.press("Enter");
-  // Finished workers integrate automatically.
+  // A dashboard worker's turn ending does not merge it: the user may still be
+  // talking to it. The row holds in review and the checkout stays untouched.
+  await session.waitFor((s) => s.includes("press m to read the") && !s.includes("done 1"), {
+    timeout: 60_000,
+    stablePolls: 5,
+    label: "the finished worker holding in review",
+  });
+  await fsp.access(path.join(repo, "DONE.txt")).then(
+    () => {
+      throw new Error("a dashboard worker merged on its own when its turn ended");
+    },
+    () => {},
+  );
+  await mergeFinishedWorker(session);
   // The merged row is inside the `done` drawer now; the header carries its count.
   await session.waitForText("done 1", { timeout: 30_000 });
   await waitFile(path.join(repo, "DONE.txt"), true);
@@ -125,7 +141,7 @@ test("a merged row survives a restart with its identity intact", { timeout: 120_
 
   await session.type("write the done marker");
   await session.press("Enter");
-  // Finished workers integrate automatically.
+  await mergeFinishedWorker(session);
   // The merged row is inside the `done` drawer now; the header carries its count.
   await session.waitForText("done 1", { timeout: 30_000 });
   await waitFile(path.join(repo, "DONE.txt"), true);

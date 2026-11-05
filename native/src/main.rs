@@ -18633,6 +18633,13 @@ Address the objection directly. If you disagree, say why inside \
                 match self.merge_agent_at(index) {
                     Ok(()) => {
                         self.delete_pending = None;
+                        // The gate opened this row's diff to be read; once merged, the
+                        // review is over. Left open, the panel kept covering the worker
+                        // and showed whatever was selected next (the undo pane `u`
+                        // opens, say) instead of its output.
+                        if self.diff_panel.open {
+                            self.toggle_diff_panel();
+                        }
                         self.notice = Some("merged · dependent nodes unblocked".to_string());
                     }
                     Err(error) => {

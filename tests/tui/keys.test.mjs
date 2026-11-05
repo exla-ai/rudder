@@ -15,6 +15,7 @@ import {
   assertPrerequisites,
   fakeBackends,
   launchRudder,
+  mergeFinishedWorker,
   removeScratch,
   scratchRepo,
   waitUntil,
@@ -188,7 +189,8 @@ test("cc clears merged rows from the list (two-press)", { timeout: 120_000 }, as
 
   await session.type("mergeable task");
   await session.press("Enter");
-  // Finished workers integrate automatically.
+  // A dashboard worker waits in review when its turn ends; m merges it.
+  await mergeFinishedWorker(session);
   // Merged rows live in the collapsed `done` drawer; its count is the proof.
   await session.waitForText("done 1", { timeout: 30_000 });
 

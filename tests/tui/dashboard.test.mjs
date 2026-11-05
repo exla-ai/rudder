@@ -13,38 +13,13 @@ import {
   fakeBackends,
   launchRudder,
   plantTranscript,
+  pressMergeUntilReview,
   removeScratch,
   scratchRepo,
   waitUntil,
 } from "./helpers.mjs";
 
 assertPrerequisites();
-
-/**
- * Press the merge key until the review gate opens. The first press can land
- * while the publish-route probe is still running; the notice then reads
- * "checking whether this repo publishes · press m again" — literal
- * instructions, which slow CI runners actually exercise (a fast local machine
- * always resolved the probe before the notice rendered).
- */
-async function pressMergeUntilReview(session, { timeout = 30_000 } = {}) {
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    await session.press("Ctrl+W");
-    await session.press("m");
-    const screen = await session.waitFor(
-      (s) => s.includes("read the diff") || s.includes("press m again"),
-      { timeout: 10_000, label: "the review gate or the publish probe" },
-    );
-    if (screen.includes("read the diff")) {
-      return;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(`review gate never opened:\n${screen}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-}
 
 /** Poll for a file the way waits poll the screen: no fixed sleeps. */
 async function waitForFile(file, timeout) {

@@ -10,6 +10,7 @@ import {
   assertPrerequisites,
   fakeBackends,
   launchRudder,
+  mergeFinishedWorker,
   removeScratch,
   scratchRepo,
 } from "./helpers.mjs";
@@ -49,7 +50,8 @@ test("running and merged statuses render in DIFFERENT colors", { timeout: 120_00
 
   await session.type("a task that merges");
   await session.press("Enter");
-  // Finished workers integrate automatically.
+  // A dashboard worker waits in review when its turn ends; m merges it.
+  await mergeFinishedWorker(session);
   // A merged row collapses into the `done` drawer, so its status label lives in the
   // drawer's list. Open the drawer and sample the color there: collapsing the
   // section must not cost the state-at-a-glance color coding.

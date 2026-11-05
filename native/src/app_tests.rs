@@ -9106,6 +9106,37 @@ fn unread_work_cannot_be_merged_without_being_shown_first() {
 }
 
 #[test]
+fn a_confirmed_merge_closes_the_diff_the_gate_opened() {
+    // Dashboard workers now merge only through the gate, so every merge leaves the
+    // diff panel open. On a 120-column screen it covers the worker pane, and `u`
+    // right after the merge opened the undo pane behind it: focused, but unseen.
+    let mut app = App::new();
+    let mut run = test_agent_run("run-1", "change something");
+    // Already merged is the no-op success path; no jj repo needed to reach it.
+    run.status = AgentStatus::Merged;
+    app.agents.push(run);
+    app.diff_panel.open = true;
+    app.focus = FocusPane::Diff;
+    app.merge_confirm = Some(MergeConfirmation {
+        intent: MergeIntent::Selected {
+            id: "run-1".to_string(),
+            task: "change something".to_string(),
+        },
+        detail: None,
+    });
+
+    app.confirm_pending_merge();
+
+    assert!(!app.diff_panel.open, "the reviewed diff closes with the merge");
+    assert_eq!(app.focus, FocusPane::Worker, "focus returns to the worker");
+    assert!(
+        app.notice.as_deref().unwrap_or_default().starts_with("merged"),
+        "{:?}",
+        app.notice
+    );
+}
+
+#[test]
 fn rows_with_nothing_to_merge_never_claim_to_be_reviewed() {
     // A main-checkout or one-off agent edits the user's tree directly and can never
     // be merged, so labelling it "reviewed" would advertise a gate it never passes.

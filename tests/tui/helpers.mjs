@@ -356,3 +356,45 @@ export async function waitUntil(condition, { timeout = 10_000, interval = 100, l
     await new Promise((resolve) => setTimeout(resolve, interval));
   }
 }
+
+/**
+ * Press the merge key until the review gate opens. The first press can land
+ * while the publish-route probe is still running; the notice then reads
+ * "checking whether this repo publishes · press m again" — literal
+ * instructions, which slow CI runners actually exercise (a fast local machine
+ * always resolved the probe before the notice rendered). The gate's own notice
+ * is matched in full: the row label "done · press m to read the diff" is on
+ * screen before any key is pressed.
+ */
+export async function pressMergeUntilReview(session, { timeout = 30_000 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    await session.press("Ctrl+W");
+    await session.press("m");
+    const screen = await session.waitFor(
+      (s) => s.includes("press m again to merge") || s.includes("checking whether this repo publishes"),
+      { timeout: 10_000, label: "the review gate or the publish probe" },
+    );
+    if (screen.includes("press m again to merge")) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`review gate never opened:\n${screen}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
+/**
+ * Merge the selected finished worker the way a user does. A dashboard worker
+ * whose turn ends stays in review (the user may still be talking to it): the
+ * first m opens its diff, the second opens the confirm, and y merges.
+ */
+export async function mergeFinishedWorker(session) {
+  await session.waitForText("press m to read the", { timeout: 60_000 });
+  await pressMergeUntilReview(session);
+  await session.press("Ctrl+W");
+  await session.press("m");
+  await session.waitForText("[y] merge", { timeout: 20_000 });
+  await session.press("y");
+}

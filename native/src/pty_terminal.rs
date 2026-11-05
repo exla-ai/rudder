@@ -1108,7 +1108,11 @@ impl TerminalPane {
         // After trust: trust keys on the agent program, and the fork's
         // workspace path is the agent's cwd inside its namespace too.
         let command = enter_fork(
-            with_tool_cache_env(command, std::env::var("RUDDER_AGENT_TOOL_ENV").ok().as_deref()),
+            with_tool_cache_env(
+                command,
+                std::env::var("RUDDER_AGENT_TOOL_ENV").ok().as_deref(),
+                options.cwd.as_deref(),
+            ),
             options.cwd.as_deref(),
         );
         let mut builder = command_builder(command, &options.term)?;
@@ -2163,15 +2167,39 @@ impl TerminalPane {
 
 /// Adds the shared tool cache env (src/tool-cache.ts `toolCacheEnv("agent")`,
 /// passed down by the TS launcher as `RUDDER_AGENT_TOOL_ENV` JSON) to an agent
-/// command. Keys the command already sets win.
-pub(crate) fn with_tool_cache_env(command: Option<TerminalCommand>, json: Option<&str>) -> Option<TerminalCommand> {
+/// command. Keys the command already sets win. With sccache in the env, the
+/// agent's workspace becomes `SCCACHE_BASEDIRS` (sccache keys hold absolute
+/// target paths; stripping the workspace lets one agent's crates hit in
+/// another's), in the PTY env and, for Codex, next to the other shell policy
+/// values so Codex's own commands get it too.
+pub(crate) fn with_tool_cache_env(
+    command: Option<TerminalCommand>,
+    json: Option<&str>,
+    workspace: Option<&std::path::Path>,
+) -> Option<TerminalCommand> {
     let mut command = command?;
     let Some(map) = json.and_then(|json| serde_json::from_str::<std::collections::BTreeMap<String, String>>(json).ok()) else {
         return Some(command);
     };
+    let sccache = map.contains_key("SCCACHE_DIR");
     for (key, value) in map {
         if !command.env.iter().any(|(existing, _)| *existing == key) {
             command.env.push((key, value));
+        }
+    }
+    let Some(workspace) = workspace.filter(|_| sccache).and_then(|path| path.to_str()) else {
+        return Some(command);
+    };
+    if !command.env.iter().any(|(existing, _)| existing == "SCCACHE_BASEDIRS") {
+        command.env.push(("SCCACHE_BASEDIRS".into(), workspace.to_string()));
+    }
+    const POLICY_DIR: &str = "shell_environment_policy.set.SCCACHE_DIR=";
+    const POLICY_BASEDIRS: &str = "shell_environment_policy.set.SCCACHE_BASEDIRS=";
+    if !command.args.iter().any(|arg| arg.starts_with(POLICY_BASEDIRS)) {
+        if let Some(at) = command.args.iter().position(|arg| arg.starts_with(POLICY_DIR)) {
+            let value = serde_json::to_string(workspace).unwrap_or_default();
+            command.args.insert(at + 1, "-c".into());
+            command.args.insert(at + 2, format!("{POLICY_BASEDIRS}{value}"));
         }
     }
     Some(command)
@@ -2261,11 +2289,38 @@ mod tests {
         let mut command = TerminalCommand::with_args("claude", ["--x"]);
         command.env.push(("CARGO_HOME".into(), "/mine".into()));
         let json = r#"{"SCCACHE_DIR":"/c/sccache","CARGO_HOME":"/c/cargo"}"#;
-        let out = with_tool_cache_env(Some(command), Some(json)).unwrap();
+        let workspace = std::path::Path::new("/w/agent-1");
+        let out = with_tool_cache_env(Some(command), Some(json), Some(workspace)).unwrap();
         assert!(out.env.contains(&("SCCACHE_DIR".into(), "/c/sccache".into())));
+        assert!(out.env.contains(&("SCCACHE_BASEDIRS".into(), "/w/agent-1".into())));
         assert!(out.env.contains(&("CARGO_HOME".into(), "/mine".into())));
         assert!(!out.env.contains(&("CARGO_HOME".into(), "/c/cargo".into())));
-        assert!(with_tool_cache_env(None, Some(json)).is_none());
+        assert_eq!(out.args, vec!["--x".to_string()], "no Codex policy to extend");
+        assert!(with_tool_cache_env(None, Some(json), Some(workspace)).is_none());
+        let no_sccache = with_tool_cache_env(Some(TerminalCommand::with_args("claude", ["--x"])), Some(r#"{"CARGO_HOME":"/c/cargo"}"#), Some(workspace)).unwrap();
+        assert!(!no_sccache.env.iter().any(|(key, _)| key == "SCCACHE_BASEDIRS"));
+    }
+
+    #[test]
+    fn a_codex_agent_gets_its_workspace_as_sccache_basedirs_in_the_shell_policy() {
+        let command = TerminalCommand::with_args(
+            "codex",
+            ["-c", r#"shell_environment_policy.set.SCCACHE_DIR="/c/sccache""#, "--cd", "/w/agent-2", "task"],
+        );
+        let json = r#"{"SCCACHE_DIR":"/c/sccache"}"#;
+        let out = with_tool_cache_env(Some(command), Some(json), Some(std::path::Path::new("/w/agent-2"))).unwrap();
+        assert_eq!(
+            out.args,
+            vec![
+                "-c".to_string(),
+                r#"shell_environment_policy.set.SCCACHE_DIR="/c/sccache""#.to_string(),
+                "-c".to_string(),
+                r#"shell_environment_policy.set.SCCACHE_BASEDIRS="/w/agent-2""#.to_string(),
+                "--cd".to_string(),
+                "/w/agent-2".to_string(),
+                "task".to_string(),
+            ]
+        );
     }
 
     #[test]

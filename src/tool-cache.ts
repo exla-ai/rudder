@@ -21,6 +21,12 @@ export type ToolCacheRole = "agent" | "builder";
 export interface ToolCacheOptions {
   root?: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * The directory the agent (or warm builder) builds in. sccache keys hold
+   * absolute paths (the target dir, --out-dir), so it is stripped from them
+   * (SCCACHE_BASEDIRS) and crates compiled in one workspace hit in another.
+   */
+  workspace?: string;
   /** Override tool detection (tests). */
   hasTool?: (name: string) => boolean;
 }
@@ -86,6 +92,7 @@ export function toolCacheEnv(role: ToolCacheRole, options: ToolCacheOptions = {}
     out.RUSTC_WRAPPER = "sccache";
     out.SCCACHE_CACHE_SIZE = `${Math.floor(TOOL_CACHE_LIMITS.sccache / 1024 ** 3)}G`;
     out.SCCACHE_LOCAL_RW_MODE = "READ_WRITE";
+    if (options.workspace) out.SCCACHE_BASEDIRS = options.workspace;
   }
   if (has("pnpm")) use("npm_config_store_dir", "pnpm");
   if (has("npm")) use("npm_config_cache", "npm");

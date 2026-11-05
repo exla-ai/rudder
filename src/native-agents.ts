@@ -81,7 +81,7 @@ function codexArgs(run: RunRecord, prompt: string, contract: string, codexComman
     "goals",
     ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
     ...codexEffortConfigArgs(run.effort),
-    ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
+    ...codexShellEnvConfigArgs(toolCacheEnv("agent", { workspace: run.workspace.path })),
     "--cd",
     run.workspace.path,
     [contract, "", prompt].join("\n"),

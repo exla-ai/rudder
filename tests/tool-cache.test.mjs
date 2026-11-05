@@ -35,6 +35,14 @@ test("a Cloud machine's build cache is the tool cache; a laptop uses ~/.cache", 
   assert.equal(toolCacheRoot({ HOME: "/Users/u" }), path.join("/Users/u", ".cache", "rudder", "tool-cache"));
 });
 
+test("sccache strips the build directory from its keys so workspaces share crates", (t) => {
+  const root = tempDir(t);
+  const env = { HOME: path.join(root, "home") };
+  assert.equal(toolCacheEnv("agent", { root, env, hasTool: () => true, workspace: "/w/agent-1" }).SCCACHE_BASEDIRS, "/w/agent-1");
+  assert.equal(toolCacheEnv("builder", { root, env, hasTool: () => true }).SCCACHE_BASEDIRS, undefined);
+  assert.equal(toolCacheEnv("agent", { root, env, hasTool: (name) => name !== "sccache", workspace: "/w/a" }).SCCACHE_BASEDIRS, undefined);
+});
+
 test("missing tools are skipped", (t) => {
   const root = tempDir(t);
   const out = toolCacheEnv("agent", { root, env: { HOME: root }, hasTool: (name) => name === "npm" });

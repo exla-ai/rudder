@@ -128,7 +128,7 @@ function claudeBackend(): BackendAdapter {
         nativeSessionId: sessionId,
       };
       await saveBackendRun(request.run);
-      const env = await backendEnv("anthropic");
+      const env = { ...(await backendEnv("anthropic")), ...toolCacheEnv("agent", { workspace: request.run.workspace.path }) };
       const effort = normalizeEffortForBackend("claude", request.run.effort);
       const args = compact([
         "-p",
@@ -191,7 +191,7 @@ function codexBackend(): BackendAdapter {
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
             ...codexEffortConfigArgs(request.run.effort),
-            ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
+            ...codexShellEnvConfigArgs(toolCacheEnv("agent", { workspace: request.run.workspace.path })),
             sessionId,
             `${request.contract}\n\n${prompt}`,
           ]
@@ -207,7 +207,7 @@ function codexBackend(): BackendAdapter {
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
             ...codexEffortConfigArgs(request.run.effort),
-            ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
+            ...codexShellEnvConfigArgs(toolCacheEnv("agent", { workspace: request.run.workspace.path })),
             `${request.contract}\n\n${prompt}`,
           ]);
       return await spawnAndStream({

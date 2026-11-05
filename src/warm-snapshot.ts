@@ -173,7 +173,7 @@ export async function buildWarmSnapshot(repoRoot: string, commit: string): Promi
     if (added.code !== 0) throw new Error(added.stderr.trim() || "jj workspace add failed");
     const previous = readySnapshots(repoRoot).find((snap) => snap.key !== key);
     if (previous) await seedFromPrevious(previous.dir, dir);
-    const env = { ...process.env, ...toolCacheEnv("builder") };
+    const env = { ...process.env, ...toolCacheEnv("builder", { workspace: dir }) };
     for (const command of warmCommands(dir)) {
       process.stderr.write(`[rudder] warm snapshot ${key}: ${command}\n`);
       const ran = spawnSync("sh", ["-c", command], { cwd: dir, env, stdio: ["ignore", "inherit", "inherit"] });

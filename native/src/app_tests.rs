@@ -7100,6 +7100,18 @@ fn task_pane_height_grows_for_long_task_input() {
 }
 
 #[test]
+fn a_notice_does_not_resize_the_worker_pane_while_typing_into_an_agent() {
+    let mut app = App::new();
+    app.focus = FocusPane::Worker;
+    let base_height = task_pane_height(&app, 40);
+    app.notice = Some("a long notice that wraps over several rows of the task bar ".repeat(3));
+    assert_eq!(task_pane_height(&app, 40), base_height);
+
+    app.focus = FocusPane::Task;
+    assert!(task_pane_height(&app, 40) > base_height);
+}
+
+#[test]
 fn click_in_agent_pane_does_not_change_focus() {
     let mut app = App::new();
     app.focus = FocusPane::Task;

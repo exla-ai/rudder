@@ -5113,7 +5113,15 @@ pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 pub(crate) fn task_pane_height(app: &App, width: u16) -> u16 {
     let default_hint = task_default_hint(app);
-    let hint = app.notice.as_deref().unwrap_or(&default_hint);
+    // Only the focused task bar grows for a long notice. Anywhere else a notice
+    // coming or going changed the worker pane's height, which resized the
+    // agent's PTY: Claude and Codex repaint their whole screen on every resize
+    // (the flicker), and over Cloud the resize cascades through the nested
+    // dashboard too. Unfocused, a long notice is clipped to the hint's rows.
+    let hint = match app.notice.as_deref() {
+        Some(notice) if app.focus == FocusPane::Task => notice,
+        _ => &default_hint,
+    };
     let inner_width = width.saturating_sub(2).max(1);
     let input_lines = task_input_lines(&app.task_input, app.task_cursor, inner_width)
         .len()

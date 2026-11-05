@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { AttachSession, containsCtrlC } from "./attach-session.js";
 import { InputReceipts } from "./input-receipts.js";
+import { LinkOpener } from "./link-open.js";
 import { PasteBridge, readLocalClipboard } from "./paste-bridge.js";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -3125,6 +3126,10 @@ async function runAttach(
     if (target.kind !== "workspace") {
       paste.disabled = true;
     }
+    // A link clicked in the dashboard opens here, not on the cloud machine
+    // (src/link-open.ts). Per connection: clicks sent on an old one never
+    // count for requests replayed into this one.
+    const links = new LinkOpener(openBrowser);
 
     let lastCtrlC = 0;
     // This terminal's light/dark colors, for the agents on the machine to
@@ -3194,6 +3199,7 @@ async function runAttach(
         }
         lastCtrlC = now;
       }
+      links.noteInput(buffer);
       paste.forward(buffer);
     };
 
@@ -3480,6 +3486,7 @@ async function runAttach(
         }
         stdout.write(predictor ? predictor.decorate(data) : data);
         predictor?.onServerData(data);
+        links.noteOutput(data);
         return;
       }
       const text = Buffer.isBuffer(data)

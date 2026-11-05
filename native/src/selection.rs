@@ -278,11 +278,44 @@ fn run_platform_clipboard_command(text: &str) -> Result<()> {
 /// that could launch an arbitrary app handler stays inert.
 const OPENABLE_URL_SCHEMES: &[&str] = &["https://", "http://", "file://", "mailto:"];
 
+/// On a Cloud machine nobody sits at this terminal and there is no browser:
+/// the laptop running `rudder cloud` against it opens links instead.
+#[cfg_attr(test, allow(dead_code))]
+fn on_cloud_machine() -> bool {
+    std::env::var_os("RUDDER_CLOUD_WORKER").is_some()
+        || std::env::var_os("RUDDER_CLOUD_RUNTIME").is_some()
+}
+
+/// `ESC ] 7770 ; open ; <url> BEL`, which asks the `rudder cloud` client
+/// showing this terminal to open `url` on its own computer (src/link-open.ts).
+/// Terminals ignore OSC numbers they do not know, so an older client that
+/// passes it through changes nothing on screen.
+pub(crate) fn open_url_request_sequence(url: &str) -> Result<String> {
+    if !["https://", "http://", "mailto:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+    {
+        bail!("{url} is on the cloud machine, not your computer");
+    }
+    if url.chars().any(|c| c.is_control()) {
+        bail!("not a link: {url:?}");
+    }
+    Ok(format!("\x1b]7770;open;{url}\x07"))
+}
+
 /// Open a url the user clicked in a worker pane with the OS default handler.
 #[cfg(not(test))]
 pub(crate) fn open_url_externally(url: &str) -> Result<()> {
     if !OPENABLE_URL_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
         bail!("not an http, file or mailto link: {url}");
+    }
+    if on_cloud_machine() {
+        let sequence = open_url_request_sequence(url)?;
+        let mut out = std::io::stdout().lock();
+        out.write_all(sequence.as_bytes())
+            .and_then(|()| out.flush())
+            .context("failed to ask your computer to open the link")?;
+        return Ok(());
     }
     let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(program)

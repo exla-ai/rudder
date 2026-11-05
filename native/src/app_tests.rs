@@ -26435,6 +26435,22 @@ fn clicking_a_link_in_the_worker_pane_opens_it_and_dragging_does_not() {
 }
 
 #[test]
+fn on_a_cloud_machine_a_clicked_link_is_handed_to_the_laptop() {
+    // A Cloud machine has no browser: the dashboard writes this OSC instead,
+    // and `rudder cloud` on the laptop opens the url (src/link-open.ts).
+    let request = crate::selection::open_url_request_sequence;
+    assert_eq!(
+        request("https://github.com/o/r/pull/9?a=1;b=2").unwrap(),
+        "\x1b]7770;open;https://github.com/o/r/pull/9?a=1;b=2\x07"
+    );
+    assert!(request("mailto:team@x.dev").is_ok());
+    // A file link names a file on the Cloud machine, not the laptop.
+    assert!(request("file:///workspace/code/src/main.rs").is_err());
+    // Control bytes would end the sequence early and smuggle in another.
+    assert!(request("https://x.dev/\x07\x1b]0;title").is_err());
+}
+
+#[test]
 fn shifted_arrows_reach_the_worker_with_their_modifier() {
     let key = |code, modifiers| terminal_bytes_for_key(KeyEvent::new(code, modifiers)).unwrap();
     // Codex: "shift+← to answer" a queued question.

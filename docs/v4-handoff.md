@@ -199,6 +199,12 @@ in `/workspace/scratch/<run>` and is cleaned hourly. Release worker images:
 `node scripts/worker-image.mjs <version>` after npm publish (about 2 minutes,
 no Rust compile; see cloud/README.md).
 
+Cloud link clicks (2026-11-05, not released): a click on a link in a
+`rudder cloud` pane ran `xdg-open` on the home, which has none. The dashboard
+now asks the attached laptop to open it (engineering reference "Clickable
+links"). Takes effect once the home runs the new dashboard (worker image) and
+the laptop runs a `rudder` release with `src/link-open.ts`.
+
 ## 8. Disk
 
 Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj

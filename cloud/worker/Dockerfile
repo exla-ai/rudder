@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 ARG WORKER_NODE_IMAGE=node:22-bookworm-slim
-FROM rust:1-bookworm AS native-builder
+# checkout: compile rudder-native/rudder-jj and copy ./dist from this checkout.
+# release: take dist and the linux-x64 pair CI built from the published npm
+# package @exla/rudder@RUDDER_VERSION (scripts/worker-image.mjs); no Rust stage.
+ARG RUDDER_SOURCE=checkout
+FROM rust:1-bookworm AS native-checkout
 WORKDIR /src
 COPY native ./native
 COPY engine ./engine
@@ -24,6 +28,25 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
        --bin rudder-native --bin rudder-jj \
   && cp target/release/rudder-native /rudder-native \
   && cp target/release/rudder-jj /rudder-jj
+
+FROM ${WORKER_NODE_IMAGE} AS release-package
+ARG RUDDER_VERSION
+RUN test -n "$RUDDER_VERSION" && mkdir /pkg && cd /tmp \
+  && npm pack "@exla/rudder@${RUDDER_VERSION}" --silent \
+  && tar xzf ./*.tgz -C /pkg --strip-components=1 && rm ./*.tgz \
+  && test -x /pkg/dist/native/linux-x64/rudder-native && test -x /pkg/dist/native/linux-x64/rudder-jj
+
+FROM scratch AS native-release
+COPY --from=release-package /pkg/dist/native/linux-x64/rudder-native /rudder-native
+COPY --from=release-package /pkg/dist/native/linux-x64/rudder-jj /rudder-jj
+
+FROM scratch AS dist-checkout
+COPY dist /dist
+FROM scratch AS dist-release
+COPY --from=release-package /pkg/dist /dist
+
+FROM native-${RUDDER_SOURCE} AS native-builder
+FROM dist-${RUDDER_SOURCE} AS dist-source
 
 FROM debian:bookworm-slim AS git-builder
 # Git 2.41 introduced fetch --porcelain, required by pinned jj0.40. Build the
@@ -128,6 +151,23 @@ COPY --from=git-builder /git-runtime/usr/local/ /usr/local/
 RUN test "$(/usr/local/bin/git --version)" = "git version 2.56.0" \
   && git --version
 
+# Claude refuses --permission-mode bypassPermissions as root, so we run the
+# supervisor (and everything it spawns) as a non-root user. The account and its
+# agent CLIs depend only on this tool layer, so a Rudder release reuses them
+# from cache; workers still run bounded Claude/Codex updates at boot.
+RUN groupadd --gid 1500 rudder \
+  && useradd --create-home --shell /bin/bash --uid 1500 --gid 1500 rudder
+WORKDIR /home/rudder
+USER rudder
+RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
+    PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH} \
+  && curl -fsSL https://claude.ai/install.sh | bash \
+  && claude --version \
+  && npm install -g @openai/codex@latest acpx@latest hunkdiff@latest pnpm@latest \
+  && npm cache clean --force \
+  && codex --version
+USER root
+
 # Backend archives depend on this tool layer, independently of Rudder's native
 # build and package. A code change must not download the same backends again.
 FROM worker-tools AS worker-common
@@ -137,7 +177,7 @@ WORKDIR /opt/rudder
 COPY --chmod=0644 package.json package-lock.json ./
 COPY scripts ./scripts
 RUN RUDDER_SKIP_POSTINSTALL=1 npm ci --omit=dev
-COPY dist ./dist
+COPY --from=dist-source /dist ./dist
 COPY assets ./assets
 # Local npm builds can contain platform-keyed binaries that the resolver would
 # prefer over our fresh container build. Install exactly the builder's pair.
@@ -181,11 +221,7 @@ COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 COPY cloud/worker/root-bootstrap.sh /usr/local/bin/rudder-worker-root-bootstrap
 RUN chmod 0755 /usr/local/bin/rudder-worker /usr/local/bin/rudder-worker-root-bootstrap
 
-# Claude refuses --permission-mode bypassPermissions as root, so we run the
-# supervisor (and everything it spawns) as a non-root user.
-RUN groupadd --gid 1500 rudder \
-  && useradd --create-home --shell /bin/bash --uid 1500 --gid 1500 rudder \
-  && mkdir -p /workspace \
+RUN mkdir -p /workspace \
   && chown -R rudder:rudder /workspace /opt/rudder-worker
 
 # Native-only source changes must not reinstall the unchanged worker packages
@@ -212,11 +248,6 @@ FROM worker-common AS legacy
 USER rudder
 ENV NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH}
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-  && claude --version \
-  && npm install -g @openai/codex@latest acpx@latest hunkdiff@latest pnpm@latest \
-  && npm cache clean --force \
-  && codex --version
 WORKDIR /workspace
 
 # Boot root touches only the validated device, then setpriv enters UID/GID1500

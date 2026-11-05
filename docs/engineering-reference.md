@@ -823,6 +823,13 @@ agents (`migration.json`), spawns `rudder` (workspace) or `rudder codex --worksp
 reports a final heartbeat on exit. On restart it checks `.rudder-staged.json` and
 re-fetches a fresh signed URL from the snapshot-url endpoint.
 
+Release images: `node scripts/worker-image.mjs <version>` after npm publish. With
+`RUDDER_SOURCE=release` the builder fetches `@exla/rudder@RUDDER_VERSION` and takes its
+`dist` and linux-x64 `rudder-native`/`rudder-jj`, so the image matches the release and
+skips the Rust stage. The default `RUDDER_SOURCE=checkout` compiles from the checkout
+(its native stage needs `package.json`: the header version is embedded). The worker
+account and agent CLIs sit in `worker-tools`, cached across releases.
+
 ### 9.8.1 The home machine (2.16.0) and the phone app
 The default shape is now ONE long-lived machine per account holding every repo,
 not a machine per repo. Decided with the user 2026-10-15: GitHub is the source of

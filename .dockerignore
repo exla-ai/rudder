@@ -31,3 +31,13 @@ npm-debug.log
 **/npm-debug.log*
 ios/build
 ios/fastlane/.asc.env
+
+# Not read by any image built from the repo root (worker, observability).
+# The worker image replaces dist/native with linux builds.
+.tui-report
+mac
+site
+ios
+docs
+tests
+dist/native

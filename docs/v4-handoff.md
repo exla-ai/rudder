@@ -62,8 +62,24 @@ On a 5,000-file Node repo a fork takes about 0.14s against 1.25s for a full
 checkout, with `node_modules` already there. Another volume or a failed clone
 falls back to a full checkout; there is no byte copy. Codex agents launched
 from TS now get the tool cache through `shell_environment_policy.set`, since a
-user policy like `inherit = "core"` hid it from Codex's shell. Native Codex
-launches (native/src/launch.rs) still need the same `-c` arguments.
+user policy like `inherit = "core"` hid it from Codex's shell; native Codex
+launches (native/src/launch.rs) pass the same `-c` arguments. A Mac warm build
+only starts with 10 GB free; a project opts out with `[warm] commands = []`.
+
+4.2.1 dashboard and `rudder cloud` (2026-11-05):
+- Enter on a finished agent's worker pane resumes or reopens it, like Enter on
+  its row; ⌥h full screen animates (about 200ms, 30 fps, PTY resized once).
+- Predictive echo no longer turns itself off at normal typing speed (keys
+  typed during a hold were re-arming it) and recognizes Rudder's own task
+  hint. Emulated at production delays, per-character lag at 40-160ms gaps went
+  from about 193ms to 2ms (`node scripts/cloud-perf.mjs`).
+- Typing in a read-only `rudder cloud` terminal takes control instead of
+  dropping the keys (a slept laptop's dead socket kept control for up to 30s).
+- Measured but not changed: the control plane machine runs in iad although
+  fly.toml says sjc, so every keystroke crosses the US twice (about 180ms of
+  the 190ms echo). Moving it west is the largest remaining win; its S3 buckets
+  are in us-east-1. Attach also replays up to 256KB that the repaint it asks
+  for makes redundant.
 
 Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
 then a colored status line with elapsed time and +N -N; the selected card is a

@@ -1166,6 +1166,8 @@ function agentSummary(record, options = {}) {
     summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
+    // A /swarm experiment: the control plane never tracks it in Linear.
+    ...(record.swarmExperiment === true ? { swarmExperiment: true } : {}),
     remoteUrl,
     asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
   };

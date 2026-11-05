@@ -20,7 +20,7 @@ const openaiCalls = (ctx) => ctx.upstream.calls.filter((c) => c.url === "https:/
 const anthropicCalls = (ctx) => ctx.upstream.calls.filter((c) => c.url.startsWith("https://api.anthropic.com/"));
 const gqlCalls = (ctx, needle) => ctx.upstream.calls.filter((c) => c.url === "https://api.linear.app/graphql" && JSON.parse(c.body).query.includes(needle));
 
-test("generate: gpt-6-luna on the Responses API with a strict schema, then rudder-labeled issues in the Linear project", async () => {
+test("generate: gpt-6-luna on the Responses API with a strict schema, then unlabeled issues in the Linear project", async () => {
   const ctx = await setup();
   try {
     await connectLinear(ctx, "alice");
@@ -33,7 +33,7 @@ test("generate: gpt-6-luna on the Responses API with a strict schema, then rudde
     assert.equal(res.data.model, "gpt-6-luna");
     assert.deepEqual(res.data.issues.map((i) => i.title), TASKS.map((t) => t.title));
     assert.match(res.data.issues[0].identifier, /^OPS-\d+$/, "a project's first team takes the issues");
-    assert.equal(res.data.autoStart, true);
+    assert.equal("autoStart" in res.data, false, "generated issues start nothing");
     assert.deepEqual(res.data.link, { workspaceId: "ws-rudder", projectName: "exla-ai-rudder", teamId: "team-ops", mine: true });
 
     const [call] = openaiCalls(ctx);
@@ -49,7 +49,8 @@ test("generate: gpt-6-luna on the Responses API with a strict schema, then rudde
     assert.match(sent.input, /<goal>\nMake uploads reliable\n<\/goal>/);
     assert.equal(anthropicCalls(ctx).length, 0);
 
-    // issueCreate: team + project + rudder label, description ends with the done-when line.
+    // issueCreate: team + project, no label (only a label the user adds starts
+    // an agent); the description ends with the done-when line.
     const created = ctx.upstream.linearState.created;
     assert.equal(created.length, 3);
     assert.deepEqual(created[0], {
@@ -57,18 +58,14 @@ test("generate: gpt-6-luna on the Responses API with a strict schema, then rudde
       projectId: "lp-rudder",
       title: TASKS[0].title,
       description: `${TASKS[0].description}\n\nDone when: ${TASKS[0].done_when}`,
-      labelIds: ["lab-new-1"],
     });
-    const [labelCreate] = gqlCalls(ctx, "issueLabelCreate");
-    assert.deepEqual(JSON.parse(labelCreate.body).variables.input, { name: "rudder", teamId: "team-ops", color: "#5E6AD2" });
+    assert.equal(gqlCalls(ctx, "issueLabel").length, 0, "no label is looked up or created");
     const [createCall] = gqlCalls(ctx, "issueCreate");
     assert.match(JSON.parse(createCall.body).query, /issueCreate\(input: \$input\) \{ success issue \{ id identifier title url \} \}/);
 
-    // A second run finds the label instead of creating another.
     const again = await ctx.call("POST", "/api/app/linear/generate", { account: "alice", body: { goal: GOAL, linearProjectId: "lp-rudder" } });
     assert.equal(again.status, 200, JSON.stringify(again.data));
-    assert.equal(gqlCalls(ctx, "issueLabelCreate").length, 1);
-    assert.deepEqual(ctx.upstream.linearState.created.at(-1).labelIds, ["lab-new-1"]);
+    assert.equal(ctx.upstream.linearState.created.at(-1).labelIds, undefined);
     assert.ok(ctx.events.some((e) => e.name === "linear_tasks_generated" && e.props.count === 3 && e.props.provider === "openai"));
     assertNoSecrets([...ctx.logs, JSON.stringify(res.data), JSON.stringify(ctx.events)]);
   } finally {
@@ -86,7 +83,6 @@ test("generate: RUDDER_TASKGEN_MODEL overrides the model; a team works without a
     assert.equal(ctx.upstream.linearState.created[0].teamId, "team-eng");
     assert.equal("projectId" in ctx.upstream.linearState.created[0], false);
     assert.equal(res.data.link, null);
-    assert.equal(res.data.autoStart, false, "nothing starts without a linked Rudder project");
   } finally {
     await ctx.close();
   }

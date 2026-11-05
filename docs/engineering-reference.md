@@ -1447,12 +1447,12 @@ on the user's own Claude Code / Codex subscription.
   it, names like Libra -> libra are suggested). `POST /api/app/linear/generate`
   {goal, linearProjectId | teamId, projectId?} asks OpenAI Responses
   (`RUDDER_TASKGEN_MODEL`, default `gpt-6-luna`, reasoning none, strict JSON
-  schema) for 3 to 10 tasks, falling back to Claude Haiku 5.5 via
+  schema) for 1 to 10 tasks, falling back to Claude Haiku 5.5 via
   `@anthropic-ai/sdk` when `OPENAI_API_KEY` is unset or the call fails
   (`ANTHROPIC_API_KEY`, plus `anthropic-workspace-id` from
   `ANTHROPIC_WORKSPACE_ID` for a user key); no key is a 503. Output is
-  validated strictly, then created as issues labeled `rudder` (label found or
-  created per team). The public webhook
+  validated strictly, then created as unlabeled issues: nothing starts until
+  the user adds the `rudder` label. The public webhook
   `https://rudder-cloud-control.fly.dev/api/integrations/linear/webhook`
   checks `Linear-Signature` (hex HMAC-SHA256 of the raw body with
   `RUDDER_LINEAR_WEBHOOK_SECRET`, unset is 503) and a 60s `webhookTimestamp`
@@ -1467,6 +1467,28 @@ on the user's own Claude Code / Codex subscription.
   merges. Rows are claimed before each Linear call; failures are logged only.
   Linear OAuth app setup: Webhooks on, Issues events, that URL; the signing
   secret is `RUDDER_LINEAR_WEBHOOK_SECRET`.
+- **Linear tracking** (`integrations.ts` `syncTrackedRuns`, `linear-track.ts`,
+  2026-11-05): on by default for every linked project, no setting. Each new
+  agent there is decided once, in the background, by one `structuredJson` call
+  (the taskgen model and fallback): attach to one of the Linear project's open
+  issues (read at most every 5 minutes), create an issue, or skip (questions,
+  chores, tests, small tweaks, renames, "summarize X", follow-ups). The prompt
+  gets the `userTask` text, the open issues and the project's recently tracked
+  agents; decisions in one project run one at a time, so the second agent sees
+  the issue the first created. Never decided: runs created before
+  `rudder_linear_meta.track_started_at` or before the project was linked, runs
+  from a Linear issue ("Linear ENG-7:" or in `rudder_linear_issue_runs`),
+  `/swarm` experiments (`swarmExperiment` from home.mjs), main, orchestrator,
+  review-all, one-off and gam-adversarial rows, and private agents under an
+  org install. `rudder_linear_tracked_runs` keeps every decision, skips
+  included (a `deciding` claim older than 10 minutes is retried; a model or
+  Linear failure becomes a skip, logged once). No model key: nothing is
+  tracked, logged once per process. Created issues go to the link's project
+  and team without labels, titled by outcome, describing the task with the
+  agent URL. Sync is quiet: started from backlog/unstarted at decision time,
+  one "Merged: <summary line>" comment plus the agent URL at merge, completed
+  only when this run created the issue. Nothing for needs-you or unmerged
+  finishes. Each step is claimed in the row before Linear is called.
 - **Plans on the phone/web**: the supervisor reads `.rudder/graph.json` and
   `.rudder/plan-queue.json` (`cloud/worker/plan.mjs`, re-read on mtime) into each
   project's `plan` in home state; `homeProjects` passes it through. Approve is a

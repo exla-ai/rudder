@@ -13,13 +13,20 @@
 // back to Linear issues). Everything it needs from the rest of the control
 // plane is injected.
 //
-// Linear task flow: a Linear project (or team) maps to a Rudder project on
-// someone's home. "Generate tasks" asks a model for small tasks and creates
-// them as issues labeled `rudder` in that Linear project. Linear's webhook
-// then reports each labeled issue, and the mapped project starts an agent on
-// it (once per issue, rudder_linear_issue_runs). As the agent's run starts,
-// needs you, and merges, the issue moves to started, gets a comment, and
-// moves to completed.
+// Linear flow: a Linear project (or team) maps to a Rudder project on
+// someone's home.
+// - Tracking (Rudder -> Linear): each new agent in a linked project is decided
+//   once (linear-track.ts: attach to an open issue, create one, or skip), and
+//   the decision is kept per run (rudder_linear_tracked_runs). A tracked issue
+//   moves to started, gets one "Merged:" comment when the agent merges, and
+//   moves to completed only if Rudder created it. Created issues never carry
+//   the `rudder` label, so they never start an agent.
+// - Starting (Linear -> Rudder): an issue the user labels `rudder` reaches the
+//   webhook, and the mapped project starts an agent on it (once per issue,
+//   rudder_linear_issue_runs). As that run starts, needs you, and merges, the
+//   issue moves to started, gets a comment, and moves to completed.
+// - "Generate tasks" asks a model for small tasks and adds them as unlabeled
+//   issues; labeling one starts an agent through the webhook.
 
 import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -43,7 +50,6 @@ import {
   commentOnLinearIssue,
   createLinearIssue,
   exchangeLinearCode,
-  findOrCreateRudderLabel,
   firstStateOfType,
   getLinearIssue,
   linearAuthorizeUrl,
@@ -54,6 +60,7 @@ import {
   linearWorkspace,
   listLinearIssues,
   listLinearProjects,
+  listOpenLinearIssues,
   listLinearTeams,
   refreshLinearToken,
   revokeLinearToken,
@@ -66,6 +73,7 @@ import {
   type LinearToken,
 } from "./linear.js";
 import { generateTasks, GOAL_LIMIT, linearIssueDescription, TaskgenError, taskgenConfigured } from "./linear-tasks.js";
+import { classifyWork, mergeLine, trackedIssueDescription, untrackedReason, userTask, type TrackDecision } from "./linear-track.js";
 
 export type Provider = "slack" | "linear";
 export type OrgRole = "admin" | "member";
@@ -86,6 +94,13 @@ export type IntegrationAgent = {
   visibility?: string | null;
   /** The task text the agent was started with (a Linear task starts "Linear ENG-7: ..."). */
   task?: string | null;
+  /** execute, plan, main, rudder-plan, ... (native AgentMode). */
+  mode?: string | null;
+  /** A /swarm experiment: one of many competing attempts, never tracked. */
+  swarmExperiment?: boolean | null;
+  /** The agent's done summary and its last message, for the merge comment. */
+  summary?: string | null;
+  lastMessage?: string | null;
   createdAt?: number | null;
   /** A task typed a moment ago that has no run yet; its id is not the run's. */
   pending?: boolean | null;
@@ -133,6 +148,13 @@ const LINEAR_CLAIM_STALE_MS = 10 * 60 * 1000;
 const LINEAR_SYNC_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 // A run started before the issue was handed over is some earlier attempt.
 const LINEAR_RUN_MATCH_SLACK_MS = 2 * 60 * 1000;
+// A linked project's open issues are read again after this long.
+const TRACK_ISSUE_CACHE_MS = 5 * 60 * 1000;
+// A tracking decision that never finished (a restart mid-call) is retried after this long.
+const TRACK_CLAIM_STALE_MS = 10 * 60 * 1000;
+// Agents tracked this recently are shown to the classifier, so a follow-up is recognized.
+const TRACK_RECENT_MS = 24 * 60 * 60 * 1000;
+const TRACK_TITLE_LIMIT = 200;
 
 class HttpError extends Error {
   status: number;
@@ -421,7 +443,41 @@ export function createIntegrations(deps: IntegrationsDeps) {
       updated_at integer not null
     );
     create index if not exists rudder_linear_issue_runs_account on rudder_linear_issue_runs (account_id, phase);
+    create index if not exists rudder_linear_issue_runs_run on rudder_linear_issue_runs (run_id);
+    create index if not exists rudder_linear_links_account on rudder_linear_links (account_id, workspace_id);
+    -- One row per agent run Rudder decided to track (or not) in Linear, skips
+    -- included, so a run is classified once. action: deciding (model call in
+    -- flight), attach, create, skip. created_issue: this run created the issue
+    -- (only then does its merge complete it). started_synced / merged_synced:
+    -- the progress steps already sent to Linear.
+    create table if not exists rudder_linear_tracked_runs (
+      workspace_id text not null,
+      run_id text not null,
+      account_id text not null,
+      owner_kind text not null,
+      owner_id text not null,
+      action text not null,
+      issue_id text,
+      identifier text,
+      created_issue integer not null default 0,
+      started_synced integer not null default 0,
+      merged_synced integer not null default 0,
+      agent_title text,
+      reason text,
+      created_at integer not null,
+      updated_at integer not null,
+      primary key (workspace_id, run_id)
+    );
+    create index if not exists rudder_linear_tracked_runs_account on rudder_linear_tracked_runs (account_id, action);
+    create table if not exists rudder_linear_meta (
+      key text primary key,
+      value text not null
+    );
   `);
+  // Tracking starts for runs created after this, so existing runs are never backfilled.
+  database.prepare("insert or ignore into rudder_linear_meta (key, value) values ('track_started_at', ?)").run(String(now()));
+  const trackStartedAt =
+    Number((database.prepare("select value from rudder_linear_meta where key = 'track_started_at'").get() as Row | undefined)?.value) || now();
 
   const findInstallRow = database.prepare(
     "select * from rudder_integrations where owner_kind = ? and owner_id = ? and provider = ?",
@@ -529,6 +585,37 @@ export function createIntegrations(deps: IntegrationsDeps) {
   );
   const claimNeedsComment = database.prepare(
     "update rudder_linear_issue_runs set needs_commented = 1, updated_at = ? where issue_id = ? and needs_commented = 0",
+  );
+  const issueRunForRun = database.prepare("select 1 from rudder_linear_issue_runs where run_id = ? limit 1");
+  // Org links first, then a Linear project before a team (the webhook's order).
+  const linksForAccount = database.prepare(
+    "select * from rudder_linear_links where account_id = ? order by owner_kind desc, linear_kind, updated_at desc",
+  );
+  const findTracked = database.prepare("select * from rudder_linear_tracked_runs where workspace_id = ? and run_id = ?");
+  const dropStaleTrackClaim = database.prepare(
+    "delete from rudder_linear_tracked_runs where workspace_id = ? and run_id = ? and action = 'deciding' and updated_at < ?",
+  );
+  const claimTracked = database.prepare(`
+    insert or ignore into rudder_linear_tracked_runs (workspace_id, run_id, account_id, owner_kind, owner_id, action,
+      agent_title, created_at, updated_at)
+    values (@workspaceId, @runId, @accountId, @ownerKind, @ownerId, 'deciding', @title, @now, @now)
+  `);
+  const decideTracked = database.prepare(`
+    update rudder_linear_tracked_runs set action = @action, issue_id = @issueId, identifier = @identifier,
+      created_issue = @created, reason = @reason, updated_at = @now
+    where workspace_id = @workspaceId and run_id = @runId and action = 'deciding'
+  `);
+  const activeTrackedRuns = database.prepare(
+    "select * from rudder_linear_tracked_runs where account_id = ? and action in ('attach', 'create') and merged_synced = 0 and created_at > ?",
+  );
+  const recentTracked = database.prepare(
+    "select agent_title, identifier from rudder_linear_tracked_runs where workspace_id = ? and action in ('attach', 'create') and created_at > ? order by created_at desc limit 8",
+  );
+  const claimTrackStarted = database.prepare(
+    "update rudder_linear_tracked_runs set started_synced = 1, updated_at = ? where workspace_id = ? and run_id = ? and started_synced = 0",
+  );
+  const claimTrackMerged = database.prepare(
+    "update rudder_linear_tracked_runs set merged_synced = 1, updated_at = ? where workspace_id = ? and run_id = ? and merged_synced = 0",
   );
 
   function aad(ownerKind: string, ownerId: string, provider: string): string {
@@ -975,9 +1062,10 @@ export function createIntegrations(deps: IntegrationsDeps) {
     return { link: linkView(findLinearLink.get(owner.kind, owner.id, kind, linearId) as Row, account) };
   }
 
-  // POST /api/app/linear/generate: a goal becomes 3 to 10 issues labeled
-  // `rudder` in a Linear project (or team). Naming a Rudder project links the
-  // two first, so the webhook for each new issue knows where to start it.
+  // POST /api/app/linear/generate: a goal becomes 1 to 10 issues in a Linear
+  // project (or team). They are not labeled `rudder`, so nothing starts until
+  // the user labels one. Naming a Rudder project links the two first, so a
+  // labeled issue knows where to start and agents there are tracked.
   async function generateLinearTasks(account: Account, body: Record<string, unknown>) {
     const goal = str(body.goal);
     if (!goal) {
@@ -1036,7 +1124,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
       }
       throw error;
     }
-    const { labelId } = await findOrCreateRudderLabel(deps.fetch, token, target.teamId);
     if (workspaceId && rudderProject && String(existing?.workspace_id ?? "") !== workspaceId) {
       upsertLinearLink.run({
         ownerKind: owner.kind,
@@ -1061,7 +1148,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
             ...(kind === "project" ? { projectId: linearId } : {}),
             title: task.title,
             description: linearIssueDescription(task),
-            labelIds: [labelId],
           }),
         );
       } catch (error) {
@@ -1075,12 +1161,15 @@ export function createIntegrations(deps: IntegrationsDeps) {
     }
     capture(account.accountId, "linear_tasks_generated", { count: issues.length, provider: generated.provider, scope: owner.kind });
     const link = findLinearLink.get(owner.kind, owner.id, kind, linearId) as Row | undefined;
+    if (link) {
+      // The next tracking decision in this project sees the new issues.
+      issueCache.delete(linkKey(link));
+    }
     return {
       issues,
       provider: generated.provider,
       model: generated.model,
       link: linkView(link, account),
-      autoStart: Boolean(linearConfig.webhookSecret && link),
       ...(failure ? { error: `Created ${issues.length} of ${generated.tasks.length} issues: ${failure}` } : {}),
     };
   }
@@ -1361,6 +1450,276 @@ export function createIntegrations(deps: IntegrationsDeps) {
         })());
       }
     }
+  }
+
+  // ---- Linear: agents started in Rudder tracked as Linear issues ----
+
+  type TrackRoute = { install: Install; link: Row };
+  type TrackView = { project: IntegrationProject; agent: IntegrationAgent };
+
+  // A linked Linear project's open issues, read at most every TRACK_ISSUE_CACHE_MS.
+  const issueCache = new Map<string, { at: number; issues: LinearIssue[] }>();
+  const trackInFlight = new Set<string>();
+  // The newest view of a run being decided: a merge that lands while the model
+  // answers is synced as soon as the decision is.
+  const trackLatest = new Map<string, TrackView>();
+  const trackQueues = new Map<string, Promise<void>>();
+  let trackNoModelLogged = false;
+
+  const runKey = (workspaceId: string, runId: string) => `${workspaceId}\0${runId}`;
+  const linkKey = (link: Row) => `${String(link.owner_kind)}:${String(link.owner_id)}:${String(link.linear_kind)}:${String(link.linear_id)}`;
+
+  // Tracking work runs one job at a time per Rudder project: each decision
+  // sees the issue the one before it created, and an issue never moves to
+  // started after it moved to completed.
+  function enqueueTrack(workspaceId: string, job: () => Promise<void>): void {
+    const previous = trackQueues.get(workspaceId) ?? Promise.resolve();
+    const next = previous.then(job).catch((error: unknown) => log(`integrations: linear tracking failed: ${errorText(error)}`));
+    trackQueues.set(workspaceId, next);
+    track(next.finally(() => {
+      if (trackQueues.get(workspaceId) === next) {
+        trackQueues.delete(workspaceId);
+      }
+    }));
+  }
+
+  function trackRoute(accountId: string, links: Row[]): TrackRoute | null {
+    for (const link of links) {
+      const install = getInstall({ kind: String(link.owner_kind) as Owner["kind"], id: String(link.owner_id) }, "linear");
+      if (install && canUseInstall(accountId, install)) {
+        return { install, link };
+      }
+    }
+    return null;
+  }
+
+  async function openIssuesFor(link: Row, token: string): Promise<LinearIssue[]> {
+    const key = linkKey(link);
+    const cached = issueCache.get(key);
+    if (cached && now() - cached.at < TRACK_ISSUE_CACHE_MS) {
+      return cached.issues;
+    }
+    const scope = link.linear_kind === "project" ? { projectId: String(link.linear_id) } : { teamId: String(link.linear_id) };
+    const issues = await listOpenLinearIssues(deps.fetch, token, scope);
+    issueCache.set(key, { at: now(), issues });
+    return issues;
+  }
+
+  function forgetCachedIssue(issueId: string): void {
+    for (const entry of issueCache.values()) {
+      entry.issues = entry.issues.filter((issue) => issue.id !== issueId);
+    }
+  }
+
+  // Called with every home state; only database reads and claims happen here.
+  // Model and Linear calls run in the background.
+  function syncTrackedRuns(accountId: string, projects: IntegrationProject[]): void {
+    const links = linksForAccount.all(accountId) as Row[];
+    if (links.length === 0) {
+      return;
+    }
+    const linksByWorkspace = new Map<string, Row[]>();
+    for (const link of links) {
+      const workspaceId = String(link.workspace_id);
+      linksByWorkspace.set(workspaceId, [...(linksByWorkspace.get(workspaceId) ?? []), link]);
+    }
+    const active = new Map(
+      (activeTrackedRuns.all(accountId, now() - LINEAR_SYNC_WINDOW_MS) as Row[]).map((row) => [runKey(String(row.workspace_id), String(row.run_id)), row]),
+    );
+    for (const project of projects ?? []) {
+      const projectLinks = linksByWorkspace.get(project.workspaceId);
+      if (!projectLinks) {
+        continue;
+      }
+      // Runs created before tracking started, or before this project was linked, are never backfilled.
+      const linkedAt = Math.min(...projectLinks.map((link) => Date.parse(String(link.updated_at)) || 0));
+      const since = Math.max(trackStartedAt, linkedAt);
+      let route: TrackRoute | null | undefined;
+      for (const agent of project.agents ?? []) {
+        if (!agent?.id || agent.pending === true) {
+          continue;
+        }
+        const key = runKey(project.workspaceId, agent.id);
+        const row = active.get(key);
+        if (row) {
+          syncTrackedRun(row, { project, agent });
+          continue;
+        }
+        if (trackInFlight.has(key)) {
+          trackLatest.set(key, { project, agent });
+          continue;
+        }
+        if (typeof agent.createdAt !== "number" || agent.createdAt < since || untrackedReason(agent) || !userTask(agent.task)) {
+          continue;
+        }
+        const decided = findTracked.get(project.workspaceId, agent.id) as Row | undefined;
+        if (decided) {
+          if (decided.action !== "deciding" || dropStaleTrackClaim.run(project.workspaceId, agent.id, now() - TRACK_CLAIM_STALE_MS).changes !== 1) {
+            continue;
+          }
+        }
+        if (issueRunForRun.get(agent.id)) {
+          continue; // started from a Linear issue: that issue already tracks it
+        }
+        if (!taskgenConfigured(deps.env)) {
+          if (!trackNoModelLogged) {
+            trackNoModelLogged = true;
+            log("integrations: linear tracking is off: no OPENAI_API_KEY or ANTHROPIC_API_KEY on this server");
+          }
+          continue;
+        }
+        if (route === undefined) {
+          route = trackRoute(accountId, projectLinks);
+        }
+        // A private agent's work stays out of an org's shared Linear workspace.
+        if (!route || (agent.visibility === "private" && route.install.ownerKind === "org")) {
+          continue;
+        }
+        const claimed = claimTracked.run({
+          workspaceId: project.workspaceId,
+          runId: agent.id,
+          accountId,
+          ownerKind: route.install.ownerKind,
+          ownerId: route.install.ownerId,
+          title: String(agent.title || userTask(agent.task)).slice(0, TRACK_TITLE_LIMIT),
+          now: now(),
+        });
+        if (claimed.changes !== 1) {
+          continue;
+        }
+        trackInFlight.add(key);
+        trackLatest.set(key, { project, agent });
+        const chosen = route;
+        enqueueTrack(project.workspaceId, () => decideTrackedRun(accountId, project, agent, chosen));
+      }
+    }
+  }
+
+  // One model call, then the decision is stored (a failure is a skip, so a run
+  // is never classified twice). An attach or create then syncs like any
+  // tracked run.
+  async function decideTrackedRun(accountId: string, project: IntegrationProject, agent: IntegrationAgent, route: TrackRoute): Promise<void> {
+    const key = runKey(project.workspaceId, agent.id);
+    const task = userTask(agent.task);
+    let decided: { action: TrackDecision["action"]; issueId: string | null; identifier: string | null; created: boolean; reason: string } = {
+      action: "skip",
+      issueId: null,
+      identifier: null,
+      created: false,
+      reason: "",
+    };
+    try {
+      const token = await linearAccessToken(route.install);
+      const issues = await openIssuesFor(route.link, token);
+      const tracked = (recentTracked.all(project.workspaceId, now() - TRACK_RECENT_MS) as Row[]).map((row) => ({
+        title: String(row.agent_title ?? ""),
+        identifier: String(row.identifier ?? ""),
+      }));
+      let decision: TrackDecision;
+      try {
+        decision = await classifyWork({
+          env: deps.env,
+          fetch: deps.fetch,
+          task,
+          project: { name: project.name, repo: project.repo ?? null },
+          linearName: route.link.linear_name ? String(route.link.linear_name) : null,
+          issues,
+          tracked,
+          log,
+        });
+      } catch (error) {
+        throw new Error(`the model could not decide: ${errorText(error)}`);
+      }
+      if (decision.action === "attach") {
+        decided = { action: "attach", issueId: decision.issue.id, identifier: decision.issue.identifier, created: false, reason: decision.reason };
+      } else if (decision.action === "create") {
+        const teamId = str(route.link.team_id);
+        if (!teamId) {
+          throw new Error("the linked Linear project has no team");
+        }
+        // No labels: only an issue the user labels `rudder` starts an agent.
+        const issue = await createLinearIssue(deps.fetch, token, {
+          teamId,
+          ...(route.link.linear_kind === "project" ? { projectId: String(route.link.linear_id) } : {}),
+          title: decision.title,
+          description: trackedIssueDescription(task, project.name, agentUrl(project.workspaceId, agent.id)),
+        });
+        decided = { action: "create", issueId: issue.id, identifier: issue.identifier, created: true, reason: decision.reason };
+        issueCache.get(linkKey(route.link))?.issues.unshift({
+          id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title || decision.title,
+          url: issue.url,
+          state: null,
+          stateType: "started",
+          priority: null,
+          team: null,
+        });
+      } else {
+        decided = { ...decided, reason: decision.reason };
+      }
+    } catch (error) {
+      decided = { action: "skip", issueId: null, identifier: null, created: false, reason: errorText(error).slice(0, 300) };
+      log(`integrations: linear tracking skipped ${agent.id}: ${errorText(error)}`);
+    } finally {
+      trackInFlight.delete(key);
+      decideTracked.run({
+        workspaceId: project.workspaceId,
+        runId: agent.id,
+        action: decided.action,
+        issueId: decided.issueId,
+        identifier: decided.identifier,
+        created: decided.created ? 1 : 0,
+        reason: decided.reason || null,
+        now: now(),
+      });
+    }
+    const latest = trackLatest.get(key) ?? { project, agent };
+    trackLatest.delete(key);
+    if (decided.action !== "skip") {
+      const row = findTracked.get(project.workspaceId, agent.id) as Row | undefined;
+      if (row) {
+        syncTrackedRun(row, latest);
+      }
+    }
+  }
+
+  // Started when tracking begins (no comment); one "Merged:" comment when the
+  // agent merges, and completed only for an issue this run created. Each step
+  // is claimed in the row before Linear is called; failures are only logged.
+  function syncTrackedRun(row: Row, view: TrackView): void {
+    const workspaceId = String(row.workspace_id);
+    const runId = String(row.run_id);
+    const issueId = str(row.issue_id);
+    if (!issueId) {
+      return;
+    }
+    const start = !Number(row.started_synced) && claimTrackStarted.run(now(), workspaceId, runId).changes === 1;
+    const merged = normalizedStatus(view.agent as StatusAgent) === "merged" && claimTrackMerged.run(now(), workspaceId, runId).changes === 1;
+    if (!start && !merged) {
+      return;
+    }
+    enqueueTrack(workspaceId, async () => {
+      const token = await linearTokenFor(row).catch((error: unknown) => {
+        log(`integrations: linear token failed: ${errorText(error)}`);
+        return null;
+      });
+      if (!token) {
+        return;
+      }
+      if (start) {
+        await step("move to started", () => moveLinearIssue(token, issueId, "started"));
+      }
+      if (merged) {
+        await step("merge comment", () =>
+          commentOnLinearIssue(deps.fetch, token, issueId, `Merged: ${mergeLine(view.agent)}\n\n${agentUrl(workspaceId, runId)}`),
+        );
+        if (Number(row.created_issue)) {
+          await step("move to completed", () => moveLinearIssue(token, issueId, "completed"));
+          forgetCachedIssue(issueId);
+        }
+      }
+    });
   }
 
   async function routeApp(req: IncomingMessage, res: ServerResponse, url: URL, account: Account): Promise<boolean> {
@@ -1695,6 +2054,11 @@ export function createIntegrations(deps: IntegrationsDeps) {
       syncLinearRuns(accountId, projects);
     } catch (error) {
       log(`integrations: linear sync failed: ${errorText(error)}`);
+    }
+    try {
+      syncTrackedRuns(accountId, projects);
+    } catch (error) {
+      log(`integrations: linear tracking failed: ${errorText(error)}`);
     }
     try {
       const first = !memory.has(accountId);

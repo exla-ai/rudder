@@ -466,7 +466,7 @@ function orgRoutes(req, res, p, url, body) {
     if (!String(body.goal || "").trim()) return send(400, { error: "goal is required" });
     const titles = ["Add retry to the upload client", "Show upload progress", "Log upload failures"];
     const issues = titles.map((title, i) => ({ id: `gen_${i}`, identifier: `EXL-${200 + i}`, title, url: `https://linear.app/exla/issue/EXL-${200 + i}` }));
-    return send(200, { issues, provider: "openai", model: "gpt-6-luna", link: null, autoStart: true });
+    return send(200, { issues, provider: "openai", model: "gpt-6-luna", link: null });
   }
   if ((r = p.match(/^\/api\/app\/link\/slack\/([^/]+)$/)) && m === "POST") {
     if (r[1] === "expired") return send(410, { error: "This link has expired. Run /rudder link in Slack again." });

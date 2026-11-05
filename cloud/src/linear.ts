@@ -226,6 +226,23 @@ export async function commentOnLinearIssue(fetchImpl: FetchImpl, token: string, 
   );
 }
 
+/** Open issues of one Linear project (or, without one, one team), most recently updated first. */
+export async function listOpenLinearIssues(
+  fetchImpl: FetchImpl,
+  token: string,
+  scope: { projectId?: string | null; teamId?: string | null },
+  limit = 100,
+): Promise<LinearIssue[]> {
+  const where = scope.projectId ? { project: { id: { eq: scope.projectId } } } : { team: { id: { eq: scope.teamId ?? "" } } };
+  const data = await linearGraphql<{ issues?: unknown }>(
+    fetchImpl,
+    token,
+    `query($filter: IssueFilter) { issues(first: ${Math.max(1, Math.min(250, Math.floor(limit)))}, filter: $filter, orderBy: updatedAt) { nodes { ${ISSUE_FIELDS} } } }`,
+    { filter: { ...where, state: { type: { nin: ["completed", "canceled"] } } } },
+  );
+  return nodes(data.issues).map(toIssue);
+}
+
 export type LinearTeam = { id: string; key: string; name: string };
 
 export async function listLinearTeams(fetchImpl: FetchImpl, token: string): Promise<LinearTeam[]> {
@@ -304,7 +321,7 @@ export type CreatedLinearIssue = { id: string; identifier: string; title: string
 export async function createLinearIssue(
   fetchImpl: FetchImpl,
   token: string,
-  input: { teamId: string; projectId?: string; title: string; description: string; labelIds: string[] },
+  input: { teamId: string; projectId?: string; title: string; description: string; labelIds?: string[] },
 ): Promise<CreatedLinearIssue> {
   const data = await linearGraphql<{ issueCreate?: { success?: boolean; issue?: Record<string, unknown> | null } }>(
     fetchImpl,

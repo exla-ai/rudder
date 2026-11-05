@@ -8,6 +8,7 @@
 // ANTHROPIC_WORKSPACE_ID is set). Whatever comes back is validated again here
 // before any issue is created. HTTP goes through an injected fetch so tests
 // never reach either API. Keys never reach a log or an error message.
+// structuredJson is the shared call; linear-track.ts classifies agents with it.
 
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -144,7 +145,45 @@ function scrub(message: string, secrets: string[]): string {
   return out.replace(/\b(sk-[A-Za-z0-9_*-]{6,})/g, "[key]").slice(0, 300);
 }
 
-async function viaOpenAI(params: { apiKey: string; model: string; fetch: typeof fetch; prompt: string }): Promise<string> {
+/** What a failed call says, so each caller's errors read in its own words. */
+export type CallWording = {
+  /** "could not <act>" */
+  act: string;
+  /** "declined to <declined>" */
+  declined: string;
+  /** "stopped before <unfinished> (reason)" */
+  unfinished: string;
+  /** "ran out of room <noRoom>" */
+  noRoom: string;
+  /** Appended to the two "too long" errors. */
+  hint: string;
+};
+
+/** One strict structured-output request, answered in `schema` by either provider. */
+export type StructuredRequest = {
+  system: string;
+  prompt: string;
+  schema: Record<string, unknown>;
+  /** The OpenAI json_schema name; also names the request in logs. */
+  name: string;
+  wording: CallWording;
+  /** Claude only: the answer's token budget and effort. */
+  maxTokens: number;
+  effort: "low" | "medium";
+  timeoutMs?: number;
+};
+
+const TASKGEN_WORDING: CallWording = {
+  act: "plan the tasks",
+  declined: "plan this goal. Try rewording it.",
+  unfinished: "finishing the tasks",
+  noRoom: "writing the tasks",
+  hint: " Try a smaller goal.",
+};
+
+async function viaOpenAI(params: { apiKey: string; model: string; fetch: typeof fetch; request: StructuredRequest }): Promise<string> {
+  const { request } = params;
+  const words = request.wording;
   let res: Response;
   try {
     res = await params.fetch(OPENAI_RESPONSES_URL, {
@@ -152,12 +191,12 @@ async function viaOpenAI(params: { apiKey: string; model: string; fetch: typeof 
       headers: { Authorization: `Bearer ${params.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
         model: params.model,
-        instructions: TASKGEN_SYSTEM,
-        input: params.prompt,
+        instructions: request.system,
+        input: request.prompt,
         reasoning: { effort: "none" },
-        text: { format: { type: "json_schema", name: "linear_tasks", strict: true, schema: TASKS_SCHEMA } },
+        text: { format: { type: "json_schema", name: request.name, strict: true, schema: request.schema } },
       }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(request.timeoutMs ?? TIMEOUT_MS),
     });
   } catch (error) {
     throw new TaskgenError(502, `OpenAI could not be reached: ${scrub(error instanceof Error ? error.message : String(error), [params.apiKey])}`);
@@ -172,23 +211,25 @@ async function viaOpenAI(params: { apiKey: string; model: string; fetch: typeof 
     if (res.status === 401 || res.status === 403) {
       throw new TaskgenError(502, "OpenAI rejected the API key");
     }
-    throw new TaskgenError(502, `OpenAI could not plan the tasks: ${scrub(data.error?.message ?? `HTTP ${res.status}`, [params.apiKey])}`);
+    throw new TaskgenError(502, `OpenAI could not ${words.act}: ${scrub(data.error?.message ?? `HTTP ${res.status}`, [params.apiKey])}`);
   }
   const parts = (data.output ?? []).filter((item) => item.type === "message").flatMap((item) => item.content ?? []);
   if (parts.some((part) => part.type === "refusal")) {
-    throw new TaskgenError(422, "OpenAI declined to plan this goal. Try rewording it.");
+    throw new TaskgenError(422, `OpenAI declined to ${words.declined}`);
   }
   if (data.status === "incomplete") {
-    throw new TaskgenError(502, `OpenAI stopped before finishing the tasks (${data.incomplete_details?.reason ?? "incomplete"}). Try a smaller goal.`);
+    throw new TaskgenError(502, `OpenAI stopped before ${words.unfinished} (${data.incomplete_details?.reason ?? "incomplete"}).${words.hint}`);
   }
   return parts.map((part) => (part.type === "output_text" ? part.text ?? "" : "")).join("");
 }
 
-async function viaAnthropic(params: { apiKey: string; workspaceId: string; fetch: typeof fetch; prompt: string }): Promise<string> {
+async function viaAnthropic(params: { apiKey: string; workspaceId: string; fetch: typeof fetch; request: StructuredRequest }): Promise<string> {
+  const { request } = params;
+  const words = request.wording;
   const client = new Anthropic({
     apiKey: params.apiKey,
     fetch: params.fetch,
-    timeout: TIMEOUT_MS,
+    timeout: request.timeoutMs ?? TIMEOUT_MS,
     maxRetries: 2,
     // A user key works only inside its workspace, named by this header.
     ...(params.workspaceId ? { defaultHeaders: { "anthropic-workspace-id": params.workspaceId } } : {}),
@@ -197,25 +238,65 @@ async function viaAnthropic(params: { apiKey: string; workspaceId: string; fetch
   try {
     message = await client.messages.create({
       model: TASKGEN_FALLBACK_MODEL,
-      max_tokens: 16000,
-      system: TASKGEN_SYSTEM,
-      messages: [{ role: "user", content: params.prompt }],
-      output_config: { effort: "medium", format: { type: "json_schema", schema: TASKS_SCHEMA } },
+      max_tokens: request.maxTokens,
+      system: request.system,
+      messages: [{ role: "user", content: request.prompt }],
+      output_config: { effort: request.effort, format: { type: "json_schema", schema: request.schema } },
     });
   } catch (error) {
     if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
       throw new TaskgenError(502, "Anthropic rejected the API key");
     }
     const message = error instanceof Error ? error.message : String(error);
-    throw new TaskgenError(502, `Claude could not plan the tasks: ${scrub(message, [params.apiKey])}`);
+    throw new TaskgenError(502, `Claude could not ${words.act}: ${scrub(message, [params.apiKey])}`);
   }
   if (message.stop_reason === "refusal") {
-    throw new TaskgenError(422, "Claude declined to plan this goal. Try rewording it.");
+    throw new TaskgenError(422, `Claude declined to ${words.declined}`);
   }
   if (message.stop_reason === "max_tokens") {
-    throw new TaskgenError(502, "Claude ran out of room writing the tasks. Try a smaller goal.");
+    throw new TaskgenError(502, `Claude ran out of room ${words.noRoom}.${words.hint}`);
   }
   return message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+}
+
+/**
+ * One validated strict-JSON answer: OpenAI first (RUDDER_TASKGEN_MODEL, no
+ * reasoning), then Claude Haiku when OPENAI_API_KEY is unset or the OpenAI
+ * answer fails, including failing `parse`. Errors are TaskgenErrors with keys
+ * scrubbed out.
+ */
+export async function structuredJson<T>(params: {
+  env: NodeJS.ProcessEnv;
+  fetch: typeof fetch;
+  request: StructuredRequest;
+  parse: (text: string) => T;
+  log?: (message: string) => void;
+}): Promise<{ value: T; provider: TaskgenProvider; model: string }> {
+  const openaiKey = (params.env.OPENAI_API_KEY ?? "").trim();
+  const anthropicKey = (params.env.ANTHROPIC_API_KEY ?? "").trim();
+  if (!openaiKey && !anthropicKey) {
+    throw new TaskgenError(503, "Task generation is not set up on this server (OPENAI_API_KEY is missing)");
+  }
+  if (openaiKey) {
+    const model = (params.env.RUDDER_TASKGEN_MODEL ?? "").trim() || TASKGEN_DEFAULT_MODEL;
+    try {
+      const text = await viaOpenAI({ apiKey: openaiKey, model, fetch: params.fetch, request: params.request });
+      return { value: params.parse(text), provider: "openai", model };
+    } catch (error) {
+      if (!anthropicKey) {
+        throw error;
+      }
+      // Messages here are already scrubbed of keys.
+      params.log?.(`${params.request.name}: OpenAI failed (${error instanceof Error ? error.message : String(error)}), using Claude`);
+    }
+  }
+  const text = await viaAnthropic({
+    apiKey: anthropicKey,
+    workspaceId: (params.env.ANTHROPIC_WORKSPACE_ID ?? "").trim(),
+    fetch: params.fetch,
+    request: params.request,
+  });
+  return { value: params.parse(text), provider: "anthropic", model: TASKGEN_FALLBACK_MODEL };
 }
 
 export async function generateTasks(params: {
@@ -225,30 +306,20 @@ export async function generateTasks(params: {
   project?: { name: string; repo?: string | null } | null;
   log?: (message: string) => void;
 }): Promise<{ tasks: GeneratedTask[]; provider: TaskgenProvider; model: string }> {
-  const openaiKey = (params.env.OPENAI_API_KEY ?? "").trim();
-  const anthropicKey = (params.env.ANTHROPIC_API_KEY ?? "").trim();
-  if (!openaiKey && !anthropicKey) {
-    throw new TaskgenError(503, "Task generation is not set up on this server (OPENAI_API_KEY is missing)");
-  }
-  const prompt = taskgenUserPrompt(params.goal, params.project);
-  if (openaiKey) {
-    const model = (params.env.RUDDER_TASKGEN_MODEL ?? "").trim() || TASKGEN_DEFAULT_MODEL;
-    try {
-      const text = await viaOpenAI({ apiKey: openaiKey, model, fetch: params.fetch, prompt });
-      return { tasks: parseGeneratedTasks(text), provider: "openai", model };
-    } catch (error) {
-      if (!anthropicKey) {
-        throw error;
-      }
-      // Messages here are already scrubbed of keys.
-      params.log?.(`linear taskgen: OpenAI failed (${error instanceof Error ? error.message : String(error)}), using Claude`);
-    }
-  }
-  const text = await viaAnthropic({
-    apiKey: anthropicKey,
-    workspaceId: (params.env.ANTHROPIC_WORKSPACE_ID ?? "").trim(),
+  const answer = await structuredJson({
+    env: params.env,
     fetch: params.fetch,
-    prompt,
+    log: params.log,
+    parse: parseGeneratedTasks,
+    request: {
+      system: TASKGEN_SYSTEM,
+      prompt: taskgenUserPrompt(params.goal, params.project),
+      schema: TASKS_SCHEMA as unknown as Record<string, unknown>,
+      name: "linear_tasks",
+      wording: TASKGEN_WORDING,
+      maxTokens: 16000,
+      effort: "medium",
+    },
   });
-  return { tasks: parseGeneratedTasks(text), provider: "anthropic", model: TASKGEN_FALLBACK_MODEL };
+  return { tasks: answer.value, provider: answer.provider, model: answer.model };
 }

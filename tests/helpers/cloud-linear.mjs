@@ -94,10 +94,22 @@ export function fakeUpstream() {
   };
   const handlers = {
     linearDown: false,
-    openai: () => openaiResponse({ tasks: TASKS }),
+    // Tracking decisions (the linear_track schema); tests replace this.
+    classify: () => openaiResponse({ action: "skip", issue_identifier: null, title: null, reason: "not tracked by default" }),
+    openai: (body, headers) => (body?.text?.format?.name === "linear_track" ? handlers.classify(body, headers) : openaiResponse({ tasks: TASKS })),
     anthropic: () => anthropicResponse({ tasks: TASKS }),
   };
+  const stateName = (type) => STATES.find((s) => s.type === type)?.name ?? "Todo";
   const gql = (query, variables) => {
+    if (query.includes("$filter: IssueFilter")) {
+      const filter = variables.filter ?? {};
+      const closed = filter.state?.type?.nin ?? [];
+      const nodes = [...linearState.issues.values()]
+        .filter((issue) => (filter.project ? issue.projectId === filter.project.id.eq : issue.teamId === filter.team?.id?.eq))
+        .filter((issue) => !closed.includes(issue.stateType))
+        .map((issue) => ({ id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, priority: 0, state: { name: stateName(issue.stateType), type: issue.stateType }, team: { key: issue.identifier.split("-")[0] } }));
+      return { issues: { nodes } };
+    }
     if (query.includes("organization")) return { organization: { id: LINEAR_ORG, name: "Acme Linear", urlKey: "acme" } };
     if (query.includes("issueLabelCreate")) {
       const label = { id: `lab-new-${linearState.labels.length + 1}`, name: variables.input.name, team: { id: variables.input.teamId } };
@@ -112,7 +124,7 @@ export function fakeUpstream() {
     if (query.includes("issueCreate")) {
       const n = linearState.nextIssue++;
       const team = linearState.teams.find((t) => t.id === variables.input.teamId);
-      const issue = { id: `iss-${n}`, identifier: `${team?.key ?? "X"}-${n}`, title: variables.input.title, url: `https://linear.app/acme/issue/${team?.key}-${n}`, description: variables.input.description, stateType: "unstarted" };
+      const issue = { id: `iss-${n}`, identifier: `${team?.key ?? "X"}-${n}`, title: variables.input.title, url: `https://linear.app/acme/issue/${team?.key}-${n}`, description: variables.input.description, stateType: "unstarted", projectId: variables.input.projectId ?? null, teamId: variables.input.teamId };
       linearState.created.push(variables.input);
       linearState.issues.set(issue.id, issue);
       return { issueCreate: { success: true, issue } };
@@ -176,7 +188,7 @@ export async function setup({ env = BASE_ENV, needsDebounceMs = 0 } = {}) {
   const events = [];
   const logs = [];
   const clock = { t: Date.now() };
-  const integrations = createIntegrations({
+  const deps = {
     database,
     env,
     fetch: upstream.fetchImpl,
@@ -189,7 +201,10 @@ export async function setup({ env = BASE_ENV, needsDebounceMs = 0 } = {}) {
     capture: (accountId, name, props) => events.push({ accountId, name, props }),
     log: (message) => logs.push(message),
     needsDebounceMs,
-  });
+  };
+  const integrations = createIntegrations(deps);
+  /** A second control plane on the same database, as after a restart. */
+  const restart = () => createIntegrations(deps);
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     const accountId = req.headers["x-account"];
@@ -213,7 +228,7 @@ export async function setup({ env = BASE_ENV, needsDebounceMs = 0 } = {}) {
     return { status: res.status, data, location: res.headers.get("location") };
   };
   const close = () => new Promise((resolve) => server.close(resolve));
-  return { integrations, database, upstream, delivered, events, logs, call, close, clock };
+  return { integrations, database, upstream, delivered, events, logs, call, close, clock, restart };
 }
 
 export async function connectLinear(ctx, account, org) {
@@ -260,6 +275,11 @@ export function issuePayload(ctx, data, extra = {}) {
 
 export function seedIssue(ctx, issue) {
   ctx.upstream.linearState.issues.set(issue.id, { url: `https://linear.app/acme/issue/${issue.identifier}`, description: "", stateType: "unstarted", ...issue });
+}
+
+/** A tracking decision as the fake OpenAI returns it (the linear_track schema). */
+export function trackDecision({ action, issue = null, title = null, reason = "test" }) {
+  return openaiResponse({ action, issue_identifier: issue, title, reason });
 }
 
 /** All text the server logged or returned, to check no key leaked. */

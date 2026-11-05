@@ -451,7 +451,7 @@ export function SettingsScreen() {
   const disconnectBtn = (provider, label, org) => {
     const b = h(`<button type="button" class="btn small">Disconnect</button>`);
     b.addEventListener("click", async () => {
-      const ok = await confirmDialog({ title: `Disconnect ${label}?`, body: provider === "slack" ? "Rudder stops posting agent updates to Slack, and /rudder stops working there." : "Starting agents from Linear issues stops working.", confirm: "Disconnect", danger: true });
+      const ok = await confirmDialog({ title: `Disconnect ${label}?`, body: provider === "slack" ? "Rudder stops posting agent updates to Slack, and /rudder stops working there." : "Rudder stops tracking agents in Linear, and starting agents from Linear issues stops working.", confirm: "Disconnect", danger: true });
       if (!ok) return;
       try {
         await api(`/api/app/integrations/${provider}${scopeQuery(org)}`, { method: "DELETE" });
@@ -511,7 +511,7 @@ export function SettingsScreen() {
 
   function linearCard(org, data) {
     const l = data?.linear || {};
-    const card = integrationCard({ svg: LINEAR_SVG, name: "Linear", blurb: "Turn goals into Linear issues, and start agents on them." });
+    const card = integrationCard({ svg: LINEAR_SVG, name: "Linear", blurb: "Track the work your agents do in Linear, and start agents from issues." });
     const act = card.querySelector(".in-act");
     const sub = card.querySelector(".in-sub");
     if (!l.configured) { setText(sub, "Not set up on this server yet"); card.classList.add("off"); return card; }
@@ -547,9 +547,10 @@ export function SettingsScreen() {
 
 /* Linear: projects linked to Rudder projects, and Generate tasks ----- */
 
-// Each Linear project (or team) links to one Rudder project: issues labeled
-// rudder there start an agent in that project, and "Generate tasks" turns a
-// goal into such issues. Suggested links (Libra -> libra) only need a Confirm.
+// Each Linear project (or team) links to one Rudder project: agents started in
+// that project show up in Linear as progress, issues labeled rudder there
+// start an agent, and "Generate tasks" adds unlabeled issues for a goal.
+// Suggested links (Libra -> libra) only need a Confirm.
 function linearPanel(org) {
   const wrap = h(`<div class="lmap"><div class="sk sk-card" style="height:120px"></div></div>`);
   let setup = null;
@@ -635,8 +636,8 @@ function linearPanel(org) {
     }
     for (const t of targets) sel.appendChild(new Option(t.label, t.value));
     setText(hint, setup.autoStart
-      ? "Creates up to 10 small issues labeled rudder. An agent starts on each one."
-      : "Creates up to 10 small issues labeled rudder. Agents start on them once Linear webhooks are set up on this server.");
+      ? "Adds up to 10 small issues to Linear. Adding the rudder label to one starts an agent on it."
+      : "Adds up to 10 small issues to Linear.");
     const sync = () => { btn.disabled = !goal.value.trim(); };
     goal.addEventListener("input", sync);
     sync();
@@ -667,8 +668,7 @@ function linearPanel(org) {
         });
         lastResult = res;
         track("linear_tasks_generated", { count: res?.issues?.length || 0 });
-        const target = targets.find((t) => t.value === sel.value);
-        toast(`Created ${res?.issues?.length || 0} issues${res?.autoStart && target?.project ? `; agents start in ${target.project}` : ""}`);
+        toast(`Added ${res?.issues?.length || 0} issues to Linear`);
         goal.value = "";
         showResult(res);
       } catch (err) { showError(err); }
@@ -703,7 +703,7 @@ function linearPanel(org) {
     } else {
       parts.push(note("No projects in this Linear workspace yet."));
     }
-    parts.push(h(`<div class="hint">Issues labeled <code>rudder</code> in a linked Linear project start an agent in its Rudder project.${setup.autoStart ? "" : " Linear webhooks are not set up on this server yet, so nothing starts on its own."}</div>`));
+    parts.push(h(`<div class="hint">Agents you start in a linked project show up in its Linear project: a new piece of work gets an issue, related work moves an open issue forward, and small tasks stay out. Issues labeled <code>rudder</code> start an agent in the Rudder project.${setup.autoStart ? "" : " Linear webhooks are not set up on this server yet, so labeled issues do not start agents."}</div>`));
     if (setup.teams.length) {
       const details = h(`<details class="lmap-teams"><summary>Link a whole team instead</summary><div class="lmap-list"></div></details>`);
       if (setup.teams.some((t) => t.link)) details.open = true;

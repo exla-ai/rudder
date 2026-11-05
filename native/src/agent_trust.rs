@@ -125,10 +125,22 @@ fn trust_claude_once(config: &Path, root: &str) -> std::io::Result<Outcome> {
     let Some(project) = project.as_object_mut() else {
         return Ok(Outcome::Unchanged);
     };
-    if project.get("hasTrustDialogAccepted") == Some(&serde_json::Value::Bool(true)) {
+    // Trust, plus the one-time "Allow external CLAUDE.md file imports?" prompt.
+    // Workers run in a workspace below the checkout, so the checkout's
+    // CLAUDE.md (and anything it imports, such as AGENTS.md) sits outside the
+    // worker's directory and Claude asks about it in every new worker.
+    const KEYS: [&str; 3] = [
+        "hasTrustDialogAccepted",
+        "hasClaudeMdExternalIncludesApproved",
+        "hasClaudeMdExternalIncludesWarningShown",
+    ];
+    let accepted = serde_json::Value::Bool(true);
+    if KEYS.iter().all(|key| project.get(*key) == Some(&accepted)) {
         return Ok(Outcome::Unchanged);
     }
-    project.insert("hasTrustDialogAccepted".into(), serde_json::Value::Bool(true));
+    for key in KEYS {
+        project.insert(key.into(), accepted.clone());
+    }
     let mut out = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
     out.push('\n');
     replace_file(config, &text, out.as_bytes())
@@ -367,6 +379,20 @@ mod tests {
         assert_eq!(value["numStartups"], 3);
         assert_eq!(value["projects"]["/work/repo"]["allowedTools"][0], "Bash");
         assert_eq!(value["projects"]["/work/repo"]["hasTrustDialogAccepted"], true);
+        // Workers sit below the checkout, so its CLAUDE.md imports count as
+        // external: approve them once instead of asking in every worker.
+        assert_eq!(value["projects"]["/work/repo"]["hasClaudeMdExternalIncludesApproved"], true);
+        assert_eq!(value["projects"]["/work/repo"]["hasClaudeMdExternalIncludesWarningShown"], true);
+        // A repo trusted before this change still gets the import approval.
+        fs::write(
+            &claude,
+            r#"{"projects":{"/work/repo":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        assert!(trust_claude(&claude, "/work/repo").unwrap());
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&claude).unwrap()).unwrap();
+        assert_eq!(value["projects"]["/work/repo"]["hasClaudeMdExternalIncludesApproved"], true);
         fs::write(&claude, "not json").unwrap();
         assert!(!trust_claude(&claude, "/work/repo").unwrap(), "unreadable file left alone");
         assert_eq!(fs::read_to_string(&claude).unwrap(), "not json");

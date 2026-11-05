@@ -33,7 +33,7 @@ use ratatui::{
 };
 use rudder_native::pty_terminal::{
     describe_exit_code, CellContents, PtyOutputWaker, StyledTerminalCell, TerminalCommand,
-    TerminalCursor, TerminalPane, TerminalPaneOptions, TerminalSize,
+    TerminalPane, TerminalPaneOptions, TerminalSize,
 };
 
 /// A single message the main event loop selects on. Either a terminal input

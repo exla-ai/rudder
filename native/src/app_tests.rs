@@ -2658,7 +2658,7 @@ fn remote_state_refresh_rearms_when_a_new_agent_is_merged() {
 
 #[cfg(not(windows))]
 #[test]
-fn hidden_codex_cursor_still_gets_render_cursor() {
+fn a_hidden_agent_cursor_is_not_shown() {
     let command = TerminalCommand::with_args(
         "/bin/sh",
         ["-lc", "printf '\\033[?25lhidden cursor\\r\\n'; sleep 1"],
@@ -2685,9 +2685,10 @@ fn hidden_codex_cursor_still_gets_render_cursor() {
         }
     }
 
+    // Agents hide the cursor while they redraw; showing it then put it
+    // wherever they were drawing, which looked like random highlighting.
     assert!(!pane.cursor().visible);
-    assert!(worker_render_cursor(Backend::Codex, &pane, true, 5, 20, 0).is_some());
-    assert!(worker_render_cursor(Backend::Codex, &pane, false, 5, 20, 0).is_none());
+    assert!(worker_hardware_cursor(&pane, Rect::new(0, 0, 20, 5)).is_none());
 }
 
 #[cfg(not(windows))]

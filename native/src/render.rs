@@ -4039,17 +4039,27 @@ pub(crate) fn set_worker_cursor(frame: &mut Frame<'_>, inner: Rect, app: &App) {
     let Some(terminal) = run.terminal.as_ref() else {
         return;
     };
+    if let Some(position) = worker_hardware_cursor(terminal, inner) {
+        frame.set_cursor_position(position);
+    }
+}
+
+/// Where the terminal's own cursor goes for a live agent pane, if anywhere.
+///
+/// The agent decides: Claude Code and Codex hide the cursor while they redraw
+/// and show it again at the input caret. Showing it while hidden put it
+/// wherever the agent happened to be drawing, so it jumped around and seemed
+/// to highlight random text. Rudder sets the cursor shape (a thin bar) once
+/// for the whole dashboard; panes never paint a cursor cell of their own.
+pub(crate) fn worker_hardware_cursor(terminal: &TerminalPane, inner: Rect) -> Option<(u16, u16)> {
     if terminal.scrollback() > 0 {
-        return;
+        return None;
     }
     let cursor = terminal.cursor();
-    if cursor.row >= inner.height || cursor.col >= inner.width {
-        return;
+    if !cursor.visible || cursor.row >= inner.height || cursor.col >= inner.width {
+        return None;
     }
-    if !cursor.visible && !force_worker_cursor(run.backend) {
-        return;
-    }
-    frame.set_cursor_position((inner.x + cursor.col, inner.y + cursor.row));
+    Some((inner.x + cursor.col, inner.y + cursor.row))
 }
 
 /// The selected run's `/gam` peer pair, ordered (generator, adversarial).
@@ -4545,7 +4555,6 @@ fn worker_lines_at(app: &mut App, index: usize, height: usize, width: usize) -> 
         .map(normalize_selection)
         .filter(|selection| !selection_is_empty(*selection));
     let (start_row, styled_rows) = terminal.styled_line_window_snapshot(height);
-    let cursor = worker_render_cursor(run.backend, terminal, focused, height, width, start_row);
     // Selection rows are history line numbers (see `worker_selection_point`).
     let history_top = terminal.view_top_line();
     let lines = styled_rows
@@ -4556,9 +4565,7 @@ fn worker_lines_at(app: &mut App, index: usize, height: usize, width: usize) -> 
             styled_terminal_line(
                 cells,
                 selection_for_row(selection, history_top + row),
-                cursor
-                    .filter(|cursor| cursor.row as usize == row)
-                    .map(|cursor| cursor.col as usize),
+                None,
             )
         })
         .collect::<Vec<_>>();
@@ -4778,17 +4785,9 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
             let Some(terminal) = run.terminal.as_ref() else {
                 continue;
             };
-            if terminal.scrollback() > 0 {
-                continue;
+            if let Some(position) = worker_hardware_cursor(terminal, half_inner) {
+                frame.set_cursor_position(position);
             }
-            let cursor = terminal.cursor();
-            if cursor.row >= half_inner.height || cursor.col >= half_inner.width {
-                continue;
-            }
-            if !cursor.visible && !force_worker_cursor(run.backend) {
-                continue;
-            }
-            frame.set_cursor_position((half_inner.x + cursor.col, half_inner.y + cursor.row));
         }
     }
 }
@@ -4864,7 +4863,6 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
         .map(normalize_selection)
         .filter(|selection| !selection_is_empty(*selection));
     let (start_row, styled_rows) = terminal.styled_line_window_snapshot(height);
-    let cursor = worker_render_cursor(backend, terminal, focused, height, width, start_row);
     let row_count = styled_rows.len();
     // Selection rows are history line numbers (see `worker_selection_point`).
     let history_top = terminal.view_top_line();
@@ -4876,9 +4874,7 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
             styled_terminal_line(
                 cells,
                 selection_for_row(selection, history_top + row),
-                cursor
-                    .filter(|cursor| cursor.row as usize == row)
-                    .map(|cursor| cursor.col as usize),
+                None,
             )
         })
         .collect::<Vec<_>>();
@@ -4897,33 +4893,6 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
         }),
     );
     lines
-}
-
-pub(crate) fn worker_render_cursor(
-    backend: Backend,
-    terminal: &TerminalPane,
-    focused: bool,
-    height: usize,
-    width: usize,
-    start_row: usize,
-) -> Option<TerminalCursor> {
-    if !focused || terminal.scrollback() > 0 {
-        return None;
-    }
-    let cursor = terminal.cursor();
-    if !cursor.visible && !force_worker_cursor(backend) {
-        return None;
-    }
-    let row = cursor.row as usize;
-    let col = cursor.col as usize;
-    if row < start_row || row >= start_row.saturating_add(height) || col >= width {
-        return None;
-    }
-    Some(cursor)
-}
-
-pub(crate) fn force_worker_cursor(backend: Backend) -> bool {
-    matches!(backend, Backend::Claude | Backend::Codex)
 }
 
 /// The default task-pane hint shown when there is no transient notice. Centralised

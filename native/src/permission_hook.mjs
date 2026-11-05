@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 const dir = process.argv[2];
@@ -109,6 +110,27 @@ function lastLines(file, bytes) {
   }
 }
 
+// The Claude process that ran this hook (through `sh -c`): our parent's parent.
+// When it is gone nobody can use our answer, so the hook must not keep polling.
+function agentPid() {
+  try {
+    const raw = execFileSync("ps", ["-o", "ppid=", "-p", String(process.ppid)], { encoding: "utf8" });
+    const pid = Number(raw.trim());
+    return Number.isInteger(pid) && pid > 1 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
 function main() {
   if (!dir) return;
   let input;
@@ -159,7 +181,13 @@ function main() {
     });
   }
 
+  const agent = agentPid();
+  let checkedSize = sizeAtStart;
   const tick = () => {
+    if ((agent && !alive(agent)) || process.ppid === 1) {
+      cleanup();
+      process.exit(0);
+    }
     let answer = null;
     try {
       answer = fs.readFileSync(answerFile, "utf8");
@@ -173,7 +201,16 @@ function main() {
       if (answer.trim()) process.stdout.write(answer);
       process.exit(0);
     }
-    if (transcript) {
+    // Re-read the transcript only when it grew: reading its 2 MB tail four
+    // times a second kept a core busy per waiting hook.
+    let size = checkedSize;
+    try {
+      size = transcript ? fs.statSync(transcript).size : checkedSize;
+    } catch {
+      size = checkedSize;
+    }
+    if (transcript && size !== checkedSize) {
+      checkedSize = size;
       if (!toolUseId) toolUseId = findToolUseId(tailLines(transcript), input.tool_name, input.tool_input);
       if (resolvedElsewhere(transcript, toolUseId, sizeAtStart)) {
         cleanup();

@@ -9,6 +9,8 @@ COPY vcs-bridge ./vcs-bridge
 COPY src/operations ./src/operations
 # The binary embeds assets (the notifier icon) with include_bytes!.
 COPY assets ./assets
+# The dashboard header shows the version, read from package.json with include_str!.
+COPY package.json ./
 COPY Cargo.toml Cargo.lock ./
 # Reuse external dependencies, but rebuild workspace crates from these exact
 # inputs. Restored source mtimes cannot validate an old cached local binary.

@@ -28816,6 +28816,41 @@ fn only_untouched_planned_nodes_are_integrated_automatically() {
     assert!(app.integration_prepared.contains("node"));
 }
 
+#[cfg(not(windows))]
+#[test]
+fn typing_into_a_planned_node_without_sending_keeps_it_from_auto_merging() {
+    // Keys typed into the PTY are not always a counted turn (the agent looked busy,
+    // or Enter was never pressed). Typing alone hands the node to the user.
+    let repo = unique_test_repo("typed-node-no-auto-merge");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 5"])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 40 },
+            cwd: Some(repo.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker PTY");
+    let mut node = test_agent_run_with_terminal(&app, pane);
+    node.id = "typed-node".to_string();
+    node.node_id = Some("n1".to_string());
+    node.status = AgentStatus::Done;
+    app.agents.push(node);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Worker;
+    assert!(app.is_auto_integration_candidate(&app.agents[0]));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+    let node = &app.agents[0];
+    assert_eq!(node.turns.iter().filter(|turn| turn.source == "user").count(), 1);
+    assert!(!app.is_auto_integration_candidate(node), "typed into: waits for m");
+    let _ = fs::remove_dir_all(&repo);
+}
+
 #[test]
 fn integration_conflict_or_failed_checks_need_the_user_and_merge_nothing() {
     let finished = |id: &str| {

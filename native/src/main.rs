@@ -2167,6 +2167,9 @@ struct App {
     integration_prep_rx: mpsc::Receiver<(String, IntegrationPrep)>,
     integration_prep_inflight: HashSet<String>,
     integration_prepared: HashSet<String>,
+    /// Runs the user typed or pasted into (their PTY, their resume draft or an
+    /// attached client). Automatic integration leaves them for an explicit `m`.
+    user_typed_runs: HashSet<String>,
     /// When finished agents older than FINISHED_RETENTION were last swept.
     finished_cleanup_at: Option<Instant>,
     /// (run id, turn count) whose main/one-off summary was already read.
@@ -3359,6 +3362,7 @@ impl App {
             integration_prep_rx,
             integration_prep_inflight: HashSet::new(),
             integration_prepared: HashSet::new(),
+            user_typed_runs: HashSet::new(),
             finished_cleanup_at: None,
             direct_summary_read: HashSet::new(),
             last_user_activity: Instant::now(),
@@ -5066,6 +5070,7 @@ impl App {
                 if self.selected_finished_worker_conversable() {
                     if let Some(prompt) = self.capture_selected_worker_key(key, true) {
                         let index = self.selected_agent;
+                        self.note_selected_user_input();
                         self.regoal_agent_at(index, &prompt);
                     }
                     self.dirty = true;
@@ -5082,6 +5087,7 @@ impl App {
         if let Some(run) = self.agents.get_mut(self.selected_agent) {
             run.last_worker_input_at = Some(Instant::now());
         }
+        self.note_selected_user_input();
         self.clear_selected_attention_flags();
         if let Some(prompt) = self.capture_selected_worker_key(key, capture_as_prompt) {
             self.record_selected_worker_prompt(prompt);
@@ -5303,6 +5309,12 @@ impl App {
         }
         self.dirty = true;
         false
+    }
+
+    fn note_selected_user_input(&mut self) {
+        if let Some(run) = self.agents.get(self.selected_agent) {
+            self.user_typed_runs.insert(run.id.clone());
+        }
     }
 
     fn clear_selected_attention_flags(&mut self) {
@@ -6429,6 +6441,7 @@ impl App {
                                 let joined = prompts.join("\n");
                                 if !joined.trim().is_empty() {
                                     let index = self.selected_agent;
+                                    self.note_selected_user_input();
                                     self.regoal_agent_at(index, joined.trim());
                                 }
                                 self.dirty = true;
@@ -6440,6 +6453,7 @@ impl App {
                         self.set_selected_error(error.to_string());
                         return;
                     }
+                    self.note_selected_user_input();
                     self.clear_selected_attention_flags();
                     let prompts = self.capture_selected_worker_paste(&text, capture_as_prompt);
                     self.record_selected_worker_prompts(prompts);
@@ -17025,11 +17039,14 @@ Address the objection directly. If you disagree, say why inside \
         // A worker's turn ending is not the work being finished: the user may still
         // be talking to it. Only planned nodes merge on their own (the plan waits on
         // them), and only while nobody has typed a follow-up into them. Workers
-        // started from the dashboard merge when the user presses `m`.
+        // started from the dashboard merge when the user presses `m`. Counted turns
+        // miss keys typed while the agent looked busy, resume-draft follow-ups
+        // (recorded as "regoal") and attached clients, so any typed input counts too.
         let user_turns = run.turns.iter().filter(|turn| turn.source == "user").count();
         run.status == AgentStatus::Done
             && run.node_id.is_some()
             && user_turns <= 1
+            && !self.user_typed_runs.contains(&run.id)
             && !run.swarm_experiment
             && !run.is_main()
             && !run.is_oneoff()
@@ -22316,6 +22333,7 @@ impl App {
                 let Some(index) = self.attached_run_index(pos) else {
                     return;
                 };
+                self.user_typed_runs.insert(self.agents[index].id.clone());
                 let run = &mut self.agents[index];
                 run.last_worker_input_at = Some(Instant::now());
                 let result = run

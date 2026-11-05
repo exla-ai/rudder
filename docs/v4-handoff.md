@@ -183,12 +183,17 @@ before step 9.
 the rudder-native cargo suite pass. Not yet released or deployed; see
 PLAN.md section 0 "After 4.0.0" for what remains.
 
-Linear tasks (2026-11-05, not deployed): Settings links Linear projects to
-Rudder projects, "Generate tasks" turns a goal into `rudder`-labeled issues
-(OpenAI `gpt-6-luna`, Claude Haiku 5.5 fallback), the Linear webhook starts
-an agent per labeled issue, and run start / needs-you / merge sync back to
-the issue (engineering reference §9.8.2). Needs `RUDDER_LINEAR_WEBHOOK_SECRET`
-on the control plane and the webhook turned on in the Linear OAuth app.
+Linear (2026-11-05, live on the control plane): the Exla workspace is
+connected (Libra, Offstage and Rudder projects linked). "Generate tasks" turns
+a goal into 1 to 10 `rudder`-labeled issues (OpenAI `gpt-6-luna`), and the
+webhook starts an agent per labeled issue. Rudder also tracks the user's own
+work: a plan gets one issue that its workers and branches share, closed after
+the last worker merges; a main row (one long session) is judged per user
+turn, at most one model call a minute, and never auto-closed. Each piece of
+work attaches to a related open issue, creates one, or is skipped when it is
+not real work ("summarize the README", "thanks"). Main-row turns and plan
+close counts need the 4.2.3 worker image on the home (engineering reference
+§9.8.2). Never create test issues in the real workspace.
 
 4.2 external home host (2026-11-05): `rudder cloud host <ssh-target>` runs
 the home on any Linux box with Docker (engineering reference §9.6). The

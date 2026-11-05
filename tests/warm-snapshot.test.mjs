@@ -128,4 +128,13 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   sh(repo, "jj", ["new", "@", "description(substring:agentwork)", "-m", "integrate"]);
   assert.equal(fs.readFileSync(path.join(repo, "new.txt"), "utf8"), "new\n");
   assert.equal(fs.readFileSync(path.join(snapshot.dir, "src", "f1.txt"), "utf8"), "1\n", "snapshot untouched");
+
+  // Branching an agent (dashboard `b`) forks too, starting at that agent's change.
+  const change = sh(repo, "jj", ["log", "--no-graph", "-r", "description(substring:agentwork)", "-T", "change_id"]).trim();
+  const branch = await createNodeWorkspace({ repoRoot: repo, nodeId: "branch0", task: "branch", atChangeId: change });
+  forks.push({ workspaceName: branch.workspaceName, workspacePath: branch.path });
+  assert.ok(fs.existsSync(`${branch.path}.fork/enter`), "branch is an overlay fork");
+  const seen = spawnSync(`${branch.path}.fork/enter`, ["sh", "-ec", "cat src/f1.txt new.txt node_modules/dep/index.js; jj log --no-graph -r @- -T change_id"], { cwd: branch.path, env, encoding: "utf8" });
+  assert.equal(seen.status, 0, seen.stderr);
+  assert.equal(seen.stdout, `changed\nnew\ndep\n${change}`);
 });

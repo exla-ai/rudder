@@ -58,6 +58,15 @@ export function inFork(cwd: string, command: string, args: string[]): { command:
 }
 
 /** The single parent of the main checkout's @: what `jj workspace add` bases on. */
+async function commitOf(repoRoot: string, change: string): Promise<string | null> {
+  const result = await runCommand("jj", ["log", "--no-graph", "--ignore-working-copy", "-r", change, "-T", 'commit_id ++ "\\n"'], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  const ids = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  return result.code === 0 && ids.length === 1 ? ids[0]! : null;
+}
+
 export async function currentBaseCommit(repoRoot: string): Promise<string | null> {
   const result = await runCommand("jj", ["log", "--no-graph", "--ignore-working-copy", "-r", "@-", "-T", 'commit_id ++ "\\n"'], {
     cwd: repoRoot,
@@ -299,13 +308,18 @@ export async function createForkWorkspace(params: {
   targetPath: string;
   workspaceName: string;
   description?: string;
+  /** Start from this change (a branch of another agent) instead of main. */
+  atChangeId?: string;
 }): Promise<{ snapshot: WarmSnapshot } | { reason: string }> {
   if (process.platform !== "linux") return { reason: "not Linux" };
-  const base = await currentBaseCommit(params.repoRoot);
+  const base = params.atChangeId
+    ? await commitOf(params.repoRoot, params.atChangeId)
+    : await currentBaseCommit(params.repoRoot);
+  if (params.atChangeId && !base) return { reason: `change ${params.atChangeId} not found` };
   const snaps = readySnapshots(params.repoRoot);
   // Projects with nothing to install or build keep the plain checkout.
   const warmable = warmCommands(params.repoRoot).length > 0;
-  if (base && !snaps.some((snap) => snap.commit === base) && warmable) {
+  if (!params.atChangeId && base && !snaps.some((snap) => snap.commit === base) && warmable) {
     startWarmBuild(params.repoRoot, base);
   }
   const snapshot = snaps.find((snap) => snap.commit === base) ?? snaps[0];

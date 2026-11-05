@@ -369,12 +369,13 @@ export async function createNodeWorkspace(params: {
 
   // Fast path: an overlay fork of the warm snapshot (no file copies, deps and
   // build outputs already there). Falls back to a full jj checkout.
-  if (!params.atChangeId) {
+  {
     const fork = await createForkWorkspace({
       repoRoot: params.repoRoot,
       targetPath,
       workspaceName,
       description: workspaceDescription(params, "running"),
+      ...(params.atChangeId ? { atChangeId: params.atChangeId } : {}),
     });
     if ("snapshot" in fork) {
       process.stderr.write(`[rudder] workspace ${workspaceName}: overlay fork of warm snapshot ${fork.snapshot.key}\n`);

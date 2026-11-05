@@ -4941,6 +4941,10 @@ impl App {
             self.focus = FocusPane::Worker;
         } else {
             let index = self.selected_agent;
+            // Focusing a row reopens it at most once per session; an explicit
+            // Enter always may, so an agent that exited again comes back again.
+            let id = self.agents[index].id.clone();
+            self.focus_resume_attempted.remove(&id);
             self.reopen_conversation_at(index);
             self.focus = FocusPane::Worker;
         }
@@ -4959,7 +4963,7 @@ impl App {
         run.is_main()
             || is_cloud_owned_agent(run)
             || run.status == AgentStatus::Paused
-            || (conversation_can_reopen(run) && !self.focus_resume_attempted.contains(&run.id))
+            || conversation_can_reopen(run)
     }
 
     fn toggle_nest_view(&mut self) {

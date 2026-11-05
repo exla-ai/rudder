@@ -8624,6 +8624,15 @@ fn worker_enter_reopens_a_finished_paneless_row_like_the_agents_pane() {
                 "{label}"
             );
             assert_resumed_with(&recorded_args(&args_file), backend, flag, session);
+
+            // The reopened session exits on its own; the next Enter brings it
+            // back again instead of hitting the once-per-session focus guard.
+            app.agents[0].terminal = None;
+            let _ = fs::remove_file(&args_file);
+            app.focus = pane;
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(app.agents[0].terminal.is_some(), "{label}: back a second time");
+            assert_resumed_with(&recorded_args(&args_file), backend, flag, session);
             app.agents[0].terminal = None;
         }
     }
@@ -8816,11 +8825,8 @@ fn paneless_worker_card_offers_enter_only_when_it_resumes() {
         assert!(card(&mut app).contains(hint), "{backend:?}: a saved session reopens");
 
         app.focus_resume_attempted.insert("card".to_string());
-        let text = card(&mut app);
-        assert!(text.contains("This agent is not running."), "{backend:?}");
-        assert!(!text.contains("Press Enter"), "{backend:?}: already tried this session");
+        assert!(card(&mut app).contains(hint), "{backend:?}: Enter reopens even after a focus reopen");
 
-        app.focus_resume_attempted.clear();
         app.agents[0].session_id = None;
         assert!(!card(&mut app).contains("Press Enter"), "{backend:?}: nothing to reopen");
 

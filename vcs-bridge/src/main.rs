@@ -170,6 +170,7 @@ async fn fork_add(ui: &mut Ui, helper: &CommandHelper, args: &ForkAddArgs) -> Re
     use jj_cli::command_error::{internal_error, user_error};
     use jj_lib::ref_name::WorkspaceNameBuf;
     use jj_lib::repo::Repo as _;
+    use jj_lib::workspace::Workspace;
     use rudder_engine::jj_working_copy::{OverlayWorkingCopyFactory, link_lower};
     let old = helper.workspace_helper(ui)?;
     let name = WorkspaceNameBuf::from(args.name.clone());

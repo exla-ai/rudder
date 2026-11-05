@@ -635,8 +635,8 @@ function linearPanel(org) {
     }
     for (const t of targets) sel.appendChild(new Option(t.label, t.value));
     setText(hint, setup.autoStart
-      ? "Creates 3 to 10 small issues labeled rudder. An agent starts on each one."
-      : "Creates 3 to 10 small issues labeled rudder. Agents start on them once Linear webhooks are set up on this server.");
+      ? "Creates up to 10 small issues labeled rudder. An agent starts on each one."
+      : "Creates up to 10 small issues labeled rudder. Agents start on them once Linear webhooks are set up on this server.");
     const sync = () => { btn.disabled = !goal.value.trim(); };
     goal.addEventListener("input", sync);
     sync();

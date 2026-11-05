@@ -16,7 +16,7 @@ export const TASKGEN_FALLBACK_MODEL = "claude-haiku-5-5";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const TIMEOUT_MS = 60_000;
 
-export const MIN_TASKS = 3;
+export const MIN_TASKS = 1;
 export const MAX_TASKS = 10;
 export const GOAL_LIMIT = 4000;
 const TITLE_LIMIT = 200;
@@ -106,9 +106,10 @@ export function parseGeneratedTasks(text: string): GeneratedTask[] {
   if (Object.keys(root).some((key) => key !== "tasks") || !Array.isArray(root.tasks)) {
     throw new TaskgenError(502, "the model did not return a task list");
   }
-  const list = root.tasks as unknown[];
-  if (list.length < MIN_TASKS || list.length > MAX_TASKS) {
-    throw new TaskgenError(502, `the model returned ${list.length} tasks, not ${MIN_TASKS} to ${MAX_TASKS}`);
+  // A small goal is one or two tasks; past the cap, keep the first ones.
+  const list = (root.tasks as unknown[]).slice(0, MAX_TASKS);
+  if (list.length < MIN_TASKS) {
+    throw new TaskgenError(502, "the model returned no tasks");
   }
   const seen = new Set<string>();
   return list.map((item, index) => {

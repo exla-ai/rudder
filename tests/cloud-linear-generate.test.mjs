@@ -98,8 +98,7 @@ test("generate: invalid model output is rejected and creates no issues", async (
     await connectLinear(ctx, "alice");
     const bad = [
       "not json at all",
-      { tasks: TASKS.slice(0, 2) },
-      { tasks: [...TASKS, ...TASKS.map((t, i) => ({ ...t, title: `${t.title} ${i}` })), ...TASKS.map((t, i) => ({ ...t, title: `${t.title} x${i}` })), { ...TASKS[0], title: "eleven" }, { ...TASKS[0], title: "twelve" }] },
+      { tasks: [] },
       { tasks: TASKS, extra: true },
       { tasks: [{ ...TASKS[0], priority: 1 }, TASKS[1], TASKS[2]] },
       { tasks: [{ ...TASKS[0], title: "  " }, TASKS[1], TASKS[2]] },
@@ -123,6 +122,10 @@ test("generate: invalid model output is rejected and creates no issues", async (
 });
 
 test("parseGeneratedTasks is strict and keeps titles, descriptions and done-when lines", () => {
+  // A small goal can be one task; past the cap the first ten are kept.
+  assert.equal(taskgen.parseGeneratedTasks(JSON.stringify({ tasks: TASKS.slice(0, 1) })).length, 1);
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...TASKS[0], title: `task ${i}` }));
+  assert.equal(taskgen.parseGeneratedTasks(JSON.stringify({ tasks: many })).length, taskgen.MAX_TASKS);
   const ok = taskgen.parseGeneratedTasks(JSON.stringify({ tasks: TASKS }));
   assert.deepEqual(ok[0], { title: TASKS[0].title, description: TASKS[0].description, doneWhen: TASKS[0].done_when });
   assert.throws(() => taskgen.parseGeneratedTasks("[]"), /task list/);
@@ -192,7 +195,7 @@ test("generate: an OpenAI failure falls back to Claude; Claude's bad output is s
     assert.ok(ctx.logs.some((line) => /OpenAI failed .*using Claude/.test(line)));
 
     ctx.upstream.handlers.openai = () => openaiResponse("{");
-    ctx.upstream.handlers.anthropic = () => anthropicResponse({ tasks: [TASKS[0]] });
+    ctx.upstream.handlers.anthropic = () => anthropicResponse({ tasks: [] });
     const bad = await ctx.call("POST", "/api/app/linear/generate", { account: "alice", body: { goal: GOAL, teamId: "team-eng" } });
     assert.equal(bad.status, 502);
 

@@ -687,6 +687,9 @@ pub(crate) fn diff_panel_lines(
     lines.push(Line::from(stats));
     if let Some((run_id, summary)) = &panel.timeline {
         if *run_id == run.id {
+            for line in crate::timeline::context_lines(summary) {
+                lines.push(Line::from(Span::styled(truncate_cells(&line, width), muted)));
+            }
             lines.push(Line::from(Span::styled(
                 truncate_cells(&crate::timeline::format_timeline(summary), width),
                 muted,

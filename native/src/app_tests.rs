@@ -24453,6 +24453,23 @@ fn diff_panel_text(panel: &crate::diffview::DiffPanel, run: &AgentRun, width: u1
 }
 
 #[test]
+fn agent_context_panel_shows_only_the_selected_runs_snapshot() {
+    let run = test_agent_run("context-agent", "inspect context");
+    let mut panel = crate::diffview::DiffPanel::new();
+    let mut summary = crate::timeline::TimelineSummary::default();
+    summary.context = Some(crate::timeline::ContextUsage {
+        timestamp_ms: 1, input: 1000, cached: Some(600), cache_write: Some(100), capacity: Some(2000),
+    });
+    panel.timeline = Some((run.id.clone(), summary));
+    let text = diff_panel_text(&panel, &run, 100).join("\n");
+    assert!(text.contains("Context:") && text.contains("50%"), "{text}");
+    assert!(text.contains("600 cached") && text.contains("300 fresh") && text.contains("100 cache write"), "{text}");
+    assert!(text.contains("Latest request"));
+    let other = test_agent_run("other", "another agent");
+    assert!(!diff_panel_text(&panel, &other, 100).join("\n").contains("Context:"));
+}
+
+#[test]
 fn the_diff_panel_header_carries_stats_tokens_and_an_api_rate_cost() {
     use crate::diffview::{DiffPanel, DiffSource};
     let mut run = test_agent_run("diff-1", "tighten the parser");

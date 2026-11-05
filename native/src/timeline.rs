@@ -18,6 +18,9 @@ pub(crate) const TIMELINE_FILE: &str = "timeline.jsonl";
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TimelineSummary {
+    /// Latest observed request, separate from cumulative billing totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context: Option<ContextUsage>,
     /// Workspace startup (fork/checkout), when Rudder created one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) start_ms: Option<u64>,
@@ -42,6 +45,45 @@ pub(crate) struct TimelineSummary {
     pub(crate) cached: u64,
     #[serde(default)]
     pub(crate) output: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContextUsage {
+    pub(crate) timestamp_ms: u64,
+    pub(crate) input: u64,
+    pub(crate) cached: Option<u64>,
+    pub(crate) cache_write: Option<u64>,
+    pub(crate) capacity: Option<u64>,
+}
+
+fn latest_context(summary: &mut TimelineSummary, context: ContextUsage) {
+    if summary.context.as_ref().is_none_or(|old| context.timestamp_ms >= old.timestamp_ms) {
+        summary.context = Some(context);
+    }
+}
+
+pub(crate) fn context_lines(summary: &TimelineSummary) -> Vec<String> {
+    let Some(c) = &summary.context else {
+        return vec!["Context: waiting for backend usage".into()];
+    };
+    let mut title = format!("Context: {} input tokens", format_token_count(c.input));
+    if let Some(capacity) = c.capacity.filter(|n| *n > 0) {
+        title.push_str(&format!(" / {} ({:.0}%)", format_token_count(capacity), c.input as f64 / capacity as f64 * 100.0));
+    }
+    let mut detail = Vec::new();
+    if let Some(cached) = c.cached {
+        detail.push(format!("{} cached", format_token_count(cached)));
+        let fresh = c.input.saturating_sub(cached).saturating_sub(c.cache_write.unwrap_or(0));
+        detail.push(format!("{} fresh", format_token_count(fresh)));
+    }
+    if let Some(write) = c.cache_write {
+        detail.push(format!("{} cache write", format_token_count(write)));
+    }
+    let mut lines = vec![title];
+    if !detail.is_empty() { lines.push(detail.join(" · ")); }
+    lines.push("Latest request; excludes later messages and tool results".into());
+    lines
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +191,16 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
             summary.model_ms += gap;
             if let Some(u) = message.and_then(|m| m.get("usage")) {
                 let get = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                if let (Some(input), Some(cached), Some(write)) = (
+                    u.get("input_tokens").and_then(|v| v.as_u64()),
+                    u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                ) {
+                    latest_context(summary, ContextUsage {
+                        timestamp_ms: ts, input: input.saturating_add(cached).saturating_add(write),
+                        cached: Some(cached), cache_write: Some(write), capacity: None,
+                    });
+                }
                 let id = message
                     .and_then(|m| m.get("id"))
                     .and_then(|v| v.as_str())
@@ -239,6 +291,16 @@ pub(crate) fn analyze_codex_rollout(
             continue;
         }
         if kind == "event_msg" && ptype == "token_count" {
+            if let Some(info) = payload.and_then(|p| p.get("info")) {
+                if let (Some(ts), Some(input)) = (ts, info.get("last_token_usage").and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64())) {
+                    latest_context(&mut local, ContextUsage {
+                        timestamp_ms: ts, input,
+                        cached: info.get("last_token_usage").and_then(|u| u.get("cached_input_tokens")).and_then(|v| v.as_u64()),
+                        cache_write: None,
+                        capacity: info.get("model_context_window").and_then(|v| v.as_u64()),
+                    });
+                }
+            }
             if let Some(total) = payload.and_then(|p| p.get("info")).and_then(|i| i.get("total_token_usage")) {
                 let get = |k: &str| total.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
                 let cached = get("cached_input_tokens");
@@ -311,6 +373,7 @@ pub(crate) fn analyze_codex_rollout(
 }
 
 fn merge(into: &mut TimelineSummary, from: &TimelineSummary) {
+    if let Some(context) = &from.context { latest_context(into, context.clone()); }
     into.install_ms += from.install_ms;
     into.build_ms += from.build_ms;
     into.test_ms += from.test_ms;
@@ -446,7 +509,7 @@ pub(crate) fn compute_timeline_in(
     }
     let (start, last) = read_timeline_file(&request.repo_root, &request.run_id);
     summary.start_ms = start;
-    let has_data = summary.model_ms + summary.input + summary.output > 0;
+    let has_data = summary.context.is_some() || summary.model_ms + summary.input + summary.output > 0;
     if has_data && last.as_ref() != Some(&summary) {
         if let Ok(mut value) = serde_json::to_value(&summary) {
             if let Some(map) = value.as_object_mut() {
@@ -518,6 +581,45 @@ pub(crate) fn format_timeline(summary: &TimelineSummary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_uses_latest_request_and_can_shrink() {
+        let mut summary = TimelineSummary::default();
+        for (ts, input) in [(2, 1000), (3, 10), (1, 5000)] {
+            let row = serde_json::json!({"type":"assistant", "timestamp":format!("2026-11-04T00:00:0{ts}Z"),
+                "message":{"usage":{"input_tokens":input,"cache_read_input_tokens":20,"cache_creation_input_tokens":30}}});
+            analyze_claude_transcript(&row.to_string(), 0, &mut summary);
+        }
+        let c = summary.context.as_ref().unwrap();
+        assert_eq!((c.input, c.cached, c.cache_write, c.capacity), (60, Some(20), Some(30), None));
+        assert!(context_lines(&summary)[1].contains("10 fresh"));
+    }
+
+    #[test]
+    fn codex_context_uses_last_usage_not_session_total_or_capacity() {
+        let content = [
+            serde_json::json!({"type":"session_meta","timestamp":"2026-11-04T00:00:00Z","payload":{"cwd":"/repo"}}),
+            serde_json::json!({"type":"event_msg","timestamp":"2026-11-04T00:00:01Z","payload":{"type":"token_count","info":{
+                "model_context_window":1000,"last_token_usage":{"input_tokens":250,"cached_input_tokens":200},
+                "total_token_usage":{"input_tokens":9000}}}}),
+        ].iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        let mut summary = TimelineSummary::default();
+        assert!(analyze_codex_rollout(&content, "/repo", 0, &mut summary));
+        assert_eq!(summary.context.as_ref().unwrap().input, 250);
+        assert!(context_lines(&summary)[0].contains("25%"));
+        assert!(context_lines(&summary)[1].contains("50 fresh"));
+        let mut other = TimelineSummary::default();
+        assert!(!analyze_codex_rollout(&content, "/other", 0, &mut other));
+        assert!(other.context.is_none());
+    }
+
+    #[test]
+    fn missing_context_is_not_reported_as_zero() {
+        let mut summary = TimelineSummary::default();
+        analyze_claude_transcript(r#"{"type":"assistant","timestamp":"2026-11-04T00:00:00Z","message":{"usage":{"input_tokens":5}}}"#, 0, &mut summary);
+        assert!(summary.context.is_none());
+        assert_eq!(context_lines(&summary), vec!["Context: waiting for backend usage"]);
+    }
 
     #[test]
     fn iso_millis_parses_utc_timestamps() {

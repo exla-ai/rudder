@@ -5933,11 +5933,8 @@ impl App {
     }
 
     /// Keep the diff panel pointed at the selected run and its content fresh.
-    /// Runs every poll tick; cheap when the panel is closed or nothing changed.
+    /// Also refresh the selected agent's context snapshot while the diff is closed.
     fn refresh_diff_panel(&mut self) {
-        if !self.diff_panel.open {
-            return;
-        }
         if self.diff_panel.drain() {
             self.dirty = true;
         }
@@ -5952,9 +5949,9 @@ impl App {
             .diff_panel
             .tokens_refreshed_at
             .is_none_or(|at| at.elapsed() >= DIFF_PANEL_TOKEN_REFRESH);
-        if tokens_due && !cfg!(test) {
+        if tokens_due && !cfg!(test) && !is_cloud_agent(run) && run.backend != Backend::Opencode {
             let before = (run.tokens_in, run.tokens_out);
-            refresh_run_token_usage(run);
+            if self.diff_panel.open { refresh_run_token_usage(run); }
             self.diff_panel.tokens_refreshed_at = Some(Instant::now());
             if (run.tokens_in, run.tokens_out) != before {
                 self.diff_panel.revision += 1;
@@ -5966,7 +5963,7 @@ impl App {
         if cfg!(test) {
             return;
         }
-        if self.diff_panel.due(run.last_output_at) {
+        if self.diff_panel.open && self.diff_panel.due(run.last_output_at) {
             let cwd = run.cwd.clone();
             self.diff_panel.request(&run_id, cwd, run.last_output_at);
         }

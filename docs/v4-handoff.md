@@ -46,6 +46,12 @@ PLAN.md section 0 steps 0-8 are merged. Step 9 results:
   stale commit; headless backends ran outside the fork mount; login shells
   inside forks picked stock jj; auto-integration raced the plan scheduler.
 
+Agent context: the selected agent card and diff panel show the latest backend
+request input, cached/fresh/cache-write breakdown, and Codex context capacity
+when reported. This is a request snapshot, separate from cumulative billing;
+Claude capacity and prompt/file/tool categories are not inferred. Usage is
+read off the UI thread and refreshed every ten seconds.
+
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
 `rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
 workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero

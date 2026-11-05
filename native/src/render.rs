@@ -643,6 +643,20 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     }
 
     let mut extra: Vec<Vec<Span<'a>>> = Vec::new();
+    if selected {
+        let summary = app.diff_panel.timeline.as_ref()
+            .filter(|(id, _)| *id == agent.id)
+            .map(|(_, summary)| summary.clone()).unwrap_or_default();
+        let context = if is_cloud_agent(agent) || agent.backend == Backend::Opencode {
+            vec!["Context: backend usage unavailable here".into()]
+        } else {
+            crate::timeline::context_lines(&summary)
+        };
+        for line in context {
+            extra.push(vec![Span::styled(line, muted_style(focused))]);
+        }
+    }
+
     if let Some(detail) = integration_detail(agent) {
         extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }

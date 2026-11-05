@@ -735,6 +735,8 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
         let _ = execute!(
             stdout,
             EnterAlternateScreen,
+            // Thin bar cursor, as in the dashboard (see main.rs).
+            crossterm::cursor::SetCursorStyle::SteadyBar,
             EnableBracketedPaste,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
         );
@@ -746,7 +748,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
     let result = attach_input_loop(&mut writer, &done, &screen);
     {
         let mut stdout = io::stdout();
-        let _ = stdout.write_all(b"\x1b[?7h\x1b[?25h\x1b[0m");
+        let _ = stdout.write_all(b"\x1b[?7h\x1b[?25h\x1b[0m\x1b[0 q");
         let _ = disable_rudder_mouse_capture(&mut stdout);
         let _ = stdout.write_all(TERMINAL_KEYBOARD_RESET);
         let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
@@ -775,6 +777,8 @@ fn run_dashboard_client(stream: UnixStream) -> Result<()> {
         let _ = execute!(
             stdout,
             EnterAlternateScreen,
+            // Thin bar cursor, as in the dashboard (see main.rs).
+            crossterm::cursor::SetCursorStyle::SteadyBar,
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
@@ -844,7 +848,7 @@ fn run_dashboard_client(stream: UnixStream) -> Result<()> {
 
     {
         let mut stdout = io::stdout();
-        let _ = stdout.write_all(b"\x1b[?25h\x1b[0m");
+        let _ = stdout.write_all(b"\x1b[?25h\x1b[0m\x1b[0 q");
         let _ = disable_rudder_mouse_capture(&mut stdout);
         let _ = execute!(
             stdout,

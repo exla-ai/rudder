@@ -13,6 +13,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
@@ -20826,6 +20827,10 @@ fn setup_terminal() -> Result<Tui> {
     execute!(
         stdout,
         EnterAlternateScreen,
+        // A thin bar, not a block: Claude Code and Codex draw their own
+        // inverse-video input cursor, and a block on top of it read as
+        // highlighted text while typing.
+        SetCursorStyle::SteadyBar,
         EnableBracketedPaste,
         // Focus reporting (CSI ?1004) drives the desktop-notification gate: a
         // focused tab never notifies, an unfocused one does. See notify.rs.
@@ -21135,6 +21140,7 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
         PopKeyboardEnhancementFlags,
         DisableFocusChange,
         DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape,
         LeaveAlternateScreen
     )?;
     terminal.backend_mut().write_all(TERMINAL_KEYBOARD_RESET)?;

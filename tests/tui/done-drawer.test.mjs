@@ -28,7 +28,7 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
   const story = journey(session, "finished work collapses into a drawer");
 
   await story.step("a worker merged with m collapses into the done drawer", async () => {
-    await session.waitForText("Type a task", { timeout: 20_000 });
+    await session.waitForText("describe a task", { timeout: 20_000 });
     await session.type("write the done marker");
     await session.press("Enter");
     // A dashboard worker waits in review when its turn ends; m merges it.

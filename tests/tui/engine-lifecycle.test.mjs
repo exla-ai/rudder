@@ -133,7 +133,7 @@ test("headless engine keeps the same PTY across closed views and pauses on expli
   const state = await fixture(t);
   const { child, ready } = await state.boot();
   const first = await state.view();
-  await first.waitForText("Type a task", { timeout: 15_000 });
+  await first.waitForText("describe a task", { timeout: 15_000 });
   const worker = await startWorker(state, first, "implement the persistent service fixture");
   const ownerRecord = JSON.parse(await fsp.readFile(path.join(state.repo, ".rudder/engine/owner.json"), "utf8"));
 
@@ -186,7 +186,7 @@ test("headless engine keeps the same PTY across closed views and pauses on expli
 test("legacy dashboard and fabric engine cannot own one checkout concurrently", { timeout: 90_000 }, async (t) => {
   const state = await fixture(t);
   const legacy = await state.view([]);
-  await legacy.waitForText("Type a task", { timeout: 15_000 });
+  await legacy.waitForText("describe a task", { timeout: 15_000 });
   let status;
   await waitUntil(async () => { status = await state.native("status"); return status.running; });
   assert.equal(status.authority, "legacy-native");
@@ -208,7 +208,7 @@ test("headless view confirms deletion after rendering and SIGTERM persists a res
   const state = await fixture(t);
   const { child } = await state.boot();
   const view = await state.view();
-  await view.waitForText("Type a task", { timeout: 15_000 });
+  await view.waitForText("describe a task", { timeout: 15_000 });
   const removed = await startWorker(state, view, "implement the delete fixture");
   await view.press("Ctrl+W");
   await view.press("1");

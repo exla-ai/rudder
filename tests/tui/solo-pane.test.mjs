@@ -11,15 +11,15 @@ test("Alt+h full-screens the pane, hiding the sidebar and task line", { timeout:
   const repo = await scratchRepo("rudder-solo-");
   const { claudeBin } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin });
-  await session.waitForText("Type a task", { timeout: 30_000 });
+  await session.waitForText("describe a task", { timeout: 30_000 });
 
-  // The split shows the agents sidebar keymap alongside the worker pane.
-  await session.waitForText("j/k move", { timeout: 10_000 });
+  // The split shows the agents sidebar (its empty state) beside the worker pane.
+  await session.waitForText("no agents yet", { timeout: 10_000 });
 
   await session.press("Alt+h");
-  // Full screen: the sidebar keymap AND the task prompt are both gone.
-  await session.waitForGone("j/k move", { timeout: 10_000 });
-  await session.waitForGone("Type a task", { timeout: 10_000 });
+  // Full screen: the sidebar AND the task prompt are both gone.
+  await session.waitForGone("no agents yet", { timeout: 10_000 });
+  await session.waitForGone("describe a task", { timeout: 10_000 });
 
   await session.press("Alt+h");
   const restored = await session.waitFor((s) => s.includes("panes restored"), {
@@ -27,7 +27,7 @@ test("Alt+h full-screens the pane, hiding the sidebar and task line", { timeout:
     label: "the panes-restored notice",
   });
   assert.match(restored, /panes restored/);
-  await session.waitForText("Type a task", { timeout: 10_000 });
+  await session.waitForText("describe a task", { timeout: 10_000 });
   // The sidebar is back, which is what "restored" has to mean on screen.
-  await session.waitForText("j/k move", { timeout: 10_000 });
+  await session.waitForText("no agents yet", { timeout: 10_000 });
 });

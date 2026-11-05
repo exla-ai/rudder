@@ -29,7 +29,7 @@ async function scratchWithLeakDetector(t, prefix) {
   t.after(() => fsp.rm(pidDir, { recursive: true, force: true }));
   const claudeBin = await leakDetectorBackend(repo, pidDir);
   const session = await launchRudder(t, { repo, claudeBin });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   return { session, pidDir };
 }
 

@@ -68,7 +68,7 @@ test("a plain local dashboard shows no cloud-worker status lines at all", { time
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   const screen = await session.screen();
   // Showing "cloud connected/offline" in a local session reflects saved auth,
   // not anything attached — it is worker-session-only by design.

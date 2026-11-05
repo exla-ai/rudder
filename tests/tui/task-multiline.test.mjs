@@ -36,9 +36,13 @@ const CHORDS = {
  */
 function taskPaneRows(screen) {
   const rows = screen.split("\n");
-  const start = rows.findIndex((line) => line.includes("┌ task ·"));
+  // The prompt pill is the lowest rounded box on screen.
+  let start = -1;
+  rows.forEach((line, index) => {
+    if (line.startsWith("╭")) start = index;
+  });
   if (start < 0) return [];
-  const end = rows.findIndex((line, index) => index > start && line.includes("└"));
+  const end = rows.findIndex((line, index) => index > start && line.startsWith("╰"));
   return rows.slice(start + 1, end < 0 ? rows.length : end);
 }
 
@@ -47,7 +51,7 @@ async function taskPane(t, prefix) {
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   return session;
 }
 

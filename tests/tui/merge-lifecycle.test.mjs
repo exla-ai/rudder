@@ -42,7 +42,7 @@ test("two workers merge, undo takes the work back out", { timeout: 180_000 }, as
   const story = journey(session, "merge then undo: work lands, work leaves");
 
   await story.step("dashboard boots", async () => {
-    await session.waitForText("Type a task", { timeout: 20_000 });
+    await session.waitForText("describe a task", { timeout: 20_000 });
   });
 
   await story.step("two workers finish and merge with m", async () => {
@@ -97,7 +97,7 @@ test("a single merge then undo round-trips the checkout", { timeout: 120_000 }, 
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("write the done marker");
   await session.press("Enter");
@@ -137,7 +137,7 @@ test("a merged row survives a restart with its identity intact", { timeout: 120_
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   let session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("write the done marker");
   await session.press("Enter");

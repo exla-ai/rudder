@@ -50,7 +50,7 @@ test("two /plan orchestrators survive a process restart", { timeout: 120_000 }, 
   // of them ever reloaded state from disk.
   const { repo, sleeper } = await scratch(t, "rudder-tui-plans-");
   let session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("/plan alpha objective");
   await session.press("Enter");
@@ -137,7 +137,7 @@ test("two /plan orchestrators survive a process restart", { timeout: 120_000 }, 
 test("a typed task becomes an isolated worker on screen", { timeout: 60_000 }, async (t) => {
   const { repo, sleeper } = await scratch(t, "rudder-tui-worker-");
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("add a parser test");
   await session.press("Enter");
@@ -151,7 +151,7 @@ test("a typed task becomes an isolated worker on screen", { timeout: 60_000 }, a
 test("/main runs in the checkout and says so", { timeout: 60_000 }, async (t) => {
   const { repo, sleeper } = await scratch(t, "rudder-tui-main-");
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("/main tidy the readme");
   await session.press("Enter");
@@ -168,7 +168,7 @@ test("/main runs in the checkout and says so", { timeout: 60_000 }, async (t) =>
 test("merge gate: first m shows the diff, second m merges", { timeout: 120_000 }, async (t) => {
   const { repo, completer } = await scratch(t, "rudder-tui-gate-");
   const session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("write the done marker");
   await session.press("Enter");
@@ -206,7 +206,7 @@ test("/resume shows where each conversation ran, and --here stays in the checkou
   await plantTranscript(home, path.join(repo, "site"), "22222222-2222-2222-2222-222222222222", "fix the sidebar spacing");
 
   const session = await launchRudder(t, { repo, claudeBin: sleeper, home });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("/resume ");
   await session.waitForText("rewrite the auth middleware", { timeout: 20_000 });
@@ -230,7 +230,7 @@ test("dd deletes a running /main row instead of dead-ending", { timeout: 60_000 
   // not be followed.
   const { repo, sleeper } = await scratch(t, "rudder-tui-dd-main-");
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("/main long running chore");
   await session.press("Enter");
@@ -258,7 +258,7 @@ test("a hammered dd burst deletes at most the row you saw confirmed", { timeout:
   // has rendered), and removal happens off-thread so the UI never freezes.
   const { repo, sleeper } = await scratch(t, "rudder-tui-dd-burst-");
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   // Selection sits on the NEWEST row, so beta (created second) is the one
   // the burst arms and the confirm deletes; alpha must survive untouched.
@@ -305,7 +305,7 @@ test("recorded work survives renaming the repo directory", { timeout: 120_000 },
   // finds them in, and the work still merges.
   const { repo, completer } = await scratch(t, "rudder-tui-rename-");
   let session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("write the done marker");
   await session.press("Enter");
@@ -347,7 +347,7 @@ test("recorded work survives renaming the repo directory", { timeout: 120_000 },
 test("resize reflows without a panic and stays interactive", { timeout: 60_000 }, async (t) => {
   const { repo, sleeper } = await scratch(t, "rudder-tui-resize-");
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.resize(60, 20);
   // Still alive and still drawing at the new size.

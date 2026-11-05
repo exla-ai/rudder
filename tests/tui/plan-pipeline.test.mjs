@@ -91,7 +91,7 @@ test("plan → approve → workers → merge lands every node's work", { timeout
   };
 
   await story.step("dashboard boots", async () => {
-    await session.waitForText("Type a task", { timeout: 20_000 });
+    await session.waitForText("describe a task", { timeout: 20_000 });
   });
 
   await story.step("a multi-part task automatically proposes a two-node DAG", async () => {

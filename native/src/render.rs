@@ -420,6 +420,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     trailing: &[Span<'a>],
 ) {
     let row_start = lines.len();
+    // Which card this is in the frame, for the staggered startup reveal.
+    let ordinal = AGENT_ROW_SPANS.with(|spans| spans.borrow().len());
     let selected = index == app.selected_agent && app.drawer_cursor.is_none();
     let p = pal();
     // The rename box comes first: a main row used to take its summary
@@ -481,8 +483,13 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     let mut status = vec![
         Span::styled(glyph, Style::default().fg(status_color)),
         Span::raw(" "),
-        Span::styled(status_label, status_style),
     ];
+    if agent_is_busy(agent) {
+        // Working: a light band sweeps across the status, frame by frame.
+        status.extend(shimmer_spans(&status_label, status_color, app.spinner_frame));
+    } else {
+        status.push(Span::styled(status_label, status_style));
+    }
     if agent.status == AgentStatus::Running {
         if let Some(elapsed) = run_elapsed_label(agent) {
             status.push(dot.clone());
@@ -555,11 +562,14 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
             }
             lines.push(framed(if row_index == 0 { prefix } else { cont_prefix }, title));
         }
-        lines.push(framed(cont_prefix, status));
+        for row in wrap_spans(status, body_w, 2) {
+            lines.push(framed(cont_prefix, row));
+        }
         for row in extra {
             lines.push(framed(cont_prefix, row));
         }
         lines.push(Line::from(edge("╰", "╯")));
+        apply_card_motion(&mut lines[row_start..], app, &agent.id, ordinal, inner);
         record_agent_rows(row_start, lines.len(), index);
     } else {
         // Every other card: no outline, two quiet lines and a gap.
@@ -573,27 +583,39 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         } else {
             pane_text_style(true)
         };
+        // A thin bar in the card's status color runs down its left edge.
+        let bar = Span::styled(
+            "\u{258e} ",
+            Style::default().fg(match card_kind(agent) {
+                CardKind::Idle => p.faint,
+                kind if finished => blend(canvas(), card_kind_color(kind), 0.55),
+                kind => card_kind_color(kind),
+            }),
+        );
         let title_rows = wrap_title(&task_label, body_w, 2);
         let last = title_rows.len().saturating_sub(1);
         for (row_index, row) in title_rows.into_iter().enumerate() {
             let mut title = if row_index == 0 { prefix.to_vec() } else { cont_prefix.to_vec() };
-            title.push(Span::raw("  "));
+            title.push(bar.clone());
             title.push(Span::styled(row, title_style));
             if row_index == last {
                 title.extend(trailing.iter().cloned());
             }
             lines.push(Line::from(title));
         }
-        let mut row = cont_prefix.to_vec();
-        row.push(Span::raw("  "));
-        row.extend(status);
-        lines.push(Line::from(row));
+        for status_row in wrap_spans(status, body_w, 2) {
+            let mut row = cont_prefix.to_vec();
+            row.push(bar.clone());
+            row.extend(status_row);
+            lines.push(Line::from(row));
+        }
         for detail in extra {
             let mut row = cont_prefix.to_vec();
-            row.push(Span::raw("  "));
+            row.push(bar.clone());
             row.extend(detail);
             lines.push(Line::from(row));
         }
+        apply_card_motion(&mut lines[row_start..], app, &agent.id, ordinal, inner);
         record_agent_rows(row_start, lines.len(), index);
         lines.push(Line::default());
     }
@@ -603,6 +625,10 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
 /// minute says nothing: the spinner already shows it just started.
 fn run_elapsed_label(agent: &AgentRun) -> Option<String> {
     let created: u128 = agent.created_at.trim().parse().ok()?;
+    // Not a real clock reading (old rows, fixtures): say nothing.
+    if created < 1_500_000_000_000 {
+        return None;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()?
@@ -1754,6 +1780,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     AGENT_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     DRAWER_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     app.normalize_drawer_state();
+    note_card_changes(app, Instant::now());
     let diff_summaries: Vec<Option<String>> = {
         // Pinned planners (orchestrator + plan-mode front-end) run in the MAIN repo
         // and are rendered via push_orchestrator_row (no diff line), so a diff summary
@@ -6570,12 +6597,29 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| home_relative(&app.cwd));
-    let mut left = vec![
-        Span::raw(" "),
-        Span::styled("rudder", Style::default().fg(p.accent).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(project, app_style()),
-    ];
+    let reveal = reveal_progress(app, Instant::now());
+    let mut left = vec![Span::raw(" ")];
+    match reveal {
+        Some(progress) => {
+            // Startup: the wordmark draws in letter by letter under a light
+            // sweep; the rest of the row fades in behind it.
+            let shown = ((progress / 0.55).min(1.0) * 6.0).ceil() as usize;
+            let frame = (progress * 14.0) as usize;
+            let mut word = shimmer_spans(&"rudder"[..shown.min(6)], p.accent, frame);
+            for span in word.iter_mut() {
+                span.style = span.style.add_modifier(Modifier::BOLD);
+            }
+            left.extend(word);
+            left.push(Span::raw(" ".repeat(6 - shown.min(6))));
+        }
+        None => left.push(Span::styled(
+            "rudder",
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        )),
+    }
+    let word_end = left.len();
+    left.push(Span::raw("  "));
+    left.push(Span::styled(project, app_style()));
     if let Some(branch) = app.branch.as_deref() {
         left.push(Span::styled(format!("  \u{2387} {branch}"), Style::default().fg(p.muted)));
     }
@@ -6607,10 +6651,15 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             right.push(Span::styled(format!(" {count} {label}  "), Style::default().fg(p.muted)));
         }
     }
-    frame.render_widget(
-        Paragraph::new(split_row(left, right, area.width as usize)).style(app_style()),
-        area,
-    );
+    let mut row = split_row(left, right, area.width as usize);
+    if let Some(progress) = reveal {
+        let alpha = ((progress - 0.3) / 0.5).clamp(0.0, 1.0);
+        for span in row.spans.iter_mut().skip(word_end) {
+            let fg = span.style.fg.unwrap_or_else(ink);
+            span.style = span.style.fg(blend(canvas(), fg, alpha));
+        }
+    }
+    frame.render_widget(Paragraph::new(row).style(app_style()), area);
 }
 
 /// The four or five keys that matter in the current context.
@@ -6735,7 +6784,9 @@ pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
     let since = app.notice_seen.as_ref().map(|(_, at)| *at).unwrap_or(now);
     let error = notice_style(text, true).fg == Some(pal().failed);
     let ttl = if error { NOTICE_ERROR_PILL_FOR } else { NOTICE_PILL_FOR };
-    notice_in_progress(text) || now.duration_since(since) < ttl
+    // A long notice (a /help listing) is meant to be read: it stays up until
+    // Esc or the next notice instead of shrinking into the footer.
+    notice_in_progress(text) || text.chars().count() > 140 || now.duration_since(since) < ttl
 }
 
 pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -6781,11 +6832,18 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     };
     let glyph_color = if color == p.muted { p.accent } else { color };
     let text_color = if color == p.muted { p.on_surface } else { color };
-    let max_w = (area.width as usize * 2 / 3).clamp(12, 72);
+    // Short notices stay a small pill; a long one (a /help listing, an error
+    // with its cause) widens and grows so none of it is cut off.
+    let max_w = if text.chars().count() > 140 {
+        (area.width as usize).saturating_sub(6).clamp(12, 110)
+    } else {
+        (area.width as usize * 2 / 3).clamp(12, 72)
+    };
     let wrapped = wrap_text(&text, max_w.saturating_sub(2) as u16);
+    let max_rows = (area.height as usize).saturating_sub(3).max(1);
     let lines: Vec<Line<'static>> = wrapped
         .iter()
-        .take(4)
+        .take(max_rows)
         .enumerate()
         .map(|(index, row)| {
             Line::from(vec![
@@ -6964,4 +7022,235 @@ fn push_empty_state(lines: &mut Vec<Line<'_>>, focused: bool) {
         "  or /main for this checkout",
         Style::default().fg(p.faint),
     )));
+}
+
+// --- Motion: startup reveal, working shimmer, state-change flash --------------
+//
+// Everything here is a pure function of the clock and App state, drawn by the
+// normal render pass. The App loop asks for a frame (at most every ANIM_FRAME)
+// only while something is actually moving; an idle dashboard draws nothing.
+
+/// How long the startup reveal runs. Any key or click skips it.
+pub(crate) const REVEAL_FOR: Duration = Duration::from_millis(600);
+/// How long a card glows after its agent changes state.
+pub(crate) const FLASH_FOR: Duration = Duration::from_millis(700);
+/// Frame interval while animating: about 11 fps.
+pub(crate) const ANIM_FRAME: Duration = Duration::from_millis(90);
+
+/// What a card is showing, for color and change detection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CardKind {
+    Busy,
+    Waiting,
+    Done,
+    Merged,
+    Failed,
+    Idle,
+}
+
+pub(crate) fn card_kind(agent: &AgentRun) -> CardKind {
+    if agent_waits_for_you(agent) {
+        CardKind::Waiting
+    } else if matches!(agent.status, AgentStatus::Failed | AgentStatus::Orphaned)
+        || agent.turn_error().is_some()
+    {
+        CardKind::Failed
+    } else if agent_is_busy(agent) {
+        CardKind::Busy
+    } else if agent.status == AgentStatus::Merged {
+        CardKind::Merged
+    } else if agent.status == AgentStatus::Done {
+        CardKind::Done
+    } else {
+        CardKind::Idle
+    }
+}
+
+pub(crate) fn card_kind_color(kind: CardKind) -> Color {
+    let p = pal();
+    match kind {
+        CardKind::Busy => p.running,
+        CardKind::Waiting => p.waiting,
+        CardKind::Done => p.done,
+        CardKind::Merged => p.merged,
+        CardKind::Failed => p.failed,
+        CardKind::Idle => p.faint,
+    }
+}
+
+/// Startup reveal progress from 0 to 1, or None once it is over or skipped.
+pub(crate) fn reveal_progress(app: &App, now: Instant) -> Option<f32> {
+    let started = app.reveal_started?;
+    let elapsed = now.duration_since(started);
+    (elapsed < REVEAL_FOR).then(|| elapsed.as_secs_f32() / REVEAL_FOR.as_secs_f32())
+}
+
+/// Fade-in for the card drawn `ordinal`-th during the reveal: cards arrive one
+/// after another, each over 150ms.
+fn reveal_alpha(progress: Option<f32>, ordinal: usize) -> Option<f32> {
+    let progress = progress?;
+    let ms = progress * REVEAL_FOR.as_millis() as f32;
+    let start = 120.0 + (ordinal.min(6) as f32) * 55.0;
+    Some(((ms - start) / 150.0).clamp(0.0, 1.0))
+}
+
+/// Remember each agent's card kind and start a flash when it moves into a
+/// state worth noticing (finished, merged, needs you, failed). The first sight
+/// of an agent never flashes, so a dashboard reload is calm.
+pub(crate) fn note_card_changes(app: &mut App, now: Instant) {
+    let mut live = std::collections::HashSet::new();
+    for agent in &app.agents {
+        live.insert(agent.id.as_str());
+        let kind = card_kind(agent);
+        if let Some(previous) = app.card_kinds.insert(agent.id.clone(), kind) {
+            if previous != kind
+                && matches!(
+                    kind,
+                    CardKind::Waiting | CardKind::Done | CardKind::Merged | CardKind::Failed
+                )
+            {
+                app.card_flashes
+                    .insert(agent.id.clone(), (now, card_kind_color(kind)));
+            }
+        }
+    }
+    app.card_kinds.retain(|id, _| live.contains(id.as_str()));
+    app.card_flashes
+        .retain(|id, (at, _)| live.contains(id.as_str()) && now.duration_since(*at) < FLASH_FOR);
+}
+
+/// The flash on a card right now: its color and strength (1 at the start,
+/// easing out to 0).
+fn card_flash(app: &App, id: &str, now: Instant) -> Option<(Color, f32)> {
+    let (at, color) = app.card_flashes.get(id)?;
+    let age = now.duration_since(*at);
+    if age >= FLASH_FOR {
+        return None;
+    }
+    let left = 1.0 - age.as_secs_f32() / FLASH_FOR.as_secs_f32();
+    Some((*color, left * left))
+}
+
+/// True while any reveal or flash still needs frames.
+pub(crate) fn motion_pending(app: &App, now: Instant) -> bool {
+    let tail = FLASH_FOR + ANIM_FRAME * 2;
+    app.reveal_started
+        .is_some_and(|started| now.duration_since(started) < REVEAL_FOR + ANIM_FRAME * 2)
+        || app
+            .card_flashes
+            .values()
+            .any(|(at, _)| now.duration_since(*at) < tail)
+}
+
+/// `text` with a bright band sweeping left to right across it, one step per
+/// animation frame: the working state, alive without being loud.
+pub(crate) fn shimmer_spans(text: &str, base: Color, frame: usize) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len() as isize;
+    if len == 0 {
+        return Vec::new();
+    }
+    const BAND: f32 = 3.5;
+    let span = len + 10;
+    let center = (frame as isize * 2).rem_euclid(span) - 5;
+    let dim = blend(canvas(), base, 0.72);
+    let bright = blend(base, ink(), 0.65);
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(index, ch)| {
+            let distance = (index as isize - center).abs() as f32;
+            let glow = (1.0 - distance / BAND).clamp(0.0, 1.0);
+            Span::styled(ch.to_string(), Style::default().fg(blend(dim, bright, glow)))
+        })
+        .collect()
+}
+
+/// Fade a line in from the canvas: alpha 0 is invisible, 1 is the final look.
+fn fade_line(line: &mut Line<'_>, alpha: f32) {
+    if alpha >= 1.0 {
+        return;
+    }
+    let canvas = canvas();
+    let ink = ink();
+    for span in line.spans.iter_mut() {
+        let fg = span.style.fg.unwrap_or(ink);
+        span.style = span.style.fg(blend(canvas, fg, alpha));
+    }
+}
+
+/// Wash a line's background with `bg` across the full card width.
+fn tint_line(line: &mut Line<'_>, bg: Color, width: usize) {
+    let used = line.width();
+    if used < width {
+        line.spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    for span in line.spans.iter_mut() {
+        span.style = span.style.bg(bg);
+    }
+}
+
+/// The flash and the reveal fade for one card's rows.
+fn apply_card_motion(rows: &mut [Line<'_>], app: &App, id: &str, ordinal: usize, width: usize) {
+    let now = Instant::now();
+    if let Some((color, strength)) = card_flash(app, id, now) {
+        let bg = blend(canvas(), color, 0.42 * strength);
+        for row in rows.iter_mut() {
+            tint_line(row, bg, width);
+        }
+    }
+    if let Some(alpha) = reveal_alpha(reveal_progress(app, now), ordinal) {
+        for row in rows.iter_mut() {
+            fade_line(row, alpha);
+        }
+    }
+}
+
+/// Styled spans laid out on at most `max_rows` rows of `width` columns,
+/// broken between words; the last row is clipped with an ellipsis.
+fn wrap_spans<'a>(spans: Vec<Span<'a>>, width: usize, max_rows: usize) -> Vec<Vec<Span<'a>>> {
+    let width = width.max(4);
+    let mut rows: Vec<Vec<Span<'a>>> = vec![Vec::new()];
+    let mut used = 0usize;
+    let mut overflow: Vec<Span<'a>> = Vec::new();
+    for span in spans {
+        for word in span.content.split_inclusive(' ') {
+            let w = unicode_width::UnicodeWidthStr::width(word);
+            let trimmed_w = unicode_width::UnicodeWidthStr::width(word.trim_end());
+            if used > 0 && used + trimmed_w > width {
+                if rows.len() == max_rows {
+                    overflow.push(Span::styled(word.to_string(), span.style));
+                    continue;
+                }
+                rows.push(Vec::new());
+                used = 0;
+            }
+            if !overflow.is_empty() {
+                overflow.push(Span::styled(word.to_string(), span.style));
+                continue;
+            }
+            if used == 0 && word.trim().is_empty() {
+                continue;
+            }
+            rows.last_mut().expect("a row").push(Span::styled(word.to_string(), span.style));
+            used += w;
+        }
+    }
+    if !overflow.is_empty() {
+        let last = rows.pop().unwrap_or_default();
+        let mut joined = last;
+        joined.extend(overflow);
+        rows.push(fit_spans(joined, width));
+    }
+    // A row may end on the space after its last word; that space is not
+    // content and must not count against the width.
+    for row in rows.iter_mut() {
+        if let Some(last) = row.last_mut() {
+            let trimmed = last.content.trim_end().to_string();
+            if trimmed.len() != last.content.len() && !trimmed.is_empty() {
+                last.content = trimmed.into();
+            }
+        }
+    }
+    rows
 }

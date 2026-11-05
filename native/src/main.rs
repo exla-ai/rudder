@@ -212,8 +212,6 @@ const CLAUDE_NAV_MAX_PAGES: u16 = 200;
 /// Animation-only redraw cadence. Real PTY output wakes the loop immediately; this
 /// interval only advances the idle spinner.
 const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(100);
-/// Card and notice spinners: slower than planning, still reads as motion.
-const CARD_SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(160);
 /// How fast the tab glyph turns while agents are running. Slower than the in-app
 /// spinner: a tab is glanced at, not watched, and a fast cycle there is noise in
 /// the corner of the eye.
@@ -1940,6 +1938,13 @@ struct App {
     notice_seen: Option<(String, Instant)>,
     /// The `?` keys overlay is open.
     show_keys: bool,
+    /// When the startup reveal began; None once it is over or skipped. Only
+    /// a real terminal session sets it, so tests render the settled look.
+    reveal_started: Option<Instant>,
+    /// Each agent's last drawn card kind, to notice state changes.
+    card_kinds: HashMap<String, CardKind>,
+    /// Cards glowing after a state change: when it started and its color.
+    card_flashes: HashMap<String, (Instant, Color)>,
     /// Machine notices are projected into independent attached views only when
     /// this App has no local terminal surface.
     engine_headless: bool,
@@ -3274,6 +3279,9 @@ impl App {
             notice: None,
             notice_seen: None,
             show_keys: false,
+            reveal_started: None,
+            card_kinds: HashMap::new(),
+            card_flashes: HashMap::new(),
             engine_headless: false,
             machine_notice: None,
             machine_notice_cursor: 0,
@@ -3630,15 +3638,20 @@ impl App {
                 self.dirty = true;
             }
         }
-        // Planning spins at full speed; a busy card or an in-progress notice
-        // spins at a calmer cadence so a fleet of running agents does not turn
-        // into a redraw loop.
+        // Frames only while something moves, capped near 11 fps: planning,
+        // the startup reveal, a card flash, an in-progress notice, or a working
+        // card's shimmer (only when the card list is on screen). Idle draws
+        // nothing extra.
+        if self.reveal_started.is_some_and(|started| now.duration_since(started) >= REVEAL_FOR + ANIM_FRAME * 2) {
+            self.reveal_started = None;
+        }
         let interval = if self.has_planning_orchestrator() {
             SPINNER_FRAME_INTERVAL
-        } else if self.notice.as_deref().is_some_and(notice_in_progress)
-            || self.agents.iter().any(agent_is_busy)
+        } else if motion_pending(self, now)
+            || self.notice.as_deref().is_some_and(notice_in_progress)
+            || (self.agents_area.is_some() && self.agents.iter().any(agent_is_busy))
         {
-            CARD_SPINNER_FRAME_INTERVAL
+            ANIM_FRAME
         } else {
             return false;
         };
@@ -4125,6 +4138,10 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return self.confirm_or_quit();
+        }
+        // Any key skips the startup reveal (and still does its normal job).
+        if self.reveal_started.take().is_some() {
+            self.dirty = true;
         }
         // The keys overlay is read-only: any key closes it and is spent there.
         if self.show_keys {
@@ -6704,6 +6721,9 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.reveal_started.take().is_some() {
+            self.dirty = true;
+        }
         if self.gods_view {
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.note_user_activity();
@@ -21380,6 +21400,11 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
         if ownership.is_fabric() {
             println!("{}", serde_json::to_string(&ready)?);
             io::stdout().flush()?;
+        }
+        // A short reveal on a real screen: the wordmark draws in and the cards
+        // fade in one after another. Drawing only; input works throughout.
+        if terminal.is_some() {
+            app.reveal_started = Some(Instant::now());
         }
 
         loop {

@@ -16,7 +16,7 @@ async function finishedWorker(t, prefix) {
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completer, cols: 160, rows: 40 });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("write the done marker");
   await session.press("Enter");
   // The completer exits after writing DONE.txt; the row reaches review.
@@ -30,7 +30,7 @@ test("⌥d opens a diff panel with the worker's change set and Esc closes it", {
   await session.press("2");
 
   await session.write(ALT_D);
-  await session.waitForText("┌ diff", { timeout: 10_000 });
+  await session.waitForText("╭ diff", { timeout: 10_000 });
   // The panel parses the real jj diff of the workspace: the completer's file,
   // its one added line, and the running totals in the title.
   await session.waitForText("DONE.txt", { timeout: 15_000 });
@@ -38,20 +38,21 @@ test("⌥d opens a diff panel with the worker's change set and Esc closes it", {
   assert.ok(screen.includes("+1 −0"), `stats for the one-line file:\n${screen}`);
   assert.ok(screen.includes("done marker"), `the added line itself:\n${screen}`);
   assert.ok(screen.includes("A DONE.txt"), `an added file is badged A:\n${screen}`);
-  assert.ok(screen.includes("┌ worker"), `the worker pane stays beside it:\n${screen}`);
+  assert.ok(screen.includes("╭ claude"), `the worker pane stays beside it:\n${screen}`);
 
   // ⌥h solos the focused panel: the diff fills the screen, nothing else drawn.
   await session.write(ALT_H);
   await session.waitFor(
-    (s) => s.includes("┌ diff") && !s.includes("┌ agents") && !s.includes("┌ worker"),
+    // The header row (wordmark, branch) is only drawn with the split.
+    (s) => s.includes("╭ diff") && !s.includes("\u2387") && !s.includes("╭ claude"),
     { timeout: 10_000, label: "the diff panel alone on screen" },
   );
   await session.write(ALT_H);
-  await session.waitForText("┌ agents", { timeout: 10_000 });
-  assert.ok((await session.screen()).includes("┌ diff"), "the split comes back with the panel");
+  await session.waitForText("\u2387", { timeout: 10_000 });
+  assert.ok((await session.screen()).includes("╭ diff"), "the split comes back with the panel");
 
   // Esc closes the panel and the worker pane widens again.
   await session.press("Escape");
-  await session.waitFor((s) => !s.includes("┌ diff"), { timeout: 10_000, label: "the diff panel closing" });
-  assert.ok((await session.screen()).includes("┌ worker"));
+  await session.waitFor((s) => !s.includes("╭ diff"), { timeout: 10_000, label: "the diff panel closing" });
+  assert.ok((await session.screen()).includes("╭ claude"));
 });

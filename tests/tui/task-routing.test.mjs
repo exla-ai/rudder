@@ -35,7 +35,7 @@ test("a discussion-only task keeps one checkout owner and cannot approve impleme
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   const task = "Just discuss the architecture and deployment plan; do not implement yet";
   await session.type(task);
@@ -72,7 +72,7 @@ test("retired gam and nudge commands show their replacement without launching wo
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   for (const [input, notice] of [
     ["/gam fix the caching bug", "/gam has been retired"],

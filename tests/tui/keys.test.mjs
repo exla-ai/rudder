@@ -48,7 +48,7 @@ async function twoWorkerDashboard(t, prefix, { fakeBrowser = false } = {}) {
     t.after(async () => { await host.close(); authority.close(); });
   }
   const session = await launchRudder(t, { repo, claudeBin: sleeper, env });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("alpha worker");
   await session.press("Enter");
   await session.waitForText("working", { timeout: 30_000 });
@@ -66,14 +66,14 @@ async function twoWorkerDashboard(t, prefix, { fakeBrowser = false } = {}) {
   return { repo, session, browserLog };
 }
 
-/** The task on the currently-selected (▶) row. */
+/** The title row of the selected card: the first row inside its outline. */
 async function selectedRow(session) {
   const screen = await session.screen();
-  const line = screen.split("\n").find((l) => l.includes("▶"));
+  const line = screen.split("\n").find((l) => /^ \u2502 /.test(l));
   return line ?? "";
 }
 
-/** Poll until the selected (▶) row contains `task`. */
+/** Poll until the selected card's title contains `task`. */
 async function waitSelected(session, task, timeout = 10_000) {
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -105,9 +105,9 @@ test("Alt+h hides the panes and never moves the selection", { timeout: 60_000 },
   // Focus is the agents pane here, so full screen keeps THAT one and drops the
   // worker pane and the task line with it.
   await session.press("Alt+h");
-  await session.waitForGone("Type a task", { timeout: 10_000 });
+  await session.waitForGone("describe a task", { timeout: 10_000 });
   await session.press("Alt+h");
-  await session.waitForText("Type a task", { timeout: 10_000 });
+  await session.waitForText("describe a task", { timeout: 10_000 });
   await waitSelected(session, "beta worker");
 });
 
@@ -116,9 +116,9 @@ test("v opens the diff panel and Esc closes it", { timeout: 60_000 }, async (t) 
   // diff panel on screen (and focuses it), so Esc is the way back.
   const { session } = await twoWorkerDashboard(t, "rudder-tui-diff-");
   await session.press("v");
-  await session.waitForText("┌ diff", { timeout: 15_000 });
+  await session.waitForText("╭ diff", { timeout: 15_000 });
   await session.press("Escape");
-  await session.waitForGone("┌ diff", { timeout: 15_000 });
+  await session.waitForGone("╭ diff", { timeout: 15_000 });
 });
 
 test("r opens rename on the selected row; Esc cancels", { timeout: 60_000 }, async (t) => {
@@ -185,7 +185,7 @@ test("cc clears merged rows from the list (two-press)", { timeout: 120_000 }, as
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("mergeable task");
   await session.press("Enter");

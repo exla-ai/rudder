@@ -17,16 +17,27 @@ import {
 
 assertPrerequisites();
 
-// Rudder's theme (native/src/theme.rs): running amber, merged green.
-const RUNNING = "#b45309";
-const MERGED = "#15803d";
+// Rudder's theme (native/src/theme.rs, dark palette: the test terminal does
+// not report its colors): running blue, merged violet.
+const RUNNING = "#6cb6ff";
+const MERGED = "#a394ff";
+
+/** A working status shimmers: a light band sweeps across it frame by frame,
+ * so its exact shade moves. It always stays in the running blue family. */
+function isRunningBlue(fg) {
+  const hex = String(fg).toLowerCase();
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/.exec(hex);
+  if (!match) return false;
+  const [r, g, b] = match.slice(1).map((part) => parseInt(part, 16));
+  return b > g && g > r;
+}
 
 test("a running worker's status renders in the running color", { timeout: 60_000 }, async (t) => {
   const repo = await scratchRepo("rudder-tui-vis-run-");
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("a colored running task");
   await session.press("Enter");
@@ -34,10 +45,9 @@ test("a running worker's status renders in the running color", { timeout: 60_000
 
   const style = await session.styleAt("working");
   assert.ok(style, "the running status label is on screen");
-  assert.equal(
-    String(style.fg).toLowerCase(),
-    RUNNING,
-    "the running status is rendered in the running (amber) color",
+  assert.ok(
+    isRunningBlue(style.fg),
+    `the running status is rendered in the running (blue) color, got ${style.fg}`,
   );
 });
 
@@ -46,7 +56,7 @@ test("running and merged statuses render in DIFFERENT colors", { timeout: 120_00
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completer });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("a task that merges");
   await session.press("Enter");
@@ -66,7 +76,7 @@ test("running and merged statuses render in DIFFERENT colors", { timeout: 120_00
   assert.equal(
     String(merged.fg).toLowerCase(),
     MERGED,
-    "a merged worker is rendered in the merged (green) color — distinct from running amber",
+    "a merged worker is rendered in the merged (violet) color, distinct from running blue",
   );
   assert.notEqual(String(merged.fg).toLowerCase(), RUNNING, "state colors are not identical");
 });

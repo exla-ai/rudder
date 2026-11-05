@@ -39,7 +39,7 @@ test("mouse wheel scrolls the worker pane through real SGR sequences", { timeout
   t.after(() => removeScratch(repo));
   const scroller = await scrollerBackend(repo, 200);
   const session = await launchRudder(t, { repo, claudeBin: scroller });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("fill the pane");
   await session.press("Enter");
   await session.waitForText("LINE-200", { timeout: 30_000 });
@@ -66,7 +66,7 @@ test("Alt+u/k/j/n travel the worker scrollback without typing into the agent", {
   t.after(() => removeScratch(repo));
   const scroller = await scrollerBackend(repo, 200);
   const session = await launchRudder(t, { repo, claudeBin: scroller });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("fill the pane");
   await session.press("Enter");

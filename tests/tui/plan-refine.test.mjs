@@ -28,7 +28,7 @@ test("typing after a plan lands refines it with the planner", { timeout: 90_000 
   t.after(() => removeScratch(repo));
   const { claudeBin, stdinLog } = await interactiveOrchestratorBackend(repo, 2);
   const session = await launchRudder(t, { repo, claudeBin });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
 
   await session.type("/plan build the thing");
   await session.press("Enter");
@@ -70,7 +70,7 @@ test("the plan review editor can type letters that are also nav keys", { timeout
   t.after(() => removeScratch(repo));
   const { claudeBin } = await interactiveOrchestratorBackend(repo, 2);
   const session = await launchRudder(t, { repo, claudeBin });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("/plan build the thing");
   await session.press("Enter");
   await session.waitForText("Plan ready", { timeout: 30_000 });
@@ -103,7 +103,7 @@ test("a task in a plain directory says isolation is off instead of failing quiet
   const { claudeBin } = await interactiveOrchestratorBackend(dir, 1);
 
   const session = await launchRudder(t, { repo: dir, claudeBin });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("do some work here");
   await session.press("Enter");
 

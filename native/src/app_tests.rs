@@ -7108,8 +7108,10 @@ fn a_notice_does_not_resize_the_worker_pane_while_typing_into_an_agent() {
     app.notice = Some("a long notice that wraps over several rows of the task bar ".repeat(3));
     assert_eq!(task_pane_height(&app, 40), base_height);
 
+    // Focused or not, a notice never resizes the prompt: it shows as a pill
+    // and then in the footer, so the worker's PTY keeps its size.
     app.focus = FocusPane::Task;
-    assert!(task_pane_height(&app, 40) > base_height);
+    assert_eq!(task_pane_height(&app, 40), base_height);
 }
 
 #[test]
@@ -29035,4 +29037,108 @@ fn the_home_cleanup_parks_only_idle_agents_and_a_woken_row_forgets_it() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- 4.2 look: keys overlay, footer, motion ----------------------------------
+
+#[test]
+fn question_mark_opens_the_keys_overlay_and_the_next_key_only_closes_it() {
+    let mut app = App::new();
+    app.agents = vec![test_agent_run("a", "first task"), test_agent_run("b", "second task")];
+    app.selected_agent = 0;
+    app.focus = FocusPane::Agents;
+    let before = render_screen(&mut app, 120, 40);
+    assert!(!before.contains("clear merged"), "{before}");
+    assert!(before.contains("? keys"), "the footer points at the overlay:\n{before}");
+
+    app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+    let open = render_screen(&mut app, 120, 40);
+    assert!(open.contains("clear merged") && open.contains("god's view"), "{open}");
+
+    // The key that closes the overlay is spent there: j does not move.
+    app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+    assert!(!app.show_keys);
+    assert_eq!(app.selected_agent, 0);
+    let closed = render_screen(&mut app, 120, 40);
+    assert!(!closed.contains("clear merged"), "{closed}");
+}
+
+#[test]
+fn question_mark_on_an_empty_prompt_opens_keys_but_types_inside_a_draft() {
+    let mut app = App::new();
+    app.focus = FocusPane::Task;
+    app.handle_task_key(KeyEvent::from(KeyCode::Char('?')));
+    assert!(app.show_keys);
+    assert!(app.task_input.is_empty());
+
+    app.show_keys = false;
+    app.task_input = "why".to_string();
+    app.task_cursor = 3;
+    app.handle_task_key(KeyEvent::from(KeyCode::Char('?')));
+    assert!(!app.show_keys);
+    assert_eq!(app.task_input, "why?");
+}
+
+#[test]
+fn a_card_flashes_when_its_agent_changes_state_but_not_on_first_sight() {
+    let mut app = App::new();
+    app.agents = vec![test_agent_run("a", "first task")];
+    let now = Instant::now();
+    note_card_changes(&mut app, now);
+    assert!(app.card_flashes.is_empty(), "a reload is calm");
+
+    app.agents[0].status = AgentStatus::Done;
+    note_card_changes(&mut app, now);
+    let (_, color) = app.card_flashes.get("a").expect("finishing flashes the card");
+    assert_eq!(*color, pal().done);
+    assert!(motion_pending(&app, now));
+    assert!(!motion_pending(&app, now + FLASH_FOR + ANIM_FRAME * 3), "the flash ends");
+
+    // Gone agents leave no state behind.
+    app.agents.clear();
+    note_card_changes(&mut app, now);
+    assert!(app.card_kinds.is_empty() && app.card_flashes.is_empty());
+}
+
+#[test]
+fn the_working_shimmer_sweeps_across_the_status() {
+    let base = pal().running;
+    let frame_a: Vec<_> = shimmer_spans("working", base, 1).iter().map(|s| s.style.fg).collect();
+    let frame_b: Vec<_> = shimmer_spans("working", base, 3).iter().map(|s| s.style.fg).collect();
+    assert_eq!(frame_a.len(), 7);
+    assert_ne!(frame_a, frame_b, "the band moves from frame to frame");
+    let text: String = shimmer_spans("working", base, 2).iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "working", "the words never change, only their light");
+}
+
+#[test]
+fn an_idle_dashboard_asks_for_no_animation_frames() {
+    let mut app = App::new();
+    let later = Instant::now() + Duration::from_secs(5);
+    app.dirty = false;
+    assert!(!app.advance_spinner_if_due(later), "nothing moves, nothing is drawn");
+    assert!(!app.dirty);
+
+    // A working card on screen animates, capped at one frame per ANIM_FRAME.
+    let mut run = test_agent_run("a", "busy task");
+    run.status = AgentStatus::Running;
+    app.agents = vec![run];
+    app.agents_area = Some(Rect::new(0, 0, 34, 20));
+    assert!(app.advance_spinner_if_due(later));
+    assert!(!app.advance_spinner_if_due(later + ANIM_FRAME / 2), "no faster than the cap");
+    assert!(app.advance_spinner_if_due(later + ANIM_FRAME));
+
+    // With the card list hidden there is nothing to animate.
+    app.agents_area = None;
+    assert!(!app.advance_spinner_if_due(later + ANIM_FRAME * 3));
+}
+
+#[test]
+fn any_key_skips_the_startup_reveal() {
+    let mut app = App::new();
+    app.reveal_started = Some(Instant::now());
+    assert!(reveal_progress(&app, Instant::now()).is_some());
+    app.focus = FocusPane::Agents;
+    app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+    assert!(app.reveal_started.is_none());
 }

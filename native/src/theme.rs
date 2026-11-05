@@ -208,3 +208,49 @@ pub(crate) fn pal() -> Palette {
         LIGHT
     }
 }
+
+/// The canvas behind the chrome: the terminal's own background when it told
+/// us, otherwise a typical dark or light one. Fades and flashes blend toward it.
+pub(crate) fn canvas() -> Color {
+    if color_mode() == ColorMode::Paper {
+        return PAPER;
+    }
+    if let Some(colors) = rudder_native::term_colors::terminal_colors() {
+        let [r, g, b] = colors.bg;
+        return Color::Rgb(r, g, b);
+    }
+    if DARK_CHROME.with(std::cell::Cell::get) {
+        Color::Rgb(0x12, 0x12, 0x18)
+    } else {
+        PAPER
+    }
+}
+
+/// Default text color for blending: the terminal's foreground when known.
+pub(crate) fn ink() -> Color {
+    if color_mode() == ColorMode::Paper {
+        return INK;
+    }
+    if let Some([r, g, b]) = rudder_native::term_colors::terminal_colors().and_then(|c| c.fg) {
+        return Color::Rgb(r, g, b);
+    }
+    if DARK_CHROME.with(std::cell::Cell::get) {
+        Color::Rgb(0xE6, 0xE6, 0xF0)
+    } else {
+        INK
+    }
+}
+
+/// Mix `from` toward `to` by `t` (0 keeps `from`, 1 is `to`). Non-RGB colors
+/// snap at the halfway point instead of blending.
+pub(crate) fn blend(from: Color, to: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ if t < 0.5 => from,
+        _ => to,
+    }
+}

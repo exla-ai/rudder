@@ -59,7 +59,7 @@ async function runningWorker(t, prefix, backend) {
   const repo = await scratchRepo(prefix);
   t.after(() => removeScratch(repo));
   const session = await launchRudder(t, { repo, claudeBin: backend });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("do the thing");
   await session.press("Enter");
   return session;
@@ -72,7 +72,7 @@ test("answering a waiting agent actually clears its badge", { timeout: 90_000 },
   // forever, because the signal file was re-read every tick and never consumed.
   const backend = await signallingBackend(repo, "claude-asker", [[2, "input"]]);
   const session = await launchRudder(t, { repo, claudeBin: backend });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("do the thing");
   await session.press("Enter");
 
@@ -115,7 +115,7 @@ test("a permission block reads as needing permission, not as a question", { time
   // the commonest reason an agent stops dead had no native signal at all.
   const backend = await signallingBackend(repo, "claude-blocked", [[2, "permission"]]);
   const session = await launchRudder(t, { repo, claudeBin: backend });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("do the thing");
   await session.press("Enter");
 
@@ -138,7 +138,7 @@ test("the backend saying it resumed lifts the wait with no keystroke in rudder",
     [3, "working"],
   ]);
   const session = await launchRudder(t, { repo, claudeBin: backend });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   await session.type("do the thing");
   await session.press("Enter");
 

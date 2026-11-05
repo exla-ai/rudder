@@ -21,7 +21,7 @@ async function dashboard(t, prefix) {
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: sleeper });
-  await session.waitForText("Type a task", { timeout: 20_000 });
+  await session.waitForText("describe a task", { timeout: 20_000 });
   return session;
 }
 

@@ -45,9 +45,10 @@ export const TOOL_CACHE_LIMITS: Record<string, number> = {
 
 export function toolCacheRoot(env: NodeJS.ProcessEnv = process.env): string {
   if (env.RUDDER_TOOL_CACHE_DIR) return env.RUDDER_TOOL_CACHE_DIR;
-  // A Cloud machine's one build cache (cloud/worker/cache-env.sh, on the
-  // volume): agents share it with everything else running there.
-  if (env.RUDDER_CACHE_DIR) return env.RUDDER_CACHE_DIR;
+  // Never derive this from anything that differs between processes or
+  // versions (such as a Cloud supervisor's RUDDER_CACHE_DIR): Cargo records
+  // CARGO_HOME's paths in its build fingerprints, so a moved CARGO_HOME
+  // rebuilds every dependency in every warm snapshot and checkout.
   const base = env.XDG_CACHE_HOME || path.join(env.HOME || os.homedir(), ".cache");
   return path.join(base, "rudder", "tool-cache");
 }

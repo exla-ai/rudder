@@ -29,10 +29,11 @@ test("agents and the builder share one read-write sccache and the same stores", 
   }
 });
 
-test("a Cloud machine's build cache is the tool cache; a laptop uses ~/.cache", () => {
-  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_CACHE_DIR: "/workspace/cache/build" }), "/workspace/cache/build");
-  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_CACHE_DIR: "/workspace/cache/build", RUDDER_TOOL_CACHE_DIR: "/x" }), "/x");
-  assert.equal(toolCacheRoot({ HOME: "/Users/u" }), path.join("/Users/u", ".cache", "rudder", "tool-cache"));
+test("the tool cache stays in one place, so CARGO_HOME never moves under a build", () => {
+  const home = path.join("/home/u", ".cache", "rudder", "tool-cache");
+  assert.equal(toolCacheRoot({ HOME: "/home/u" }), home);
+  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_CACHE_DIR: "/workspace/cache/build" }), home, "a supervisor's cache dir does not move it");
+  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_TOOL_CACHE_DIR: "/x" }), "/x");
 });
 
 test("sccache strips the build directory from its keys so workspaces share crates", (t) => {

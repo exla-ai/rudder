@@ -1132,12 +1132,16 @@ brain lives in the cloud, and the phone is a first-class client.
   external host, the supervisor not answering) or every builder busy past
   `--wait`, `rudder-burst` runs the command on the home and says so on stderr,
   so following the skill never fails a build.
-- **One build cache per Cloud machine.** `cache-env.sh` sets `RUDDER_CACHE_DIR`
-  (`/workspace/cache/build` on a home) and `toolCacheRoot` uses it, so agents,
-  the warm snapshot builder and the supervisor share the same npm, pnpm, uv,
-  pip, cargo, Turborepo, Nx and sccache directories. The worker image ships a
-  pinned sccache, so every Rust build there goes through one read-write sccache
-  server per machine (`src/tool-cache.ts` explains why not read-only). Each
+- **Build caches on a Cloud machine.** Agents and the warm snapshot builder
+  share `~/.cache/rudder/tool-cache` (on the volume through `persistHomeDirs`):
+  npm, pnpm, uv, pip, cargo, Turborepo, Nx and sccache. It never moves: Cargo
+  records CARGO_HOME's paths in its fingerprints, so a snapshot built with one
+  CARGO_HOME rebuilds every dependency under another (measured: all deps
+  recompiled after only CARGO_HOME changed). The supervisor's `cache-env.sh`
+  cache (`/workspace/cache/build`) is separate and only holds downloads. The
+  worker image ships a pinned sccache, so every Rust build there goes through
+  one read-write sccache server per machine (`src/tool-cache.ts` explains why
+  not read-only). Each
   agent and the warm builder pass their build directory as `SCCACHE_BASEDIRS`
   (sccache keys hold absolute target paths), so crates compiled in one
   workspace hit in another. Incremental compiles (a crate's own debug build)

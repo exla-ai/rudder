@@ -219,11 +219,14 @@ stopped. Left on Fly: the control plane, the old home above, three stopped
 homes of other accounts (two people and the App Store review account) and the
 stopped dad-job-apply workspace. The burst pool stays off (an external host
 cannot reach Fly's private network); `rudder-burst` now runs the command on
-the home instead of failing. 4.2.4 ships sccache in the worker image, one
-read-write cache per machine (`RUDDER_CACHE_DIR`), and these reach the home
-when it next updates while idle. The Rudder repo's warm snapshot rebuilds on
-the next agent launch (one failed inside an old sccache binary, one lost its
-ready marker in the machine move); Offstage has never built one.
+the home instead of failing. 4.2.4 ships sccache in the worker image with
+per-workspace keys; 4.2.5 keeps the tool cache (and CARGO_HOME) where it was,
+since a moved CARGO_HOME rebuilds every dependency. These reach the home
+when it next updates while idle. Warm snapshots were rebuilt by hand for the
+jj projects with something to build (exla-ai-rudder, libra, offstage,
+vibeprint, viraat-gazette); an earlier Rudder one failed inside an old sccache
+binary. Repos without root lockfiles (smol, snap, raindrop, ...) get a plain
+checkout, and non-jj repos get a snapshot after their first worktree agent.
 
 Cloud link clicks (2026-11-05, not released): a click on a link in a
 `rudder cloud` pane ran `xdg-open` on the home, which has none. The dashboard

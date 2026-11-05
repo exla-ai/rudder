@@ -88,7 +88,10 @@ one-line prompt pill, a footer with the keys for the current pane and `?` for
 all keys. Motion only while something moves (about 11 fps cap): a 600ms
 startup reveal any key skips, a shimmer on working cards, a short glow when a
 card changes state. Notices show as a pill and then settle into the footer and
-never resize the prompt.
+never resize the prompt. Pill words and footer keys use the terminal's own
+text color (`term_fg()`, `Color::Reset`), so they read on a light, dark or
+unreported background; severity shows in the glyph and border. The faint grey
+is for hairlines and separators only, never words (theme.rs has a contrast test).
 
 ## 3. Status of every agent
 

@@ -8334,21 +8334,24 @@ fn esc_dismisses_the_notice_without_being_consumed() {
 #[test]
 fn notice_style_colors_errors_and_pending_confirms() {
     assert_eq!(
-        notice_style("merge stopped: boom", true).fg,
+        notice_style("merge stopped: boom").fg,
         Some(pal().failed)
     );
     assert_eq!(
-        notice_style(
-            "delete x? press d again to confirm · any other key cancels",
-            true
-        )
-        .fg,
+        notice_style("delete x? press d again to confirm · any other key cancels").fg,
         Some(pal().waiting)
     );
+    // Routine status settles into the footer muted, never in the faint grey.
     assert_eq!(
-        notice_style("integrated 2 nodes locally · dependents unblocked", true).fg,
-        muted_style(true).fg
+        notice_style("integrated 2 nodes locally · dependents unblocked").fg,
+        Some(pal().muted)
     );
+    assert_eq!(
+        notice_kind("delete x? press d again to confirm · any other key cancels"),
+        NoticeKind::Confirm
+    );
+    assert_eq!(notice_kind("merge stopped: boom"), NoticeKind::Error);
+    assert_eq!(notice_kind("deleted agent from dashboard"), NoticeKind::Info);
 }
 
 #[test]

@@ -153,12 +153,9 @@ pub(crate) struct Palette {
     pub failed: Color,
     /// Secondary text.
     pub muted: Color,
-    /// Hairlines and the quietest text.
+    /// Hairlines and separators. Too low in contrast for words someone has to
+    /// read; use `muted` or `term_fg()` for those.
     pub faint: Color,
-    /// A soft fill behind the selected card and the notice pill.
-    pub surface: Color,
-    /// Text drawn on top of `surface`.
-    pub on_surface: Color,
 }
 
 const DARK: Palette = Palette {
@@ -170,8 +167,6 @@ const DARK: Palette = Palette {
     failed: Color::Rgb(0xFF, 0x7A, 0x7A),
     muted: Color::Rgb(0x8C, 0x93, 0xA3),
     faint: Color::Rgb(0x4E, 0x55, 0x63),
-    surface: Color::Rgb(0x25, 0x26, 0x38),
-    on_surface: Color::Rgb(0xE6, 0xE6, 0xF0),
 };
 
 const LIGHT: Palette = Palette {
@@ -183,8 +178,6 @@ const LIGHT: Palette = Palette {
     failed: Color::Rgb(0xD0, 0x30, 0x30),
     muted: Color::Rgb(0x6B, 0x72, 0x80),
     faint: Color::Rgb(0xB4, 0xBA, 0xC4),
-    surface: Color::Rgb(0xEC, 0xEA, 0xFB),
-    on_surface: Color::Rgb(0x1A, 0x1A, 0x1A),
 };
 
 thread_local! {
@@ -209,6 +202,11 @@ pub(crate) fn pal() -> Palette {
     }
 }
 
+/// A typical dark terminal's background and text, for a terminal that did not
+/// report its colors. The light variant uses PAPER and INK.
+const DARK_CANVAS: Color = Color::Rgb(0x12, 0x12, 0x18);
+const DARK_INK: Color = Color::Rgb(0xE6, 0xE6, 0xF0);
+
 /// The canvas behind the chrome: the terminal's own background when it told
 /// us, otherwise a typical dark or light one. Fades and flashes blend toward it.
 pub(crate) fn canvas() -> Color {
@@ -220,7 +218,7 @@ pub(crate) fn canvas() -> Color {
         return Color::Rgb(r, g, b);
     }
     if DARK_CHROME.with(std::cell::Cell::get) {
-        Color::Rgb(0x12, 0x12, 0x18)
+        DARK_CANVAS
     } else {
         PAPER
     }
@@ -235,7 +233,18 @@ pub(crate) fn ink() -> Color {
         return Color::Rgb(r, g, b);
     }
     if DARK_CHROME.with(std::cell::Cell::get) {
-        Color::Rgb(0xE6, 0xE6, 0xF0)
+        DARK_INK
+    } else {
+        INK
+    }
+}
+
+/// The terminal's own text color, for words that must always be readable
+/// (notices, the keys in the footer). `Reset` inherits the user's theme, so it
+/// reads on a light, dark or unreported background alike; paper mode keeps ink.
+pub(crate) fn term_fg() -> Color {
+    if terminal_background_mode() {
+        Color::Reset
     } else {
         INK
     }
@@ -252,5 +261,90 @@ pub(crate) fn blend(from: Color, to: Color, t: f32) -> Color {
         }
         _ if t < 0.5 => from,
         _ => to,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2 contrast ratio between two RGB colors, from 1 to 21.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("not an RGB color: {color:?}");
+            };
+            let channel = |c: u8| {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    struct RestoreChrome;
+    impl Drop for RestoreChrome {
+        fn drop(&mut self) {
+            DARK_CHROME.with(|cell| cell.set(true));
+            set_color_mode(ColorMode::Terminal);
+        }
+    }
+
+    #[test]
+    fn notice_pill_and_footer_text_read_on_dark_and_light_terminals() {
+        let _restore = RestoreChrome;
+        // Each variant against the background and text a terminal of that kind
+        // typically has: what canvas() and ink() fall back to when it does not
+        // report its colors. `Reset` is the terminal's own text color.
+        let variants = [("dark", true, DARK_CANVAS, DARK_INK), ("light", false, PAPER, INK)];
+        for (variant, dark, bg, fg) in variants {
+            set_color_mode(ColorMode::Terminal);
+            DARK_CHROME.with(|cell| cell.set(dark));
+            let resolve = |color: Option<Color>| match color {
+                None | Some(Color::Reset) => fg,
+                Some(color) => color,
+            };
+            for kind in [NoticeKind::Info, NoticeKind::Error, NoticeKind::Confirm] {
+                let colors = notice_pill_colors(kind);
+                // The words inherit the terminal's theme instead of a fixed
+                // color that only suits one background.
+                assert_eq!(colors.text.fg, Some(Color::Reset), "{variant} {kind:?} pill text");
+                assert!(
+                    !colors.text.add_modifier.contains(Modifier::DIM),
+                    "{variant} {kind:?} pill text is dim"
+                );
+                let text = contrast(resolve(colors.text.fg), bg);
+                assert!(text >= 4.5, "{variant} {kind:?} pill text contrast {text:.2}");
+                let glyph = contrast(colors.glyph, bg);
+                assert!(glyph >= 4.5, "{variant} {kind:?} pill glyph contrast {glyph:.2}");
+                let border = contrast(colors.border, bg);
+                assert!(border >= 3.0, "{variant} {kind:?} pill border contrast {border:.2}");
+            }
+            assert!(
+                notice_pill_colors(NoticeKind::Confirm)
+                    .text
+                    .add_modifier
+                    .contains(Modifier::BOLD),
+                "{variant}: a pending confirmation is the most legible notice"
+            );
+            // A notice settled into the footer, and the footer's key labels.
+            for text in ["deleted agent from dashboard", "merge stopped: boom"] {
+                let ratio = contrast(resolve(notice_style(text).fg), bg);
+                assert!(ratio >= 4.5, "{variant} footer notice {text:?} contrast {ratio:.2}");
+            }
+            let muted = contrast(pal().muted, bg);
+            assert!(muted >= 4.5, "{variant} muted contrast {muted:.2}");
+        }
+        // Paper mode paints its own canvas, so the words are ink, not Reset.
+        set_color_mode(ColorMode::Paper);
+        DARK_CHROME.with(|cell| cell.set(false));
+        assert_eq!(notice_pill_colors(NoticeKind::Confirm).text.fg, Some(INK));
+        assert!(contrast(INK, PAPER) >= 4.5);
     }
 }

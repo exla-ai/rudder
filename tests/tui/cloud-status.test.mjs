@@ -21,7 +21,7 @@ assertPrerequisites();
 
 // theme.rs dark palette (the test terminal does not report its colors).
 const CLOUD_ACCENT = "#a394ff"; // accent: connected
-const FAINT_GRAY = "#4e5563"; // faint: how "cloud offline" renders
+const OFFLINE_GRAY = "#8c93a3"; // muted: how "cloud offline" renders
 
 test("inside a cloud worker the dashboard shows its own workspace, connected, in the accent", { timeout: 60_000 }, async (t) => {
   const repo = await scratchRepo("rudder-tui-cloudws-");
@@ -53,14 +53,14 @@ test("inside a cloud worker the dashboard shows its own workspace, connected, in
   );
 
   // The visual truth: "cloud connected" renders in the accent. If the words
-  // were right but painted in the faint offline gray, the user would still
+  // were right but painted in the offline gray, the user would still
   // read it as broken. Sampled after the 600ms startup reveal, which fades
   // the header in.
   await new Promise((resolve) => setTimeout(resolve, 800));
   const style = await session.styleAt("cloud connected");
   assert.ok(style, "the connected line is visible on screen");
   assert.equal(style.fg, CLOUD_ACCENT, `connected renders in the accent, got ${style.fg}`);
-  assert.notEqual(style.fg, FAINT_GRAY, "connected must not use the offline gray");
+  assert.notEqual(style.fg, OFFLINE_GRAY, "connected must not use the offline gray");
 
   // And nothing structurally broken anywhere on the frame.
   await session.assertIntact();

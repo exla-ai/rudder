@@ -5177,11 +5177,17 @@ fn task_default_hint_static(app: &App) -> &'static str {
     }
 }
 
-/// Style for the transient notice line, by severity. Errors and pending
-/// confirmations must not read like routine status: the notice is the only
-/// surface many failures have, and an all-muted line buried them. Keyed off the
-/// message text so the ~60 notice call sites need no extra state to maintain.
-pub(crate) fn notice_style(text: &str, focused: bool) -> Style {
+/// What a notice asks of the user. Keyed off the message text so the ~60
+/// notice call sites need no extra state to maintain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NoticeKind {
+    Info,
+    Error,
+    /// A pending confirmation such as "press d again".
+    Confirm,
+}
+
+pub(crate) fn notice_kind(text: &str) -> NoticeKind {
     const ERROR_MARKERS: &[&str] = &[
         "failed",
         "error",
@@ -5197,11 +5203,49 @@ pub(crate) fn notice_style(text: &str, focused: bool) -> Style {
     const CONFIRM_MARKERS: &[&str] = &["press d again", "press q / ctrl+c again", "still running"];
     let lower = text.to_ascii_lowercase();
     if CONFIRM_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        Style::default().fg(pal().waiting)
+        NoticeKind::Confirm
     } else if ERROR_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        Style::default().fg(pal().failed)
+        NoticeKind::Error
     } else {
-        muted_style(focused)
+        NoticeKind::Info
+    }
+}
+
+/// Style for a notice settled into the footer, by severity. Errors and pending
+/// confirmations must not read like routine status: the notice is the only
+/// surface many failures have, and an all-muted line buried them. Routine
+/// status is muted, never faint: it is still something to read.
+pub(crate) fn notice_style(text: &str) -> Style {
+    let p = pal();
+    match notice_kind(text) {
+        NoticeKind::Confirm => Style::default().fg(p.waiting),
+        NoticeKind::Error => Style::default().fg(p.failed),
+        NoticeKind::Info => Style::default().fg(p.muted),
+    }
+}
+
+/// Colors for the notice pill. The words are the terminal's own text color on
+/// its own background, so they read in any theme, including one that did not
+/// report its colors; the severity shows in the glyph and the border. A pending
+/// confirmation is bold: it is about to delete or quit something.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NoticePillColors {
+    pub glyph: Color,
+    pub text: Style,
+    pub border: Color,
+}
+
+pub(crate) fn notice_pill_colors(kind: NoticeKind) -> NoticePillColors {
+    let p = pal();
+    let text = Style::default().fg(term_fg());
+    match kind {
+        NoticeKind::Info => NoticePillColors { glyph: p.accent, text, border: p.muted },
+        NoticeKind::Error => NoticePillColors { glyph: p.failed, text, border: p.failed },
+        NoticeKind::Confirm => NoticePillColors {
+            glyph: p.waiting,
+            text: text.add_modifier(Modifier::BOLD),
+            border: p.waiting,
+        },
     }
 }
 
@@ -6772,13 +6816,13 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         left.push(Span::styled(format!("  \u{2387} {branch}"), Style::default().fg(p.muted)));
     }
     if let Some(version) = rudder_version() {
-        left.push(Span::styled(format!("  {version}"), Style::default().fg(p.faint)));
+        left.push(Span::styled(format!("  {version}"), Style::default().fg(p.muted)));
     }
     if is_cloud_worker_session() {
         let connected = app.cloud_connected;
         left.push(Span::styled(
             if connected { "  \u{2601} cloud connected" } else { "  \u{2601} cloud offline" },
-            Style::default().fg(if connected { p.accent } else { p.faint }),
+            Style::default().fg(if connected { p.accent } else { p.muted }),
         ));
     }
     let mut right: Vec<Span<'static>> = Vec::new();
@@ -6891,6 +6935,8 @@ pub(crate) fn footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// Footer key hints: the key in the terminal's own text color, what it does in
+/// muted. Only the separator dots are faint.
 fn key_spans(keys: &[(&str, &str)]) -> Vec<Span<'static>> {
     let p = pal();
     let mut spans = vec![Span::raw(" ")];
@@ -6898,8 +6944,8 @@ fn key_spans(keys: &[(&str, &str)]) -> Vec<Span<'static>> {
         if index > 0 {
             spans.push(Span::styled("  \u{b7}  ", Style::default().fg(p.faint)));
         }
-        spans.push(Span::styled((*key).to_string(), Style::default().fg(p.muted)));
-        spans.push(Span::styled(format!(" {label}"), Style::default().fg(p.faint)));
+        spans.push(Span::styled((*key).to_string(), Style::default().fg(term_fg())));
+        spans.push(Span::styled(format!(" {label}"), Style::default().fg(p.muted)));
     }
     spans
 }
@@ -6930,15 +6976,13 @@ pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
         app.notice_seen = Some((text.to_string(), now));
     }
     let since = app.notice_seen.as_ref().map(|(_, at)| *at).unwrap_or(now);
-    let color = notice_style(text, true).fg;
-    let error = color == Some(pal().failed);
-    let ttl = if error { NOTICE_ERROR_PILL_FOR } else { NOTICE_PILL_FOR };
+    let kind = notice_kind(text);
+    let ttl = if kind == NoticeKind::Error { NOTICE_ERROR_PILL_FOR } else { NOTICE_PILL_FOR };
     // A pending confirmation ("press d again") and a long notice (a /help
     // listing) are meant to be acted on or read: they stay up until Esc or the
     // next notice instead of shrinking into the footer.
-    let confirm = color == Some(pal().waiting);
     notice_in_progress(text)
-        || confirm
+        || kind == NoticeKind::Confirm
         || text.chars().count() > 140
         || now.duration_since(since) < ttl
 }
@@ -6953,7 +6997,7 @@ pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         Some(text) if !notice_pill_visible(app, Instant::now()) => {
             let room = (area.width as usize).saturating_sub(spans_width(&keys) + 4);
             vec![
-                Span::styled(truncate_chars(&text, room), notice_style(&text, false)),
+                Span::styled(truncate_chars(&text, room), notice_style(&text)),
                 Span::raw(" "),
             ]
         }
@@ -6973,19 +7017,17 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     let Some(text) = app.notice.clone() else {
         return;
     };
-    let p = pal();
-    let color = notice_style(&text, true).fg.unwrap_or(p.muted);
+    let kind = notice_kind(&text);
+    let colors = notice_pill_colors(kind);
     let glyph = if notice_in_progress(&text) {
         app.spinner_glyph()
-    } else if color == p.failed {
-        "\u{2715}"
-    } else if color == p.waiting {
-        "!"
     } else {
-        "\u{2713}"
+        match kind {
+            NoticeKind::Error => "\u{2715}",
+            NoticeKind::Confirm => "!",
+            NoticeKind::Info => "\u{2713}",
+        }
     };
-    let glyph_color = if color == p.muted { p.accent } else { color };
-    let text_color = if color == p.muted { p.on_surface } else { color };
     // The pill is as wide as its text: a short notice stays small, a long one
     // (a /help listing, an error with its cause) widens and wraps only when
     // it must, so a sentence is not broken across rows needlessly.
@@ -7000,9 +7042,9 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
             Line::from(vec![
                 Span::styled(
                     if index == 0 { format!("{glyph} ") } else { "  ".to_string() },
-                    Style::default().fg(glyph_color),
+                    Style::default().fg(colors.glyph),
                 ),
-                Span::styled(row.clone(), Style::default().fg(text_color)),
+                Span::styled(row.clone(), colors.text),
             ])
         })
         .collect();
@@ -7023,7 +7065,7 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(if color == p.muted { p.faint } else { color }))
+                .border_style(Style::default().fg(colors.border))
                 .padding(ratatui::widgets::Padding::horizontal(1))
                 .style(app_style()),
         ),
@@ -7144,7 +7186,7 @@ pub(crate) fn render_keys_overlay(frame: &mut Frame<'_>, area: Rect, app: &App) 
             Block::default()
                 .title(Line::from(Span::styled(" keys ", Style::default().fg(p.muted))))
                 .title_bottom(
-                    Line::from(Span::styled(" esc close ", Style::default().fg(p.faint)))
+                    Line::from(Span::styled(" esc close ", Style::default().fg(p.muted)))
                         .right_aligned(),
                 )
                 .borders(Borders::ALL)

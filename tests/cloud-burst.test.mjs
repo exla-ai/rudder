@@ -75,6 +75,26 @@ test("arguments: options, the command, and refusals", () => {
   }
 });
 
+test("without a build pool the command runs here, with its output and exit code", () => {
+  const dir = tmp("rudder-burst-here-");
+  try {
+    const dead = path.join(dir, "no-supervisor.sock");
+    fs.writeFileSync(dead, "");
+    for (const socket of [undefined, dead]) {
+      const env = { ...process.env };
+      delete env.RUDDER_BURST_SOCKET;
+      if (socket) env.RUDDER_BURST_SOCKET = socket;
+      const ran = spawnSync(process.execPath, [BURST, "echo built; exit 3"], { cwd: dir, env, encoding: "utf8" });
+      assert.equal(ran.status, 3, ran.stderr);
+      assert.equal(ran.stdout, "built\n");
+      assert.match(ran.stderr, /running here instead/);
+    }
+    assert.equal(spawnSync(process.execPath, [BURST, "--or-local", "true"], { cwd: dir, env: { ...process.env, RUDDER_BURST_SOCKET: "" }, encoding: "utf8" }).status, 0, "the old flag is still accepted");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("worktrees of one repo share a build key; rsync args protect builder outputs", () => {
   const answers = {
     "git rev-parse --show-toplevel": "/home/rudder/.rudder/ws/agent-1",

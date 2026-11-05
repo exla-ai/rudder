@@ -96,6 +96,20 @@ RUN set -eux; \
     curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh; \
     uv --version
 
+# sccache: Rudder points every Rust build at the machine's shared compile cache
+# (src/tool-cache.ts sets RUSTC_WRAPPER when sccache is on PATH), so agents
+# reuse the warm snapshot builder's compiled crates instead of rebuilding them.
+ARG SCCACHE_VERSION=0.18.0
+ARG SCCACHE_SHA256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+RUN set -eux; \
+    url="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/sccache.tgz; \
+    echo "${SCCACHE_SHA256}  /tmp/sccache.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/sccache.tgz -C /tmp; \
+    install -m 0755 "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/bin/sccache; \
+    rm -rf /tmp/sccache.tgz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl"; \
+    sccache --version
+
 # GitHub CLI: clone-mode workspaces wire git credentials via `gh auth setup-git`
 # using the vault-delivered ~/.config/gh, and agents get `gh pr create`.
 RUN set -eux; \

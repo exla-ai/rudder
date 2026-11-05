@@ -2,13 +2,16 @@
 // uv, pip, cargo, Turborepo, Nx) point at shared directories so parallel
 // agents reuse each other's compile and install work.
 //
-// Trusted-writer rule: the warm-snapshot builder writes shared results; agents
-// read. sccache supports this directly (SCCACHE_LOCAL_RW_MODE=READ_ONLY). The
-// other tools have no read-only mode, so agents share them read-write. That is
-// acceptable because these stores are content-addressed or keyed by exact
-// package version/hash and the tools write entries atomically (temp file plus
-// rename), so a concurrent writer can add entries but cannot change what an
-// existing key resolves to. All agents on a machine run as the same user.
+// Agents and the warm-snapshot builder share every cache read-write. These
+// stores are content-addressed or keyed by exact package version/hash and the
+// tools write entries atomically (temp file plus rename), so a concurrent
+// writer can add entries but cannot change what an existing key resolves to.
+// All agents on a machine run as the same user, so a read-only mode would not
+// protect the directory anyway. sccache in particular runs one server per
+// machine and the first process to start it picks its mode; a read-only agent
+// server also never sees entries another server adds after it started. So
+// sccache is read-write for everyone and parallel agents reuse each other's
+// compiled crates.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +39,9 @@ export const TOOL_CACHE_LIMITS: Record<string, number> = {
 
 export function toolCacheRoot(env: NodeJS.ProcessEnv = process.env): string {
   if (env.RUDDER_TOOL_CACHE_DIR) return env.RUDDER_TOOL_CACHE_DIR;
+  // A Cloud machine's one build cache (cloud/worker/cache-env.sh, on the
+  // volume): agents share it with everything else running there.
+  if (env.RUDDER_CACHE_DIR) return env.RUDDER_CACHE_DIR;
   const base = env.XDG_CACHE_HOME || path.join(env.HOME || os.homedir(), ".cache");
   return path.join(base, "rudder", "tool-cache");
 }
@@ -79,7 +85,7 @@ export function toolCacheEnv(role: ToolCacheRole, options: ToolCacheOptions = {}
   if (has("sccache") && use("SCCACHE_DIR", "sccache")) {
     out.RUSTC_WRAPPER = "sccache";
     out.SCCACHE_CACHE_SIZE = `${Math.floor(TOOL_CACHE_LIMITS.sccache / 1024 ** 3)}G`;
-    out.SCCACHE_LOCAL_RW_MODE = role === "builder" ? "READ_WRITE" : "READ_ONLY";
+    out.SCCACHE_LOCAL_RW_MODE = "READ_WRITE";
   }
   if (has("pnpm")) use("npm_config_store_dir", "pnpm");
   if (has("npm")) use("npm_config_cache", "npm");

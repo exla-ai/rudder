@@ -1,6 +1,6 @@
 ---
 name: rudder-burst
-description: Use on a Rudder Cloud home (when `rudder-burst` is on PATH) before running a heavy command such as a release build, a full test suite, a large cargo/npm/pnpm/go/bazel build, or anything that pegs the CPU for minutes. Runs the command on a dedicated 16 CPU builder machine from the home's burst build pool instead of on the shared home, with the same exit code and streamed output. Not for quick commands, interactive programs, or work that needs services running on the home.
+description: Use on a Rudder Cloud home (when `rudder-burst` is on PATH) before running a heavy command such as a release build, a full test suite, a large cargo/npm/pnpm/go/bazel build, or anything that pegs the CPU for minutes. Runs the command on a dedicated 16 CPU builder machine from the home's burst build pool instead of on the shared home, with the same exit code and streamed output; without a pool it runs the command on the home. Not for quick commands, interactive programs, or work that needs services running on the home.
 ---
 
 # Heavy builds on the burst build pool
@@ -44,8 +44,6 @@ A trailing slash copies a directory's contents into the same directory at home.
 
 ## Options worth knowing
 
-- `--or-local`: run here when the pool is off or every builder is busy. Use it
-  in scripts that must not fail just because no builder is free.
 - `--env NAME=VALUE`: environment for the command (the home's environment is
   not copied; secrets the build needs must be passed explicitly).
 - `--git`: also upload `.git` (left out by default) for builds that run git.
@@ -54,11 +52,12 @@ A trailing slash copies a directory's contents into the same directory at home.
 - `rudder-burst clean`: delete this repo's build directory on a builder, for a
   corrupted cache.
 
-## When it says no
+## When there is no builder
 
-- Exit 69, "the build pool is not enabled": the pool is off for this account;
-  run the command locally.
-- Exit 75, "every builder is busy": other agents hold all builders. It already
-  waited (`--wait`, default 10 minutes); run locally or try again later.
+If the home has no build pool (it is off, or the home runs on its own host
+outside Fly) or every builder stays busy past `--wait` (default 10 minutes),
+`rudder-burst` says so on stderr ("running here instead") and runs the command
+on the home with the same output and exit code. There is no need to retry or
+to run it again yourself.
 - A cold start (first build in a while) takes a minute while the machine
   starts; the first build ever on a builder also installs Rust and Go.

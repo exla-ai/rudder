@@ -34,7 +34,9 @@ options:
   --key <name>       build directory on the builder (default: from the repo)
   --minutes <n>      lease length, renewed while the command runs (default 10)
   --wait <minutes>   how long to wait when every builder is busy (default 10)
-  --or-local         run the command here when no builder is available`;
+
+When this home has no build pool (it is off, or the home runs on a host
+outside Fly), or every builder stays busy, the command runs here instead.`;
 
 class BurstError extends Error {
   constructor(message, code = EXIT.failed) {
@@ -44,7 +46,7 @@ class BurstError extends Error {
 }
 
 export function parseArgs(argv) {
-  const opts = { pull: [], exclude: [], env: {}, git: false, sync: true, key: "", minutes: 10, wait: 10, orLocal: false, command: [], action: "run" };
+  const opts = { pull: [], exclude: [], env: {}, git: false, sync: true, key: "", minutes: 10, wait: 10, command: [], action: "run" };
   if (argv[0] === "status" || argv[0] === "clean") {
     opts.action = argv[0];
     argv = argv.slice(1);
@@ -73,7 +75,9 @@ export function parseArgs(argv) {
       const n = Number(value(++i, arg));
       if (!Number.isFinite(n) || n < 0) throw new BurstError(`${arg} wants a number of minutes`, EXIT.usage);
       opts[arg.slice(2)] = n;
-    } else if (arg === "--or-local") opts.orLocal = true;
+    } else if (arg === "--or-local") {
+      // Older callers ask for the fallback; it is how rudder-burst always works now.
+    }
     else if (arg === "-h" || arg === "--help") throw new BurstError(USAGE, 0);
     else if (arg.startsWith("-")) throw new BurstError(`unknown option ${arg}\n${USAGE}`, EXIT.usage);
     else {
@@ -221,6 +225,12 @@ function runLocal(command, cwd) {
   return spawnExit("bash", ["-c", command], { cwd });
 }
 
+/** No builder to use: the command still runs, on this machine. */
+function runHere(reason, command, cwd) {
+  process.stderr.write(`rudder-burst: ${reason}; running here instead\n`);
+  return runLocal(command, cwd);
+}
+
 function rsync(args, env) {
   return spawnExit("rsync", args, { env, stdio: ["ignore", "inherit", "inherit"] });
 }
@@ -307,7 +317,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const command = commandLine(opts.command);
   const cwd = process.cwd();
   if (!socketPath) {
-    if (opts.orLocal && opts.action === "run") return await runLocal(command, cwd);
+    if (opts.action === "run") return await runHere("no build pool here (RUDDER_BURST_SOCKET is not set)", command, cwd);
     throw new BurstError("no build pool here: rudder-burst runs on Rudder Cloud homes (RUDDER_BURST_SOCKET is not set)", EXIT.unavailable);
   }
   if (opts.action === "status") return await status(socketPath);
@@ -317,9 +327,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   try {
     granted = await lease(socketPath, opts, `${path.basename(repo.root)}: ${opts.action === "clean" ? "clean" : command}`.slice(0, 120));
   } catch (error) {
-    if (opts.orLocal && opts.action === "run" && error instanceof BurstError && (error.code === EXIT.unavailable || error.code === EXIT.busy)) {
-      process.stderr.write(`rudder-burst: ${error.message}; running here instead\n`);
-      return await runLocal(command, cwd);
+    if (opts.action === "run" && error instanceof BurstError && (error.code === EXIT.unavailable || error.code === EXIT.busy)) {
+      return await runHere(error.message, command, cwd);
     }
     throw error;
   }

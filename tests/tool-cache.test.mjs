@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { pruneToolCache, toolCacheEnv } from "../dist/tool-cache.js";
+import { pruneToolCache, toolCacheEnv, toolCacheRoot } from "../dist/tool-cache.js";
 import { codexShellEnvConfigArgs } from "../dist/codex-binary.js";
 import { nativeAgentCommand } from "../dist/native-agents.js";
 
@@ -14,12 +14,12 @@ function tempDir(t) {
   return dir;
 }
 
-test("agents get read-only sccache and the builder gets read-write", (t) => {
+test("agents and the builder share one read-write sccache and the same stores", (t) => {
   const root = tempDir(t);
   const env = { HOME: path.join(root, "home") };
   const agent = toolCacheEnv("agent", { root, env, hasTool: () => true });
   const builder = toolCacheEnv("builder", { root, env, hasTool: () => true });
-  assert.equal(agent.SCCACHE_LOCAL_RW_MODE, "READ_ONLY");
+  assert.equal(agent.SCCACHE_LOCAL_RW_MODE, "READ_WRITE");
   assert.equal(builder.SCCACHE_LOCAL_RW_MODE, "READ_WRITE");
   assert.equal(agent.RUSTC_WRAPPER, "sccache");
   assert.equal(agent.SCCACHE_DIR, path.join(root, "sccache"));
@@ -27,6 +27,12 @@ test("agents get read-only sccache and the builder gets read-write", (t) => {
     assert.equal(agent[key], builder[key]);
     assert.ok(fs.statSync(agent[key]).isDirectory(), key);
   }
+});
+
+test("a Cloud machine's build cache is the tool cache; a laptop uses ~/.cache", () => {
+  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_CACHE_DIR: "/workspace/cache/build" }), "/workspace/cache/build");
+  assert.equal(toolCacheRoot({ HOME: "/home/u", RUDDER_CACHE_DIR: "/workspace/cache/build", RUDDER_TOOL_CACHE_DIR: "/x" }), "/x");
+  assert.equal(toolCacheRoot({ HOME: "/Users/u" }), path.join("/Users/u", ".cache", "rudder", "tool-cache"));
 });
 
 test("missing tools are skipped", (t) => {

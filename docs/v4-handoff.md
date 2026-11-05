@@ -66,7 +66,10 @@ user policy like `inherit = "core"` hid it from Codex's shell; native Codex
 launches (native/src/launch.rs) pass the same `-c` arguments. A Mac warm build
 only starts with 10 GB free; a project opts out with `[warm] commands = []`.
 
-4.2.1 dashboard and `rudder cloud` (2026-11-05):
+Shipped in 4.2.2/4.2.3 (2026-11-05; the v4.2.1 tag never published: the
+macOS clone change broke the Linux-only rudder-jj fork_add, which a Mac
+build does not compile). Control plane v187 runs worker image 4.2.3; the
+home adopts it on its first idle window.
 - Enter on a finished agent's worker pane resumes or reopens it, like Enter on
   its row; ⌥h full screen animates (about 200ms, 30 fps, PTY resized once).
 - Predictive echo no longer turns itself off at normal typing speed (keys

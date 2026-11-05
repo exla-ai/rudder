@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { inFork } from "./warm-snapshot.js";
 import { BackendTelemetryObserver } from "./agent-efficiency/backend-observer.js";
 import type { BackendAdapter, BackendId, RunRequest, RudderEvent, AuthProfileStore, EffortLevel } from "./types.js";
-import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, ensureRudderCodexBinary } from "./codex-binary.js";
+import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, codexShellEnvConfigArgs, ensureRudderCodexBinary } from "./codex-binary.js";
+import { toolCacheEnv } from "./tool-cache.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel, loadAuthStore, loadConfig, saveRunRecord } from "./state.js";
 import { codexEffortConfigArgs, DEFAULT_EFFORT, normalizeEffortForBackend } from "./effort.js";
 import {
@@ -190,6 +191,7 @@ function codexBackend(): BackendAdapter {
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
             ...codexEffortConfigArgs(request.run.effort),
+            ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
             sessionId,
             `${request.contract}\n\n${prompt}`,
           ]
@@ -205,6 +207,7 @@ function codexBackend(): BackendAdapter {
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
             ...codexEffortConfigArgs(request.run.effort),
+            ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
             `${request.contract}\n\n${prompt}`,
           ]);
       return await spawnAndStream({

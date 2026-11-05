@@ -14,6 +14,12 @@ enum BridgeCommand {
     /// warm snapshot) as its read-only lower layer. No file is copied.
     #[command(hide = true)]
     RudderForkAdd(ForkAddArgs),
+    /// Add a workspace that is an APFS copy-on-write clone of `--snapshot` (a
+    /// warm snapshot: a local jj workspace) checked out at `-r`. The clone
+    /// keeps the snapshot's recorded file states, so only files that differ
+    /// between the snapshot's tree and the revision are written.
+    #[command(hide = true)]
+    RudderCloneAdd(CloneAddArgs),
     #[cfg(feature = "local-development")]
     /// Explicit development scanner profile, using private colocated metadata.
     RudderInitLocal,
@@ -34,6 +40,126 @@ struct ForkAddArgs {
     message: String,
 }
 
+#[derive(clap::Args, Clone, Debug)]
+struct CloneAddArgs {
+    destination: std::path::PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long, short = 'r')]
+    revision: String,
+    #[arg(long)]
+    snapshot: std::path::PathBuf,
+    #[arg(long, short = 'm', default_value = "")]
+    message: String,
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn clone_add(_ui: &mut Ui, _helper: &CommandHelper, _args: &CloneAddArgs) -> Result<(), CommandError> {
+    Err(jj_cli::command_error::user_error("rudder-clone-add needs APFS clonefile (macOS)"))
+}
+
+#[cfg(target_os = "macos")]
+async fn clone_add(ui: &mut Ui, helper: &CommandHelper, args: &CloneAddArgs) -> Result<(), CommandError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use jj_cli::command_error::{internal_error, user_error};
+    use jj_lib::file_util;
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::local_working_copy::{LocalWorkingCopy, LockedLocalWorkingCopy};
+    use jj_lib::ref_name::WorkspaceNameBuf;
+    use jj_lib::repo::Repo as _;
+    use jj_lib::working_copy::WorkingCopy as _;
+    use jj_lib::workspace_store::{SimpleWorkspaceStore, WorkspaceStore as _};
+    let old = helper.workspace_helper(ui)?;
+    let name = WorkspaceNameBuf::from(args.name.clone());
+    if old.repo().view().get_wc_commit_id(&name).is_some() {
+        return Err(user_error(format!("Workspace named '{}' already exists", args.name)));
+    }
+    let snapshot = helper.cwd().join(&args.snapshot);
+    let wc_type = std::fs::read_to_string(snapshot.join(".jj/working_copy/type"))
+        .map_err(|err| user_error(format!("{} is not a jj workspace: {err}", snapshot.display())))?;
+    if wc_type.trim() != LocalWorkingCopy::name() {
+        return Err(user_error(format!("{} has a '{}' working copy, not a local one", snapshot.display(), wc_type.trim())));
+    }
+    let parent_id = old
+        .resolve_single_rev(ui, &jj_cli::cli_util::RevisionArg::from(args.revision.clone()))
+        .await?
+        .id()
+        .clone();
+    // One clonefile call clones the whole tree: data blocks are shared, and
+    // mtime, size and mode are kept, so the recorded file states stay valid.
+    // There is no byte-copy fallback; the caller makes a full checkout instead.
+    let destination = helper.cwd().join(&args.destination);
+    let from = std::ffi::CString::new(snapshot.as_os_str().as_bytes()).map_err(internal_error)?;
+    let to = std::ffi::CString::new(destination.as_os_str().as_bytes()).map_err(internal_error)?;
+    const CLONE_NOFOLLOW: u32 = 0x0001; // <sys/clonefile.h>
+    if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), CLONE_NOFOLLOW) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(user_error(format!("APFS clone of {} failed: {error}", snapshot.display())));
+    }
+    // Point .jj/repo at the repo from the new location, as `jj workspace add` writes it.
+    let jj_dir = std::fs::canonicalize(destination.join(".jj")).map_err(internal_error)?;
+    let repo_dir = std::fs::canonicalize(old.repo_path()).map_err(internal_error)?;
+    let to_store = file_util::relative_path(&jj_dir, &repo_dir);
+    let to_store = if to_store.is_relative() { file_util::slash_path(&to_store).into_owned() } else { to_store };
+    std::fs::write(jj_dir.join("repo"), file_util::path_to_bytes(&to_store).map_err(internal_error)?)
+        .map_err(internal_error)?;
+    // Take over the snapshot's working-copy state (its recorded tree and file
+    // states) under the new name. The snapshot's Watchman clock belongs to
+    // another path; clearing it also rewrites the tree state on finish, so
+    // every cloned file predates the state and is trusted by its recorded
+    // stats instead of being hashed again.
+    let root = std::fs::canonicalize(&destination).map_err(internal_error)?;
+    let repo = old.repo().clone();
+    let wc = LocalWorkingCopy::load(repo.store().clone(), root.clone(), jj_dir.join("working_copy"), old.settings())?;
+    let mut locked = wc.start_mutation()?;
+    locked.rename_workspace(name.clone());
+    if let Some(local) = locked.downcast_mut::<LockedLocalWorkingCopy>() {
+        local.reset_watchman()?;
+    }
+    let mut tx = jj_cli::cli_util::start_repo_transaction(&repo, &name, helper.string_args());
+    let parent = repo.store().get_commit(&parent_id)?;
+    let commit = tx
+        .repo_mut()
+        .new_commit(vec![parent_id], parent.tree())
+        .set_description(&args.message)
+        .write()
+        .await?;
+    tx.repo_mut().edit(name.clone(), &commit).await?;
+    // Check out from the snapshot's recorded tree, writing only the files that
+    // differ, before the workspace is published: a failure here leaves the
+    // repo untouched.
+    let stats = locked
+        .check_out(&commit)
+        .await
+        .map_err(|err| jj_cli::command_error::internal_error_with_message("Failed to check out the clone", err))?;
+    let repo = tx.commit(format!("create clone workspace {}", args.name)).await?;
+    let finished = async {
+        locked.finish(repo.op_id().clone()).await?;
+        SimpleWorkspaceStore::load(&repo_dir)
+            .and_then(|store| store.add(&name, &root))
+            .map_err(internal_error)
+    }
+    .await;
+    if let Err(error) = finished {
+        // Unpublish the half-made workspace so a full checkout can take the name.
+        let mut tx = repo.start_transaction();
+        tx.repo_mut().remove_wc_commit(&name).await?;
+        tx.commit(format!("forget failed clone workspace {}", args.name)).await?;
+        return Err(error);
+    }
+    writeln!(
+        ui.status(),
+        "Cloned workspace {} at {}: {} files updated, {} added, {} removed",
+        args.name,
+        commit.id().hex(),
+        stats.updated_files,
+        stats.added_files,
+        stats.removed_files
+    )?;
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 async fn fork_add(_ui: &mut Ui, _helper: &CommandHelper, _args: &ForkAddArgs) -> Result<(), CommandError> {
     Err(jj_cli::command_error::user_error("rudder-fork-add needs Linux OverlayFS"))
@@ -44,7 +170,6 @@ async fn fork_add(ui: &mut Ui, helper: &CommandHelper, args: &ForkAddArgs) -> Re
     use jj_cli::command_error::{internal_error, user_error};
     use jj_lib::ref_name::WorkspaceNameBuf;
     use jj_lib::repo::Repo as _;
-    use jj_lib::workspace::Workspace;
     use rudder_engine::jj_working_copy::{OverlayWorkingCopyFactory, link_lower};
     let old = helper.workspace_helper(ui)?;
     let name = WorkspaceNameBuf::from(args.name.clone());
@@ -85,6 +210,7 @@ async fn command(
 ) -> Result<(), CommandError> {
     match command {
         BridgeCommand::RudderForkAdd(args) => fork_add(ui, helper, &args).await?,
+        BridgeCommand::RudderCloneAdd(args) => clone_add(ui, helper, &args).await?,
         BridgeCommand::RudderCapabilities => {
             let _ = helper;
             writeln!(

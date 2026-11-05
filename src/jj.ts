@@ -367,8 +367,9 @@ export async function createNodeWorkspace(params: {
   const targetPath = workspacePath(params.repoRoot, params.runId ?? id, params.task);
   await fsp.mkdir(path.dirname(targetPath), { recursive: true });
 
-  // Fast path: an overlay fork of the warm snapshot (no file copies, deps and
-  // build outputs already there). Falls back to a full jj checkout.
+  // Fast path: a fork of the warm snapshot (an overlay on Linux, an APFS clone
+  // on macOS; no file copies, deps and build outputs already there). Falls
+  // back to a full jj checkout.
   {
     const fork = await createForkWorkspace({
       repoRoot: params.repoRoot,
@@ -378,7 +379,8 @@ export async function createNodeWorkspace(params: {
       ...(params.atChangeId ? { atChangeId: params.atChangeId } : {}),
     });
     if ("snapshot" in fork) {
-      process.stderr.write(`[rudder] workspace ${workspaceName}: overlay fork of warm snapshot ${fork.snapshot.key}\n`);
+      const kind = process.platform === "darwin" ? "APFS clone" : "overlay fork";
+      process.stderr.write(`[rudder] workspace ${workspaceName}: ${kind} of warm snapshot ${fork.snapshot.key}\n`);
       return { workspaceName, path: targetPath };
     }
     process.stderr.write(`[rudder] workspace ${workspaceName}: full jj checkout (${fork.reason})\n`);

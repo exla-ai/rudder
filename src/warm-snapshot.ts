@@ -1,10 +1,12 @@
 /**
- * Warm snapshots and overlay forks (Linux).
+ * Warm snapshots, overlay forks (Linux) and clone forks (macOS).
  *
  * A warm snapshot is one jj workspace per base commit (`rudderwarm-<key>`)
- * where the trusted builder installed dependencies and ran the build once. It
- * is never written again: agents get an OverlayFS fork of it instead of a full
- * checkout.
+ * where the trusted builder installed dependencies and ran the build once
+ * (with the shared tool cache, src/tool-cache.ts). It is never written again:
+ * agents get a fork of it instead of a full checkout. On macOS a fork is an
+ * APFS copy-on-write clone of the snapshot (see createCloneWorkspace). On
+ * Linux it is an overlay fork:
  *
  * A fork is a jj workspace on the `rudder-overlay` working copy, added by
  * `rudder-jj rudder-fork-add`: its directory on disk holds only `.jj`, the
@@ -220,12 +222,38 @@ export async function seedFromPrevious(previousDir: string, dir: string): Promis
   }
 }
 
-/** Starts a detached builder for `commit` unless one is ready, failed or running. */
-export function startWarmBuild(repoRoot: string, commit: string): void {
+const MIN_FREE_FOR_WARM_BUILD = 10 * 1024 ** 3;
+
+/**
+ * Why a warm build should not start on this disk, or null. A Mac's disk is
+ * shared with everything else on it, and a warm build (install, build, a Rust
+ * target dir) can take gigabytes, so it waits for room. Cloud homes size their
+ * own disks and always build.
+ */
+export function warmBuildSkipReason(dir: string, minFree = MIN_FREE_FOR_WARM_BUILD): string | null {
+  if (process.platform !== "darwin") return null;
+  let free: number;
+  try {
+    const stats = fs.statfsSync(dir);
+    free = stats.bavail * stats.bsize;
+  } catch {
+    return null;
+  }
+  if (free >= minFree) return null;
+  return `no warm snapshot: ${Math.floor(free / 1024 ** 3)} GB free, a warm build waits for ${Math.ceil(minFree / 1024 ** 3)} GB`;
+}
+
+/**
+ * Starts a detached builder for `commit` unless one is ready, failed or
+ * running. Returns why it did not start one when the disk lacks room.
+ */
+export function startWarmBuild(repoRoot: string, commit: string): string | null {
   const key = commit.slice(0, 12);
   const root = warmDir(repoRoot);
-  if (["ready", "failed", "building"].some((s) => fs.existsSync(path.join(root, `${key}.${s}`)))) return;
+  if (["ready", "failed", "building"].some((s) => fs.existsSync(path.join(root, `${key}.${s}`)))) return null;
   fs.mkdirSync(root, { recursive: true });
+  const skipped = warmBuildSkipReason(root);
+  if (skipped) return skipped;
   const log = fs.openSync(path.join(root, `${key}.log`), "a");
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), repoRoot, commit], {
     detached: true,
@@ -233,6 +261,7 @@ export function startWarmBuild(repoRoot: string, commit: string): void {
   });
   child.unref();
   fs.closeSync(log);
+  return null;
 }
 
 /** Deletes ready snapshots beyond the newest few that no fork still uses. */
@@ -299,9 +328,10 @@ jj rebase -r @ -d "$2"
 `;
 
 /**
- * Creates `targetPath` as an overlay fork of the newest warm snapshot. Returns
- * null (after cleaning up) when there is no snapshot or the overlay cannot be
- * mounted here; the caller then makes a full jj checkout.
+ * Creates `targetPath` as a fork of the newest warm snapshot: an overlay fork
+ * on Linux, an APFS clone on macOS. Returns a reason (after cleaning up) when
+ * there is no snapshot or the fork cannot be made here; the caller then makes
+ * a full jj checkout.
  */
 export async function createForkWorkspace(params: {
   repoRoot: string;
@@ -311,7 +341,7 @@ export async function createForkWorkspace(params: {
   /** Start from this change (a branch of another agent) instead of main. */
   atChangeId?: string;
 }): Promise<{ snapshot: WarmSnapshot } | { reason: string }> {
-  if (process.platform !== "linux") return { reason: "not Linux" };
+  if (process.platform !== "linux" && process.platform !== "darwin") return { reason: "not Linux or macOS" };
   const base = params.atChangeId
     ? await commitOf(params.repoRoot, params.atChangeId)
     : await currentBaseCommit(params.repoRoot);
@@ -319,13 +349,15 @@ export async function createForkWorkspace(params: {
   const snaps = readySnapshots(params.repoRoot);
   // Projects with nothing to install or build keep the plain checkout.
   const warmable = warmCommands(params.repoRoot).length > 0;
+  let skipped: string | null = null;
   if (!params.atChangeId && base && !snaps.some((snap) => snap.commit === base) && warmable) {
-    startWarmBuild(params.repoRoot, base);
+    skipped = startWarmBuild(params.repoRoot, base);
   }
   const snapshot = snaps.find((snap) => snap.commit === base) ?? snaps[0];
-  if (!snapshot) return { reason: warmable ? "no warm snapshot yet (building)" : "nothing to install or build" };
+  if (!snapshot) return { reason: skipped ?? (warmable ? "no warm snapshot yet (building)" : "nothing to install or build") };
   const rudderJj = rudderJjPath();
   if (!rudderJj) return { reason: "rudder-jj is not available" };
+  if (process.platform === "darwin") return await createCloneWorkspace(params, snapshot, base ?? snapshot.commit);
   const added = await runCommand(
     "jj",
     [
@@ -366,6 +398,39 @@ export async function createForkWorkspace(params: {
     await fsp.rm(params.targetPath, { recursive: true, force: true });
     return { reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * macOS: `targetPath` becomes an APFS copy-on-write clone of the warm snapshot
+ * (`rudder-jj rudder-clone-add`), checked out at `revision` (the base, or the
+ * change to branch from). It is an ordinary jj workspace: no mount and no
+ * `enter` script, so commands run in it directly. Its files, dependencies and
+ * build output share the snapshot's data blocks, and it inherits the
+ * snapshot's recorded file states, so jj trusts them instead of hashing. Only
+ * files that differ between the snapshot's tree and `revision` are written.
+ * A clone no longer needs the snapshot once made, so pruning ignores clones.
+ * A failed clone (another volume, no clonefile) leaves nothing behind and the
+ * caller makes a full checkout; there is no byte-copy fallback.
+ */
+async function createCloneWorkspace(
+  params: { repoRoot: string; targetPath: string; workspaceName: string; description?: string },
+  snapshot: WarmSnapshot,
+  revision: string,
+): Promise<{ snapshot: WarmSnapshot } | { reason: string }> {
+  if (fs.existsSync(params.targetPath)) return { reason: `${params.targetPath} already exists` };
+  const added = await runCommand(
+    "jj",
+    [
+      "rudder-clone-add", params.targetPath, "--name", params.workspaceName, "-r", revision,
+      "--snapshot", snapshot.dir, "-m", params.description ?? "",
+    ],
+    { cwd: params.repoRoot, allowFailure: true },
+  );
+  if (added.code === 0) return { snapshot };
+  // rudder-clone-add publishes the workspace only once its files are in
+  // place, so a failure leaves at most the partly cloned directory.
+  await fsp.rm(params.targetPath, { recursive: true, force: true });
+  return { reason: added.stderr.trim() || "rudder-jj rudder-clone-add failed" };
 }
 
 /** Removes `<workspace>.fork/` (OverlayFS leaves a mode-000 `work/work`). */

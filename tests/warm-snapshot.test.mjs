@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createNodeWorkspace, forgetWorkspace } from "../dist/jj.js";
-import { buildWarmSnapshot, currentBaseCommit, seedFromPrevious, warmCommands } from "../dist/warm-snapshot.js";
+import { buildWarmSnapshot, createForkWorkspace, currentBaseCommit, inFork, seedFromPrevious, warmBuildSkipReason, warmCommands, warmDir } from "../dist/warm-snapshot.js";
 import { rudderJjPath } from "../dist/util.js";
 
 const FILES = 3000;
@@ -137,4 +137,165 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   const seen = spawnSync(`${branch.path}.fork/enter`, ["sh", "-ec", "cat src/f1.txt new.txt node_modules/dep/index.js; jj log --no-graph -r @- -T change_id"], { cwd: branch.path, env, encoding: "utf8" });
   assert.equal(seen.status, 0, seen.stderr);
   assert.equal(seen.stdout, `changed\nnew\ndep\n${change}`);
+});
+
+// macOS: forks are APFS clones of the warm snapshot (rudder-jj rudder-clone-add).
+const onMac = { skip: process.platform !== "darwin" || !rudderJjPath() };
+const BIG = 32 * 1024 * 1024;
+const freeBytes = (dir) => { const s = fs.statfsSync(dir); return s.bavail * s.bsize; };
+const jjOut = (cwd, args) => sh(cwd, "jj", args);
+const workspaceNames = (repo) => jjOut(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).trim().split("\n");
+
+/** A colocated repo whose warm build installs node_modules and churns tracked files. */
+async function macRepo(t, warm = "mkdir -p node_modules/dep && echo dep > node_modules/dep/index.js && echo churn >> src/f1.txt && echo built > out.txt") {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-clone-")));
+  const repo = path.join(root, "repo");
+  const forks = [];
+  t.after(async () => {
+    for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
+    // A detached warm builder for a newer base (its log appears before it
+    // starts) must finish before the repo goes.
+    const running = () => {
+      const names = fs.readdirSync(warmDir(repo));
+      return names.some((n) => n.endsWith(".log") && !names.includes(n.replace(/\.log$/, ".ready")) && !names.includes(n.replace(/\.log$/, ".failed")));
+    };
+    for (let i = 0; i < 150 && running(); i += 1) await new Promise((resolve) => setTimeout(resolve, 200));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  for (let i = 0; i < 200; i += 1) fs.writeFileSync(path.join(repo, "src", `f${i}.txt`), `${i}\n`);
+  fs.writeFileSync(path.join(repo, ".gitignore"), "node_modules\n.rudder-workspaces\n");
+  fs.writeFileSync(path.join(repo, "rudder.toml"), `[warm]\ncommands = [${JSON.stringify(warm)}]\n`);
+  sh(repo, "git", ["init", "-q"]);
+  sh(repo, "git", ["add", "."]);
+  sh(repo, "git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  sh(repo, "jj", ["git", "init", "--colocate"]);
+  const base = await currentBaseCommit(repo);
+  const snapshot = await buildWarmSnapshot(repo, base);
+  assert.ok(snapshot, "warm snapshot built");
+  const fork = async (nodeId, extra = {}) => {
+    const ws = await createNodeWorkspace({ repoRoot: repo, nodeId, task: `task ${nodeId}`, ...extra });
+    forks.push({ workspaceName: ws.workspaceName, workspacePath: ws.path });
+    return ws;
+  };
+  return { repo, base, snapshot, fork };
+}
+
+test("macOS: an agent workspace is a clean APFS clone of the warm snapshot", onMac, async (t) => {
+  const { repo, base, snapshot, fork } = await macRepo(t);
+  // Heavy dependencies: a clone must not copy them.
+  fs.writeFileSync(path.join(snapshot.dir, "node_modules", "big.bin"), Buffer.alloc(BIG, 7));
+
+  let ws;
+  let used = Infinity;
+  for (let i = 0; i < 3 && used >= BIG / 2; i += 1) {
+    const before = freeBytes(repo);
+    ws = await fork(`clone${i}`);
+    used = Math.min(used, before - freeBytes(repo));
+  }
+  assert.ok(used < BIG / 2, `a fork used ${used} bytes of disk; its files must be clones`);
+
+  // An ordinary jj workspace: no overlay state, nothing to enter, no .git.
+  assert.equal(fs.existsSync(`${ws.path}.fork`), false);
+  assert.equal(fs.existsSync(path.join(ws.path, ".git")), false);
+  assert.deepEqual(inFork(ws.path, "claude", ["-p"]), { command: "claude", args: ["-p"] });
+  assert.match(jjOut(ws.path, ["status"]), /The working copy has no changes/);
+  assert.equal(jjOut(ws.path, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), base);
+  assert.match(jjOut(ws.path, ["log", "--no-graph", "-r", "@", "-T", "description"]), /task clone/);
+
+  // Warm dependencies came along; files the build churned are back at the commit.
+  assert.equal(fs.readFileSync(path.join(ws.path, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
+  assert.equal(fs.statSync(path.join(ws.path, "node_modules", "big.bin")).size, BIG);
+  assert.equal(fs.readFileSync(path.join(ws.path, "src", "f1.txt"), "utf8"), "1\n");
+  assert.equal(fs.existsSync(path.join(ws.path, "out.txt")), false);
+
+  // The snapshot's recorded file states are trusted, not rehashed: a same-size
+  // edit with the old mtime goes unseen, a real edit is seen.
+  const f2 = path.join(ws.path, "src", "f2.txt");
+  // jj keeps whole milliseconds; land mid-millisecond so float rounding in
+  // utimes cannot move the mtime into the next or previous one.
+  const sameMs = (Math.floor(fs.statSync(f2).mtimeMs) + 0.5) / 1000;
+  fs.writeFileSync(f2, "X\n");
+  fs.utimesSync(f2, sameMs, sameMs);
+  fs.writeFileSync(path.join(ws.path, "src", "f3.txt"), "changed\n");
+  assert.equal(jjOut(ws.path, ["diff", "--summary"]), "M src/f3.txt\n");
+
+  // Writes stay private to the fork.
+  fs.writeFileSync(path.join(ws.path, "node_modules", "dep", "index.js"), "mine\n");
+  assert.equal(fs.readFileSync(path.join(snapshot.dir, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
+  assert.equal(fs.readFileSync(path.join(snapshot.dir, "src", "f1.txt"), "utf8"), "1\nchurn\n");
+
+  // Removal works as for a full checkout, and later forks still work.
+  await forgetWorkspace({ repoRoot: repo, workspaceName: ws.workspaceName, workspacePath: ws.path });
+  assert.equal(fs.existsSync(ws.path), false);
+  assert.ok(!workspaceNames(repo).includes(ws.workspaceName));
+  const again = await fork("again");
+  assert.match(jjOut(again.path, ["status"]), /The working copy has no changes/);
+});
+
+test("macOS: a clone fork starts at current main, or at a branched change", onMac, async (t) => {
+  const { repo, snapshot, fork } = await macRepo(t);
+  fs.writeFileSync(path.join(repo, "src", "f2.txt"), "newer\n");
+  fs.rmSync(path.join(repo, "src", "f3.txt"));
+  fs.writeFileSync(path.join(repo, "added.txt"), "added\n");
+  jjOut(repo, ["commit", "-m", "main moved"]);
+  const base = await currentBaseCommit(repo);
+  assert.notEqual(base, snapshot.commit);
+
+  const ws = await fork("current");
+  assert.equal(jjOut(ws.path, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), base);
+  assert.match(jjOut(ws.path, ["status"]), /The working copy has no changes/);
+  assert.equal(fs.readFileSync(path.join(ws.path, "src", "f2.txt"), "utf8"), "newer\n");
+  assert.equal(fs.existsSync(path.join(ws.path, "src", "f3.txt")), false);
+  assert.equal(fs.readFileSync(path.join(ws.path, "added.txt"), "utf8"), "added\n");
+  assert.equal(fs.readFileSync(path.join(ws.path, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
+  // As on Linux, the new base gets its own warm build (when the disk has room).
+  const started = fs.readdirSync(warmDir(repo)).some((n) => n.startsWith(base.slice(0, 12)));
+  assert.equal(started, warmBuildSkipReason(warmDir(repo)) === null, "warm build started for the new base");
+
+  // Branching an agent forks from that agent's change.
+  fs.writeFileSync(path.join(ws.path, "agent.txt"), "agent\n");
+  jjOut(ws.path, ["commit", "-m", "agentwork"]);
+  const change = jjOut(repo, ["log", "--no-graph", "-r", "description(substring:agentwork)", "-T", "change_id"]).trim();
+  const branch = await fork("branch", { atChangeId: change });
+  assert.equal(jjOut(branch.path, ["log", "--no-graph", "-r", "@-", "-T", "change_id"]), change);
+  assert.match(jjOut(branch.path, ["status"]), /The working copy has no changes/);
+  assert.equal(fs.readFileSync(path.join(branch.path, "agent.txt"), "utf8"), "agent\n");
+  assert.equal(fs.readFileSync(path.join(branch.path, "src", "f2.txt"), "utf8"), "newer\n");
+  assert.equal(fs.readFileSync(path.join(branch.path, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
+});
+
+test("warm builds wait for disk room on macOS and always run on Linux", () => {
+  const dir = os.tmpdir();
+  assert.equal(warmBuildSkipReason(dir, 0), null);
+  const tooMuch = warmBuildSkipReason(dir, Number.MAX_SAFE_INTEGER);
+  if (process.platform === "darwin") assert.match(tooMuch ?? "", /GB free, a warm build waits for/);
+  else assert.equal(tooMuch, null);
+});
+
+test("macOS: a failed clone leaves nothing behind and the launch makes a full checkout", onMac, async (t) => {
+  const { repo, base, snapshot, fork } = await macRepo(t);
+  // clonefile refuses to write into a read-only directory: a reason, no workspace.
+  const locked = path.join(repo, ".rudder-workspaces", "locked");
+  fs.mkdirSync(locked, { recursive: true });
+  fs.chmodSync(locked, 0o500);
+  let failed;
+  try {
+    failed = await createForkWorkspace({ repoRoot: repo, targetPath: path.join(locked, "ws"), workspaceName: "rudder-locked" });
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+  assert.match(failed.reason ?? "", /APFS clone .* failed/);
+  assert.equal(fs.existsSync(path.join(locked, "ws")), false);
+  assert.ok(!workspaceNames(repo).includes("rudder-locked"));
+
+  // A snapshot that is not a jj workspace: the launch falls back to a full checkout.
+  const broken = path.join(warmDir(repo), "broken");
+  fs.mkdirSync(path.join(broken, ".jj"), { recursive: true });
+  fs.writeFileSync(path.join(warmDir(repo), "broken.ready"), JSON.stringify({ key: "broken", commit: base, dir: broken, builtAt: "2999-01-01T00:00:00.000Z" }));
+  const ws = await fork("fallback");
+  assert.match(jjOut(ws.path, ["status"]), /The working copy has no changes/);
+  assert.equal(fs.existsSync(path.join(ws.path, "node_modules")), false, "full checkout, not a clone");
+  assert.equal(fs.readFileSync(path.join(ws.path, "src", "f1.txt"), "utf8"), "1\n");
+  assert.ok(fs.existsSync(path.join(snapshot.dir, "node_modules")), "the real snapshot is untouched");
 });

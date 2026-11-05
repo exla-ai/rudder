@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { pruneToolCache, toolCacheEnv } from "../dist/tool-cache.js";
+import { codexShellEnvConfigArgs } from "../dist/codex-binary.js";
+import { nativeAgentCommand } from "../dist/native-agents.js";
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-tool-cache-"));
@@ -51,4 +53,38 @@ test("prune removes least recently used files until under the limit", (t) => {
   assert.equal(freed, 100);
   assert.deepEqual(fs.readdirSync(dir).sort(), ["mid", "new"]);
   assert.equal(pruneToolCache(root, { npm: 250 }), 0);
+});
+
+// Codex filters its shell tool's environment (`shell_environment_policy`,
+// e.g. `inherit = "core"`), so the cache vars go into the policy itself.
+test("Codex gets every tool cache variable through its shell environment policy", (t) => {
+  const root = tempDir(t);
+  const env = toolCacheEnv("agent", { root, env: { HOME: root }, hasTool: () => true });
+  const args = codexShellEnvConfigArgs(env);
+  assert.equal(args.length, Object.keys(env).length * 2);
+  for (const [key, value] of Object.entries(env)) {
+    assert.equal(args[args.indexOf(`shell_environment_policy.set.${key}=${JSON.stringify(value)}`) - 1], "-c", key);
+  }
+  // Values are TOML basic strings; names a config key cannot hold are skipped.
+  assert.deepEqual(
+    codexShellEnvConfigArgs({ A_DIR: 'C:\\x "y"', "bad.name": "z", "1X": "z" }),
+    ["-c", 'shell_environment_policy.set.A_DIR="C:\\\\x \\"y\\""'],
+  );
+});
+
+test("a Codex agent launch carries the tool cache into its shell policy", (t) => {
+  const root = tempDir(t);
+  const saved = process.env.RUDDER_TOOL_CACHE_DIR;
+  process.env.RUDDER_TOOL_CACHE_DIR = root;
+  try {
+    const command = nativeAgentCommand({
+      run: { id: "r", task: "t", backend: "codex", model: "gpt-5.5", workspace: { path: root } },
+      prompt: "p",
+      contract: "c",
+    });
+    assert.ok(command.includes(`shell_environment_policy.set.TURBO_CACHE_DIR="${path.join(root, "turbo")}"`), command);
+  } finally {
+    if (saved === undefined) delete process.env.RUDDER_TOOL_CACHE_DIR;
+    else process.env.RUDDER_TOOL_CACHE_DIR = saved;
+  }
 });

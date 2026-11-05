@@ -1,9 +1,10 @@
 import type { RunRecord } from "./types.js";
-import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS } from "./codex-binary.js";
+import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-binary.js";
 import { codexEffortConfigArgs, normalizeEffortForBackend } from "./effort.js";
 import { PLAN_MODE_CONTRACT } from "./plan-mode.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel } from "./state.js";
 import { taskDisplayLabel } from "./task-summary.js";
+import { toolCacheEnv } from "./tool-cache.js";
 import { shellQuote, stripRudderPromptWrappers } from "./util.js";
 
 export function nativeAgentCommand(params: {
@@ -80,6 +81,7 @@ function codexArgs(run: RunRecord, prompt: string, contract: string, codexComman
     "goals",
     ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
     ...codexEffortConfigArgs(run.effort),
+    ...codexShellEnvConfigArgs(toolCacheEnv("agent")),
     "--cd",
     run.workspace.path,
     [contract, "", prompt].join("\n"),

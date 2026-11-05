@@ -45,6 +45,19 @@ export const CODEX_RUDDER_PLANNER_CONFIG_ARGS = [
   "features.computer_use=false",
 ];
 
+/**
+ * `-c shell_environment_policy.set.<NAME>=<value>` for each variable. Codex
+ * builds its own environment for shell commands, and a policy such as
+ * `inherit = "core"` drops every other variable, so values an agent's
+ * commands need (the shared tool cache, src/tool-cache.ts) go into the policy
+ * itself. Claude passes its environment through unchanged.
+ */
+export function codexShellEnvConfigArgs(vars: Record<string, string>): string[] {
+  return Object.entries(vars)
+    .filter(([name]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    .flatMap(([name, value]) => ["-c", `shell_environment_policy.set.${name}=${JSON.stringify(value)}`]);
+}
+
 export async function codexEnvVars(): Promise<Record<string, string>> {
   try {
     const codex = await ensureRudderCodexBinary();

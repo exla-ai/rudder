@@ -53,6 +53,18 @@ phase times for headless runs; `LocalStore::gc` refuses stores that hold jj
 objects. Fork commits stay in Git on purpose: a fork is a workspace of the
 user's colocated repo, so it shares that repo's backend.
 
+macOS agents now get forks too (src/warm-snapshot.ts `createCloneWorkspace`,
+`rudder-jj rudder-clone-add`): warm snapshots build locally as on Linux, and
+each agent workspace is one APFS `clonefile` of the snapshot that keeps its
+recorded jj file states, then checks out the base (only differing files are
+written). It is a plain local jj workspace, so nothing runs through `enter`.
+On a 5,000-file Node repo a fork takes about 0.14s against 1.25s for a full
+checkout, with `node_modules` already there. Another volume or a failed clone
+falls back to a full checkout; there is no byte copy. Codex agents launched
+from TS now get the tool cache through `shell_environment_policy.set`, since a
+user policy like `inherit = "core"` hid it from Codex's shell. Native Codex
+launches (native/src/launch.rs) still need the same `-c` arguments.
+
 Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
 then a colored status line with elapsed time and +N -N; the selected card is a
 rounded outline), a header row (wordmark, project, branch, version), a

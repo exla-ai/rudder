@@ -96,10 +96,17 @@ export function plansFromQueue(queue) {
     if (!entry || typeof entry !== "object") {
       continue;
     }
+    const count = (value) => (Array.isArray(value) ? value.length : 0);
     out.push({
       id: text(entry.id, 120) ?? "",
       awaitingApproval: entry.awaiting_approval === true,
       request: text(entry.plan_request, 500),
+      summary: text(entry.plan_summary, 300),
+      // Nodes still queued, launched, and merged: the control plane closes a
+      // plan's Linear issue only when nothing is queued and every launch merged.
+      pending: count(entry.planned_nodes),
+      launched: count(entry.launched_node_ids),
+      merged: count(entry.merged_node_ids),
     });
   }
   return out;

@@ -1168,8 +1168,26 @@ function agentSummary(record, options = {}) {
     planId: record.planId ?? null,
     // A /swarm experiment: the control plane never tracks it in Linear.
     ...(record.swarmExperiment === true ? { swarmExperiment: true } : {}),
+    // A main row is one long session: Linear tracking reads each new user turn.
+    ...(record.mode === "main" ? lastUserTurn(record) : {}),
     remoteUrl,
     asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
+  };
+}
+
+// The newest prompt the user typed in a run (turns from Rudder itself, such as
+// the bootstrap or a regoal, are not the user's), and how many they typed. A
+// record without turns started from its task, as the dashboard reads it.
+function lastUserTurn(record) {
+  const turns = Array.isArray(record?.turns) && record.turns.length
+    ? record.turns
+    : [{ prompt: record?.task, ts: record?.createdAt, source: "user" }];
+  const typed = turns.filter((turn) => turn && typeof turn.prompt === "string" && (turn.source ?? "user") === "user");
+  const last = typed.at(-1);
+  return {
+    userTurns: typed.length,
+    lastUserPrompt: last ? userTask(last.prompt).slice(0, 2000) : null,
+    lastUserAt: last ? toMillis(last.ts) : null,
   };
 }
 

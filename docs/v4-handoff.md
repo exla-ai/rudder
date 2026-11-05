@@ -205,8 +205,8 @@ user's home moved off Fly to an AWS m8azn.6xlarge (us-west-2, 5GHz, 24 vCPU,
 copied under the 4.1.2 image with the Fly machine stopped (`init.exec` set to
 sleep); on 2026-11-05 after the 4.2.0 deploy, `rudder cloud host` switched it
 to external mode on `rudder-workers-exla:4.2.0`. The old Fly machine
-(8edd225a7d0378) and its 150GB volume are kept until the user says to destroy
-them; Cloud never calls Fly for an external home. Agent scratch now lives
+(8edd225a7d0378) and its 150GB volume were destroyed on 2026-11-05 at the
+user's request; Cloud never calls Fly for an external home. Agent scratch now lives
 in `/workspace/scratch/<run>` and is cleaned hourly. Release worker images:
 `node scripts/worker-image.mjs <version>` after npm publish (about 2 minutes,
 no Rust compile; see cloud/README.md).

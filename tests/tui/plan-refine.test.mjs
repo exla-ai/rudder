@@ -108,5 +108,9 @@ test("a task in a plain directory says isolation is off instead of failing quiet
   await session.press("Enter");
 
   await session.waitForText("no git repo here", { timeout: 30_000 });
-  await session.waitForText("git init", { timeout: 10_000 });
+  // The notice pill wraps a long notice, so the fix may span two rows.
+  await session.waitFor((s) => s.replace(/[│\s]+/g, " ").includes("git init"), {
+    timeout: 10_000,
+    label: "the notice names the fix",
+  });
 });

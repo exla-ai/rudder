@@ -93,6 +93,7 @@ view_state! {
     diff_panel: DiffPanel = DiffPanel::new(),
     solo_pane: bool = false,
     solo_restore_focus: Option<FocusPane> = None,
+    solo_transition: Option<SoloTransition> = None,
     task_area: Option<Rect> = None,
     rename_input: Option<String> = None,
     rename_cursor: usize = 0,
@@ -405,6 +406,15 @@ impl App {
     /// Draw every remote view that needs it and send the bytes. `changed`:
     /// shared state changed this tick, so every view redraws.
     pub(crate) fn render_dashboard_views(&mut self, changed: bool) {
+        // A view mid-⌥h-move draws its next step when the step comes up.
+        let now = Instant::now();
+        for client in &mut self.attach_clients {
+            if let Some(view) = client.dashboard.as_mut() {
+                if step_solo_transition(&mut view.state.solo_transition, now) {
+                    view.dirty = true;
+                }
+            }
+        }
         let ids: Vec<u64> = self
             .attach_clients
             .iter()

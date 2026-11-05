@@ -1942,6 +1942,9 @@ struct App {
     /// When the startup reveal began; None once it is over or skipped. Only
     /// a real terminal session sets it, so tests render the settled look.
     reveal_started: Option<Instant>,
+    /// Panes may animate (the ⌥h move). Set by the same rule as the reveal: a
+    /// real terminal session; tests and headless hosts switch at once.
+    motion: bool,
     /// Each agent's last drawn card kind, to notice state changes.
     card_kinds: HashMap<String, CardKind>,
     /// Cards glowing after a state change: when it started and its color.
@@ -2100,6 +2103,12 @@ struct App {
     /// focus to the worker (the task line is not drawn, so keys typed at it would
     /// go somewhere invisible); this remembers where to return.
     solo_restore_focus: Option<FocusPane>,
+    /// The ⌥h move between the split and full screen while it is drawn
+    /// (render.rs `SoloTransition`).
+    solo_transition: Option<SoloTransition>,
+    /// Set only while render draws the moving pane: the slot that pane is laid
+    /// out for, so its agent keeps one size until the move lands.
+    transition_slot: Option<Rect>,
     task_area: Option<Rect>,
     cloud_connected: bool,
     cloud_runtime: Option<String>,
@@ -3281,6 +3290,7 @@ impl App {
             notice_seen: None,
             show_keys: false,
             reveal_started: None,
+            motion: false,
             card_kinds: HashMap::new(),
             card_flashes: HashMap::new(),
             engine_headless: false,
@@ -3342,6 +3352,8 @@ impl App {
             diff_panel: DiffPanel::new(),
             solo_pane: false,
             solo_restore_focus: None,
+            solo_transition: None,
+            transition_slot: None,
             task_area: None,
             cloud_connected: cloud.connected,
             cloud_runtime: cloud.runtime,
@@ -3767,6 +3779,9 @@ impl App {
     /// Full-screen the focused pane, or restore the split. Toggling twice returns
     /// you exactly where you were, focus included.
     fn toggle_solo_pane(&mut self) {
+        let now = Instant::now();
+        let from = self.solo_fullness(now);
+        let shown = self.solo_shown_pane();
         self.solo_pane = !self.solo_pane;
         if self.solo_pane {
             // Full screen is only ever the worker (or the open diff panel): the
@@ -3789,12 +3804,54 @@ impl App {
                 previous
             };
         }
+        self.begin_solo_transition(from, shown, now);
         self.notice = Some(if self.solo_pane {
             "full screen · ⌥h restores the panes".to_string()
         } else {
             "panes restored".to_string()
         });
         self.dirty = true;
+    }
+
+    /// The pane full screen shows: the open diff panel while it has focus,
+    /// otherwise the worker.
+    fn solo_shown_pane(&self) -> FocusPane {
+        if self.focus == FocusPane::Diff && self.diff_panel.open {
+            FocusPane::Diff
+        } else {
+            FocusPane::Worker
+        }
+    }
+
+    /// How full screen the panes are drawn at `now`: 0 is the split, 1 is full
+    /// screen, between is mid-move.
+    fn solo_fullness(&self, now: Instant) -> f32 {
+        self.solo_transition
+            .filter(|transition| transition.entering == self.solo_pane)
+            .and_then(|transition| transition.step_at(now).map(|step| transition.fullness(step)))
+            .unwrap_or(if self.solo_pane { 1.0 } else { 0.0 })
+    }
+
+    /// `solo_pane` just flipped: draw the move to the new layout, starting
+    /// from where the panes were (`from`), unless motion is off.
+    fn begin_solo_transition(&mut self, from: f32, pane: FocusPane, now: Instant) {
+        let transition = SoloTransition {
+            started: now,
+            from,
+            entering: self.solo_pane,
+            pane,
+            step_shown: 0,
+        };
+        self.solo_transition = (self.motion && transition.steps() > 1).then_some(transition);
+    }
+
+    /// Ask for the ⌥h move's next frame when its step comes up.
+    fn advance_solo_transition(&mut self, now: Instant) -> bool {
+        let due = step_solo_transition(&mut self.solo_transition, now);
+        if due {
+            self.dirty = true;
+        }
+        due
     }
 
     /// Full screen shows only the worker or the open diff panel. A key that
@@ -3811,8 +3868,18 @@ impl App {
         if self.focus == FocusPane::Diff {
             self.focus = FocusPane::Worker;
         } else {
+            let now = Instant::now();
+            let from = self.solo_fullness(now);
+            // Focus already left the pane on screen; the last frame's rects say
+            // which one that was.
+            let shown = if self.diff_area.is_some() && self.worker_area.is_none() {
+                FocusPane::Diff
+            } else {
+                FocusPane::Worker
+            };
             self.solo_pane = false;
             self.solo_restore_focus = None;
+            self.begin_solo_transition(from, shown, now);
             self.notice = Some("panes restored".to_string());
         }
         self.dirty = true;
@@ -20935,6 +21002,7 @@ What to do\n\
         // calm 10fps rather than forcing a full terminal repaint on every planner
         // heartbeat (which made Ghostty and WindowServer amplify Rudder's own CPU use).
         self.advance_spinner_if_due(Instant::now());
+        self.advance_solo_transition(Instant::now());
 
         // MIRROR plan-launched agents' status transitions (running->review->merged
         // / failed) into graph.json so the board tracks them. Only when something
@@ -21501,6 +21569,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
         // fade in one after another. Drawing only; input works throughout.
         if terminal.is_some() {
             app.reveal_started = Some(Instant::now());
+            app.motion = true;
         }
 
         loop {

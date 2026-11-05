@@ -4901,6 +4901,7 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
 
 pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Line<'static>> {
     let perf_start = Instant::now();
+    let enter_resumes = app.enter_resumes_paneless_agent(app.selected_agent);
     let Some(run) = app.agents.get_mut(app.selected_agent) else {
         return vec![
             Line::from(""),
@@ -4950,11 +4951,16 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
             )));
         }
         lines.push(Line::from(""));
+        let idle = if matches!(run.mode, AgentMode::Plan | AgentMode::RudderPlan) {
+            "This read-only planner is not running."
+        } else {
+            "This agent is not running."
+        };
         lines.push(Line::from(Span::styled(
-            if matches!(run.mode, AgentMode::Plan | AgentMode::RudderPlan) {
-                "This read-only planner is not running."
+            if enter_resumes {
+                format!("{idle} Press Enter to resume it.")
             } else {
-                "This agent is not running."
+                idle.to_string()
             },
             muted_style(true),
         )));

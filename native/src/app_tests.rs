@@ -8527,6 +8527,308 @@ fn enter_on_paused_rows_resumes_worker_and_main_sessions() {
     let _ = fs::remove_dir_all(&repo);
 }
 
+/// A fake backend that records its argv to `args_file`, then idles like an
+/// agent waiting at its prompt.
+#[cfg(not(windows))]
+fn write_args_recording_bin(path: &std::path::Path, args_file: &std::path::Path) {
+    write_fake_bin(
+        path,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {tmp}\nmv {tmp} {final}\nsleep 30\n",
+            tmp = shell_single_quote(&args_file.with_extension("partial").to_string_lossy()),
+            final = shell_single_quote(&args_file.to_string_lossy())
+        ),
+    );
+}
+
+/// The argv a recording fake backend was started with, one arg per entry.
+#[cfg(not(windows))]
+fn recorded_args(args_file: &std::path::Path) -> Vec<String> {
+    for _ in 0..200 {
+        if let Ok(raw) = fs::read_to_string(args_file) {
+            let _ = fs::remove_file(args_file);
+            return raw.lines().map(str::to_string).collect();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Vec::new()
+}
+
+/// Claude and Codex rows resume the same way, through each backend's own resume
+/// form: Claude `--resume <id>`, Codex `resume <id>`. Each case is the backend,
+/// the saved session id and the argument that precedes it.
+#[cfg(not(windows))]
+const PANELESS_BACKENDS: [(Backend, &str, &str); 2] = [
+    (Backend::Claude, "11111111-1111-4111-8111-111111111111", "--resume"),
+    (Backend::Codex, "019a0000-0000-7000-8000-00000000c0de", "resume"),
+];
+
+/// One row whose process is gone, with a saved session, the way a finished or
+/// paused agent looks after its pane exits or rudder restarts.
+#[cfg(not(windows))]
+fn paneless_app(repo: &std::path::Path, backend: Backend, session: &str, status: AgentStatus) -> App {
+    let mut app = App::new();
+    app.cwd = repo.to_path_buf();
+    let mut run = test_agent_run("paneless", "port the settings screen");
+    run.cwd = repo.to_path_buf();
+    run.backend = backend;
+    run.model = if backend == Backend::Codex { "gpt-5.5" } else { "sonnet" }.to_string();
+    run.status = status;
+    run.completed_at = (status != AgentStatus::Paused).then(Instant::now);
+    run.session_id = Some(session.to_string());
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app
+}
+
+#[cfg(not(windows))]
+fn assert_resumed_with(args: &[String], backend: Backend, flag: &str, session: &str) {
+    assert!(
+        args.windows(2).any(|pair| pair[0] == flag && pair[1] == session),
+        "{backend:?} resumes with `{flag} {session}`: {args:?}"
+    );
+    if backend == Backend::Codex {
+        assert!(!args.iter().any(|arg| arg == "--resume"), "codex has no --resume: {args:?}");
+    }
+}
+
+/// Enter on the worker pane of a finished agent whose process is gone reopens
+/// its conversation, exactly as Enter on its row in the agents pane does, and
+/// leaves focus on the worker so the next keys type into it.
+#[cfg(not(windows))]
+#[test]
+fn worker_enter_reopens_a_finished_paneless_row_like_the_agents_pane() {
+    let _env = env_guard();
+    let repo = unique_test_repo("worker-enter-reopen");
+    let args_file = repo.join("backend-args.txt");
+    let fake = repo.join("fake-backend.sh");
+    write_args_recording_bin(&fake, &args_file);
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+
+    for (backend, session, flag) in PANELESS_BACKENDS {
+        for pane in [FocusPane::Worker, FocusPane::Agents] {
+            let mut app = paneless_app(&repo, backend, session, AgentStatus::Done);
+            app.focus = pane;
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+            let label = format!("{backend:?} from {pane:?}");
+            assert!(app.agents[0].terminal.is_some(), "{label}: the conversation is back");
+            assert_eq!(app.agents[0].status, AgentStatus::Done, "{label}: still finished");
+            assert!(app.agents[0].completed_at.is_some(), "{label}: still merge-eligible");
+            assert_eq!(app.agents[0].session_id.as_deref(), Some(session), "{label}");
+            assert_eq!(app.focus, FocusPane::Worker, "{label}: ready to type into");
+            assert_eq!(
+                app.notice.as_deref(),
+                Some("reopened the previous conversation"),
+                "{label}"
+            );
+            assert_resumed_with(&recorded_args(&args_file), backend, flag, session);
+            app.agents[0].terminal = None;
+        }
+    }
+
+    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+/// A paused row with no process resumes its saved session from the worker pane,
+/// continuing the prompt it was on, for Claude and Codex alike.
+#[cfg(not(windows))]
+#[test]
+fn worker_enter_resumes_a_paused_paneless_row() {
+    let _env = env_guard();
+    let repo = unique_test_repo("worker-enter-resume");
+    let args_file = repo.join("backend-args.txt");
+    let fake = repo.join("fake-backend.sh");
+    write_args_recording_bin(&fake, &args_file);
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+
+    for (backend, session, flag) in PANELESS_BACKENDS {
+        let mut app = paneless_app(&repo, backend, session, AgentStatus::Paused);
+        app.focus = FocusPane::Worker;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.agents[0].terminal.is_some(), "{backend:?}: resumed");
+        assert_eq!(app.agents[0].status, AgentStatus::Running, "{backend:?}");
+        assert_eq!(app.agents[0].session_id.as_deref(), Some(session), "{backend:?}");
+        assert_eq!(app.focus, FocusPane::Worker, "{backend:?}");
+        let last_turn = app.agents[0].turns.last().expect("resume turn");
+        assert_eq!(last_turn.source, "regoal", "{backend:?}");
+        assert_eq!(last_turn.prompt, "port the settings screen", "{backend:?}");
+        assert_resumed_with(&recorded_args(&args_file), backend, flag, session);
+        app.agents[0].terminal = None;
+    }
+
+    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+/// Text typed into a finished pane-less worker is still sent as its next
+/// instruction on Enter; reopening is only for an empty Enter.
+#[cfg(not(windows))]
+#[test]
+fn worker_enter_with_a_typed_draft_still_sends_it() {
+    let _env = env_guard();
+    let repo = unique_test_repo("worker-enter-draft");
+    let args_file = repo.join("backend-args.txt");
+    let fake = repo.join("fake-backend.sh");
+    write_args_recording_bin(&fake, &args_file);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+
+    let (backend, session, flag) = PANELESS_BACKENDS[1];
+    let mut app = paneless_app(&repo, backend, session, AgentStatus::Done);
+    app.focus = FocusPane::Worker;
+    for ch in "add a test".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app.agents[0].terminal.is_some());
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    let last_turn = app.agents[0].turns.last().expect("regoal turn");
+    assert_eq!((last_turn.source.as_str(), last_turn.prompt.as_str()), ("regoal", "add a test"));
+    assert!(
+        !app.focus_resume_attempted.contains("paneless"),
+        "the typed instruction is sent, not a bare reopen"
+    );
+    assert_resumed_with(&recorded_args(&args_file), backend, flag, session);
+    app.agents[0].terminal = None;
+
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+/// A finished row whose PTY is still alive keeps getting Enter in its own
+/// session: nothing is reopened or restarted around it.
+#[cfg(not(windows))]
+#[test]
+fn worker_enter_on_a_live_pty_still_reaches_the_pty() {
+    for (backend, session, _) in PANELESS_BACKENDS {
+        let command =
+            TerminalCommand::with_args("/bin/sh", ["-lc", "stty raw -echo; printf ready; cat -v"]);
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(command),
+            TerminalPaneOptions {
+                size: TerminalSize { rows: 5, cols: 40 },
+                scrollback_lines: 100,
+                ..Default::default()
+            },
+        )
+        .expect("spawn test pty");
+        for _ in 0..200 {
+            pane.drain_output();
+            if pane.visible_lines_snapshot().join("\n").contains("ready") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut app = App::new();
+        app.focus = FocusPane::Worker;
+        let mut run = test_agent_run_with_terminal(&app, pane);
+        run.backend = backend;
+        run.status = AgentStatus::Done;
+        run.completed_at = Some(Instant::now());
+        run.session_id = Some(session.to_string());
+        app.agents.push(run);
+        app.selected_agent = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let mut output = String::new();
+        for _ in 0..200 {
+            output = app
+                .selected_terminal_mut()
+                .map(|terminal| {
+                    terminal.drain_output();
+                    terminal.visible_lines_snapshot().join("\n")
+                })
+                .unwrap_or_default();
+            if output.contains("^M") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(output.contains("ready^M"), "{backend:?}: Enter reached the PTY: {output:?}");
+        assert!(
+            !app.focus_resume_attempted.contains("run-1"),
+            "{backend:?}: a live session is never reopened"
+        );
+        assert_eq!(app.agents[0].status, AgentStatus::Done, "{backend:?}");
+        assert_eq!(app.focus, FocusPane::Worker);
+    }
+}
+
+/// Approving a pending plan belongs to the orchestrator row and the prompt.
+/// From a pane-less orchestrator's worker pane, Enter neither approves nor
+/// restarts the planner (which would plan again); it says where to approve.
+#[test]
+fn worker_enter_on_a_paneless_orchestrator_leaves_a_pending_plan_alone() {
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    let mut run = planner_run("orch-paneless", false);
+    run.interactive_orchestrator = true;
+    run.status = AgentStatus::Paused;
+    run.terminal = None;
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app.plan_mut().awaiting_approval = true;
+    app.focus = FocusPane::Worker;
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app.plan().awaiting_approval, "not approved from the worker pane");
+    assert!(app.agents[0].terminal.is_none(), "the planner is not restarted");
+    assert_eq!(app.agents[0].status, AgentStatus::Paused);
+    assert!(
+        app.notice.as_deref().unwrap_or("").contains("waiting for approval"),
+        "says where to approve: {:?}",
+        app.notice
+    );
+    assert!(!app.enter_resumes_paneless_agent(0), "no Enter hint while the plan waits");
+}
+
+/// The pane-less worker card offers Enter only when Enter brings the agent back.
+#[test]
+fn paneless_worker_card_offers_enter_only_when_it_resumes() {
+    let card = |app: &mut App| {
+        worker_lines(app, 40, 120)
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let hint = "This agent is not running. Press Enter to resume it.";
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    for backend in [Backend::Claude, Backend::Codex] {
+        let mut run = test_agent_run("card", "port the settings screen");
+        run.backend = backend;
+        run.status = AgentStatus::Done;
+        run.session_id = Some("saved-session".to_string());
+        app.agents = vec![run];
+        app.selected_agent = 0;
+        app.focus_resume_attempted.clear();
+        assert!(card(&mut app).contains(hint), "{backend:?}: a saved session reopens");
+
+        app.focus_resume_attempted.insert("card".to_string());
+        let text = card(&mut app);
+        assert!(text.contains("This agent is not running."), "{backend:?}");
+        assert!(!text.contains("Press Enter"), "{backend:?}: already tried this session");
+
+        app.focus_resume_attempted.clear();
+        app.agents[0].session_id = None;
+        assert!(!card(&mut app).contains("Press Enter"), "{backend:?}: nothing to reopen");
+
+        app.agents[0].status = AgentStatus::Paused;
+        assert!(card(&mut app).contains(hint), "{backend:?}: a paused row restarts");
+    }
+}
+
 #[test]
 fn main_prompt_is_an_end_to_end_delivery_contract() {
     let prompt = main_task_prompt("deploy the app");

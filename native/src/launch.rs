@@ -137,6 +137,18 @@ pub(crate) fn can_resume_agent(run: &AgentRun) -> bool {
     }
 }
 
+/// A pane-less agent row whose saved backend conversation can be reopened here.
+/// Migrated rows never reopen locally: the live conversation belongs to the
+/// cloud workspace now, and `claude --resume` here would run a second,
+/// diverging copy of the same session.
+pub(crate) fn conversation_can_reopen(run: &AgentRun) -> bool {
+    run.terminal.is_none()
+        && !run.plain_process
+        && !run.is_orchestrator()
+        && run.status != AgentStatus::Migrated
+        && can_resume_agent(run)
+}
+
 pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
     // A saved conversation does not replace the launch-time tool policy.
     // Historical planners/reviewers keep their original restrictions on resume.

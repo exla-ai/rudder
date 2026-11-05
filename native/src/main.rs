@@ -4866,34 +4866,7 @@ impl App {
                     self.approve_planned_queue();
                 } else if !self.agents.is_empty() {
                     self.delete_pending = None;
-                    if self.selected_is_main() {
-                        self.focus_or_spawn_main();
-                    } else if self.selected_is_cloud_owned() {
-                        let has_live_attach = self.agents[self.selected_agent].terminal.is_some()
-                            && self.agents[self.selected_agent].status == AgentStatus::Running;
-                        if !has_live_attach {
-                            self.attach_selected_cloud_agent();
-                        }
-                        self.focus = FocusPane::Worker;
-                    } else if self.agents[self.selected_agent].status == AgentStatus::Paused {
-                        let index = self.selected_agent;
-                        if self.agents[index].is_orchestrator() {
-                            self.restart_selected_agent();
-                        } else {
-                            let continuation =
-                                if self.agents[index].current_prompt.trim().is_empty() {
-                                    self.agents[index].task.clone()
-                                } else {
-                                    self.agents[index].current_prompt.clone()
-                                };
-                            self.regoal_agent_at(index, &continuation);
-                        }
-                        self.focus = FocusPane::Worker;
-                    } else {
-                        let index = self.selected_agent;
-                        self.reopen_conversation_at(index);
-                        self.focus = FocusPane::Worker;
-                    }
+                    self.open_selected_agent_session();
                 }
             }
             KeyCode::Char('v') => self.toggle_worker_view(),
@@ -4933,6 +4906,60 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    /// Enter on an agent: bring its session into the worker pane and focus it.
+    /// Main focuses (or spawns) its pane, a Cloud row attaches unless its attach
+    /// is live, a paused row resumes, and any other row reopens its saved
+    /// conversation. Shared by Enter on the agents pane and Enter on a worker
+    /// pane whose process is gone, so the two never disagree.
+    fn open_selected_agent_session(&mut self) {
+        if self.agents.get(self.selected_agent).is_none() {
+            return;
+        }
+        if self.selected_is_main() {
+            self.focus_or_spawn_main();
+        } else if self.selected_is_cloud_owned() {
+            let has_live_attach = self.agents[self.selected_agent].terminal.is_some()
+                && self.agents[self.selected_agent].status == AgentStatus::Running;
+            if !has_live_attach {
+                self.attach_selected_cloud_agent();
+            }
+            self.focus = FocusPane::Worker;
+        } else if self.agents[self.selected_agent].status == AgentStatus::Paused {
+            let index = self.selected_agent;
+            if self.agents[index].is_orchestrator() {
+                self.restart_selected_agent();
+            } else {
+                let continuation = if self.agents[index].current_prompt.trim().is_empty() {
+                    self.agents[index].task.clone()
+                } else {
+                    self.agents[index].current_prompt.clone()
+                };
+                self.regoal_agent_at(index, &continuation);
+            }
+            self.focus = FocusPane::Worker;
+        } else {
+            let index = self.selected_agent;
+            self.reopen_conversation_at(index);
+            self.focus = FocusPane::Worker;
+        }
+    }
+
+    /// True when Enter on agent `index`'s pane, with no process behind it, brings
+    /// a session back through `open_selected_agent_session`. The worker pane only
+    /// offers Enter when this holds, so the hint never promises a no-op.
+    pub(crate) fn enter_resumes_paneless_agent(&self, index: usize) -> bool {
+        let Some(run) = self.agents.get(index) else {
+            return false;
+        };
+        if run.terminal.is_some() || (run.is_orchestrator() && self.plan().awaiting_approval) {
+            return false;
+        }
+        run.is_main()
+            || is_cloud_owned_agent(run)
+            || run.status == AgentStatus::Paused
+            || (conversation_can_reopen(run) && !self.focus_resume_attempted.contains(&run.id))
     }
 
     fn toggle_nest_view(&mut self) {
@@ -5107,6 +5134,24 @@ impl App {
         if self.selected_terminal_mut().is_none() {
             match key.code {
                 KeyCode::Char('q') => return self.confirm_or_quit(),
+                // No process behind this pane: Enter brings the agent back, as
+                // Enter on its row in the agents pane does, and focus stays here
+                // to type into it. A typed resume draft still goes to the regoal
+                // path below. Approving a pending plan stays with the orchestrator
+                // row and the prompt; restarting the planner here would replan.
+                KeyCode::Enter
+                    if !is_newline_key(key) && !self.selected_worker_has_resume_draft() =>
+                {
+                    if self.plan().awaiting_approval && self.selected_is_orchestrator() {
+                        self.notice = Some(
+                            "the plan is waiting for approval; press Enter in the prompt to launch it"
+                                .to_string(),
+                        );
+                    } else {
+                        self.open_selected_agent_session();
+                    }
+                    return false;
+                }
                 _ => {}
             }
         }
@@ -6755,6 +6800,18 @@ impl App {
                         | AgentStatus::Failed
                 )
         })
+    }
+
+    /// A pane-less finished worker with text typed into its resume draft: Enter
+    /// sends that text as the next instruction instead of just reopening it.
+    fn selected_worker_has_resume_draft(&self) -> bool {
+        self.selected_finished_worker_conversable()
+            && self
+                .agents
+                .get(self.selected_agent)
+                .is_some_and(|run| {
+                    run.worker_input_is_prompt && !run.worker_input_draft.trim().is_empty()
+                })
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -10775,15 +10832,7 @@ Address the objection directly. If you disagree, say why inside \
             self.notice = Some("runtime custody requires explicit reconciliation before resume".into());
             return false;
         }
-        if run.terminal.is_some()
-            || run.plain_process
-            || run.is_orchestrator()
-            || run.status == AgentStatus::Migrated
-            || !can_resume_agent(run)
-        {
-            // Migrated rows never reopen locally: the live conversation belongs
-            // to the cloud workspace now, and `claude --resume` here would run a
-            // second, diverging copy of the same session.
+        if !conversation_can_reopen(run) {
             return false;
         }
         if !self.focus_resume_attempted.insert(run.id.clone()) {

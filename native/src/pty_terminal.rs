@@ -822,10 +822,14 @@ impl OscNotificationScanner {
     }
 }
 
-/// The url under char column `col` of `line`. Agent-marked links win (newest
-/// first, since the same text can point somewhere new later); otherwise a bare
-/// `http(s)://` or `file://` url in the text itself, which is how Codex and
-/// most CLI output print links.
+/// The url under char column `col` of `line`. Agent-marked links win, `links`
+/// newest first; otherwise a bare `http(s)://` or `file://` url in the text
+/// itself, which is how most CLI output prints links.
+///
+/// Among agent links the longest text under the click wins, then the newest
+/// (the same text can point somewhere new later). Codex redraws a link while
+/// its url is still streaming in, so shorter pieces of the same text are on
+/// record with the url cut short.
 pub fn hyperlink_at<'a>(
     line: &str,
     col: usize,
@@ -835,18 +839,25 @@ pub fn hyperlink_at<'a>(
     if col >= chars.len() {
         return None;
     }
+    let mut best: Option<(usize, &TerminalHyperlink)> = None;
     for link in links {
         let needle: Vec<char> = link.text.chars().collect();
-        if needle.is_empty() || needle.len() > chars.len() {
+        if needle.is_empty()
+            || needle.len() > chars.len()
+            || best.is_some_and(|(len, _)| needle.len() <= len)
+        {
             continue;
         }
         let first = col.saturating_sub(needle.len() - 1);
         let last = col.min(chars.len() - needle.len());
         if (first..=last).any(|start| chars[start..start + needle.len()] == needle[..]) {
-            return Some(link.url.clone());
+            best = Some((needle.len(), link));
         }
     }
-    bare_url_at(&chars, col)
+    match best {
+        Some((_, link)) => Some(link.url.clone()),
+        None => bare_url_at(&chars, col),
+    }
 }
 
 fn bare_url_at(chars: &[char], col: usize) -> Option<String> {
@@ -2948,6 +2959,47 @@ mod tests {
         );
         assert_eq!(hyperlink_at(line, 0, links.iter()), None);
         assert_eq!(hyperlink_at(line, 500, links.iter()), None);
+    }
+
+    #[test]
+    fn a_link_codex_redrew_while_streaming_opens_its_full_url() {
+        // Codex 0.166 wraps links in OSC 8 and redraws them as the reply
+        // streams in, so a shorter piece of the same text was recorded later
+        // with the url cut short. The full piece under the click wins.
+        let full = "https://github.com/openai/codex/blob/main/codex-rs/tui/src/history_cell.rs?plain=1&q=abcdefghijklmnopqrstuvwxyz";
+        let cut = "https://github.com/openai/codex/blob/main/codex-rs/tui/src/history_cell.rs?plain=1&q=abc";
+        let links = [
+            TerminalHyperlink {
+                text: "cell.rs?plain=1&q=abcdefghijklmnopqrstuvwxyz".to_string(),
+                url: full.to_string(),
+            },
+            TerminalHyperlink {
+                text: "l.rs?plain=1&q=abc".to_string(),
+                url: cut.to_string(),
+            },
+        ];
+        let line = "  cell.rs?plain=1&q=abcdefghijklmnopqrstuvwxyz";
+        let col = line.find("q=").unwrap();
+        // The pane hands them over newest first.
+        assert_eq!(
+            hyperlink_at(line, col, links.iter().rev()).as_deref(),
+            Some(full)
+        );
+        // Text that later points somewhere new: the newest still wins.
+        let relinked = [
+            TerminalHyperlink {
+                text: "PR #1".to_string(),
+                url: "https://x.dev/old".to_string(),
+            },
+            TerminalHyperlink {
+                text: "PR #1".to_string(),
+                url: "https://x.dev/new".to_string(),
+            },
+        ];
+        assert_eq!(
+            hyperlink_at("see PR #1 now", 5, relinked.iter().rev()).as_deref(),
+            Some("https://x.dev/new")
+        );
     }
 
     #[test]

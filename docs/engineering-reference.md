@@ -472,7 +472,14 @@ on scroll and Ink repaints, the text does not. A plain click (no drag) in a work
 pane opens the agent-marked link under it, else a bare `http(s)://`/`file://` url in
 the row (`hyperlink_at`), via `open`/`xdg-open`; only http, https, file and mailto
 are ever handed to the OS. Child PTYs get `FORCE_HYPERLINK=1` so Claude Code emits
-links whatever the outer terminal is.
+links whatever the outer terminal is (Codex emits OSC 8 on its own). Among recorded
+links the longest text under the click wins, then the newest: Codex redraws a link
+while its url streams in, so cut-short pieces are on record too. A Cloud machine
+(`RUDDER_CLOUD_WORKER`/`RUDDER_CLOUD_RUNTIME`) has no browser, so there the dashboard
+writes `ESC ] 7770 ; open ; <url> BEL` instead and `rudder cloud` on the laptop
+opens it (`src/link-open.ts`): http(s) and mailto only, and only right after that
+terminal sent a left click, once per click, because the relay replays recent output
+to every attach.
 
 **God's view (⌥g).** `⌥g` (Option+g's `©` too, and `g` under `^W` / nav mode; bare
 `g` in the agents list is still nest view) replaces the whole screen with every

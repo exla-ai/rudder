@@ -74,6 +74,16 @@ checkout). Synthetic repo: 4,000 files 55.8 s to 0.6 s; 9,300 files about
 starts a warm build for a branch base too, and waits up to 90 s for that build
 when every snapshot is over 500 files away. Conflicted bases get a full checkout.
 
+Workspace preparation no longer freezes the dashboard. A new task, a plan
+node, `b` (branch) and `/handoff` add their row at once as "preparing
+workspace"; `rudder __launch-node` and the Claude transcript copy run on a
+background thread (one at a time, as before), and the App loop starts the
+agent when the result arrives. Keys typed into the pane meanwhile reach the
+agent once it starts; `x` or `dd` cancels and the workspace is removed when it
+finishes; a quit drops the row and leaves any late workspace to the orphan
+sweep. `/gam` still prepares its generator's workspace on the loop. On
+2026-11-06 a 182s `__launch-node` froze a libra dashboard for its whole run.
+
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
 `rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
 workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero

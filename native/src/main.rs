@@ -1985,6 +1985,15 @@ struct App {
     bg_notice_rx: mpsc::Receiver<String>,
     task_routing_tx: mpsc::Sender<TaskRoutingOutcome>,
     task_routing_rx: mpsc::Receiver<TaskRoutingOutcome>,
+    /// Launches whose jj workspace is being prepared on a background thread,
+    /// keyed by run id. Each one's row is already in `agents`; the outcome
+    /// arrives on `workspace_prep_rx` and the loop finishes the launch.
+    pending_launches: HashMap<String, PendingLaunch>,
+    workspace_prep_tx: mpsc::Sender<WorkspacePrepOutcome>,
+    workspace_prep_rx: mpsc::Receiver<WorkspacePrepOutcome>,
+    /// Prepare workspaces on the calling thread. Unit tests only, so a launch
+    /// test can assert on the finished row without waiting on a thread.
+    workspace_prep_inline: bool,
     merge_confirm: Option<MergeConfirmation>,
     /// The yes/no modal for deleting something in Rudder Cloud.
     cloud_delete_confirm: Option<CloudDeleteConfirm>,
@@ -2355,6 +2364,93 @@ fn cloud_delete_target_label(target: &CloudDeleteTarget) -> String {
         CloudDeleteTarget::Workspace => "this repo's cloud workspace".to_string(),
         CloudDeleteTarget::HomeAgent(_) => "this agent on the home machine".to_string(),
     }
+}
+
+/// A launch waiting on its workspace (see `App::pending_launches`).
+struct PendingLaunch {
+    kind: PendingLaunchKind,
+    /// Keys typed into the row's pane while it waited. They go to the agent
+    /// once its process starts, as they did when preparation froze the loop.
+    typed: Vec<u8>,
+}
+
+enum PendingLaunchKind {
+    /// `start_execute_task_node`: a typed task (`single_run`) or a plan node.
+    Task { single_run: bool },
+    /// `spawn_forked_conversation`: `b` on an agent, or `/handoff`.
+    Fork(PendingFork),
+}
+
+struct PendingFork {
+    session_id: String,
+    seed: Option<String>,
+    notices: ForkNotices,
+}
+
+/// What a fork says once it starts or fails, chosen by its caller.
+struct ForkNotices {
+    started: String,
+    spawn_failed: &'static str,
+    failed: &'static str,
+    activity: Option<String>,
+}
+
+/// The slow part of a launch that needs nothing from App, run off the loop.
+struct WorkspacePrepJob {
+    cwd: PathBuf,
+    label: String,
+    base_change: Option<String>,
+    /// Claude fork: copy this session's transcript (source cwd, session id)
+    /// into the new workspace's project folder so `--resume` finds it there.
+    stage_claude_session: Option<(PathBuf, String)>,
+}
+
+/// Several `__launch-node` calls at once would race on one jj repo. The loop
+/// used to run them one at a time, and the background threads still do.
+static WORKSPACE_PREP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl WorkspacePrepJob {
+    fn run(self, run_id: String) -> WorkspacePrepOutcome {
+        let prepared = {
+            let _serial = WORKSPACE_PREP_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            prepare_jj_workspace_as(
+                &self.cwd,
+                &self.label,
+                self.base_change.as_deref(),
+                Some(&run_id),
+            )
+        };
+        match prepared {
+            Err(error) => WorkspacePrepOutcome {
+                run_id,
+                workspace: None,
+                error: Some(error.to_string()),
+            },
+            Ok(workspace) => {
+                let error = self
+                    .stage_claude_session
+                    .and_then(|(source_cwd, session_id)| {
+                        stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path)
+                            .err()
+                    });
+                WorkspacePrepOutcome {
+                    run_id,
+                    workspace: Some(workspace),
+                    error,
+                }
+            }
+        }
+    }
+}
+
+/// A finished workspace preparation. `workspace` is set whenever one was
+/// created, even if a later step (transcript staging) failed.
+struct WorkspacePrepOutcome {
+    run_id: String,
+    workspace: Option<WorkspaceInfo>,
+    error: Option<String>,
 }
 
 /// A finished cloud deletion, reported back from its background thread.
@@ -2851,12 +2947,9 @@ struct ForkedConversation {
     task: String,
     /// First turn handed to the fork. None opens it waiting for the user to type.
     seed: Option<String>,
-}
-
-enum ForkOutcome {
-    Started,
-    /// The row exists (marked Failed) but the backend process never started.
-    SpawnFailed(String),
+    /// The fork finishes after its workspace is ready, so the caller hands over
+    /// what to say then instead of reading an outcome back.
+    notices: ForkNotices,
 }
 
 #[derive(Default)]
@@ -3217,6 +3310,7 @@ impl App {
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         let cloud_deletes = mpsc::channel();
         let task_routing = mpsc::channel();
+        let workspace_preps = mpsc::channel();
         Self {
             fabric_runtime: fabric_runtime::RuntimeState::default(),
             gam_links: HashMap::new(),
@@ -3319,6 +3413,10 @@ impl App {
             bg_notice_rx: bg_notices.1,
             task_routing_tx: task_routing.0,
             task_routing_rx: task_routing.1,
+            pending_launches: HashMap::new(),
+            workspace_prep_tx: workspace_preps.0,
+            workspace_prep_rx: workspace_preps.1,
+            workspace_prep_inline: cfg!(test),
             merge_confirm: None,
             cloud_delete_confirm: None,
             cloud_delete_tx: cloud_deletes.0,
@@ -5000,7 +5098,12 @@ impl App {
     /// conversation. Shared by Enter on the agents pane and Enter on a worker
     /// pane whose process is gone, so the two never disagree.
     fn open_selected_agent_session(&mut self) {
-        if self.agents.get(self.selected_agent).is_none() {
+        let Some(run) = self.agents.get(self.selected_agent) else {
+            return;
+        };
+        // Still preparing: its pane says so, and the agent starts there.
+        if self.launch_preparing(&run.id) {
+            self.focus = FocusPane::Worker;
             return;
         }
         if self.selected_is_main() {
@@ -5202,6 +5305,27 @@ impl App {
         }
 
         self.worker_selection = None;
+        // A row still preparing its workspace keeps what is typed into its pane
+        // and hands it to the agent once it starts, as a frozen dashboard used
+        // to. Esc is dropped (it would interrupt the agent's first turn), and
+        // so are the page keys, which only scroll.
+        let preparing = self
+            .agents
+            .get(self.selected_agent)
+            .map(|run| run.id.clone())
+            .filter(|id| self.launch_preparing(id));
+        if let Some(run_id) = preparing {
+            if !matches!(key.code, KeyCode::Esc | KeyCode::PageUp | KeyCode::PageDown) {
+                if let (Some(bytes), Some(pending)) = (
+                    terminal_bytes_for_key(key),
+                    self.pending_launches.get_mut(&run_id),
+                ) {
+                    pending.typed.extend_from_slice(&bytes);
+                    self.dirty = true;
+                }
+            }
+            return false;
+        }
         if self.selected_terminal_mut().is_none() {
             match key.code {
                 KeyCode::Char('q') => return self.confirm_or_quit(),
@@ -8758,6 +8882,10 @@ impl App {
     /// its plan node id and hard deps (so the scheduler can track its merge and
     /// unblock dependents), and the node's backend/model/effort overrides apply.
     /// When `None`, this is an ordinary manual launch using the dashboard defaults.
+    ///
+    /// The row appears at once while its jj workspace is prepared off the App
+    /// loop (that took 182s once, with the whole dashboard frozen behind it);
+    /// `finish_task_launch` starts the agent when the workspace is ready.
     fn start_execute_task_node(
         &mut self,
         input: &str,
@@ -8778,20 +8906,9 @@ impl App {
         // new task used to wait ~3s on a haiku call before anything started.
         // The model title still arrives (spawn_task_summary_worker below) and
         // renames the row; only the directory keeps the heuristic words.
-        let workspace_label = task_summary.as_str();
-        let workspace = match prepare_jj_workspace(&self.cwd, workspace_label) {
-            Ok(workspace) => workspace,
-            Err(error) => {
-                // New runs are jj-isolated; never silently fall back to git.
-                // Surface the failure and run in the current checkout so the user
-                // sees the error rather than a half-broken merge later.
-                self.notice = Some(format!("jj workspace failed: {error}"));
-                WorkspaceInfo::current(self.cwd.clone())
-            }
-        };
-        if let Err(error) = self.write_rudder_context_timed(Some(&workspace)) {
-            self.notice = Some(format!("context warning: {error}"));
-        }
+        let workspace_label = task_summary.clone();
+        let run_id = new_run_id(&workspace_label);
+        let single_run = node.is_none();
 
         // Plan node overrides win over the dashboard defaults when supplied.
         let backend = node
@@ -8817,32 +8934,16 @@ impl App {
             .map(|n| n.plan_id.clone())
             .filter(|id| !id.is_empty());
         let node_deps = node.as_ref().map(|n| n.deps.clone()).unwrap_or_default();
-        let session_id = mint_session_id_for(backend);
         // Lead the launch prompt with the canonical Objective + Done-when block so
         // every spawned agent has a clear objective and verifiable stopping condition.
         // Idempotent: an already objective-formatted worker prompt is normalized and kept.
         let goal_prompt = manual_goal_prompt(input);
-        let mut command = agent_command(
-            backend,
-            &model,
-            effort,
-            &goal_prompt,
-            AgentMode::Execute,
-            session_id.as_deref(),
-        );
-        // Official completion signal: wire the backend's own Stop hook (Claude) /
-        // notify (Codex) so it deterministically reports turn-end. Keyed by the run id the poll loop
-        // reads. See signals.rs.
-        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
-        let options = TerminalPaneOptions {
-            size: TerminalSize::default(),
-            cwd: Some(workspace.path.clone()),
-            ..TerminalPaneOptions::default()
-        };
 
+        // The row goes in now, in the dashboard checkout with no workspace, no
+        // session and no process; finish_task_launch fills those in.
         let created_at = now_stamp();
-        let mut run = AgentRun {
-            id: workspace.id.clone(),
+        let run = AgentRun {
+            id: run_id.clone(),
             created_at: created_at.clone(),
             mode: AgentMode::Execute,
             task: goal_prompt.clone(),
@@ -8858,17 +8959,17 @@ impl App {
             model,
             effort,
             status: AgentStatus::Running,
-            cwd: workspace.path.clone(),
-            workspace_branch: workspace.branch.clone(),
-            workspace_path: workspace
-                .path_is_workspace
-                .then_some(workspace.path.clone()),
-            workspace_name: workspace.workspace_name.clone(),
-            jj_change_id: workspace.jj_change_id.clone(),
+            cwd: self.cwd.clone(),
+            workspace_branch: None,
+            workspace_path: None,
+            workspace_name: None,
+            jj_change_id: None,
             integration: IntegrationEvidence::default(),
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::for_task(&goal_prompt),
-            session_id,
+            // Minted when the agent starts. A row with a session id is one Enter
+            // tries to reopen, and there is nothing to reopen yet.
+            session_id: None,
             execution_profile: None,
             terminal: None,
             terminal_size: None,
@@ -8910,37 +9011,261 @@ impl App {
             gam: None,
         };
 
+        self.agents.push(run);
+        self.selected_agent = self.agents.len().saturating_sub(1);
+        self.delete_pending = None;
+        self.focus = FocusPane::Worker;
+        self.dirty = true;
+        if should_generate_summary {
+            spawn_task_summary_worker(
+                self.task_summary_tx.clone(),
+                run_id.clone(),
+                input.to_string(),
+            );
+        }
+        let job = WorkspacePrepJob {
+            cwd: self.cwd.clone(),
+            label: workspace_label,
+            base_change: None,
+            stage_claude_session: None,
+        };
+        self.begin_workspace_prep(run_id, PendingLaunchKind::Task { single_run }, job);
+    }
+
+    /// Is `run_id` a row still waiting on its workspace?
+    pub(crate) fn launch_preparing(&self, run_id: &str) -> bool {
+        self.pending_launches.contains_key(run_id)
+    }
+
+    /// True (with a notice) when the selected row is still preparing its
+    /// workspace, for actions that need a started agent.
+    fn refuse_while_preparing(&mut self) -> bool {
+        let preparing = self
+            .agents
+            .get(self.selected_agent)
+            .is_some_and(|run| self.launch_preparing(&run.id));
+        if preparing {
+            self.notice = Some("this agent is still preparing its workspace".to_string());
+            self.dirty = true;
+        }
+        preparing
+    }
+
+    /// Run `job` on a background thread and finish the launch of `run_id`
+    /// (whose row is already in `agents`) when its outcome comes back.
+    fn begin_workspace_prep(
+        &mut self,
+        run_id: String,
+        kind: PendingLaunchKind,
+        job: WorkspacePrepJob,
+    ) {
+        self.pending_launches.insert(
+            run_id.clone(),
+            PendingLaunch {
+                kind,
+                typed: Vec::new(),
+            },
+        );
+        if self.workspace_prep_inline {
+            let outcome = job.run(run_id);
+            self.finish_workspace_prep(outcome);
+            return;
+        }
+        let tx = self.workspace_prep_tx.clone();
+        // The PTY waker only wakes the loop, so it serves here too: the launch
+        // finishes on this wake instead of the next tick.
+        let waker = self.pty_output_waker.clone();
+        let thread_run_id = run_id.clone();
+        let spawned = thread::Builder::new()
+            .name("rudder-workspace-prep".to_string())
+            .spawn(move || {
+                let _ = tx.send(job.run(thread_run_id));
+                if let Some(wake) = waker {
+                    wake();
+                }
+            });
+        if let Err(error) = spawned {
+            self.finish_workspace_prep(WorkspacePrepOutcome {
+                run_id,
+                workspace: None,
+                error: Some(format!("could not start workspace preparation: {error}")),
+            });
+        }
+    }
+
+    /// Shutdown: a row still waiting on its workspace never started anything
+    /// and has no record, so it simply goes (and RUDDER.md stops listing it).
+    /// A workspace that finishes after the dashboard exits belongs to no row,
+    /// and the next dashboard's orphan sweep removes it.
+    pub(crate) fn drop_preparing_rows(&mut self) {
+        if self.pending_launches.is_empty() {
+            return;
+        }
+        let pending = &self.pending_launches;
+        self.agents.retain(|run| !pending.contains_key(&run.id));
+        self.pending_launches.clear();
+        self.agent_row_map.clear();
+        self.selected_agent = self
+            .selected_agent
+            .min(self.agents.len().saturating_sub(1));
+    }
+
+    fn drain_workspace_preps(&mut self) {
+        while let Ok(outcome) = self.workspace_prep_rx.try_recv() {
+            self.finish_workspace_prep(outcome);
+        }
+    }
+
+    fn finish_workspace_prep(&mut self, outcome: WorkspacePrepOutcome) {
+        let pending = self.pending_launches.remove(&outcome.run_id);
+        let index = self.agents.iter().position(|run| run.id == outcome.run_id);
+        let (Some(PendingLaunch { kind, typed }), Some(index)) = (pending, index) else {
+            // The row was deleted or stopped while it waited, so nothing will
+            // ever run here. Remove what preparation made.
+            if let Some(workspace) = outcome.workspace.filter(|ws| ws.path_is_workspace) {
+                self.remove_workspace_in_background(workspace.path, workspace.workspace_name);
+            }
+            return;
+        };
+        self.dirty = true;
+        match kind {
+            PendingLaunchKind::Task { single_run } => {
+                self.finish_task_launch(index, outcome, single_run, &typed);
+            }
+            PendingLaunchKind::Fork(fork) => self.finish_fork_launch(index, outcome, fork, &typed),
+        }
+    }
+
+    /// Start the agent for the prepared row at `index`. On failure the row is
+    /// marked Failed and keeps no process.
+    fn spawn_into_row(
+        &mut self,
+        index: usize,
+        command: TerminalCommand,
+        options: TerminalPaneOptions,
+        typed: &[u8],
+    ) -> std::result::Result<(), String> {
         match TerminalPane::spawn_shell_or_command(Some(command), options) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                let typed_any = !typed.is_empty() && terminal.write_input(typed).is_ok();
+                let run = &mut self.agents[index];
                 run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
+                if typed_any {
+                    run.last_worker_input_at = Some(Instant::now());
+                }
+                Ok(())
             }
             Err(error) => {
+                let run = &mut self.agents[index];
                 run.status = AgentStatus::Failed;
                 run.last_error = Some(error.to_string());
-                self.notice = Some(format!("failed to start {}: {error}", backend.as_str()));
+                Err(error.to_string())
             }
         }
+    }
 
-        let run_id = run.id.clone();
-        let spawned = run.terminal.is_some();
-        self.agents.push(run);
-        self.selected_agent = self.agents.len().saturating_sub(1);
-        self.delete_pending = None;
-        // A dead pane swallows every key except q; focusing it after a failed
-        // spawn trapped the user. Stay in the task bar so they can retry.
-        self.focus = if spawned {
-            FocusPane::Worker
-        } else {
-            FocusPane::Task
+    /// A dead pane swallows every key except q; leaving focus on it after a
+    /// failed start trapped the user. Back to the task bar so they can retry.
+    fn release_focus_after_failed_start(&mut self, index: usize) {
+        if self.selected_agent == index && self.focus == FocusPane::Worker {
+            self.focus = FocusPane::Task;
+        }
+    }
+
+    /// The workspace for a task row is ready (or failed): start its agent.
+    fn finish_task_launch(
+        &mut self,
+        index: usize,
+        outcome: WorkspacePrepOutcome,
+        single_run: bool,
+        typed: &[u8],
+    ) {
+        let workspace_failed = outcome.error.is_some();
+        let workspace = match (outcome.workspace, outcome.error) {
+            (Some(workspace), None) => workspace,
+            (_, error) => {
+                // New runs are jj-isolated; never silently fall back to git.
+                // Surface the failure and run in the current checkout so the user
+                // sees the error rather than a half-broken merge later.
+                self.notice = Some(format!(
+                    "jj workspace failed: {}",
+                    error.unwrap_or_default()
+                ));
+                let mut workspace = WorkspaceInfo::current(self.cwd.clone());
+                workspace.id = outcome.run_id;
+                workspace
+            }
         };
-        if let Some(run) = self.agents.get(self.selected_agent) {
+        let (backend, model, effort, goal_prompt, session_id) = {
+            let run = &mut self.agents[index];
+            run.cwd = workspace.path.clone();
+            run.workspace_branch = workspace.branch.clone();
+            run.workspace_path = workspace
+                .path_is_workspace
+                .then_some(workspace.path.clone());
+            run.workspace_name = workspace.workspace_name.clone();
+            run.jj_change_id = workspace.jj_change_id.clone();
+            run.session_id = mint_session_id_for(run.backend);
+            run.last_output_at = Instant::now();
+            (
+                run.backend,
+                run.model.clone(),
+                run.effort,
+                run.task.clone(),
+                run.session_id.clone(),
+            )
+        };
+        // The agent reads RUDDER.md first thing; it should find itself there.
+        if let Err(error) = self.write_rudder_context_timed(None) {
+            self.notice = Some(format!("context warning: {error}"));
+        }
+        let mut command = agent_command(
+            backend,
+            &model,
+            effort,
+            &goal_prompt,
+            AgentMode::Execute,
+            session_id.as_deref(),
+        );
+        // Official completion signal: wire the backend's own Stop hook (Claude) /
+        // notify (Codex) so it deterministically reports turn-end. Keyed by the run id the poll loop
+        // reads. See signals.rs.
+        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
+        let options = TerminalPaneOptions {
+            size: TerminalSize::default(),
+            cwd: Some(workspace.path.clone()),
+            ..TerminalPaneOptions::default()
+        };
+        let spawned = match self.spawn_into_row(index, command, options, typed) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notice = Some(format!("failed to start {}: {error}", backend.as_str()));
+                self.release_focus_after_failed_start(index);
+                false
+            }
+        };
+        if let Some(run) = self.agents.get(index) {
             let _ = save_native_run_record(&self.cwd, run);
         }
-        if should_generate_summary {
-            spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, input.to_string());
+        if single_run && spawned {
+            if self.agents[index].has_merge_source() {
+                self.notice = Some(
+                    "isolated worker running; it merges automatically when done".to_string(),
+                );
+            } else if !workspace_failed {
+                // Name the CONSEQUENCE and the fix. The old wording stated a
+                // fact ("no merge step outside a git repo") that read as
+                // incidental, so a whole session could run unisolated in the
+                // user's files without them realising nothing could ever be
+                // merged or undone (field report: job-nikita).
+                self.notice = Some(
+                    "no git repo here: this worker edits your checkout directly, with no isolation and nothing to merge · run `git init` for isolated workspaces"
+                        .to_string(),
+                );
+            }
         }
         let _ = self.write_rudder_context_timed(None);
     }
@@ -11208,6 +11533,9 @@ Address the objection directly. If you disagree, say why inside \
         // Main rows rename like any other: the rename only touches
         // task_summary and the saved record, both of which main rows have.
         // The old is-main refusal ("rename disabled") guarded nothing.
+        if self.refuse_while_preparing() {
+            return;
+        }
         let Some(run) = self.agents.get(self.selected_agent) else {
             self.notice = Some("no agent selected".to_string());
             return;
@@ -11673,7 +12001,7 @@ Address the objection directly. If you disagree, say why inside \
 
         match request.target {
             HandoffTarget::Worker => {
-                match self.spawn_forked_conversation(ForkedConversation {
+                self.spawn_forked_conversation(ForkedConversation {
                     backend,
                     model,
                     effort,
@@ -11685,20 +12013,15 @@ Address the objection directly. If you disagree, say why inside \
                     label: format!("handoff: {title}"),
                     task,
                     seed: instruction,
-                }) {
-                    Ok(ForkOutcome::Started) => {
-                        self.record_activity(format!("handed off conversation: {title}"));
-                        self.notice = Some(format!(
+                    notices: ForkNotices {
+                        started: format!(
                             "picked up “{title}” in an isolated worker; merge with m when it is done"
-                        ));
-                    }
-                    Ok(ForkOutcome::SpawnFailed(error)) => {
-                        self.notice = Some(format!("handoff failed to start: {error}"));
-                    }
-                    Err(error) => {
-                        self.notice = Some(format!("handoff failed: {error}"));
-                    }
-                }
+                        ),
+                        spawn_failed: "handoff failed to start",
+                        failed: "handoff failed",
+                        activity: Some(format!("handed off conversation: {title}")),
+                    },
+                });
             }
             HandoffTarget::Here => self.start_handoff_in_main_checkout(
                 backend,
@@ -13708,40 +14031,15 @@ Address the objection directly. If you disagree, say why inside \
 
     /// Spawn exactly one normal execute worker without invoking the planner. In a git
     /// repo this uses the same jj workspace isolation as DAG workers, so the result
-    /// appears in Review and is integrated automatically (or with `m`).
+    /// appears in Review and is integrated automatically (or with `m`). The
+    /// notice saying which of those it got comes from `finish_task_launch`.
     fn start_single_run_task(&mut self, input: &str) {
         let input = input.trim();
         if input.is_empty() {
             return;
         }
-        let before = self.agents.len();
         self.notice = None;
         self.start_execute_task_node(input, None, None);
-        let launch_notice = self.notice.clone();
-        if self.agents.len() > before {
-            let Some(run) = self.agents.last() else {
-                return;
-            };
-            if run.status == AgentStatus::Running && run.has_merge_source() {
-                self.notice = Some(
-                    "isolated worker running; it merges automatically when done".to_string(),
-                );
-            } else if run.status == AgentStatus::Running
-                && !launch_notice
-                    .as_deref()
-                    .is_some_and(|notice| notice.starts_with("jj workspace failed:"))
-            {
-                // Name the CONSEQUENCE and the fix. The old wording stated a
-                // fact ("no merge step outside a git repo") that read as
-                // incidental, so a whole session could run unisolated in the
-                // user's files without them realising nothing could ever be
-                // merged or undone (field report: job-nikita).
-                self.notice = Some(
-                    "no git repo here — this worker edits your checkout directly, with no isolation and nothing to merge · run `git init` for isolated workspaces"
-                        .to_string(),
-                );
-            }
-        }
     }
 
     fn refresh_cloud_workspace_status(&mut self) {
@@ -17039,7 +17337,10 @@ Address the objection directly. If you disagree, say why inside \
     /// row, never touches `default` or a dir outside `.rudder-workspaces`, waits
     /// out the grace window, and skips while a resolver/rebase churns the op log.
     fn gc_orphan_workspaces(&mut self) {
-        if self.plan().rebasing
+        // A workspace being prepared is registered with jj before any row
+        // records it, so the sweep below would forget it mid-launch.
+        if !self.pending_launches.is_empty()
+            || self.plan().rebasing
             || self
                 .agents
                 .iter()
@@ -17741,10 +18042,10 @@ Address the objection directly. If you disagree, say why inside \
         let swarm = self.plans[plan_index].swarm.clone();
         let mut swarm_hold: Option<String> = None;
 
-        // Launch at most MAX_LAUNCH_PER_TICK nodes per pass. Each launch shells a
-        // synchronous jj-workspace setup that briefly blocks the UI thread, so
-        // draining a whole wave of newly-ready nodes at once (e.g. when a parent
-        // merge unblocks several children) would freeze the TUI. The periodic
+        // Launch at most MAX_LAUNCH_PER_TICK nodes per pass. Workspace setup runs
+        // off the UI thread now, but one at a time, so a whole wave of newly-ready
+        // nodes (e.g. when a parent merge unblocks several children) would only
+        // queue up as "preparing workspace" rows behind each other. The periodic
         // scheduler tick and merge transitions keep calling run_scheduler, so the
         // remaining nodes launch progressively and the UI stays responsive. The
         // launch decision is recomputed each iteration so a node launched this pass
@@ -17904,7 +18205,10 @@ Address the objection directly. If you disagree, say why inside \
             .find(|run| run.node_id.as_deref() == Some(node_id))
         {
             run.swarm_experiment = true;
-            let _ = save_native_run_record(&cwd, run);
+            // Saved with the rest of the row once its workspace is ready.
+            if !self.pending_launches.contains_key(&run.id) {
+                let _ = save_native_run_record(&cwd, run);
+            }
         }
     }
 
@@ -18332,6 +18636,9 @@ Address the objection directly. If you disagree, say why inside \
     /// memory of "the edits so far" matches the files it sees. The user then types
     /// the new direction into the forked pane.
     fn branch_selected_agent(&mut self) {
+        if self.refuse_while_preparing() {
+            return;
+        }
         let Some(run) = self.agents.get(self.selected_agent) else {
             self.notice = Some("no agent selected".to_string());
             return;
@@ -18414,7 +18721,7 @@ Address the objection directly. If you disagree, say why inside \
         }
 
         let label = format!("branch: {source_summary}");
-        match self.spawn_forked_conversation(ForkedConversation {
+        self.spawn_forked_conversation(ForkedConversation {
             backend,
             model,
             effort,
@@ -18426,19 +18733,15 @@ Address the objection directly. If you disagree, say why inside \
             label,
             task: format!("Branch of: {source_task}"),
             seed: None,
-        }) {
-            Ok(ForkOutcome::Started) => {
-                self.notice = Some(format!(
+            notices: ForkNotices {
+                started: format!(
                     "branched {source_summary}; type the new direction in the forked pane"
-                ));
-            }
-            Ok(ForkOutcome::SpawnFailed(error)) => {
-                self.notice = Some(format!("branch failed to start: {error}"));
-            }
-            Err(error) => {
-                self.notice = Some(format!("branch failed: {error}"));
-            }
-        }
+                ),
+                spawn_failed: "branch failed to start",
+                failed: "branch failed",
+                activity: None,
+            },
+        });
         self.delete_pending = None;
     }
 
@@ -18447,10 +18750,11 @@ Address the objection directly. If you disagree, say why inside \
     /// was happening OUTSIDE the dashboard). Always a fork, never a plain resume:
     /// the source conversation may still be open in another process, and two
     /// writers on one transcript corrupt it.
-    fn spawn_forked_conversation(
-        &mut self,
-        request: ForkedConversation,
-    ) -> std::result::Result<ForkOutcome, String> {
+    ///
+    /// The row appears at once; its workspace and the Claude transcript copy are
+    /// made off the App loop, and `finish_fork_launch` starts the fork. Every
+    /// outcome is reported through `request.notices`.
+    fn spawn_forked_conversation(&mut self, request: ForkedConversation) {
         let ForkedConversation {
             backend,
             model,
@@ -18461,72 +18765,51 @@ Address the objection directly. If you disagree, say why inside \
             label,
             task,
             seed,
+            notices,
         } = request;
         // Claude resolves --resume against the CURRENT directory's transcripts; make
         // sure the source session's transcript actually exists before creating a
         // workspace we'd abandon on failure. (Codex sessions are global.)
         if backend == Backend::Claude && claude_transcript_path(&source_cwd, &session_id).is_none()
         {
-            return Err("no session transcript found to fork".to_string());
+            self.notice = Some(format!(
+                "{}: no session transcript found to fork",
+                notices.failed
+            ));
+            return;
         }
-        let workspace = prepare_jj_workspace_at(&self.cwd, &label, base_change.as_deref())
-            .map_err(|error| error.to_string())?;
-        if let Err(error) = self.write_rudder_context_timed(Some(&workspace)) {
-            self.notice = Some(format!("context warning: {error}"));
-        }
-        // Stage the source transcript into the fork workspace's project folder so
-        // `--resume <sid> --fork-session` can find the conversation from its new cwd.
-        if backend == Backend::Claude {
-            stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path)?;
-        }
-        // A seeded fork wakes up in a DIFFERENT directory than the conversation it
-        // remembers; say so before the instruction so it re-reads instead of trusting
-        // its memory of the other checkout.
-        let seed = seed
-            .map(|text| worker_orientation(&workspace.path, &text))
-            .filter(|text| !text.trim().is_empty());
-        let mut command = match backend {
-            Backend::Claude => claude_fork_command(&model, effort, &session_id, seed.as_deref()),
-            Backend::Codex => codex_fork_command(&model, effort, &session_id, seed.as_deref()),
-            Backend::Opencode => opencode_fork_command(&model, &session_id, seed.as_deref()),
-        };
-        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
-        let options = TerminalPaneOptions {
-            size: TerminalSize::default(),
-            cwd: Some(workspace.path.clone()),
-            ..TerminalPaneOptions::default()
+        let run_id = new_run_id(&label);
+        let job = WorkspacePrepJob {
+            cwd: self.cwd.clone(),
+            label: label.clone(),
+            base_change,
+            // Stage the source transcript into the fork workspace's project folder so
+            // `--resume <sid> --fork-session` can find the conversation from its new cwd.
+            stage_claude_session: (backend == Backend::Claude)
+                .then(|| (source_cwd, session_id.clone())),
         };
 
+        // The row goes in now, in the dashboard checkout with no workspace and
+        // no process; finish_fork_launch fills those in and records the seed.
         let created_at = now_stamp();
-        let mut run = AgentRun {
-            id: workspace.id.clone(),
+        let run = AgentRun {
+            id: run_id.clone(),
             created_at: created_at.clone(),
             mode: AgentMode::Execute,
             task,
             task_summary: truncate_chars(&label, 56),
-            current_prompt: seed.clone().unwrap_or_default(),
-            turns: seed
-                .clone()
-                .map(|prompt| {
-                    vec![AgentTurn {
-                        ts: created_at.clone(),
-                        prompt,
-                        source: "user".to_string(),
-                    }]
-                })
-                .unwrap_or_default(),
+            current_prompt: String::new(),
+            turns: Vec::new(),
             last_user_input_at: created_at,
             backend,
             model,
             effort,
             status: AgentStatus::Running,
-            cwd: workspace.path.clone(),
-            workspace_branch: workspace.branch.clone(),
-            workspace_path: workspace
-                .path_is_workspace
-                .then_some(workspace.path.clone()),
-            workspace_name: workspace.workspace_name.clone(),
-            jj_change_id: workspace.jj_change_id.clone(),
+            cwd: self.cwd.clone(),
+            workspace_branch: None,
+            workspace_path: None,
+            workspace_name: None,
+            jj_change_id: None,
             integration: IntegrationEvidence::default(),
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::default(),
@@ -18574,36 +18857,109 @@ Address the objection directly. If you disagree, say why inside \
             gam: None,
         };
 
-        let mut outcome = ForkOutcome::Started;
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
-            Ok(mut terminal) => {
-                let _ = terminal.drain_output();
-                Self::attach_output_waker(&self.pty_output_waker, &terminal);
-                run.execution_profile = terminal.execution_profile().map(str::to_string);
-                run.terminal = Some(terminal);
-            }
-            Err(error) => {
-                run.status = AgentStatus::Failed;
-                run.last_error = Some(error.to_string());
-                outcome = ForkOutcome::SpawnFailed(error.to_string());
-            }
-        }
-
-        let spawned = run.terminal.is_some();
         self.agents.push(run);
         self.selected_agent = self.agents.len().saturating_sub(1);
-        self.focus = if spawned {
-            FocusPane::Worker
-        } else {
-            FocusPane::Task
-        };
+        self.focus = FocusPane::Worker;
         self.worker_view = WorkerView::Terminal;
-        if let Some(run) = self.agents.get(self.selected_agent) {
+        self.notice = None;
+        self.dirty = true;
+        let kind = PendingLaunchKind::Fork(PendingFork {
+            session_id,
+            seed,
+            notices,
+        });
+        self.begin_workspace_prep(run_id, kind, job);
+    }
+
+    /// The workspace for a fork row is ready (or failed): start the fork, or
+    /// take the row back out and say why.
+    fn finish_fork_launch(
+        &mut self,
+        index: usize,
+        outcome: WorkspacePrepOutcome,
+        fork: PendingFork,
+        typed: &[u8],
+    ) {
+        let PendingFork {
+            session_id,
+            seed,
+            notices,
+        } = fork;
+        let workspace = match (outcome.workspace, outcome.error) {
+            (Some(workspace), None) => workspace,
+            (_, error) => {
+                // Nothing started, so no row stays behind. A workspace made
+                // before the transcript copy failed is left to the orphan sweep,
+                // as it always was.
+                let was_selected = self.selected_agent == index;
+                self.delete_agent_now(index);
+                if was_selected && self.focus == FocusPane::Worker {
+                    self.focus = FocusPane::Agents;
+                }
+                self.notice = Some(format!(
+                    "{}: {}",
+                    notices.failed,
+                    error.unwrap_or_default()
+                ));
+                return;
+            }
+        };
+        // A seeded fork wakes up in a DIFFERENT directory than the conversation it
+        // remembers; say so before the instruction so it re-reads instead of trusting
+        // its memory of the other checkout.
+        let seed = seed
+            .map(|text| worker_orientation(&workspace.path, &text))
+            .filter(|text| !text.trim().is_empty());
+        let (backend, model, effort) = {
+            let run = &mut self.agents[index];
+            run.cwd = workspace.path.clone();
+            run.workspace_branch = workspace.branch.clone();
+            run.workspace_path = workspace
+                .path_is_workspace
+                .then_some(workspace.path.clone());
+            run.workspace_name = workspace.workspace_name.clone();
+            run.jj_change_id = workspace.jj_change_id.clone();
+            run.last_output_at = Instant::now();
+            if let Some(prompt) = seed.clone() {
+                run.current_prompt = prompt.clone();
+                run.turns = vec![AgentTurn {
+                    ts: run.created_at.clone(),
+                    prompt,
+                    source: "user".to_string(),
+                }];
+            }
+            (run.backend, run.model.clone(), run.effort)
+        };
+        if let Err(error) = self.write_rudder_context_timed(None) {
+            self.notice = Some(format!("context warning: {error}"));
+        }
+        let mut command = match backend {
+            Backend::Claude => claude_fork_command(&model, effort, &session_id, seed.as_deref()),
+            Backend::Codex => codex_fork_command(&model, effort, &session_id, seed.as_deref()),
+            Backend::Opencode => opencode_fork_command(&model, &session_id, seed.as_deref()),
+        };
+        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
+        let options = TerminalPaneOptions {
+            size: TerminalSize::default(),
+            cwd: Some(workspace.path.clone()),
+            ..TerminalPaneOptions::default()
+        };
+        match self.spawn_into_row(index, command, options, typed) {
+            Ok(()) => {
+                if let Some(activity) = notices.activity {
+                    self.record_activity(activity);
+                }
+                self.notice = Some(notices.started);
+            }
+            Err(error) => {
+                self.notice = Some(format!("{}: {error}", notices.spawn_failed));
+                self.release_focus_after_failed_start(index);
+            }
+        }
+        if let Some(run) = self.agents.get(index) {
             let _ = save_native_run_record(&self.cwd, run);
         }
         let _ = self.write_rudder_context_timed(None);
-        self.dirty = true;
-        Ok(outcome)
     }
 
     /// `c` in the agents pane: clear every MERGED agent from the list in one
@@ -18732,6 +19088,9 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn request_merge_selected_agent(&mut self) {
+        if self.refuse_while_preparing() {
+            return;
+        }
         // A /gam reviewer has no workspace of its own; `m` on it means the work
         // it reviewed, which is its generator's.
         if self
@@ -19397,6 +19756,19 @@ Address the objection directly. If you disagree, say why inside \
     /// its jj workspace on disk (undoable / re-goalable). Its node id never enters the
     /// merged set, so hard dependents stay correctly blocked.
     fn stop_agent_at(&mut self, index: usize) -> bool {
+        // Stopping a launch that has not started cancels it. The row has no
+        // workspace or session to resume, so it goes, and the workspace being
+        // prepared is removed when preparation ends (finish_workspace_prep).
+        if self
+            .agents
+            .get(index)
+            .is_some_and(|run| self.launch_preparing(&run.id))
+        {
+            self.delete_agent_now(index);
+            self.notice = Some("cancelled before it started".to_string());
+            let _ = self.write_rudder_context_timed(None);
+            return true;
+        }
         let cwd = self.cwd.clone();
         let (label, run_id) = {
             let Some(run) = self.agents.get_mut(index) else {
@@ -19509,6 +19881,8 @@ Address the objection directly. If you disagree, say why inside \
                     // Swarm experiments are SUPPOSED to touch the same files: they
                     // compete and never merge, so an overlap is not a collision.
                     && !r.swarm_experiment
+                    // Still preparing: its cwd is the dashboard checkout, not its own.
+                    && !self.pending_launches.contains_key(&r.id)
             })
             .map(|(i, r)| (i, r.node_id.clone().unwrap_or_default(), r.cwd.clone()))
             .collect();
@@ -20283,7 +20657,9 @@ What to do\n\
                 continue;
             }
             // A row that never started has nothing to map.
-            if matches!(run.status, AgentStatus::Failed | AgentStatus::Migrated) {
+            if matches!(run.status, AgentStatus::Failed | AgentStatus::Migrated)
+                || self.pending_launches.contains_key(&run.id)
+            {
                 continue;
             }
             let attempts = self.session_id_attempts.get(&run.id).copied().unwrap_or(0);
@@ -20367,6 +20743,7 @@ What to do\n\
         while let Ok(outcome) = self.task_routing_rx.try_recv() {
             self.finish_task_routing(outcome);
         }
+        self.drain_workspace_preps();
         self.emit_dashboard_opened_once();
         self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();
@@ -21136,7 +21513,11 @@ What to do\n\
                 continue;
             }
             run.task_summary = title;
-            let _ = save_native_run_record(&repo_root, run);
+            // A row still preparing its workspace has no record yet; the title
+            // is saved with it when the agent starts.
+            if !self.pending_launches.contains_key(&run.id) {
+                let _ = save_native_run_record(&repo_root, run);
+            }
             changed = true;
         }
         if changed {

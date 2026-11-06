@@ -1940,12 +1940,28 @@ pub(crate) fn prepare_jj_workspace_at(
     task: &str,
     base_change: Option<&str>,
 ) -> Result<WorkspaceInfo> {
+    prepare_jj_workspace_as(cwd, task, base_change, None)
+}
+
+/// `prepare_jj_workspace_at` for a run id the caller already chose. The
+/// dashboard shows a launch's row before its workspace exists, so the row and
+/// the workspace must agree on the id from the start.
+pub(crate) fn prepare_jj_workspace_as(
+    cwd: &Path,
+    task: &str,
+    base_change: Option<&str>,
+    run_id: Option<&str>,
+) -> Result<WorkspaceInfo> {
     let repo = dashboard_root(cwd);
     if !is_git_repo(&repo) {
-        return Ok(WorkspaceInfo::current(cwd.to_path_buf()));
+        let mut info = WorkspaceInfo::current(cwd.to_path_buf());
+        if let Some(id) = run_id {
+            info.id = id.to_string();
+        }
+        return Ok(info);
     }
 
-    let id = new_run_id(task);
+    let id = run_id.map_or_else(|| new_run_id(task), ToString::to_string);
     let started = Instant::now();
     let rudder = locate_rudder_cli()
         .context("rudder CLI not found on PATH; cannot create a jj workspace for the run")?;

@@ -9401,6 +9401,62 @@ fn branch_spawns_a_new_forked_agent_row() {
 
 #[cfg(not(windows))]
 #[test]
+fn a_slow_workspace_is_prepared_off_the_app_loop_behind_a_preparing_row() {
+    // 2026-11-06: `__launch-node` took 182s and the whole dashboard froze behind
+    // it, because the launch waited for it on the App loop. The row must show at
+    // once, preparing, and its agent start when the workspace arrives.
+    let _env = env_guard();
+    let repo = unique_test_repo("async-prep");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(init.success());
+    let workspace = repo.join("ws");
+    let fake_cli = repo.join("fake-rudder.sh");
+    write_fake_bin(
+        &fake_cli,
+        &format!(
+            "#!/bin/sh\nsleep 2\nmkdir -p '{ws}'\necho '{{\"path\":\"{ws}\",\"workspaceName\":\"rudder-async-prep\",\"jjChangeId\":\"zzzz\"}}'\n",
+            ws = workspace.display()
+        ),
+    );
+    std::env::set_var("RUDDER_CLI", &fake_cli);
+    let fake_claude = repo.join("fake-claude.sh");
+    write_fake_bin(&fake_claude, "#!/bin/sh\nsleep 5\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake_claude);
+
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.workspace_prep_inline = false;
+    let started = Instant::now();
+    app.start_single_run_task("add a health check endpoint");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "the launch waited for its workspace"
+    );
+    assert_eq!(app.agents.len(), 1, "the row shows at once");
+    let id = app.agents[0].id.clone();
+    assert!(app.launch_preparing(&id));
+    assert!(app.agents[0].terminal.is_none());
+    assert!(app.agents[0].workspace_path.is_none());
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.launch_preparing(&id) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+        app.drain_workspace_preps();
+    }
+    assert!(!app.launch_preparing(&id), "the workspace never arrived");
+    let run = &app.agents[0];
+    assert_eq!(run.workspace_path.as_deref(), Some(workspace.as_path()));
+    assert_eq!(run.workspace_name.as_deref(), Some("rudder-async-prep"));
+    assert!(run.terminal.is_some(), "the agent starts in the prepared workspace");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[cfg(not(windows))]
+#[test]
 fn restart_preserves_interactive_orchestrator_profile_from_run_record() {
     // A persisted interactive orchestrator row is authoritative even if the current
     // process default says future planners should be headless.

@@ -578,6 +578,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     let (status_label, status_style): (String, Style) =
         if agent.is_main() && agent.terminal.is_none() {
             ("idle".to_string(), muted_style(focused))
+        } else if app.launch_preparing(&agent.id) {
+            ("preparing workspace".to_string(), agent_status_style(agent))
         } else {
             (agent_status_text(agent), agent_status_style(agent))
         };
@@ -5053,6 +5055,12 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
 pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Line<'static>> {
     let perf_start = Instant::now();
     let enter_resumes = app.enter_resumes_paneless_agent(app.selected_agent);
+    // Some(keys typed so far) while the row's workspace is being prepared.
+    let preparing = app
+        .agents
+        .get(app.selected_agent)
+        .and_then(|run| app.pending_launches.get(&run.id))
+        .map(|pending| pending.typed.len());
     let Some(run) = app.agents.get_mut(app.selected_agent) else {
         return vec![
             Line::from(""),
@@ -5084,9 +5092,14 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
         } else {
             run.task_summary.clone()
         };
+        let status = if preparing.is_some() {
+            "preparing workspace"
+        } else {
+            run.status.as_str()
+        };
         let mut lines = vec![
             Line::from(Span::styled(
-                format!("{}  {}", run.status.as_str(), title),
+                format!("{status}  {title}"),
                 pane_text_style(true),
             )),
             Line::from(""),
@@ -5102,6 +5115,21 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
             )));
         }
         lines.push(Line::from(""));
+        if let Some(typed) = preparing {
+            lines.push(Line::from(Span::styled(
+                "Creating this agent's workspace. The agent starts here when it is ready.",
+                muted_style(true),
+            )));
+            lines.push(Line::from(Span::styled(
+                if typed == 0 {
+                    "Anything you type here goes to the agent once it starts."
+                } else {
+                    "What you typed goes to the agent once it starts."
+                },
+                muted_style(true),
+            )));
+            return lines;
+        }
         let idle = if matches!(run.mode, AgentMode::Plan | AgentMode::RudderPlan) {
             "This read-only planner is not running."
         } else {

@@ -589,6 +589,21 @@ renamed under a live agent), which put ~3s (up to 8s) between Enter and any
 agent on every task. A slightly worse directory name beats a dead keystroke.
 Planner nodes already arrive titled.
 
+The workspace itself is made OFF the App loop. `start_execute_task_node` (typed
+tasks and plan nodes) and `spawn_forked_conversation` (`b`, `/handoff`) push the
+row at once with no workspace, session or PTY, record a `PendingLaunch` in
+`App::pending_launches`, and hand a `WorkspacePrepJob` (`__launch-node`, plus
+the Claude transcript copy for a fork) to a thread. `WORKSPACE_PREP_LOCK` keeps
+those one at a time. `poll_agents` drains `WorkspacePrepOutcome` and
+`finish_task_launch` / `finish_fork_launch` fill in the workspace, build the
+command and spawn the PTY. While a row is pending it renders as "preparing
+workspace", keeps no run record, buffers keys typed into its pane for the
+agent, refuses rename/merge/branch, and is skipped by the orphan workspace
+sweep, session-id discovery and drift checks. `x` or `dd` cancels it (the
+late workspace is removed), and shutdown drops it. Unit tests set
+`workspace_prep_inline` so launches finish synchronously. `/gam` still
+prepares its generator's workspace on the loop.
+
 ### Orchestrator skills
 The bottom task pane remains the primary input surface for fresh requests,
 slash commands, plan refinements, and empty-Enter approval. When the interactive

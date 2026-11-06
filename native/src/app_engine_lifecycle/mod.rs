@@ -220,6 +220,8 @@ fn shutdown_app_until(
     can_publish: bool,
 ) -> Result<()> {
     app.close_attach_clients(reason);
+    // Launches still preparing a workspace have no process to stop.
+    app.drop_preparing_rows();
     let mut failures = Vec::new();
     let mut pending = Vec::new();
     for (index, run) in app.agents.iter_mut().enumerate() {

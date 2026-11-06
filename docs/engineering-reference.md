@@ -429,6 +429,30 @@ selection stays, and the PTY keeps its last size. Focus moves only off the
 worker (to the agent list) and back on show. A key that focuses the hidden
 worker (⌥2, Enter) shows it; ^W Tab skips it; a scheduler launch that focuses
 it while hidden has focus put back on the tick. There is no full-screen mode.
+
+**Subagents under an agent's row (`native/src/subagents.rs`).** A card whose
+agent spawned subagents gets a summary line (`▸ 3 subagents (1 running)`).
+Tab in the agent list opens it into a tree (`├─` / `└─` rows: status glyph,
+description, status word when the pane is wide enough, elapsed time) and Tab
+closes it; open trees are kept per run id in `subagent_trees_open`. j/k and
+the arrows walk the tree rows (`subagent_cursor`) before moving on, and up
+from the next row lands on the tree's last row. The worker pane stays on the
+parent; the cursor's subagent shows its description, kind, status, time and
+last message under its row. Tab on a subagent row closes the tree back onto
+the parent; m/d/x/r/b/u there do nothing. Tab on a done/closed (or long
+review) drawer header opens or closes it, like Enter and Esc. In the worker
+pane Tab still goes to the agent. Finished subagents stay, dimmed, until the
+parent's next human prompt, at most 8. Detection is the backends' own hooks,
+installed with the lifecycle signals (signals.rs): Claude `SubagentStart`,
+`SubagentStop`, `PostToolUse` matched to `Agent|Task` (gives the description)
+and `UserPromptSubmit` (a `<task-notification>` carries a background
+subagent's final status; anything else is the human's turn); Codex
+`SubagentStart` / `SubagentStop`, named from the head of the subagent's
+rollout (`agent_path`), with no failed state. Each hook drops its payload as a
+file in `<rudder_home>/signals/<run_id>.subagents/`; a background scan every
+500ms reads and deletes them and the loop applies typed events. Subagents are
+view state only: never runs, never persisted, never counted for `/sync`,
+scheduling or capacity.
 - **Agents**: the run list. Grouped: a `main`-branch agent section first, then
   workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
   focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running

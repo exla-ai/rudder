@@ -147,6 +147,7 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.js")));
     let _ = std::fs::remove_dir_all(asks_dir_in(&dir, run_id));
+    let _ = std::fs::remove_dir_all(dir.join(format!("{run_id}.subagents")));
 }
 
 /// The phone answers Claude's prompts (approvals, questions, plans) only on the
@@ -220,13 +221,23 @@ pub(crate) fn cleanup_old_signals(max_age: Duration) -> usize {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        if !metadata.is_file() {
-            continue;
-        }
         let Ok(modified) = metadata.modified() else {
             continue;
         };
         if modified >= cutoff {
+            continue;
+        }
+        // A run's subagent payload directory (subagents.rs) that nothing has
+        // written to or read from since the cutoff.
+        if metadata.is_dir() {
+            if entry.file_name().to_string_lossy().ends_with(".subagents")
+                && std::fs::remove_dir_all(entry.path()).is_ok()
+            {
+                removed = removed.saturating_add(1);
+            }
+            continue;
+        }
+        if !metadata.is_file() {
             continue;
         }
         if std::fs::remove_file(entry.path()).is_ok() {
@@ -325,6 +336,29 @@ fn write_signal_with_detail_command(signal: &Path, state: &str, key: &str) -> St
     )
 }
 
+/// Hook command for the subagent events (subagents.rs): the payload from stdin
+/// becomes one file in the run's `<run_id>.subagents/` directory. Written to a
+/// temp name and renamed, so the scan never reads half a payload.
+fn write_subagent_event_command(signal: &Path) -> String {
+    let dir = crate::subagents::events_dir_for_signal(signal);
+    format!(
+        "d='{dir}'; mkdir -p \"$d\" && f=\"$d/$(date +%s)-$$\" && cat > \"$f.tmp\" && mv -f \"$f.tmp\" \"$f.json\"",
+        dir = dir.display()
+    )
+}
+
+/// The `UserPromptSubmit` side of the subagent events. A `<task-notification>`
+/// prompt (Claude reporting a background subagent's end) is kept whole for its
+/// status; any other prompt is the human's next turn, and only that fact is
+/// written, never the prompt text.
+fn write_subagent_prompt_command(signal: &Path) -> String {
+    let dir = crate::subagents::events_dir_for_signal(signal);
+    format!(
+        "p=$(cat); case \"$p\" in *'\"prompt\":\"<task-notification>'*) ;; *) p='{{\"hook_event_name\":\"UserPromptSubmit\"}}' ;; esac; d='{dir}'; mkdir -p \"$d\" && f=\"$d/$(date +%s)-$$\" && printf '%s' \"$p\" > \"$f.tmp\" && mv -f \"$f.tmp\" \"$f.json\"",
+        dir = dir.display()
+    )
+}
+
 /// Hook command for `PostCompact`: writes `compacted` for a manual compaction
 /// only. The whole payload is read before matching, so Claude never writes
 /// into a pipe the hook already closed. Claude and Codex write compact JSON; the
@@ -339,6 +373,7 @@ fn write_compacted_signal_command(signal: &Path) -> String {
 /// The `claude --settings` JSON: a `Stop` hook (turn ended), a `StopFailure` hook
 /// (turn ended on an API error), `Notification` hooks for the pause states, and
 /// a `PostCompact` hook (a manual `/compact` ended), each writing the signal file.
+/// The subagent hooks write payload files for the sidebar tree (subagents.rs).
 ///
 /// Matcher names are Claude's OWN notification types, verified against the
 /// installed binary: `permission_prompt`, `idle_prompt`, `agent_needs_input`,
@@ -387,8 +422,23 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
             "UserPromptSubmit": [{
                 "hooks": [
                     { "type": "command", "command": write_signal_command(signal, "working") },
-                    { "type": "command", "command": write_claude_session_command(signal) }
+                    { "type": "command", "command": write_claude_session_command(signal) },
+                    { "type": "command", "command": write_subagent_prompt_command(signal) }
                 ]
+            }],
+            // Subagents, for the tree under the agent's row (subagents.rs).
+            // `PostToolUse` is matched to the subagent tool only: its response
+            // pairs the new agent's id with its description. Every other tool
+            // call runs no hook.
+            "SubagentStart": [{
+                "hooks": [{ "type": "command", "command": write_subagent_event_command(signal) }]
+            }],
+            "SubagentStop": [{
+                "hooks": [{ "type": "command", "command": write_subagent_event_command(signal) }]
+            }],
+            "PostToolUse": [{
+                "matcher": "Agent|Task",
+                "hooks": [{ "type": "command", "command": write_subagent_event_command(signal) }]
             }],
             // A manual `/compact` ended. It fires no `UserPromptSubmit` and no
             // `Stop` (measured on 2.1.318: PreCompact, SessionStart with source
@@ -419,6 +469,8 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
 ///   permission, `UserPromptSubmit` -> working, `PostCompact` of a manual
 ///   `/compact` -> compacted (it fires no `Stop` and no `notify`, measured on
 ///   codex 0.166, and a Codex without the event ignores the override).
+///   `SubagentStart` / `SubagentStop` payloads are kept as files for the
+///   sidebar's subagent tree (subagents.rs), before the subagent guard below.
 ///
 /// `notify` fires for EVERY thread, not just the conversation (measured on codex
 /// 0.162): the hidden title thread Codex runs ~4s into a first turn ("Generate a
@@ -439,6 +491,8 @@ pub(crate) fn codex_notify_script(signal: &Path) -> String {
         .parent()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let events = crate::subagents::events_dir_for_signal(signal);
+    let events = events.display();
     format!(
         r#"#!/bin/sh
 # Rudder Codex lifecycle signal: `notify` program (event in $1) AND hook (event on stdin).
@@ -457,6 +511,10 @@ done_once() {{
 field() {{
   printf '%s' "$2" | sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" | head -n 1
 }}
+# Subagent events for the tree under the agent's row (subagents.rs).
+subagent_event() {{
+  mkdir -p '{events}' && f='{events}'/"$(date +%s)-$$" && printf '%s' "$1" > "$f.tmp" && mv -f "$f.tmp" "$f.json"
+}}
 case "$1" in
   *agent-turn-complete*)
     session=$(cat '{path}.session' 2>/dev/null)
@@ -468,6 +526,8 @@ case "$1" in
 esac
 payload=$(cat)
 case "$payload" in
+  *'"hook_event_name":"SubagentStart"'*|*'"hook_event_name": "SubagentStart"'*|*'"hook_event_name":"SubagentStop"'*|*'"hook_event_name": "SubagentStop"'*)
+    subagent_event "$payload"; exit 0 ;;
   *'"agent_id"'*) exit 0 ;;
 esac
 case "$payload" in
@@ -477,7 +537,8 @@ case "$payload" in
   *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) done_once "$(field turn_id "$payload")" ;;
   *'"hook_event_name":"Interrupt"'*|*'"hook_event_name": "Interrupt"'*) done_once "$(field turn_id "$payload")" ;;
   *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) emit permission ;;
-  *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*) emit working ;;
+  *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*)
+    emit working; subagent_event '{{"hook_event_name":"UserPromptSubmit"}}' ;;
   *'"hook_event_name":"PostCompact"'*|*'"hook_event_name": "PostCompact"'*)
     case "$payload" in
       *'"trigger":"manual"'*|*'"trigger": "manual"'*) emit compacted ;;
@@ -490,13 +551,16 @@ exit 0
 
 /// The Codex hook events the signal script listens for, mapped onto the protocol.
 /// `SessionStart` maps to nothing: it records which thread is the conversation.
-pub(crate) const CODEX_HOOK_EVENTS: [&str; 6] = [
+/// `SubagentStart` / `SubagentStop` feed the subagent tree (subagents.rs).
+pub(crate) const CODEX_HOOK_EVENTS: [&str; 8] = [
     "SessionStart",
     "Stop",
     "Interrupt",
     "PermissionRequest",
     "UserPromptSubmit",
     "PostCompact",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// `-c hooks.<Event>=[...]` overrides pointing every lifecycle event Rudder cares

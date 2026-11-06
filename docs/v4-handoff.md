@@ -185,6 +185,15 @@ user turn, merge requests and planned-node auto-merge untouched, and the reply
 turn ends with no review ping. The cloud machine sync moved to `/sync cloud`
 (`/sync all` and `/sync move` unchanged). See engineering-reference section 7.
 
+Subagents in the sidebar (native/src/subagents.rs, not released yet): a
+Claude Code or Codex agent that spawns subagents shows `▸ N subagents` on its
+card; Tab in the agent list opens a tree with each one's status and time, j/k
+walk it, Tab closes it. Tab also opens and closes the done/closed drawers.
+Claude reports through `SubagentStart`/`SubagentStop`/`PostToolUse`(Agent)
+hooks plus task notifications; Codex through `SubagentStart`/`SubagentStop`,
+named from its rollout, and it never reports a failed subagent. View state
+only. See engineering-reference section 7.
+
 Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
 then a colored status line with elapsed time and +N -N; the selected card is a
 rounded outline), a header row (wordmark, project, branch, version), a

@@ -57,6 +57,20 @@ pub(crate) fn agent_index_from_mouse(app: &App, mouse: MouseEvent, area: Rect) -
     app.agent_row_map.get(row).copied().flatten()
 }
 
+/// Resolve a sidebar click to a subagent row: (parent agent index, subagent id).
+pub(crate) fn subagent_row_from_mouse(
+    app: &App,
+    mouse: MouseEvent,
+    area: Rect,
+) -> Option<(usize, String)> {
+    let inner = block_inner(area);
+    if !rect_contains(inner, mouse.column, mouse.row) {
+        return None;
+    }
+    let row = mouse.row.saturating_sub(inner.y) as usize;
+    app.subagent_row_map.get(row).cloned().flatten()
+}
+
 /// Resolve a sidebar click to a collapsed drawer header, through the same
 /// last-frame row map the agent hit-test uses.
 pub(crate) fn drawer_bucket_from_mouse(

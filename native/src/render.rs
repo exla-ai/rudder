@@ -372,6 +372,182 @@ fn record_drawer_row(row: usize, bucket: Bucket) {
     DRAWER_ROW_SPANS.with(|spans| spans.borrow_mut().push((row, bucket)));
 }
 
+// And for subagent tree rows: (row, parent agent index, subagent id), so a click
+// on one selects that subagent rather than just its parent.
+thread_local! {
+    static SUBAGENT_ROW_SPANS: std::cell::RefCell<Vec<(usize, usize, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_subagent_row(row: usize, agent_index: usize, id: String) {
+    SUBAGENT_ROW_SPANS.with(|spans| spans.borrow_mut().push((row, agent_index, id)));
+}
+
+/// `text` cut to `width` display columns, with "…" when it had to be cut.
+fn clip_to_width(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    if width > 0 {
+        out = out.trim_end().to_string();
+        out.push('\u{2026}');
+    }
+    out
+}
+
+/// The subagent rows under an agent's card (subagents.rs), each at most
+/// `width` columns so the sidebar never wraps them: a one-line summary
+/// (`▸ 3 subagents (1 running)`), and when its tree is open (Tab) one row per
+/// subagent, with the details of the one the cursor is on right under it.
+/// The id rides along on each tree row for the click map.
+fn subagent_card_rows(
+    app: &App,
+    index: usize,
+    agent: &AgentRun,
+    width: usize,
+    focused: bool,
+) -> Vec<(Vec<Span<'static>>, Option<String>)> {
+    if !app.subagents_shown_for(index) {
+        return Vec::new();
+    }
+    let Some(list) = app.subagents.get(&agent.id) else {
+        return Vec::new();
+    };
+    let p = pal();
+    let open = app.subagent_trees_open.contains(&agent.id);
+    let running = list
+        .iter()
+        .any(|sub| sub.status == crate::subagents::SubagentStatus::Running);
+    let summary = crate::subagents::summary_label(list, open);
+    let mut rows = vec![(
+        vec![Span::styled(
+            clip_to_width(&summary, width),
+            Style::default().fg(if running { p.running } else { p.muted }),
+        )],
+        None,
+    )];
+    if !open {
+        return rows;
+    }
+    let now = Instant::now();
+    let cursor = if index == app.selected_agent {
+        app.selected_subagent().map(|sub| sub.id.clone())
+    } else {
+        None
+    };
+    for (at, sub) in list.iter().enumerate() {
+        let last = at + 1 == list.len();
+        let selected = cursor.as_deref() == Some(sub.id.as_str());
+        rows.push((
+            subagent_tree_row(app, sub, last, selected, width, now, focused),
+            Some(sub.id.clone()),
+        ));
+        if selected {
+            // The tree's line runs on past the details when siblings follow.
+            let lane = if last { "   " } else { "\u{2502}  " };
+            for detail in subagent_detail_lines(sub, width.saturating_sub(3), now) {
+                rows.push((
+                    vec![
+                        Span::styled(lane, Style::default().fg(p.faint)),
+                        Span::styled(detail, muted_style(focused)),
+                    ],
+                    None,
+                ));
+            }
+        }
+    }
+    rows
+}
+
+/// `├─ ⠋ Explore the auth code   running 1m`: tree glyph, status glyph in the
+/// status color, the description, then status and elapsed time (the status
+/// word drops out when the pane is narrow). Finished rows are dimmed; the row
+/// under the cursor points at itself with `▶`.
+fn subagent_tree_row(
+    app: &App,
+    sub: &crate::subagents::Subagent,
+    last: bool,
+    selected: bool,
+    width: usize,
+    now: Instant,
+    focused: bool,
+) -> Vec<Span<'static>> {
+    use crate::subagents::SubagentStatus;
+    use unicode_width::UnicodeWidthStr;
+    let p = pal();
+    let finished = sub.status.finished();
+    let (glyph, color) = match sub.status {
+        SubagentStatus::Running => (app.spinner_glyph(), p.running),
+        SubagentStatus::Done => ("\u{2713}", p.done),
+        SubagentStatus::Failed => ("\u{2715}", p.failed),
+        SubagentStatus::Stopped => ("\u{25cb}", p.muted),
+    };
+    let glyph_color = if finished { blend(canvas(), color, 0.55) } else { color };
+    let tee = match (last, selected) {
+        (false, false) => "\u{251c}\u{2500}",
+        (true, false) => "\u{2514}\u{2500}",
+        (false, true) => "\u{251c}\u{25b6}",
+        (true, true) => "\u{2514}\u{25b6}",
+    };
+    let tee_style = Style::default().fg(if selected { p.accent } else { p.faint });
+    let label_style = if selected {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else if finished || !focused {
+        Style::default().fg(p.muted)
+    } else {
+        pane_text_style(true)
+    };
+    let elapsed = crate::subagents::elapsed_label(sub.elapsed(now));
+    let with_status = format!("{} {elapsed}", sub.status.label());
+    // Tee, glyph and their spaces, plus the space before the tail.
+    let fixed = 6;
+    let tail = if width >= fixed + with_status.width() + 16 { with_status } else { elapsed };
+    let room = width.saturating_sub(fixed + tail.width());
+    let label = clip_to_width(sub.label(), room);
+    let pad = room.saturating_sub(label.width());
+    vec![
+        Span::styled(tee, tee_style),
+        Span::raw(" "),
+        Span::styled(glyph, Style::default().fg(glyph_color)),
+        Span::raw(" "),
+        Span::styled(label, label_style),
+        Span::raw(" ".repeat(pad + 1)),
+        Span::styled(tail, Style::default().fg(if finished { p.muted } else { color })),
+    ]
+}
+
+/// The details of the subagent under the cursor: its whole description, what
+/// kind of agent it is with status and time, and its last message.
+fn subagent_detail_lines(sub: &crate::subagents::Subagent, width: usize, now: Instant) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    if let Some(description) = sub.description.as_deref() {
+        lines.extend(wrap_title(description, width, 3));
+    }
+    let mut facts: Vec<String> = Vec::new();
+    if !sub.kind.is_empty() {
+        facts.push(sub.kind.clone());
+    }
+    facts.push(sub.status.label().to_string());
+    facts.push(crate::subagents::elapsed_detail(sub.elapsed(now)));
+    lines.extend(wrap_title(&facts.join(" \u{b7} "), width, 2));
+    if let Some(message) = sub.last_message.as_deref() {
+        lines.extend(wrap_title(&format!("\u{201c}{message}\u{201d}"), width, 2));
+    }
+    lines
+}
+
 /// Render one agent into the list: a task-label line, a status badge line, and an
 /// optional diff line. `prefix` is prepended to the task-label line and
 /// `cont_prefix` to the status/diff continuation lines. Both are empty in flat
@@ -583,6 +759,12 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         for row in extra {
             lines.push(framed(cont_prefix, row));
         }
+        for (row, subagent) in subagent_card_rows(app, index, agent, body_w, focused) {
+            if let Some(id) = subagent {
+                record_subagent_row(lines.len(), index, id);
+            }
+            lines.push(framed(cont_prefix, row));
+        }
         lines.push(Line::from(edge("╰", "╯")));
         apply_card_motion(&mut lines[row_start..], app, &agent.id, ordinal, inner);
         record_agent_rows(row_start, lines.len(), index);
@@ -628,6 +810,15 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
             let mut row = cont_prefix.to_vec();
             row.push(bar.clone());
             row.extend(detail);
+            lines.push(Line::from(row));
+        }
+        for (spans, subagent) in subagent_card_rows(app, index, agent, body_w, focused) {
+            if let Some(id) = subagent {
+                record_subagent_row(lines.len(), index, id);
+            }
+            let mut row = cont_prefix.to_vec();
+            row.push(bar.clone());
+            row.extend(spans);
             lines.push(Line::from(row));
         }
         apply_card_motion(&mut lines[row_start..], app, &agent.id, ordinal, inner);
@@ -1285,7 +1476,7 @@ fn render_status_section<'a>(
             Span::styled(format!(" {}", members.len()), muted_style(focused)),
             Span::styled(format!("  {chevron}"), muted_style(focused)),
             Span::styled(
-                if open { "  click or Esc to collapse" } else { "  click or Enter to expand" },
+                if open { "  Tab or Esc to collapse" } else { "  Tab or click to expand" },
                 muted_style(focused),
             ),
         ])));
@@ -1801,7 +1992,9 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Fresh row-span recording for this frame; harvested into app.agent_row_map below.
     AGENT_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     DRAWER_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
+    SUBAGENT_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     app.normalize_drawer_state();
+    app.normalize_subagent_cursor();
     note_card_changes(app, Instant::now());
     let diff_summaries: Vec<Option<String>> = {
         // Pinned planners (orchestrator + plan-mode front-end) run in the MAIN repo
@@ -2047,6 +2240,11 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 span.0 = moved(span.0);
             }
         });
+        SUBAGENT_ROW_SPANS.with(|spans| {
+            for span in spans.borrow_mut().iter_mut() {
+                span.0 = moved(span.0);
+            }
+        });
         wrapped
     };
 
@@ -2071,6 +2269,15 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
     });
     app.drawer_row_map = drawer_map;
+    let mut subagent_map: Vec<Option<(usize, String)>> = vec![None; lines.len()];
+    SUBAGENT_ROW_SPANS.with(|spans| {
+        for (row, agent, id) in spans.borrow_mut().drain(..) {
+            if let Some(slot) = subagent_map.get_mut(row) {
+                *slot = Some((agent, id));
+            }
+        }
+    });
+    app.subagent_row_map = subagent_map;
 
     // Scroll the pane to follow the selection. The list was rendered stateless before,
     // so it always drew from the top: with more agents than fit, the selected row (and
@@ -6800,37 +7007,24 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
     match app.focus {
         FocusPane::Agents => {
             if app.drawer_cursor.is_some() || app.drawer.is_some() {
-                return vec![("enter", "open"), ("j/k", "move"), ("esc", "close"), ("?", "keys")];
+                return vec![("enter", "open"), ("tab", "open or close"), ("j/k", "move"), ("esc", "close"), ("?", "keys")];
             }
-            match app.agents.get(app.selected_agent) {
-                Some(agent) if agent.status == AgentStatus::Running => vec![
-                    ("enter", "open"),
-                    ("x", "stop"),
-                    ("b", "branch"),
-                    ("r", "rename"),
-                    ("?", "keys"),
-                ],
-                Some(agent) if agent.status == AgentStatus::Done => vec![
-                    ("enter", "open"),
-                    ("m", "merge"),
-                    ("b", "branch"),
-                    ("dd", "delete"),
-                    ("?", "keys"),
-                ],
-                Some(_) => vec![
-                    ("enter", "resume"),
-                    ("b", "branch"),
-                    ("dd", "delete"),
-                    ("g", "nest"),
-                    ("?", "keys"),
-                ],
-                None => vec![
-                    ("\u{2325}3", "prompt"),
-                    ("o", "web ui"),
-                    ("P", "model"),
-                    ("?", "keys"),
-                ],
+            if app.selected_subagent().is_some() {
+                return vec![("j/k", "move"), ("tab", "back to agent"), ("enter", "open agent"), ("?", "keys")];
             }
+            let mut keys = context_agent_footer_keys(app);
+            // The selected agent has subagents: Tab is how you see them.
+            if app.subagents_shown_for(app.selected_agent) {
+                let open = app
+                    .agents
+                    .get(app.selected_agent)
+                    .is_some_and(|run| app.subagent_trees_open.contains(&run.id));
+                keys.insert(1, ("tab", if open { "hide subagents" } else { "subagents" }));
+                if keys.len() > 5 {
+                    keys.remove(keys.len() - 2);
+                }
+            }
+            keys
         }
         FocusPane::Worker => vec![
             ("\u{2325}1", "agents"),
@@ -6867,6 +7061,39 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
                 ]
             }
         }
+    }
+}
+
+/// The agent-row footer keys for the selected agent's state.
+fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+    match app.agents.get(app.selected_agent) {
+        Some(agent) if agent.status == AgentStatus::Running => vec![
+            ("enter", "open"),
+            ("x", "stop"),
+            ("b", "branch"),
+            ("r", "rename"),
+            ("?", "keys"),
+        ],
+        Some(agent) if agent.status == AgentStatus::Done => vec![
+            ("enter", "open"),
+            ("m", "merge"),
+            ("b", "branch"),
+            ("dd", "delete"),
+            ("?", "keys"),
+        ],
+        Some(_) => vec![
+            ("enter", "resume"),
+            ("b", "branch"),
+            ("dd", "delete"),
+            ("g", "nest"),
+            ("?", "keys"),
+        ],
+        None => vec![
+            ("\u{2325}3", "prompt"),
+            ("o", "web ui"),
+            ("P", "model"),
+            ("?", "keys"),
+        ],
     }
 }
 
@@ -7044,6 +7271,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j k", "move"),
             ("enter", "open or resume"),
+            ("tab", "subagents, drawers"),
             ("m", "merge"),
             ("b", "branch"),
             ("x", "stop"),

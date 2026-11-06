@@ -124,6 +124,7 @@ mod home_update;
 use crate::home_update::*;
 mod agent_sync;
 use crate::agent_sync::*;
+mod subagents;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 /// How long injected text sits in a live agent's input box before the deferred
@@ -2092,6 +2093,21 @@ struct App {
     /// header expands its agent rows in the sidebar; Esc collapses them.
     /// The worker pane continues to show the selected agent.
     drawer: Option<DrawerState>,
+    /// Subagents each agent spawned (subagents.rs), by run id. View state only:
+    /// never persisted, never a run, never counted for `/sync` or capacity.
+    subagents: HashMap<String, Vec<subagents::Subagent>>,
+    /// The background scan of the subagent hook payloads, while one is out.
+    subagent_scan_rx: Option<mpsc::Receiver<Vec<(String, Vec<subagents::SubagentEvent>)>>>,
+    last_subagent_scan: Instant,
+    /// Agents whose subagent tree is open in the sidebar (Tab), by run id, so
+    /// it stays open however the list re-sorts.
+    subagent_trees_open: HashSet<String>,
+    /// The subagent row the sidebar cursor is on, under `selected_agent` (whose
+    /// terminal the worker pane keeps showing). `None` = on an agent row.
+    subagent_cursor: Option<String>,
+    /// Agents-pane row -> (agent index, subagent id), same harvest as
+    /// `agent_row_map`, so a click on a subagent row selects it.
+    subagent_row_map: Vec<Option<(usize, String)>>,
     /// Conductor activity log: an append-only, bounded record of every autonomous
     /// action the orchestrator takes (auto-expanded a node, steered an agent, etc.),
     /// shown in the orchestrator pane. The "visible" half of the no-confirm bargain.
@@ -3511,6 +3527,12 @@ impl App {
             drawer_row_map: Vec::new(),
             drawer_cursor: None,
             drawer: None,
+            subagents: HashMap::new(),
+            subagent_scan_rx: None,
+            last_subagent_scan: Instant::now(),
+            subagent_trees_open: HashSet::new(),
+            subagent_cursor: None,
+            subagent_row_map: Vec::new(),
             activity_log: Vec::new(),
             followups_ingested,
             surfaced_overlaps: HashSet::new(),
@@ -3838,6 +3860,7 @@ impl App {
         } else if motion_pending(self, now)
             || self.notice.as_deref().is_some_and(notice_in_progress)
             || (self.agents_area.is_some() && self.agents.iter().any(agent_is_busy))
+            || (self.agents_area.is_some() && self.subagent_tree_animating())
         {
             ANIM_FRAME
         } else {
@@ -5028,10 +5051,25 @@ impl App {
     }
 
     fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        // On a subagent row the agent's row keys would act on its parent, which
+        // the cursor is not on. A subagent is not a run: nothing to merge,
+        // stop, rename, branch or delete.
+        self.normalize_subagent_cursor();
+        if self.subagent_cursor.is_some()
+            && matches!(
+                key.code,
+                KeyCode::Char('m' | 'd' | 'x' | 'r' | 'b' | 'u')
+            )
+        {
+            self.delete_pending = None;
+            self.notice = Some("that key acts on agents, not subagents · Tab goes back to the agent".to_string());
+            return false;
+        }
         match key.code {
             KeyCode::Char('q') => return self.confirm_or_quit(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
+            KeyCode::Tab => self.sidebar_tab(),
             KeyCode::Enter => {
                 // The sidebar cursor is on a collapsed drawer header: Enter opens it
                 // and a second Enter focuses its selected member. Checked before
@@ -5864,7 +5902,216 @@ impl App {
         self.drawer.is_some() && self.drawer_cursor == self.drawer_open()
     }
 
+    /// Subagent payloads (subagents.rs): apply a finished background scan and
+    /// start the next one on its cadence. All the file IO happens on the scan's
+    /// thread; the loop only applies typed events.
+    fn poll_subagents(&mut self) {
+        if let Some(rx) = &self.subagent_scan_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.subagent_scan_rx = None;
+                    let now = Instant::now();
+                    for (run_id, events) in results {
+                        let list = self.subagents.entry(run_id).or_default();
+                        for event in events {
+                            subagents::apply_event(list, event, now);
+                        }
+                        self.dirty = true;
+                    }
+                    self.subagents.retain(|_, list| !list.is_empty());
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.subagent_scan_rx = None,
+            }
+        }
+        if self.last_subagent_scan.elapsed() < subagents::SCAN_INTERVAL {
+            return;
+        }
+        let now = Instant::now();
+        self.last_subagent_scan = now;
+        // A deleted row takes its subagents with it, and a parent whose process
+        // ended took its running subagents down too.
+        let agents = &self.agents;
+        let mut changed = false;
+        self.subagents.retain(|run_id, list| {
+            let Some(run) = agents.iter().find(|run| &run.id == run_id) else {
+                changed = true;
+                return false;
+            };
+            if run.terminal.is_none() {
+                for sub in list
+                    .iter_mut()
+                    .filter(|sub| sub.status == subagents::SubagentStatus::Running)
+                {
+                    sub.status = subagents::SubagentStatus::Stopped;
+                    sub.finished = Some(now);
+                    changed = true;
+                }
+            }
+            true
+        });
+        if changed {
+            self.dirty = true;
+        }
+        let runs: Vec<(String, Backend)> = self
+            .agents
+            .iter()
+            .filter(|run| {
+                run.terminal.is_some()
+                    && !run.plain_process
+                    && !run.is_orchestrator()
+                    && matches!(run.backend, Backend::Claude | Backend::Codex)
+            })
+            .map(|run| (run.id.clone(), run.backend))
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(subagents::scan(&runs));
+        });
+        self.subagent_scan_rx = Some(rx);
+    }
+
+    /// An open tree shows a running subagent: its spinner and elapsed time
+    /// move even when the parent's own turn has ended (a background subagent).
+    fn subagent_tree_animating(&self) -> bool {
+        self.subagent_trees_open.iter().any(|id| {
+            self.subagents
+                .get(id)
+                .is_some_and(|list| list.iter().any(|sub| sub.status == subagents::SubagentStatus::Running))
+        })
+    }
+
+    /// Whether agent `index` shows a subagent summary under its row: it has
+    /// subagents and is drawn as its own row (not a drawer member, not the
+    /// pinned planner).
+    pub(crate) fn subagents_shown_for(&self, index: usize) -> bool {
+        let Some(run) = self.agents.get(index) else {
+            return false;
+        };
+        !run.is_pinned_planner()
+            && self.subagents.get(&run.id).is_some_and(|list| !list.is_empty())
+            && (self.nest_view || !crate::render::in_drawer(&self.agents, run))
+    }
+
+    /// The subagent rows drawn under agent `index`, in drawn order. Empty
+    /// unless its tree is open. Navigation and rendering both read this.
+    pub(crate) fn subagent_tree_rows(&self, index: usize) -> &[subagents::Subagent] {
+        let Some(run) = self.agents.get(index) else {
+            return &[];
+        };
+        if !self.subagent_trees_open.contains(&run.id) || !self.subagents_shown_for(index) {
+            return &[];
+        }
+        self.subagents.get(&run.id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The subagent the sidebar cursor is on, if it is still drawn.
+    pub(crate) fn selected_subagent(&self) -> Option<&subagents::Subagent> {
+        let id = self.subagent_cursor.as_deref()?;
+        if self.drawer_cursor.is_some() {
+            return None;
+        }
+        self.subagent_tree_rows(self.selected_agent)
+            .iter()
+            .find(|sub| sub.id == id)
+    }
+
+    /// Drop a subagent cursor whose row is gone (tree closed, pruned, or the
+    /// selection moved to another agent). Runs before the sidebar is drawn.
+    pub(crate) fn normalize_subagent_cursor(&mut self) {
+        if self.subagent_cursor.is_some() && self.selected_subagent().is_none() {
+            self.subagent_cursor = None;
+        }
+    }
+
+    /// Tab in the agent list. On a done/closed drawer header it opens or closes
+    /// that drawer. On an agent with subagents it opens or closes its tree; on a
+    /// subagent row it closes the parent's tree and puts the cursor back on the
+    /// parent. Nothing else: Tab in the worker pane still reaches the agent.
+    fn sidebar_tab(&mut self) {
+        self.delete_pending = None;
+        if let Some(bucket) = self.drawer_cursor {
+            if self.drawer_open() == Some(bucket) {
+                self.close_drawer();
+            } else {
+                self.open_drawer(bucket);
+            }
+            self.dirty = true;
+            return;
+        }
+        let Some(id) = self.agents.get(self.selected_agent).map(|run| run.id.clone()) else {
+            return;
+        };
+        if self.subagent_cursor.take().is_some() {
+            self.subagent_trees_open.remove(&id);
+        } else if self.subagents_shown_for(self.selected_agent) {
+            if !self.subagent_trees_open.remove(&id) {
+                self.subagent_trees_open.insert(id);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Down: through the selected agent's open subagent tree, row by row, then
+    /// on to the next sidebar row.
+    fn select_next_agent(&mut self) {
+        if !self.drawer_takes_navigation() && self.drawer_cursor.is_none() {
+            let rows: Vec<String> = self
+                .subagent_tree_rows(self.selected_agent)
+                .iter()
+                .map(|sub| sub.id.clone())
+                .collect();
+            let next = match self.subagent_cursor.as_ref() {
+                None => Some(0),
+                Some(id) => rows.iter().position(|row| row == id).map(|at| at + 1),
+            };
+            if let Some(next) = next.filter(|&next| next < rows.len()) {
+                self.delete_pending = None;
+                self.subagent_cursor = Some(rows[next].clone());
+                return;
+            }
+        }
+        let before = (self.selected_agent, self.drawer_cursor);
+        let cursor = self.subagent_cursor.take();
+        self.step_sidebar_next();
+        // At the bottom of the list nothing moved: stay on the last subagent row.
+        if (self.selected_agent, self.drawer_cursor) == before {
+            self.subagent_cursor = cursor;
+        }
+    }
+
+    /// Up: back through the open subagent tree to its parent, and from the row
+    /// below an open tree onto that tree's last row (the row drawn just above).
     fn select_previous_agent(&mut self) {
+        if !self.drawer_takes_navigation() && self.drawer_cursor.is_none() {
+            if let Some(id) = self.subagent_cursor.take() {
+                let rows = self.subagent_tree_rows(self.selected_agent);
+                // Up from the first subagent row is the parent's own row.
+                let landed = rows
+                    .iter()
+                    .position(|sub| sub.id == id)
+                    .map(|at| at.checked_sub(1).map(|prev| rows[prev].id.clone()));
+                if let Some(landed) = landed {
+                    self.delete_pending = None;
+                    self.subagent_cursor = landed;
+                    return;
+                }
+            }
+        }
+        let before = (self.selected_agent, self.drawer_cursor);
+        self.step_sidebar_previous();
+        if (self.selected_agent, self.drawer_cursor) != before && self.drawer_cursor.is_none() {
+            self.subagent_cursor = self
+                .subagent_tree_rows(self.selected_agent)
+                .last()
+                .map(|sub| sub.id.clone());
+        }
+    }
+
+    fn step_sidebar_previous(&mut self) {
         self.delete_pending = None;
         self.orch_dag_scroll = 0;
         self.orch_dag_max_scroll = 0;
@@ -5919,7 +6166,7 @@ impl App {
         }
     }
 
-    fn select_next_agent(&mut self) {
+    fn step_sidebar_next(&mut self) {
         self.delete_pending = None;
         self.orch_dag_scroll = 0;
         self.orch_dag_max_scroll = 0;
@@ -7210,6 +7457,31 @@ impl App {
             }
             return;
         }
+        // A subagent row: select it under its parent, whose terminal stays in
+        // the worker pane. Subagent rows are never inside a drawer.
+        // The map is from the last frame; the id check keeps a row that shifted
+        // since (an agent added or removed) from selecting a neighbor.
+        let subagent = subagent_row_from_mouse(self, mouse, area).filter(|(index, id)| {
+            self.agents.get(*index).is_some_and(|run| {
+                self.subagents
+                    .get(&run.id)
+                    .is_some_and(|list| list.iter().any(|sub| &sub.id == id))
+            })
+        });
+        self.subagent_cursor = None;
+        if let Some((index, id)) = subagent {
+            if index != self.selected_agent {
+                self.orch_dag_scroll = 0;
+                self.orch_dag_max_scroll = 0;
+                self.orch_follow_bottom = true;
+                self.orch_selection = None;
+            }
+            self.drawer_cursor = None;
+            self.close_drawer();
+            self.selected_agent = index;
+            self.subagent_cursor = Some(id);
+            return;
+        }
         if let Some(index) = agent_index_from_mouse(self, mouse, area) {
             if index != self.selected_agent {
                 self.orch_dag_scroll = 0;
@@ -7355,13 +7627,13 @@ impl App {
                 "mouse {:?} @{},{} pane=agents",
                 mouse.kind, mouse.column, mouse.row
             ));
-            let before = self.selected_agent;
+            let before = (self.selected_agent, self.subagent_cursor.clone());
             if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                 self.select_previous_agent();
             } else if matches!(mouse.kind, MouseEventKind::ScrollDown) {
                 self.select_next_agent();
             }
-            let changed = self.selected_agent != before;
+            let changed = (self.selected_agent, self.subagent_cursor.clone()) != before;
             let duration = started.elapsed();
             self.record_perf_duration("scroll_event", duration);
             self.log_perf_duration_over(
@@ -21070,6 +21342,7 @@ What to do\n\
             self.finish_task_routing(outcome);
         }
         self.drain_workspace_preps();
+        self.poll_subagents();
         self.emit_dashboard_opened_once();
         self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();

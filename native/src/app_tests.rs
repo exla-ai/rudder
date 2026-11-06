@@ -18928,6 +18928,123 @@ fn enter_opens_the_drawer_and_esc_closes_it() {
 }
 
 #[test]
+fn tab_opens_an_agents_subagent_tree_and_j_k_walk_its_rows() {
+    use crate::subagents::{apply_event, SubagentEvent};
+    let mut app = drawer_fleet();
+    app.focus = FocusPane::Agents;
+    app.selected_agent = 0;
+    let now = Instant::now();
+    let list = app.subagents.entry("run-live".to_string()).or_default();
+    for (id, description) in [("a1", "Explore auth"), ("a2", "Check tests")] {
+        apply_event(list, SubagentEvent::Started { id: id.into(), kind: "general-purpose".into() }, now);
+        apply_event(list, SubagentEvent::Named { id: id.into(), description: description.into() }, now);
+    }
+    apply_event(
+        list,
+        SubagentEvent::Stopped { id: "a2".into(), kind: String::new(), last_message: Some("all green".into()) },
+        now,
+    );
+
+    // Closed: one summary line on the parent's card.
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("\u{25b8} 2 subagents (1 running)"), "{screen}");
+    assert!(!screen.contains("Explore auth"), "{screen}");
+
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("\u{25be} 2 subagents (1 running)"), "{screen}");
+    assert!(screen.contains("\u{251c}\u{2500}") && screen.contains("Explore auth"), "{screen}");
+    assert!(screen.contains("\u{2514}\u{2500}") && screen.contains("Check tests"), "{screen}");
+
+    // j walks the subagent rows, then moves on to the next agent; k comes back
+    // up onto the tree's last row. The worker pane stays on the parent.
+    app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+    assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (0, Some("a1")));
+    app.handle_key(KeyEvent::from(KeyCode::Down));
+    assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (0, Some("a2")));
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("all green"), "the cursor's subagent shows its details: {screen}");
+    app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+    assert_eq!(app.agents[0].status, AgentStatus::Running, "x on a subagent row stops nothing");
+    app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+    assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (1, None));
+    app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+    assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (0, Some("a2")));
+
+    // Open is remembered by run id, so a re-sort keeps it; Tab on a subagent
+    // row closes the tree and puts the cursor back on its parent.
+    app.agents.swap(0, 1);
+    app.selected_agent = 1;
+    assert_eq!(app.selected_subagent().map(|sub| sub.id.as_str()), Some("a2"));
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (1, None));
+    assert!(!app.subagent_trees_open.contains("run-live"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn tab_toggles_a_drawer_header_and_still_reaches_the_worker_pty() {
+    let mut app = drawer_fleet();
+    app.focus = FocusPane::Agents;
+    app.drawer_cursor = Some(Bucket::Done);
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.drawer_open(), Some(Bucket::Done));
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    assert_eq!(app.drawer_open(), None);
+    assert_eq!(app.drawer_cursor, Some(Bucket::Done), "closing leaves the cursor on the header");
+
+    // In the worker pane Tab is the agent's, subagents or not. (`cat -t`
+    // prints a tab as ^I; `cat -v` leaves tabs alone.)
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        ["-lc", "stty raw -echo; printf 'ready\\r\\n'; cat -t"],
+    );
+    let mut pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 20 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn test pty");
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        std::thread::sleep(Duration::from_millis(25));
+        pane.drain_output();
+        if pane.visible_lines_snapshot().join("\n").contains("ready") {
+            break;
+        }
+        assert!(Instant::now() < ready_deadline, "test pty never printed ready");
+    }
+    let mut app = App::new();
+    let run = test_agent_run_with_terminal(&app, pane);
+    let run_id = run.id.clone();
+    app.agents.push(run);
+    app.selected_agent = 0;
+    crate::subagents::apply_event(
+        app.subagents.entry(run_id).or_default(),
+        crate::subagents::SubagentEvent::Started { id: "a1".into(), kind: "Explore".into() },
+        Instant::now(),
+    );
+    app.focus = FocusPane::Worker;
+    app.handle_key(KeyEvent::from(KeyCode::Tab));
+    assert!(app.subagent_trees_open.is_empty(), "the worker pane's Tab opens no tree");
+    let echo_deadline = Instant::now() + Duration::from_secs(10);
+    let output = loop {
+        std::thread::sleep(Duration::from_millis(25));
+        let output = app
+            .selected_terminal_mut()
+            .map(|terminal| terminal.visible_lines().join("\n"))
+            .unwrap_or_default();
+        if output.contains("^I") || Instant::now() >= echo_deadline {
+            break output;
+        }
+    };
+    assert!(output.contains("^I"), "Tab reached the agent's terminal: {output:?}");
+}
+
+#[test]
 fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
     let mut app = drawer_fleet();
     app.focus = FocusPane::Agents;

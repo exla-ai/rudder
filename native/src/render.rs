@@ -693,6 +693,12 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     } else {
         agent.node_id.clone()
     };
+    // Claude Code on an OpenRouter model says which one, so a Kimi or GLM
+    // agent never passes for a Claude one in the list.
+    if let Some(routed) = openrouter_model(agent.backend, &agent.model) {
+        status.push(dot.clone());
+        status.push(Span::styled(routed.alias(), Style::default().fg(p.accent)));
+    }
     if let Some(tag) = tag {
         status.push(dot.clone());
         status.push(Span::styled(tag, Style::default().fg(p.accent)));
@@ -4021,12 +4027,7 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let model = if run.model.trim().is_empty() {
             run.backend.as_str().to_string()
         } else {
-            format!(
-                "{} {}({})",
-                run.backend.as_str(),
-                run.model,
-                effort_label(run.effort)
-            )
+            agent_model_label(run.backend, &run.model, run.effort)
         };
         if sidebar_visible {
             format!("{model} · {id}")
@@ -5382,9 +5383,8 @@ pub(crate) fn task_pane_title(app: &App) -> String {
     }
     let fast = if app.fast_mode { " · fast" } else { "" };
     format!(
-        "task · {} {model}({}){fast}",
-        app.backend.as_str(),
-        effort_label(app.effort)
+        "task · {}{fast}",
+        agent_model_label(app.backend, model, app.effort)
     )
 }
 
@@ -6764,7 +6764,9 @@ fn render_gods_view_tile(
     } else {
         run.task_summary.clone()
     };
-    let model = if run.model.trim().is_empty() {
+    let model = if let Some(routed) = openrouter_model(run.backend, &run.model) {
+        routed.alias().to_string()
+    } else if run.model.trim().is_empty() {
         run.backend.as_str().to_string()
     } else {
         format!("{}/{}", run.backend.as_str(), run.model)

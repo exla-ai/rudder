@@ -4245,7 +4245,8 @@ impl App {
         }
         let warning = save_model_defaults(self.backend, &self.model, self.effort)
             .err()
-            .map(|error| format!("config warning: {error}"));
+            .map(|error| format!("config warning: {error}"))
+            .or_else(|| openrouter_key_refusal(self.backend, &self.model).map(str::to_string));
         // Switching to a DIFFERENT model retires a still-planning planner so the next
         // task re-plans and launches its agents on the new model (see
         // `retire_planner_for_model_switch`). Logged to the activity feed rather than
@@ -6915,12 +6916,7 @@ impl App {
                     self.focus_or_spawn_main();
                 }
                 self.notice = warning.or_else(|| {
-                    Some(format!(
-                        "{} {}({})",
-                        self.backend.as_str(),
-                        self.model,
-                        effort_label(self.effort)
-                    ))
+                    Some(agent_model_label(self.backend, &self.model, self.effort))
                 });
             }
             SuggestionAction::ShowHelp => {
@@ -8276,6 +8272,16 @@ impl App {
     }
 
     fn route_fresh_task(&mut self, input: &str) {
+        // A Kimi or GLM agent with no OpenRouter key: say so once and keep the
+        // task, instead of creating a workspace for an agent that cannot start.
+        if let Some(refusal) = openrouter_key_refusal(self.backend, &self.model) {
+            if self.task_input.is_empty() {
+                self.replace_task_input(input.to_string());
+            }
+            self.notice = Some(refusal.to_string());
+            self.dirty = true;
+            return;
+        }
         let request = TaskRoutingRequest {
             task: input.to_string(),
             cwd: self.cwd.clone(),
@@ -8971,7 +8977,7 @@ impl App {
                     args.push(sid.to_string());
                 }
                 args.push(prompt.to_string());
-                TerminalCommand::with_args(claude_program(), args)
+                claude_command(args)
                     .with_env("CLAUDE_CODE_NO_FLICKER", "0")
             }
             Backend::Codex => {
@@ -12652,12 +12658,7 @@ Address the objection directly. If you disagree, say why inside \
                             default_effort_for(backend, model),
                         );
                         self.notice = warning.or_else(|| {
-                            Some(format!(
-                                "{} {}({})",
-                                self.backend.as_str(),
-                                self.model,
-                                effort_label(self.effort)
-                            ))
+                            Some(agent_model_label(self.backend, &self.model, self.effort))
                         });
                     }
                     [provider, model, effort, ..] if provider_backend(provider).is_some() => {
@@ -12666,12 +12667,7 @@ Address the objection directly. If you disagree, say why inside \
                         let warning =
                             self.set_model_defaults(backend, (*model).to_string(), parsed_effort);
                         self.notice = warning.or_else(|| {
-                            Some(format!(
-                                "{} {}({})",
-                                self.backend.as_str(),
-                                self.model,
-                                effort_label(self.effort)
-                            ))
+                            Some(agent_model_label(self.backend, &self.model, self.effort))
                         });
                     }
                     _ => {
@@ -12680,12 +12676,7 @@ Address the objection directly. If you disagree, say why inside \
                         let effort = default_effort_for(backend, &model);
                         let warning = self.set_model_defaults(backend, model, effort);
                         self.notice = warning.or_else(|| {
-                            Some(format!(
-                                "{} {}({})",
-                                self.backend.as_str(),
-                                self.model,
-                                effort_label(self.effort)
-                            ))
+                            Some(agent_model_label(self.backend, &self.model, self.effort))
                         });
                     }
                 }

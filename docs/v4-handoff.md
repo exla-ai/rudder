@@ -194,6 +194,14 @@ hooks plus task notifications; Codex through `SubagentStart`/`SubagentStop`,
 named from its rollout, and it never reports a failed subagent. View state
 only. See engineering-reference section 7.
 
+Kimi and GLM agents (native/src/openrouter.rs, not released yet): `kimi` and
+`glm` are two more rows in the `/model` picker (also `/model kimi`,
+`--model glm`). They run Claude Code on OpenRouter (Kimi K3.1 Pro, GLM 5.3)
+through that one process's env; everything else is the Claude path. The key
+comes from `OPENROUTER_API_KEY` or opencode's login. Cloud homes need
+`rudder cloud secrets set OPENROUTER_API_KEY` (opencode's `auth.json` is not
+synced). See engineering-reference section 10.
+
 Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
 then a colored status line with elapsed time and +N -N; the selected card is a
 rounded outline), a header row (wordmark, project, branch, version), a

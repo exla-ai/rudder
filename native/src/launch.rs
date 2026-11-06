@@ -182,7 +182,7 @@ pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> Termina
     }
     args.push("--resume".to_string());
     args.push(session_id.to_string());
-    TerminalCommand::with_args(claude_program(), args).with_env("CLAUDE_CODE_NO_FLICKER", "0")
+    claude_command(args).with_env("CLAUDE_CODE_NO_FLICKER", "0")
 }
 
 /// BRANCH a Claude chat: resume the source session but `--fork-session` so the
@@ -215,7 +215,7 @@ pub(crate) fn claude_fork_command(
     if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
         args.push(prompt.to_string());
     }
-    TerminalCommand::with_args(claude_program(), args).with_env("CLAUDE_CODE_NO_FLICKER", "0").with_env("RUDDER_EXECUTION_PROFILE", "native")
+    claude_command(args).with_env("CLAUDE_CODE_NO_FLICKER", "0").with_env("RUDDER_EXECUTION_PROFILE", "native")
 }
 
 /// BRANCH a Codex chat: `codex fork <session-id>` copies the conversation into a
@@ -332,7 +332,7 @@ pub(crate) fn rudder_plan_refine_command(
             args.push("--resume".to_string());
             args.push(session_id.to_string());
             args.push(feedback_prompt.to_string());
-            TerminalCommand::with_args(claude_program(), args)
+            claude_command(args)
                 .with_env("CLAUDE_CODE_NO_FLICKER", "0")
         }
         Backend::Codex => {
@@ -583,7 +583,7 @@ fn build_agent_command(
             if let Some(prompt) = prompt {
                 args.push(prompt);
             }
-            TerminalCommand::with_args(claude_program(), args)
+            claude_command(args)
                 .with_env("CLAUDE_CODE_NO_FLICKER", "0")
                 .with_env("RUDDER_AGENT_INITIAL_PROMPT", initial_prompt)
         }
@@ -785,7 +785,7 @@ pub(crate) fn rudder_orchestrator_resume_command(
             if !continuation.trim().is_empty() {
                 args.push(continuation.to_string());
             }
-            TerminalCommand::with_args(claude_program(), args)
+            claude_command(args)
                 .with_env("CLAUDE_CODE_NO_FLICKER", "0")
         }
         Backend::Codex => {
@@ -956,6 +956,16 @@ pub(crate) fn interactive_orchestrator() -> bool {
     env::var("RUDDER_INTERACTIVE_ORCHESTRATOR")
         .map(|value| value.trim() != "0")
         .unwrap_or(true)
+}
+
+/// Every Claude Code launch is built here. A `kimi` or `glm` model makes it a
+/// Kimi or GLM agent: the same Claude Code process, routed to OpenRouter by
+/// its environment alone (`rudder_native::openrouter`). The key is attached at
+/// spawn, never here, so it cannot end up in argv or a saved command.
+pub(crate) fn claude_command(args: Vec<String>) -> TerminalCommand {
+    let mut command = TerminalCommand::with_args(claude_program(), args);
+    rudder_native::openrouter::route_claude_command(&mut command);
+    command
 }
 
 /// The Claude executable. Overridable via RUDDER_CLAUDE_BIN so the end-to-end TUI

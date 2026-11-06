@@ -1788,6 +1788,30 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   streaming mode to parse, so planner output is read from the pane like the
   interactive orchestrator. Known gaps, deliberate: no token/cost accounting
   (`usage.rs` reports zero), no cloud-worker support, no `/fast` preset.
+- **Kimi and GLM (Claude Code on OpenRouter, 2026-11).** Not a backend: a Kimi
+  or GLM agent is `Backend::Claude` with model `kimi` or `glm`, so hooks,
+  signals, the subagent tree, compaction, resume and `--settings` stay on the
+  Claude path. Picked like any model: the `kimi`/`glm` rows in the `/model`
+  provider list, `/model kimi`, `/model claude glm`, or `--model kimi`.
+  `native/src/openrouter.rs` (lib crate) holds the OpenRouter ids (one line
+  each) and does two steps. `launch::claude_command`, which builds every Claude
+  launch, rewrites `--model kimi` to the slot it rides on (`opus`; GLM `sonnet`)
+  and names an OpenRouter model in every slot (`ANTHROPIC_DEFAULT_*_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_MODEL`), so nothing falls back to a
+  Claude model. `TerminalPane::spawn_shell_or_command` then attaches
+  `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and blanks `ANTHROPIC_API_KEY` /
+  `CLAUDE_CODE_OAUTH_TOKEN`, only on commands marked `RUDDER_OPENROUTER_MODEL`.
+  The env marker survives the managed `__claude-sdk` rewrite, which passes its
+  env to claude. The key (`$OPENROUTER_API_KEY`, then opencode's
+  `auth.json`, then an `openrouter` api-key profile in `auth-profiles.json`) is
+  only ever in the child env: never argv, run records or logs. No key: the task
+  is refused before a workspace exists, and every other launch path fails at
+  spawn with "No OpenRouter key: run opencode auth login or set
+  OPENROUTER_API_KEY". Labels say `kimi`/`glm`, never `claude`. Caveats:
+  claude.ai connectors do not load (the token outranks the claude.ai login);
+  Claude Code's explicit "set as default" key in a worker's `/model` still
+  writes its slot alias to `~/.claude/settings.json` (plain Enter is session
+  only); Rudder's own title/summary helpers stay on Claude.
 - **`/fast` (v2.5.0, decided):** the fast preset is the FLAGSHIP model at LOW
   effort — claude `opus(low)`, codex `gpt-6.1-sol(low)` (`fast_model_for`,
   `native/src/models.rs`) — never a downgrade to haiku/spark. This mirrors

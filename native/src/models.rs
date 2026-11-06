@@ -82,6 +82,45 @@ pub(crate) fn parse_effort_arg(value: &str) -> Option<EffortLevel> {
     }
 }
 
+/// Claude Code on an OpenRouter model: a Kimi or GLM agent. It is a Claude
+/// agent in every way (hooks, signals, resume, `--settings`); only its model
+/// alias, its label and its process environment differ. See
+/// `rudder_native::openrouter` for the routing and the model ids.
+pub(crate) fn openrouter_model(
+    backend: Backend,
+    model: &str,
+) -> Option<rudder_native::openrouter::OpenRouterModel> {
+    if backend == Backend::Claude {
+        rudder_native::openrouter::OpenRouterModel::parse(model)
+    } else {
+        None
+    }
+}
+
+/// What an agent runs on, for titles and notices: `claude opus(high)`, and for
+/// Claude Code on OpenRouter just `kimi` / `glm` (with an effort only when one
+/// is set), so it never reads as a Claude model.
+pub(crate) fn agent_model_label(
+    backend: Backend,
+    model: &str,
+    effort: Option<EffortLevel>,
+) -> String {
+    match (openrouter_model(backend, model), effort) {
+        (Some(routed), None) => routed.alias().to_string(),
+        (Some(routed), Some(effort)) => format!("{}({})", routed.alias(), effort.as_str()),
+        (None, _) => format!("{} {model}({})", backend.as_str(), effort_label(effort)),
+    }
+}
+
+/// A Kimi or GLM launch with no OpenRouter key is refused with this one
+/// notice before any work starts. The spawn refuses it too, for every path.
+pub(crate) fn openrouter_key_refusal(backend: Backend, model: &str) -> Option<&'static str> {
+    openrouter_model(backend, model)?;
+    rudder_native::openrouter::resolve_key()
+        .is_none()
+        .then_some(rudder_native::openrouter::MISSING_KEY)
+}
+
 pub(crate) fn provider_backend(provider: &str) -> Option<Backend> {
     match provider.to_ascii_lowercase().as_str() {
         "claude" | "anthropic" => Some(Backend::Claude),
@@ -402,7 +441,10 @@ pub(crate) fn is_current_model_suggestion(
     current_effort: Option<EffortLevel>,
 ) -> bool {
     match &suggestion.action {
-        SuggestionAction::ChooseModelProvider(backend) => *backend == current_backend,
+        // A Kimi or GLM agent is a Claude backend, but its own row is the current one.
+        SuggestionAction::ChooseModelProvider(backend) => {
+            *backend == current_backend && openrouter_model(current_backend, current_model).is_none()
+        }
         SuggestionAction::ChooseModel { backend, model } => {
             *backend == current_backend && model == current_model
         }
@@ -764,6 +806,21 @@ pub(crate) fn provider_suggestions(query: &str) -> Vec<Suggestion> {
         detail: detail.to_string(),
         action: SuggestionAction::ChooseModelProvider(backend),
     })
+    // Kimi and GLM sit beside Claude and Codex: picking one sets the model
+    // directly (Claude Code on that OpenRouter model; there is no effort dial).
+    .chain(
+        rudder_native::openrouter::OpenRouterModel::ALL
+            .into_iter()
+            .map(|routed| Suggestion {
+                label: routed.alias().to_string(),
+                detail: format!("Claude Code on {} via OpenRouter", routed.display_name()),
+                action: SuggestionAction::SetModel {
+                    backend: Backend::Claude,
+                    model: routed.alias().to_string(),
+                    effort: default_effort_for(Backend::Claude, routed.alias()),
+                },
+            }),
+    )
     .collect();
     rank_suggestions(suggestions, query)
 }
@@ -1220,6 +1277,9 @@ pub(crate) fn fallback_model_rows() -> Vec<(Backend, &'static str, &'static str)
         (Backend::Claude, "fable", "hard, long-running tasks"),
         (Backend::Claude, "sonnet", "efficient routine tasks"),
         (Backend::Claude, "haiku", "fastest quick answers"),
+        // Claude Code on OpenRouter models (rudder_native::openrouter).
+        (Backend::Claude, "kimi", "Kimi K3.1 Pro via OpenRouter"),
+        (Backend::Claude, "glm", "GLM 5.3 via OpenRouter"),
         (Backend::Claude, "claude-sonnet-5", "explicit id"),
         // Codex rows mirror the ChatGPT-auth account cache (2026-10): the 5.6
         // family ships as capability tiers (sol > terra > luna, by price);

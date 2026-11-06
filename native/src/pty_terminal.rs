@@ -1069,6 +1069,13 @@ impl TerminalPane {
         command: Option<TerminalCommand>,
         options: TerminalPaneOptions,
     ) -> Result<Self> {
+        // A Kimi or GLM agent (Claude Code routed to OpenRouter) gets its key
+        // here, in its own environment only, or is refused before anything
+        // starts. Every agent launch passes through this spawn.
+        let mut command = command;
+        if let Some(command) = command.as_mut() {
+            crate::openrouter::attach_credentials(command)?;
+        }
         // Reserve ownership and start the reaper before a fallible spawn can
         // leave a real child behind. Teardown never needs to spawn a thread.
         let child_reservation = child_reaper()?.reserve()?;

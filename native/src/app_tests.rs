@@ -2023,6 +2023,63 @@ fn feedback_is_written_locally_before_anything_is_sent() {
 }
 
 #[test]
+fn a_kimi_or_glm_agent_is_claude_code_on_openrouter_and_a_claude_agent_is_not() {
+    use rudder_native::openrouter::{attach_credentials_with, KIMI_K3_1_PRO, ROUTE_ENV};
+    let key = "sk-or-v1-test-key-that-must-stay-in-the-env";
+    let session = Some("00000000-0000-4000-8000-000000000001");
+    let mut kimi = agent_command(Backend::Claude, "kimi", None, "fix it", AgentMode::Execute, session);
+    let mut claude = agent_command(Backend::Claude, "opus", None, "fix it", AgentMode::Execute, session);
+    for command in [&mut kimi, &mut claude] {
+        attach_credentials_with(command, || Some(key.to_string())).expect("key resolved");
+    }
+    let env = |command: &TerminalCommand, name: &str| {
+        command.env.iter().rev().find(|(key, _)| key == name).map(|(_, value)| value.clone())
+    };
+    let model_arg = |command: &TerminalCommand| {
+        let at = command.args.iter().position(|arg| arg == "--model").expect("--model");
+        command.args[at + 1].clone()
+    };
+
+    // Kimi: the same Claude Code launch on the opus slot, routed by its env alone.
+    assert_eq!(kimi.program, claude.program);
+    assert_eq!(model_arg(&kimi), "opus");
+    assert_eq!(env(&kimi, "ANTHROPIC_BASE_URL").as_deref(), Some("https://openrouter.ai/api"));
+    assert_eq!(env(&kimi, "ANTHROPIC_AUTH_TOKEN").as_deref(), Some(key));
+    assert_eq!(env(&kimi, "ANTHROPIC_DEFAULT_OPUS_MODEL").as_deref(), Some(KIMI_K3_1_PRO));
+    assert!(kimi.args.iter().all(|arg| !arg.contains(key)), "the key is never in argv");
+
+    // A normal Claude agent keeps Anthropic: no route, no key, nothing overridden.
+    assert_eq!(model_arg(&claude), "opus");
+    assert!(
+        claude.env.iter().all(|(name, _)| !name.starts_with("ANTHROPIC_") && name != ROUTE_ENV),
+        "{:?}",
+        claude.env
+    );
+
+    // Labelled as what runs, not as a Claude model.
+    assert_eq!(agent_model_label(Backend::Claude, "kimi", None), "kimi");
+    assert_eq!(agent_model_label(Backend::Claude, "opus", Some(EffortLevel::High)), "claude opus(high)");
+    let mut app = App::new();
+    app.backend = Backend::Claude;
+    app.model = "glm".to_string();
+    app.effort = default_effort_for(Backend::Claude, "glm");
+    assert_eq!(task_pane_title(&app), "task · glm");
+    assert_eq!(known_model_backend("kimi"), Some(Backend::Claude));
+
+    // The run record keeps the alias, never the key.
+    let repo = unique_test_repo("openrouter-record");
+    let mut run = test_agent_run("kimi-run", "fix it");
+    run.backend = Backend::Claude;
+    run.model = "kimi".to_string();
+    save_native_run_record(&repo, &run).expect("save");
+    let raw = fs::read_to_string(native_run_dir(&repo, "kimi-run").join("run.json")).expect("record");
+    let _ = fs::remove_dir_all(&repo);
+    let record: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    assert_eq!(record["model"].as_str(), Some("kimi"));
+    assert!(!raw.contains(key));
+}
+
+#[test]
 fn the_task_pane_title_says_what_a_new_agent_will_run_on() {
     // The hint line already carried the model, but every notice replaces the hint —
     // so the answer to "what will this run on?" vanished exactly when the user was

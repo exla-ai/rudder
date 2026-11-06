@@ -1107,10 +1107,12 @@ impl TerminalPane {
             .context("failed to initialize PTY reader readiness")?;
 
         // Answer Claude's and Codex's folder-trust prompt before it appears:
-        // each agent starts in a fresh workspace nobody is watching.
+        // each agent starts in a fresh workspace nobody is watching. A Claude
+        // worker also skips the main checkout's copy of the project memory.
         #[cfg(unix)]
         if let (Some(command), Some(cwd)) = (&command, &options.cwd) {
             crate::agent_trust::prepare_for_launch(&command.program, cwd);
+            crate::claude_memory::exclude_outer_memory(&command.args, cwd);
         }
         // After trust: trust keys on the agent program, and the fork's
         // workspace path is the agent's cwd inside its namespace too.

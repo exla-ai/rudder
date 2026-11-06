@@ -6,3 +6,5 @@ pub mod openrouter;
 
 #[cfg(unix)]
 mod agent_trust;
+#[cfg(unix)]
+mod claude_memory;

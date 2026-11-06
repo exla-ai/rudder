@@ -6338,6 +6338,21 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         && agent.merge_conflict_files.is_empty()
     {
         "needs you · checks failed"
+    } else if agent.has_merge_conflict()
+        && agent.status == AgentStatus::Done
+        && agent.conflict_auto_resolvable()
+        && !(agent.merge_requested || agent.plan_may_merge())
+    {
+        // Nobody asked for it to merge (a dashboard worker merges with m), so
+        // its conflict is not resolved behind the user's back.
+        "conflict · press m to resolve"
+    } else if agent.has_merge_conflict()
+        && agent.status == AgentStatus::Done
+        && agent.conflict_auto_resolvable()
+        && agent.resolver_attempts() < crate::MAX_AUTO_RESOLVER_ATTEMPTS
+    {
+        // Rudder starts a resolver for it by itself; nothing to do yet.
+        "conflict · resolver queued"
     } else if agent.has_merge_conflict() && agent.status == AgentStatus::Done {
         "needs you · conflict"
     } else if agent.status == AgentStatus::Done && agent.delivery.required {

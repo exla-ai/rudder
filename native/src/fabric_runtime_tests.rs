@@ -146,6 +146,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         plan_output_cache: None,
         last_worker_input_at: None,
         merge_resolver: false,
+        merge_requested: false,
         merge_conflict: false,
         merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),

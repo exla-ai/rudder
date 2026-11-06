@@ -6208,7 +6208,7 @@ fn merge_conflict_run_record_round_trips_actionable_state() {
         loaded[0].merge_conflict_files,
         vec!["src/auth.ts".to_string(), "src/session.ts".to_string()]
     );
-    assert_eq!(agent_status_label(&loaded[0]), "needs you · conflict");
+    assert_eq!(agent_status_label(&loaded[0]), "conflict · press m to resolve");
 
     save_native_run_record(&repo_root, &loaded[0]).expect("save conflict record");
     let raw = fs::read_to_string(native_run_dir(&repo_root, "conflict-run-1").join("run.json"))
@@ -8052,6 +8052,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         plan_output_cache: None,
         last_worker_input_at: None,
         merge_resolver: false,
+        merge_requested: false,
         merge_conflict: false,
         merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
@@ -10200,6 +10201,7 @@ fn delete_agent_requires_second_d() {
         plan_output_cache: None,
         last_worker_input_at: None,
         merge_resolver: false,
+        merge_requested: false,
         merge_conflict: false,
         merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
@@ -29839,28 +29841,17 @@ fn project_check_command_reads_rudder_toml_verification() {
 }
 
 #[test]
-fn integration_prep_runs_project_checks_in_the_workspace() {
+fn post_merge_check_runs_in_the_workspace() {
     let repo = unique_test_repo("integration-checks");
     let workspace = repo.join("ws");
     fs::create_dir_all(&workspace).unwrap();
-    // No rudder.toml: nothing to check.
-    assert_eq!(prepare_worker_integration(&repo, &workspace), IntegrationPrep::Ready);
-    fs::write(
-        repo.join("rudder.toml"),
-        "[verification]\ncommand = 'echo checking in $(basename \"$PWD\"); test -f ok'\n",
-    )
-    .unwrap();
-    let failed = prepare_worker_integration(&repo, &workspace);
+    let command = "echo checking in $(basename \"$PWD\"); test -f ok";
+    let failed = run_post_merge_check(&workspace, command);
     fs::write(workspace.join("ok"), "").unwrap();
-    let passed = prepare_worker_integration(&repo, &workspace);
+    let passed = run_post_merge_check(&workspace, command);
     let _ = fs::remove_dir_all(&repo);
-    match failed {
-        IntegrationPrep::ChecksFailed { output } => {
-            assert!(output.contains("checking in ws"), "{output}");
-        }
-        other => panic!("expected failed checks, got {other:?}"),
-    }
-    assert_eq!(passed, IntegrationPrep::Ready);
+    assert!(failed.as_deref().is_some_and(|out| out.contains("checking in ws")), "{failed:?}");
+    assert_eq!(passed, None);
 }
 
 #[test]
@@ -29891,9 +29882,6 @@ fn only_untouched_planned_nodes_are_integrated_automatically() {
     experiment.swarm_experiment = true;
     assert!(!app.is_auto_integration_candidate(&oneoff));
     assert!(!app.is_auto_integration_candidate(&experiment));
-    app.agents = vec![node];
-    app.apply_integration_prep("node", IntegrationPrep::Ready);
-    assert!(app.integration_prepared.contains("node"));
 }
 
 #[cfg(not(windows))]
@@ -29932,48 +29920,81 @@ fn typing_into_a_planned_node_without_sending_keeps_it_from_auto_merging() {
 }
 
 #[test]
-fn integration_conflict_or_failed_checks_need_the_user_and_merge_nothing() {
-    let finished = |id: &str| {
-        let mut run = test_agent_run(id, "parser work");
-        run.status = AgentStatus::Done;
-        run.node_id = Some("n1".to_string());
-        run.workspace_path = Some(std::env::temp_dir().join("rudder-no-such-ws"));
-        run
+fn a_requested_merge_conflict_found_at_startup_gets_a_resolver_and_others_wait_for_m() {
+    // Field failure: two libra runs sat in merge-conflict for a day. Automatic
+    // integration aborted their merge and marked them "needs you", nothing ever
+    // started a resolver, and a restart kept the status with no way back. Now a
+    // run someone asked to merge is resolved after a restart; a dashboard
+    // worker the user is still talking to is never merged behind their back.
+    let _env = env_guard();
+    let repo = unique_test_repo("conflict-at-startup");
+    let fake = repo.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 30\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    let workspace = repo.join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    let write_record = |id: &str, requested: bool| {
+        let run_dir = native_run_dir(&repo, id);
+        fs::create_dir_all(&run_dir).unwrap();
+        let mut record = serde_json::json!({
+            "id": id, "status": "merge-conflict", "vcs": "jj", "mode": "execute",
+            "task": format!("{id} work"), "taskSummary": id, "backend": "claude", "model": "sonnet",
+            "createdAt": "2026-11-05T00:00:00.000Z",
+            "turns": [
+                { "ts": "1", "prompt": "build it", "source": "user" },
+                { "ts": "2", "prompt": "how is it going", "source": "user" },
+            ],
+            "workspace": { "enabled": true, "path": workspace, "workspaceName": format!("rudder-{id}"), "jjChangeId": "npvm" },
+            "merge": { "status": "conflict", "conflictKind": "merge", "conflictedFiles": ["AGENTS.md"] },
+        });
+        if requested {
+            record["mergeRequested"] = serde_json::json!(true);
+        }
+        fs::write(run_dir.join("run.json"), record.to_string()).unwrap();
     };
+    // `cedar` conflicted under old code and nobody pressed m; `fix` was merged
+    // with m before the restart.
+    write_record("cedar", false);
+    write_record("fix", true);
+
     let mut app = App::new();
-    app.agents = vec![finished("worker")];
-    app.integration_prep_inflight.insert("worker".to_string());
+    app.cwd = repo.clone();
+    let mut loaded = load_persisted_agents(&repo);
+    loaded.sort_by_key(|run| run.id != "cedar");
+    app.agents = loaded;
+    for run in &mut app.agents {
+        run.workspace_path = Some(workspace.clone());
+    }
+    assert_eq!(app.agents[0].id, "cedar");
+    assert_eq!(agent_status_label(&app.agents[0]), "conflict · press m to resolve");
+    assert!(app.agents[1].merge_requested, "the m request survives a restart");
+    assert_eq!(agent_status_label(&app.agents[1]), "conflict · resolver queued");
+    assert_eq!(app.next_conflict_to_resolve(), Some(1), "only the run someone asked to merge");
 
-    app.apply_integration_prep(
-        "worker",
-        IntegrationPrep::Conflict {
-            files: vec!["src/a.ts".to_string()],
-            output: "rebase output".to_string(),
-        },
-    );
-    let row = &app.agents[0];
-    assert_eq!(row.status, AgentStatus::Done, "nothing was merged");
-    assert!(row.has_merge_conflict());
-    assert_eq!(row.merge_conflict_files, vec!["src/a.ts".to_string()]);
-    assert!(row
-        .last_error
-        .as_deref()
-        .is_some_and(|e| e.contains("src/a.ts") && e.contains("rebase output")));
-    assert!(!app.is_auto_integration_candidate(row), "a row that needs you is not retried");
-    assert!(app.agents.iter().all(|r| !r.merge_resolver), "no AI resolver is started");
-    assert!(app.notice.as_deref().is_some_and(|n| n.contains("needs you")));
-    assert_eq!(crate::render::agent_status_label(&app.agents[0]), "needs you · conflict");
-
-    app.agents.push(finished("worker2"));
-    app.apply_integration_prep(
-        "worker2",
-        IntegrationPrep::ChecksFailed { output: "`npm test` failed:\n1 failing".to_string() },
-    );
+    // Merging again against fresh trunk left a real conflict: the resolver
+    // starts in the row, in the main checkout, without moving the selection.
+    app.focus = FocusPane::Agents;
+    app.apply_conflict_merge("fix", ConflictMerge::Conflict { files: vec!["AGENTS.md".to_string()] });
     let row = &app.agents[1];
-    assert_eq!(row.status, AgentStatus::Done);
-    assert!(row.has_merge_conflict());
-    assert!(row.last_error.as_deref().is_some_and(|e| e.contains("1 failing")));
-    assert_eq!(crate::render::agent_status_label(row), "needs you · checks failed");
+    assert!(row.merge_resolver && row.status == AgentStatus::Running);
+    assert_eq!(row.cwd, repo);
+    assert_eq!(row.resolver_attempts(), 1);
+    assert_eq!(app.focus, FocusPane::Agents);
+    assert!(app.next_conflict_to_resolve().is_none(), "one resolver at a time, cedar untouched");
+
+    // Two attempts spent: the row is the user's, with a plain reason. (The
+    // resolver finished, as finalize_merge_resolvers sees it.)
+    app.agents[1].terminal = None;
+    app.agents[1].status = AgentStatus::Done;
+    record_agent_prompt(&mut app.agents[1], "retry".to_string(), RESOLVER_TURN_SOURCE);
+    app.start_resolver_for_conflict(1, vec!["AGENTS.md".to_string()], "left".to_string());
+    let row = &app.agents[1];
+    assert!(!row.merge_resolver && row.status == AgentStatus::Done);
+    assert_eq!(agent_status_label(row), "needs you · conflict");
+    assert!(app.notice.as_deref().is_some_and(|n| n.contains("after 2 resolver attempts")));
+    assert!(app.next_conflict_to_resolve().is_none());
+    assert!(!app.agents[0].merge_resolver && app.agents[0].status == AgentStatus::Done);
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]

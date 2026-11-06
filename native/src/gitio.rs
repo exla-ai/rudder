@@ -353,6 +353,7 @@ pub(crate) fn create_main_agent(
         plan_output_cache: None,
         last_worker_input_at: None,
         merge_resolver: false,
+        merge_requested: false,
         merge_conflict: false,
         merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
@@ -796,6 +797,10 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .get("resumeTurn")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let merge_requested = record
+        .get("mergeRequested")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let merge_resolver = record
         .get("mergeResolver")
         .and_then(serde_json::Value::as_bool)
@@ -929,6 +934,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         plan_output_cache: None,
         last_worker_input_at: None,
         merge_resolver,
+        merge_requested,
         merge_conflict,
         merge_conflict_operation,
         merge_conflict_files,
@@ -1497,6 +1503,11 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         } else {
             map.remove("resumeTurn");
         }
+        if run.merge_requested {
+            map.insert("mergeRequested".to_string(), serde_json::json!(true));
+        } else {
+            map.remove("mergeRequested");
+        }
     }
     // What Rudder DID when it published this row: the branch it pushed and the PR
     // it opened. The PR's state (draft/open/merged/closed) is GitHub's to answer:
@@ -1640,7 +1651,9 @@ pub(crate) fn run_rudder_jj_command(
     // `merge-auto` is automatic integration: same merge, but a conflict restores
     // the pre-merge operation so nothing half-merged is left in the checkout.
     let (command, extra): (&str, &[&str]) = match command {
-        "merge" => ("merge", &["--allow-dirty"]),
+        // Merge first: the project's quick check runs once after the merge
+        // lands (off the UI thread), never as a gate in front of it.
+        "merge" => ("merge", &["--allow-dirty", "--skip-checks"]),
         "merge-auto" => ("merge", &["--allow-dirty", "--abort-on-conflict", "--skip-checks"]),
         other => (other, &[]),
     };
@@ -2346,17 +2359,6 @@ pub(crate) fn jj_program() -> std::ffi::OsString {
         .clone()
 }
 
-/// What preparing a finished worker for automatic integration found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum IntegrationPrep {
-    /// Rebased cleanly and the project's checks passed (or none are configured).
-    Ready,
-    /// Rebasing onto the main change conflicted in these files.
-    Conflict { files: Vec<String>, output: String },
-    /// The project's check command failed; `output` is its tail.
-    ChecksFailed { output: String },
-}
-
 const INTEGRATION_CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const INTEGRATION_OUTPUT_LINES: usize = 40;
 
@@ -2410,44 +2412,10 @@ fn output_tail(text: &str) -> String {
     lines[start..].join("\n")
 }
 
-/// Rebase a finished worker's change onto the current main change and run the
-/// project's checks, all inside the worker's own workspace (never the user's
-/// checkout). Mechanical conflicts (package.json, lock files) are settled the
-/// same way merges settle them. Blocking: call it off the UI thread.
-pub(crate) fn prepare_worker_integration(repo_root: &Path, workspace: &Path) -> IntegrationPrep {
-    // "Current main change" is the newest bookmark under the main checkout's @.
-    // If the revset does not resolve (no bookmark yet), skip the rebase; the
-    // merge itself still reports conflicts.
-    let rebase_output = Command::new(jj_program())
-        .args(["rebase", "-b", "@", "-d", "latest(heads(::default@ & bookmarks()))"])
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .output()
-        .map(|out| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            )
-        })
-        .unwrap_or_default();
-    let conflicts = jj_unresolved_conflicts(workspace);
-    if !conflicts.is_empty() {
-        let files = auto_resolve_mechanical_conflicts(workspace, &conflicts);
-        if !files.is_empty() {
-            return IntegrationPrep::Conflict {
-                output: output_tail(&rebase_output),
-                files,
-            };
-        }
-    }
-    match project_check_command(repo_root) {
-        Some(command) => run_integration_check(workspace, &command),
-        None => IntegrationPrep::Ready,
-    }
-}
-
-fn run_integration_check(workspace: &Path, command: &str) -> IntegrationPrep {
+/// The one quick check that runs AFTER a merge, in the worker's own workspace
+/// (never the user's checkout). `None` means it passed; otherwise the failure
+/// tail. Blocking: call it off the UI thread.
+pub(crate) fn run_post_merge_check(workspace: &Path, command: &str) -> Option<String> {
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(format!("{command} 2>&1"))
@@ -2458,11 +2426,7 @@ fn run_integration_check(workspace: &Path, command: &str) -> IntegrationPrep {
         .spawn()
     {
         Ok(child) => child,
-        Err(error) => {
-            return IntegrationPrep::ChecksFailed {
-                output: format!("could not run `{command}`: {error}"),
-            }
-        }
+        Err(error) => return Some(format!("could not run `{command}`: {error}")),
     };
     let reader = child.stdout.take().map(|mut pipe| {
         thread::spawn(move || {
@@ -2493,18 +2457,94 @@ fn run_integration_check(workspace: &Path, command: &str) -> IntegrationPrep {
         .map(|buf| String::from_utf8_lossy(&buf).into_owned())
         .unwrap_or_default();
     match status {
-        Some(status) if status.success() => IntegrationPrep::Ready,
-        Some(_) => IntegrationPrep::ChecksFailed {
-            output: format!("`{command}` failed:\n{}", output_tail(&output)),
-        },
-        None => IntegrationPrep::ChecksFailed {
-            output: format!(
-                "`{command}` did not finish within {} minutes:\n{}",
-                INTEGRATION_CHECK_TIMEOUT.as_secs() / 60,
-                output_tail(&output)
-            ),
-        },
+        Some(status) if status.success() => None,
+        Some(_) => Some(format!("`{command}` failed:\n{}", output_tail(&output))),
+        None => Some(format!(
+            "`{command}` did not finish within {} minutes:\n{}",
+            INTEGRATION_CHECK_TIMEOUT.as_secs() / 60,
+            output_tail(&output)
+        )),
     }
+}
+
+/// What re-merging a conflicted run for its resolver found. Produced off the UI
+/// thread by `merge_for_conflict_resolution`; the App applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConflictMerge {
+    /// The merge landed (trunk moved, or only mechanical files collided).
+    Merged { integration: IntegrationEvidence },
+    /// The run's merge change is in the main checkout with these files still
+    /// conflicted; a resolver works on it in place.
+    Conflict { files: Vec<String> },
+    /// The main checkout holds another run's unresolved merge, so nothing new
+    /// can merge until that one is settled.
+    Blocked { files: Vec<String> },
+    /// The merge could not run at all (no CLI, timeout, missing workspace).
+    Failed { error: String },
+}
+
+/// Merge a conflicted run against the current main change and leave any real
+/// conflict in place for a resolver. Mechanical files (DECISIONS.md,
+/// package.json, lock files) are settled first. When the main checkout already
+/// holds a conflicted merge, it is this run's own (its resolver was interrupted
+/// or gave up) if one of the merge change's parents is the run's change; the
+/// resolver then resumes on it instead of merging again. `own_changes` are the
+/// run's change ids (recorded and current). Blocking: call it off the UI thread.
+pub(crate) fn merge_for_conflict_resolution(
+    repo_root: &Path,
+    run_id: &str,
+    own_changes: &[String],
+) -> ConflictMerge {
+    let existing = jj_unresolved_conflicts(repo_root);
+    if !existing.is_empty() {
+        let left = auto_resolve_mechanical_conflicts(repo_root, &existing);
+        if !left.is_empty() {
+            let own = jj_parent_revs(repo_root).iter().any(|parent| {
+                own_changes
+                    .iter()
+                    .any(|change| !parent.is_empty() && change.starts_with(parent.as_str()))
+            }) || own_changes
+                .iter()
+                .any(|change| merge_parent_descends_from(repo_root, change));
+            return if own {
+                ConflictMerge::Conflict { files: left }
+            } else {
+                ConflictMerge::Blocked { files: left }
+            };
+        }
+    }
+    let attempt = |command: &str| match run_rudder_jj_command(repo_root, command, run_id, "merge") {
+        JjCliOutcome::Ok { integration } => ConflictMerge::Merged { integration },
+        JjCliOutcome::Conflict { files } => ConflictMerge::Conflict { files },
+        JjCliOutcome::Failed { error } => ConflictMerge::Failed { error },
+    };
+    match attempt("merge") {
+        ConflictMerge::Conflict { files } => {
+            let left = auto_resolve_mechanical_conflicts(repo_root, &files);
+            if left.is_empty() {
+                // The mechanical edits cleaned the merge change; the same command
+                // finalizes it (bookmark, Git export, integration evidence).
+                attempt("merge")
+            } else {
+                ConflictMerge::Conflict { files: left }
+            }
+        }
+        other => other,
+    }
+}
+
+/// Whether a parent of the main checkout's merge change descends from `change`
+/// (the worker committed on top of the change Rudder recorded for it).
+fn merge_parent_descends_from(repo_root: &Path, change: &str) -> bool {
+    if change.is_empty() || !change.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    Command::new(jj_program())
+        .args(["log", "--no-graph", "-r", &format!("@- & ({change}::)"), "-T", "change_id"])
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
 }
 
 pub(crate) fn jj_unresolved_conflicts(cwd: &Path) -> Vec<String> {

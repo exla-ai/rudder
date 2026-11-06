@@ -6,6 +6,9 @@ pub(crate) fn record_agent_prompt(run: &mut AgentRun, prompt: String, source: &s
     let ts = now_stamp();
     if source == "user" {
         run.last_user_input_at = ts.clone();
+        // A follow-up means the user is still working with it: an earlier
+        // merge request no longer stands.
+        run.merge_requested = false;
     }
     run.current_prompt = prompt.clone();
     run.turns.push(AgentTurn {

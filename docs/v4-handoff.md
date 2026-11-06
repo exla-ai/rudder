@@ -56,6 +56,19 @@ when reported. This is a request snapshot, separate from cumulative billing;
 Claude capacity and prompt/file/tool categories are not inferred. Usage is
 read off the UI thread and refreshed every ten seconds.
 
+Merge conflicts: a run someone meant to merge no longer waits on a conflict.
+That is a planned node nobody has sent a follow-up to, or a run the user
+pressed `m` on (recorded as `mergeRequested` in run.json, cleared by a new
+prompt). The dashboard merges it again against the latest main change off the
+UI thread, one per project at a time (the rest queue), settles mechanical
+files, and starts the resolver in its row for what is left. Such rows found in
+`merge-conflict` at startup are picked up the same way. Two resolver attempts
+(counted from `resolver` turns in run.json), then "needs you" with the reason;
+`m` grants one more. Any other conflicted row (a dashboard worker that
+conflicted under older code) shows "conflict · press m to resolve" and is never
+merged on its own. Automatic
+integration no longer rebases or runs checks before merging.
+
 Selection speed: moving the selection to a busy agent now shows its current
 screen on the next frame. The selected pane drains its whole output queue
 before drawing (it used to replay up to 256 KB one 64 KB batch per frame), and
@@ -85,8 +98,9 @@ sweep. `/gam` still prepares its generator's workspace on the loop. On
 2026-11-06 a 182s `__launch-node` froze a libra dashboard for its whole run.
 
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
-`rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
-workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero
+`rudder merge` (and the dashboard `m`) merges first and then runs the
+rudder.toml check once inside the workspace, reporting a failure without
+undoing the merge (`--skip-checks` skips it); `rudder ls` no longer shows zero
 phase times for headless runs; `LocalStore::gc` refuses stores that hold jj
 objects. Fork commits stay in Git on purpose: a fork is a workspace of the
 user's colocated repo, so it shares that repo's backend.

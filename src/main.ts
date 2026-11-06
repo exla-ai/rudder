@@ -30,7 +30,7 @@ import {
 import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
 import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
-import { backfillLlmTaskSummaries, listRuns, loadConfig, loadRunRecord, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
+import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import { toolCacheEnv } from "./tool-cache.js";
@@ -428,17 +428,17 @@ export async function main(): Promise<void> {
       if (!run) {
         throw new Error("Missing run id.");
       }
-      if (!parsed.flags.skipChecks) {
-        const repoRoot = findRepoRoot();
-        const record = await loadRunRecord(repoRoot, run);
-        const failed = record ? runProjectCheck(repoRoot, record) : undefined;
-        if (failed !== undefined) {
-          throw new Error(`checks failed, nothing was merged (rudder merge ${run} --skip-checks merges anyway)\n${failed}`);
-        }
-      }
-      await mergeRun(run, Boolean(parsed.flags.allowDirty), {
+      // Merge first, then the project's quick check once. A failing check is
+      // reported; the merge stays (undo it with `rudder undo` if needed).
+      const merged = await mergeRun(run, Boolean(parsed.flags.allowDirty), {
         abortOnConflict: Boolean(parsed.flags.abortOnConflict),
       });
+      if (!parsed.flags.skipChecks && merged.merge?.status === "merged") {
+        const failed = runProjectCheck(merged.repoRoot, merged);
+        if (failed !== undefined) {
+          console.error(`merged, but the quick check failed:\n${failed}`);
+        }
+      }
       return;
     }
     case "sync":

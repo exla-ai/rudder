@@ -335,7 +335,7 @@ export type RunRecord = {
   turns?: Array<{
     ts: string;
     prompt: string;
-    source: "user" | "steerer" | "regoal";
+    source: "user" | "steerer" | "regoal" | "resolver";
   }>;
   lastUserInputAt?: string;
   autoSteer?: {

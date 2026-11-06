@@ -348,6 +348,12 @@ fn backed_off_interval(current: Duration, cap: Duration) -> Duration {
 
 /// Run the scheduler every N poll ticks (a coarse cadence; the tick rate is 33ms).
 const SCHEDULER_TICK_INTERVAL: u64 = 8;
+/// A merge conflict gets this many resolver attempts before it is the user's.
+const MAX_AUTO_RESOLVER_ATTEMPTS: usize = 2;
+/// The turn source a resolver's prompt is recorded under (not "user").
+const RESOLVER_TURN_SOURCE: &str = "resolver";
+/// A row the user typed into this recently is theirs; its resolver waits.
+const CONFLICT_RESOLVER_IDLE: Duration = Duration::from_secs(5 * 60);
 /// Max plan nodes to launch per scheduler pass. Each launch synchronously sets up
 /// a jj workspace (a brief UI-thread block), so launches are spread across passes
 /// to keep the TUI responsive when a merge unblocks a whole wave of children.
@@ -2198,12 +2204,24 @@ struct App {
     completion_summary_tx: mpsc::Sender<CompletionSummaryResult>,
     completion_summary_rx: mpsc::Receiver<CompletionSummaryResult>,
     completion_summary_pending: HashSet<String>,
-    /// Automatic integration: a finished worker is rebased onto the main change
-    /// and checked off the UI thread; results arrive here keyed by run id.
-    integration_prep_tx: mpsc::Sender<(String, IntegrationPrep)>,
-    integration_prep_rx: mpsc::Receiver<(String, IntegrationPrep)>,
-    integration_prep_inflight: HashSet<String>,
-    integration_prepared: HashSet<String>,
+    /// Conflict resolution: a conflicted run is merged again against the current
+    /// main change off the UI thread (one per project at a time); the outcome
+    /// arrives here keyed by run id and starts its resolver.
+    conflict_merge_tx: mpsc::Sender<(String, ConflictMerge)>,
+    conflict_merge_rx: mpsc::Receiver<(String, ConflictMerge)>,
+    conflict_merge_inflight: Option<String>,
+    /// Automatic conflict resolution waits until then (the main checkout holds
+    /// an unresolved merge nobody is working on).
+    conflict_merge_wait_until: Option<Instant>,
+    /// Runs whose automatic resolution could not run at all this session. They
+    /// wait for `m`; a restart gives them one more try.
+    conflict_gave_up: HashSet<String>,
+    /// Runs the user gave one more resolver attempt with `m` after the
+    /// automatic attempts were spent.
+    conflict_retry_granted: HashSet<String>,
+    /// The one quick check after a merge: (run id, label, failure tail).
+    post_merge_check_tx: mpsc::Sender<(String, String, Option<String>)>,
+    post_merge_check_rx: mpsc::Receiver<(String, String, Option<String>)>,
     /// Runs the user typed or pasted into (their PTY, their resume draft or an
     /// attached client). Automatic integration leaves them for an explicit `m`.
     user_typed_runs: HashSet<String>,
@@ -2519,6 +2537,15 @@ enum MergeIntent {
     },
 }
 
+/// "a, b, c and 2 more" for a notice line.
+fn preview_list(items: &[String], max: usize) -> String {
+    let shown = items.iter().take(max).cloned().collect::<Vec<_>>().join(", ");
+    match items.len().saturating_sub(max) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
 struct MergeConflictPrompt {
     operation: ConflictOperation,
     task: String,
@@ -2735,6 +2762,12 @@ struct AgentRun {
     /// with no conflicts left, the merge is finalized (the node flips to Merged so
     /// its children unblock); if conflicts remain it drops to manual.
     merge_resolver: bool,
+    /// The user asked for this run to merge (`m`, or the conductor's merge
+    /// marker). A dashboard worker's conflict is resolved automatically only
+    /// with this set; planned nodes need it only once the user talks to them.
+    /// Cleared by a new user prompt or a re-goal. Persisted as `mergeRequested`
+    /// only while true, so it survives a restart.
+    merge_requested: bool,
     /// True when the run's work completed but its integration is parked on a merge
     /// conflict. This is distinct from `merge_resolver`: a parked conflict is waiting
     /// for the user to press `m` (or approve a resolver), while a resolver is actively
@@ -2862,6 +2895,35 @@ impl AgentRun {
 
     fn has_merge_conflict(&self) -> bool {
         self.merge_conflict
+    }
+
+    /// Resolver attempts on the current conflict: the resolver turns since the
+    /// last turn from anyone else. Read from the turns in run.json, so the bound
+    /// survives a dashboard restart, and any new user turn starts it over.
+    pub(crate) fn resolver_attempts(&self) -> usize {
+        self.turns
+            .iter()
+            .rev()
+            .take_while(|turn| turn.source == RESOLVER_TURN_SOURCE)
+            .count()
+    }
+
+    /// The per-run half of the planned-node rule: a node nobody has sent a
+    /// follow-up to. (App::plan_may_merge adds keys typed without a turn.)
+    pub(crate) fn plan_may_merge(&self) -> bool {
+        self.node_id.is_some()
+            && self.turns.iter().filter(|turn| turn.source == "user").count() <= 1
+    }
+
+    /// A conflicted jj merge Rudder resolves by itself (attempts aside).
+    pub(crate) fn conflict_auto_resolvable(&self) -> bool {
+        self.merge_conflict
+            && self.merge_conflict_operation == ConflictOperation::Merge
+            && (self.workspace_name.is_some() || self.jj_change_id.is_some())
+            && !self.is_main()
+            && !self.is_oneoff()
+            && !self.is_orchestrator()
+            && !self.swarm_experiment
     }
 
     /// A "pinned planner" renders in the orchestrator section at the top of the list
@@ -3301,7 +3363,8 @@ impl App {
         let session_started_iso = load_or_init_session_started(&cwd);
         let (task_summary_tx, task_summary_rx) = mpsc::channel();
         let (completion_summary_tx, completion_summary_rx) = mpsc::channel();
-        let (integration_prep_tx, integration_prep_rx) = mpsc::channel();
+        let (conflict_merge_tx, conflict_merge_rx) = mpsc::channel();
+        let (post_merge_check_tx, post_merge_check_rx) = mpsc::channel();
         let (final_gate_tx, final_gate_rx) = mpsc::channel();
         let branch = current_branch_at(&cwd);
         let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60));
@@ -3499,10 +3562,14 @@ impl App {
             completion_summary_tx,
             completion_summary_rx,
             completion_summary_pending: HashSet::new(),
-            integration_prep_tx,
-            integration_prep_rx,
-            integration_prep_inflight: HashSet::new(),
-            integration_prepared: HashSet::new(),
+            conflict_merge_tx,
+            conflict_merge_rx,
+            conflict_merge_inflight: None,
+            conflict_merge_wait_until: None,
+            conflict_gave_up: HashSet::new(),
+            conflict_retry_granted: HashSet::new(),
+            post_merge_check_tx,
+            post_merge_check_rx,
             user_typed_runs: HashSet::new(),
             finished_cleanup_at: None,
             direct_summary_read: HashSet::new(),
@@ -8841,6 +8908,7 @@ impl App {
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -9001,6 +9069,7 @@ impl App {
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -9480,6 +9549,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -9576,6 +9646,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -10791,6 +10862,7 @@ Address the objection directly. If you disagree, say why inside \
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -13996,6 +14068,7 @@ Address the objection directly. If you disagree, say why inside \
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -14647,6 +14720,7 @@ Address the objection directly. If you disagree, say why inside \
         let source_branch = run.workspace_branch.clone();
         let workspace_path = run.workspace_path.clone();
         let agent_id = Some(run.id.clone());
+        self.record_merge_request(index);
         match self.merge_agent_at(index) {
             Ok(()) => {
                 self.push_activity(format!("merged {label}"));
@@ -17629,11 +17703,8 @@ Address the objection directly. If you disagree, say why inside \
         // started from the dashboard merge when the user presses `m`. Counted turns
         // miss keys typed while the agent looked busy, resume-draft follow-ups
         // (recorded as "regoal") and attached clients, so any typed input counts too.
-        let user_turns = run.turns.iter().filter(|turn| turn.source == "user").count();
         run.status == AgentStatus::Done
-            && run.node_id.is_some()
-            && user_turns <= 1
-            && !self.user_typed_runs.contains(&run.id)
+            && self.plan_may_merge(run)
             && !run.swarm_experiment
             && !run.is_main()
             && !run.is_oneoff()
@@ -17650,77 +17721,17 @@ Address the objection directly. If you disagree, say why inside \
                 }))
     }
 
-    /// Start the off-thread rebase + checks for each finished worker that has a
-    /// workspace and has not been prepared yet.
-    fn start_integration_prep(&mut self) {
-        let jobs: Vec<(String, PathBuf)> = self
-            .agents
-            .iter()
-            .filter(|run| self.is_auto_integration_candidate(run))
-            .filter(|run| {
-                !self.integration_prepared.contains(&run.id)
-                    && !self.integration_prep_inflight.contains(&run.id)
-            })
-            .filter_map(|run| run.workspace_path.clone().map(|path| (run.id.clone(), path)))
-            .collect();
-        for (id, workspace) in jobs {
-            self.integration_prep_inflight.insert(id.clone());
-            let tx = self.integration_prep_tx.clone();
-            let repo_root = self.cwd.clone();
-            thread::spawn(move || {
-                let prep = prepare_worker_integration(&repo_root, &workspace);
-                let _ = tx.send((id, prep));
-            });
-        }
-    }
-
-    fn drain_integration_prep(&mut self) {
-        while let Ok((id, prep)) = self.integration_prep_rx.try_recv() {
-            self.apply_integration_prep(&id, prep);
-        }
-    }
-
-    fn apply_integration_prep(&mut self, id: &str, prep: IntegrationPrep) {
-        self.integration_prep_inflight.remove(id);
-        let Some(index) = self.agents.iter().position(|run| run.id == id) else {
-            return;
-        };
-        // The worker went back to work (or was merged by hand) meanwhile; the
-        // next completion prepares it again.
-        if self.agents[index].status != AgentStatus::Done {
-            return;
-        }
-        match prep {
-            IntegrationPrep::Ready => {
-                self.integration_prepared.insert(id.to_string());
-            }
-            IntegrationPrep::Conflict { files, output } => {
-                let mut detail = format!(
-                    "rebase onto the main change conflicts in {}; resolve it in the workspace, then press m",
-                    files.join(", ")
-                );
-                if !output.trim().is_empty() {
-                    detail.push_str("\n");
-                    detail.push_str(&output);
-                }
-                self.mark_integration_needs_you(index, files, detail);
-            }
-            IntegrationPrep::ChecksFailed { output } => {
-                self.mark_integration_needs_you(index, Vec::new(), output);
-            }
-        }
-    }
-
-    /// Automatic integration stopped on a conflict or failed checks. Nothing was
-    /// merged; the row shows "needs you" with the output until the user acts.
-    fn mark_integration_needs_you(&mut self, index: usize, files: Vec<String>, detail: String) {
+    /// Automatic integration stopped on a conflict. Nothing was merged (the CLI
+    /// restored the pre-merge operation); the row queues for a resolver, which
+    /// `drive_conflict_resolution` starts once the checkout is free.
+    fn mark_integration_conflict(&mut self, index: usize, files: Vec<String>, detail: String) {
         let cwd = self.cwd.clone();
         let Some(run) = self.agents.get_mut(index) else {
             return;
         };
-        let checks_failed = files.is_empty();
+        let count = files.len();
         run.status = AgentStatus::Done;
-        run.last_error = Some(detail.clone());
+        run.last_error = Some(detail);
         run.merge_resolver = false;
         run.merge_conflict = true;
         run.had_merge_conflict = true;
@@ -17728,18 +17739,297 @@ Address the objection directly. If you disagree, say why inside \
         run.merge_conflict_files = files;
         run.integration.phase = IntegrationPhase::Pending;
         let _ = save_native_run_record(&cwd, run);
-        let id = run.id.clone();
         let label = short_task(&run.task_summary);
-        self.integration_prepared.remove(&id);
-        let first_line = detail.lines().next().unwrap_or_default().to_string();
-        let message = if checks_failed {
-            format!("{label} needs you: checks failed · {first_line}")
-        } else {
-            format!("{label} needs you: {first_line}")
-        };
+        let message = format!(
+            "merge conflict in {label} ({count} file{}): a resolver takes it next",
+            if count == 1 { "" } else { "s" }
+        );
         self.notice = Some(message.clone());
         self.record_activity(message);
         self.dirty = true;
+    }
+
+    /// Every conflicted run gets a resolver without anyone pressing a key: after
+    /// automatic integration, after a resolver that left conflicts, and for
+    /// conflicts found in run.json after a restart. One at a time per project,
+    /// because each one merges into the main checkout; the rest wait their turn.
+    fn drive_conflict_resolution(&mut self) {
+        self.drain_conflict_merges();
+        self.drain_post_merge_checks();
+        let busy = self.conflict_merge_inflight.is_some()
+            || self.conflict_prompt.is_some()
+            || self
+                .agents
+                .iter()
+                .any(|run| run.merge_resolver && run.status == AgentStatus::Running);
+        if busy
+            || self
+                .conflict_merge_wait_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            return;
+        }
+        if let Some(index) = self.next_conflict_to_resolve() {
+            self.start_conflict_merge(index);
+        }
+    }
+
+    /// A planned node merges on its own until the user types a follow-up into
+    /// it. Counted turns miss keys typed while the agent looked busy,
+    /// resume-draft follow-ups and attached clients, so any typed input counts.
+    fn plan_may_merge(&self, run: &AgentRun) -> bool {
+        run.plan_may_merge() && !self.user_typed_runs.contains(&run.id)
+    }
+
+    /// Whether anyone meant this run to merge: a planned node automatic
+    /// integration may merge, or a run the user pressed `m` on. Any other
+    /// conflicted row (a dashboard worker the user is still talking to, or one
+    /// that conflicted under older code) waits for `m`.
+    fn conflict_merge_intended(&self, run: &AgentRun) -> bool {
+        run.merge_requested || self.plan_may_merge(run)
+    }
+
+    /// Mark that the user asked for this run to merge, durably (run.json), so
+    /// its conflict keeps being resolved after a restart.
+    fn record_merge_request(&mut self, index: usize) {
+        let cwd = self.cwd.clone();
+        if let Some(run) = self.agents.get_mut(index) {
+            if !run.merge_requested {
+                run.merge_requested = true;
+                let _ = save_native_run_record(&cwd, run);
+            }
+        }
+    }
+
+    /// The first conflicted row Rudder should resolve now. A row whose turn
+    /// ended with a question, or that the user typed into in the last few
+    /// minutes, is theirs for the moment and waits.
+    fn next_conflict_to_resolve(&self) -> Option<usize> {
+        self.agents.iter().position(|run| {
+            let waiting = match run.status {
+                // Done with the resolver flag still set is finalize_merge_resolvers'.
+                AgentStatus::Done => !run.merge_resolver,
+                // A resolver the dashboard lost on restart picks up where it was.
+                AgentStatus::Orphaned => run.merge_resolver,
+                _ => false,
+            };
+            waiting
+                && self.conflict_merge_intended(run)
+                && run.conflict_auto_resolvable()
+                && (run.resolver_attempts() < MAX_AUTO_RESOLVER_ATTEMPTS
+                    || self.conflict_retry_granted.contains(&run.id))
+                && !self.conflict_gave_up.contains(&run.id)
+                && !is_cloud_owned_agent(run)
+                && !run.needs_permission
+                && !run.needs_user_input
+                && run
+                    .last_worker_input_at
+                    .map_or(true, |at| at.elapsed() >= CONFLICT_RESOLVER_IDLE)
+        })
+    }
+
+    /// Merge a conflicted row again against the current main change, off the UI
+    /// thread. A clean merge lands; a real conflict starts its resolver.
+    fn start_conflict_merge(&mut self, index: usize) {
+        let cwd = self.cwd.clone();
+        let Some(run) = self.agents.get_mut(index) else {
+            return;
+        };
+        let id = run.id.clone();
+        let label = short_task(&run.task_summary);
+        let recorded_change = run.jj_change_id.clone();
+        let workspace = run.workspace_path.clone();
+        run.integration.phase = IntegrationPhase::Integrating;
+        let _ = save_native_run_record(&cwd, run);
+        self.conflict_merge_inflight = Some(id.clone());
+        let message = format!("merge conflict in {label}: merging it again against the latest main change");
+        self.notice = Some(message.clone());
+        self.record_activity(message);
+        let tx = self.conflict_merge_tx.clone();
+        thread::spawn(move || {
+            let mut own_changes: Vec<String> = recorded_change.into_iter().collect();
+            if let Some(change) = workspace
+                .filter(|path| path.is_dir())
+                .and_then(|path| jj_workspace_change_id(&path))
+            {
+                own_changes.push(change);
+            }
+            let outcome = merge_for_conflict_resolution(&cwd, &id, &own_changes);
+            let _ = tx.send((id, outcome));
+        });
+        self.dirty = true;
+    }
+
+    fn drain_conflict_merges(&mut self) {
+        while let Ok((id, outcome)) = self.conflict_merge_rx.try_recv() {
+            self.apply_conflict_merge(&id, outcome);
+        }
+    }
+
+    fn apply_conflict_merge(&mut self, id: &str, outcome: ConflictMerge) {
+        if self.conflict_merge_inflight.as_deref() == Some(id) {
+            self.conflict_merge_inflight = None;
+        }
+        let Some(index) = self.agents.iter().position(|run| run.id == id) else {
+            return;
+        };
+        if self.agents[index].integration.phase == IntegrationPhase::Integrating {
+            self.agents[index].integration.phase = IntegrationPhase::Pending;
+        }
+        let label = short_task(&self.agents[index].task_summary);
+        self.dirty = true;
+        match outcome {
+            ConflictMerge::Merged { integration } => {
+                self.agents[index].integration = integration;
+                if self.agents[index].status == AgentStatus::Running {
+                    // The user started a new turn meanwhile: the work so far landed
+                    // and the live agent keeps going in its workspace.
+                    let cwd = self.cwd.clone();
+                    let run = &mut self.agents[index];
+                    run.merge_conflict = false;
+                    run.merge_conflict_files.clear();
+                    let _ = save_native_run_record(&cwd, run);
+                    self.record_activity(format!("merged {label} after its conflict; it is still running"));
+                    return;
+                }
+                self.land_merged_run(index);
+                let message = format!("merged {label} against the latest main change after its conflict");
+                self.notice = Some(message.clone());
+                self.record_activity(message);
+                self.run_scheduler();
+            }
+            ConflictMerge::Conflict { files } => {
+                self.start_resolver_for_conflict(index, files, "jj merge created conflicts".to_string());
+            }
+            ConflictMerge::Blocked { files } => {
+                // Another run's merge is stuck in the main checkout; nothing can
+                // merge on top of it. Look again in a minute.
+                self.conflict_merge_wait_until = Some(Instant::now() + Duration::from_secs(60));
+                let message = format!(
+                    "automatic merges wait: the main checkout has unresolved conflicts in {}",
+                    preview_list(&files, 3)
+                );
+                if self.activity_log.last() != Some(&message) {
+                    self.record_activity(message.clone());
+                }
+                self.notice = Some(message);
+            }
+            ConflictMerge::Failed { error } => {
+                self.conflict_gave_up.insert(id.to_string());
+                let first_line = error.lines().next().unwrap_or_default().to_string();
+                self.give_up_conflict(
+                    index,
+                    Vec::new(),
+                    format!("Rudder could not merge it again ({first_line}). Press m to retry"),
+                );
+            }
+        }
+    }
+
+    /// Start (or restart) the resolver on a conflicted merge change that sits in
+    /// the main checkout, or hand the row to the user once its attempts are spent.
+    fn start_resolver_for_conflict(&mut self, index: usize, files: Vec<String>, error: String) {
+        let Some(run) = self.agents.get(index) else {
+            return;
+        };
+        let attempts = run.resolver_attempts();
+        let extra = self.conflict_retry_granted.remove(&run.id);
+        if attempts >= MAX_AUTO_RESOLVER_ATTEMPTS && !extra {
+            let reason = format!(
+                "{} still conflicted after {attempts} resolver attempts ({}). Resolve them in the main checkout, then press m",
+                if files.len() == 1 { "1 file is".to_string() } else { format!("{} files are", files.len()) },
+                preview_list(&files, 3)
+            );
+            self.give_up_conflict(index, files, reason);
+            return;
+        }
+        let label = short_task(&run.task_summary);
+        let count = files.len();
+        let task = run
+            .task
+            .strip_prefix("Resolve merge conflicts: ")
+            .unwrap_or(&run.task)
+            .to_string();
+        self.conflict_prompt = Some(MergeConflictPrompt {
+            operation: ConflictOperation::Merge,
+            task,
+            conflicted_files: files,
+            error,
+            repo_root: self.cwd.clone(),
+            target_branch: None,
+            source_branch: run.workspace_branch.clone(),
+            workspace_path: run.workspace_path.clone(),
+            agent_id: Some(run.id.clone()),
+        });
+        self.record_activity(format!(
+            "merge conflict in {label} ({count} file{}): resolver attempt {} of {MAX_AUTO_RESOLVER_ATTEMPTS}",
+            if count == 1 { "" } else { "s" },
+            attempts + 1
+        ));
+        self.start_conflict_resolution_agent_with(false);
+    }
+
+    /// Automatic resolution is spent; the row is the user's, with a plain reason.
+    fn give_up_conflict(&mut self, index: usize, files: Vec<String>, reason: String) {
+        let cwd = self.cwd.clone();
+        let Some(run) = self.agents.get_mut(index) else {
+            return;
+        };
+        if run.status != AgentStatus::Running {
+            run.status = AgentStatus::Done;
+        }
+        run.merge_resolver = false;
+        run.merge_conflict = true;
+        run.had_merge_conflict = true;
+        run.merge_conflict_operation = ConflictOperation::Merge;
+        if !files.is_empty() {
+            run.merge_conflict_files = files;
+        }
+        run.integration.phase = IntegrationPhase::Pending;
+        run.last_error = Some(reason.clone());
+        let _ = save_native_run_record(&cwd, run);
+        let label = short_task(&run.task_summary);
+        let message = format!("{label} needs you: {reason}");
+        self.notice = Some(message.clone());
+        self.record_activity(message);
+        self.dirty = true;
+    }
+
+    /// The one quick check after a merge, in the worker's own workspace and off
+    /// the UI thread. Only when the project names a check command; a failure is
+    /// reported, the merge stays.
+    fn start_post_merge_check(&mut self, index: usize) {
+        let Some(run) = self.agents.get(index) else {
+            return;
+        };
+        let Some(workspace) = run.workspace_path.clone().filter(|path| path.is_dir()) else {
+            return;
+        };
+        let Some(command) = project_check_command(&self.cwd) else {
+            return;
+        };
+        let id = run.id.clone();
+        let label = short_task(&run.task_summary);
+        let tx = self.post_merge_check_tx.clone();
+        thread::spawn(move || {
+            let failure = run_post_merge_check(&workspace, &command);
+            let _ = tx.send((id, label, failure));
+        });
+    }
+
+    fn drain_post_merge_checks(&mut self) {
+        while let Ok((_id, label, failure)) = self.post_merge_check_rx.try_recv() {
+            let message = match failure {
+                None => format!("quick check passed after merging {label}"),
+                Some(output) => {
+                    let first_line = output.lines().next().unwrap_or_default().to_string();
+                    let message = format!("merged {label}, but the quick check failed: {first_line}");
+                    self.notice = Some(message.clone());
+                    message
+                }
+            };
+            self.record_activity(message);
+        }
     }
 
     fn integrate_ready_plan_nodes(&mut self) {
@@ -17756,30 +18046,31 @@ Address the objection directly. If you disagree, say why inside \
         // shifting @ under the resolver and making finalize_merge_resolvers mis-read whose
         // conflicts remain. Workers run in parallel, but integration is one-at-a-time. Resume
         // when the resolver lands (finalize_merge_resolvers clears its resolver state).
-        if self
-            .agents
-            .iter()
-            .any(|run| run.merge_resolver && run.status == AgentStatus::Running)
+        // The same holds while a conflicted run is being merged again for its resolver.
+        if self.conflict_merge_inflight.is_some()
+            || self
+                .agents
+                .iter()
+                .any(|run| run.merge_resolver && run.status == AgentStatus::Running)
         {
             return;
         }
         // Per-node review gate: start a reviewer for a finished, unreviewed node.
         // Nodes only pass the merge predicate below once they're marked reviewed.
+        // Merge first: nothing is rebased or tested in front of the merge; the
+        // project's quick check runs once after it lands (start_post_merge_check).
         self.maybe_start_node_review();
-        self.drain_integration_prep();
-        self.start_integration_prep();
         let mut merged_labels: Vec<String> = Vec::new();
         let mut conflicted = false;
         loop {
-            let next = self.agents.iter().position(|run| {
-                self.is_auto_integration_candidate(run)
-                    && (run.workspace_path.is_none() || self.integration_prepared.contains(&run.id))
-            });
+            let next = self
+                .agents
+                .iter()
+                .position(|run| self.is_auto_integration_candidate(run));
             let Some(index) = next else { break };
             let id = self.agents[index].id.clone();
             let label = self.agents[index].task_summary.clone();
             let task = self.agents[index].task.clone();
-            self.integration_prepared.remove(&id);
             match self.merge_agent_at_inner(index, true) {
                 Ok(()) => merged_labels.push(short_task(&label)),
                 Err(error) => {
@@ -17790,8 +18081,8 @@ Address the objection directly. If you disagree, say why inside \
                         self.handle_merge_error(task, error, None, None, None, Some(id.clone()));
                     } else {
                         // Nothing was merged (the CLI restored the pre-merge
-                        // operation). The row waits for the user.
-                        self.mark_integration_needs_you(index, files, error.to_string());
+                        // operation). A resolver takes it from here.
+                        self.mark_integration_conflict(index, files, error.to_string());
                     }
                     conflicted = true;
                     break; // one failure at a time; the notice explains it
@@ -17820,8 +18111,9 @@ Address the objection directly. If you disagree, say why inside \
     /// Finalize any AI merge-conflict resolver that has finished its turn. If no jj
     /// conflicts remain in its workspace the integration succeeded: flip the node to
     /// Merged (its hard children unblock) and drain the scheduler. If conflicts
-    /// remain, drop it back to manual (clear the resolver flag + notify) so the user
-    /// can finish. Runs for both auto-spawned and manually-started (y) resolvers.
+    /// remain, one more resolver attempt takes what is left; after that the row is
+    /// the user's, with the reason. Runs for both auto-spawned and manually-started
+    /// (y) resolvers.
     fn finalize_merge_resolvers(&mut self) {
         // Iterate by agent id, not index: marking one merged can shift the agents
         // vector, so a cached index could point at the wrong row (or out of bounds).
@@ -17836,6 +18128,15 @@ Address the objection directly. If you disagree, say why inside \
         }
         let mut finalized_any = false;
         for id in done_ids {
+            // A retry started below works in the main checkout; the others wait
+            // for the next pass instead of starting a second resolver beside it.
+            if self
+                .agents
+                .iter()
+                .any(|run| run.merge_resolver && run.status == AgentStatus::Running)
+            {
+                break;
+            }
             let Some(index) = self.agents.iter().position(|run| run.id == id) else {
                 continue;
             };
@@ -17858,36 +18159,23 @@ Address the objection directly. If you disagree, say why inside \
                         ));
                     }
                     Err(error) => {
-                        if let Some(run) = self.agents.get_mut(index) {
-                            run.status = AgentStatus::Done;
-                            run.merge_conflict = true;
-                            run.had_merge_conflict = true;
-                            run.last_error = Some(error.to_string());
-                            let _ = save_native_run_record(&self.cwd, run);
+                        let files = self.pending_jj_conflict.take().unwrap_or_default();
+                        if files.is_empty() {
+                            self.give_up_conflict(
+                                index,
+                                Vec::new(),
+                                format!("the resolver finished but the merge failed ({error}). Press m to retry"),
+                            );
+                        } else {
+                            // The merge change is back in the main checkout with
+                            // these files conflicted: the next attempt takes them.
+                            self.start_resolver_for_conflict(index, files, error.to_string());
                         }
-                        self.notice = Some(format!(
-                            "resolved files but integration failed for {}: {error}",
-                            short_task(&label)
-                        ));
                     }
                 }
             } else {
-                // Conflicts still remain. The durable merge_conflict state itself keeps
-                // the integration scheduler from retrying until the user resolves it.
-                if let Some(run) = self.agents.get_mut(index) {
-                    run.status = AgentStatus::Done;
-                    run.merge_conflict = true;
-                    run.had_merge_conflict = true;
-                    run.merge_conflict_operation = ConflictOperation::Merge;
-                    run.merge_conflict_files = conflicts.clone();
-                    run.last_error = Some(format!("resolver left {} conflict(s)", conflicts.len()));
-                    let _ = save_native_run_record(&self.cwd, run);
-                }
-                self.notice = Some(format!(
-                    "resolver left {} conflict(s) in {}; press m to retry or resolve manually",
-                    conflicts.len(),
-                    short_task(&label)
-                ));
+                let error = format!("the previous resolver left {} conflict(s)", conflicts.len());
+                self.start_resolver_for_conflict(index, conflicts, error);
             }
         }
         if finalized_any {
@@ -18847,6 +19135,7 @@ Address the objection directly. If you disagree, say why inside \
             plan_output_cache: None,
             last_worker_input_at: None,
             merge_resolver: false,
+            merge_requested: false,
             merge_conflict: false,
             merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
@@ -19042,6 +19331,42 @@ Address the objection directly. If you disagree, say why inside \
         };
         if !run.has_merge_conflict() {
             self.notice = Some("selected agent is not in a merge conflict".to_string());
+            return;
+        }
+        // A jj merge conflict is merged again against the latest main change (or
+        // resumed on its own merge change in the main checkout) before a resolver
+        // starts: after automatic integration nothing was merged, so there is no
+        // conflict in the checkout for a resolver to work on yet. Past the
+        // automatic attempts, `m` grants exactly one more.
+        if run.merge_conflict_operation == ConflictOperation::Merge && Self::run_is_jj(run) {
+            let id = run.id.clone();
+            let label = short_task(&run.task_summary);
+            let spent = run.resolver_attempts() >= MAX_AUTO_RESOLVER_ATTEMPTS;
+            self.merge_confirm = None;
+            self.delete_pending = None;
+            if self.conflict_merge_inflight.as_deref() == Some(id.as_str()) {
+                self.notice = Some(format!(
+                    "{label} is being merged again; its resolver starts if it still conflicts"
+                ));
+                return;
+            }
+            self.conflict_gave_up.remove(&id);
+            if spent {
+                self.conflict_retry_granted.insert(id);
+            }
+            self.record_merge_request(index);
+            let busy = self.conflict_merge_inflight.is_some()
+                || self
+                    .agents
+                    .iter()
+                    .any(|run| run.merge_resolver && run.status == AgentStatus::Running);
+            if busy {
+                self.notice = Some(format!(
+                    "another conflict is being resolved in this checkout; {label} is next"
+                ));
+                return;
+            }
+            self.start_conflict_merge(index);
             return;
         }
 
@@ -19293,6 +19618,7 @@ Address the objection directly. If you disagree, say why inside \
                 let source_branch = self.agents[index].workspace_branch.clone();
                 let workspace_path = self.agents[index].workspace_path.clone();
                 let agent_id = Some(self.agents[index].id.clone());
+                self.record_merge_request(index);
                 match self.merge_agent_at(index) {
                     Ok(()) => {
                         self.delete_pending = None;
@@ -19406,7 +19732,9 @@ Address the objection directly. If you disagree, say why inside \
         let already_resolver_attempt = agent_id
             .as_deref()
             .and_then(|id| self.agents.iter().find(|run| run.id == id))
-            .is_some_and(|run| run.merge_resolver);
+            .is_some_and(|run| {
+                run.merge_resolver || run.resolver_attempts() >= MAX_AUTO_RESOLVER_ATTEMPTS
+            });
         self.conflict_prompt = Some(MergeConflictPrompt {
             operation,
             task,
@@ -19676,6 +20004,7 @@ Address the objection directly. If you disagree, say why inside \
                     run.needs_user_input = false;
                     run.last_error = None;
                     run.merge_resolver = false;
+                    run.merge_requested = false;
                     run.merge_conflict = false;
                     run.merge_conflict_files.clear();
                     run.done_summary = None;
@@ -19937,6 +20266,12 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn start_conflict_resolution_agent(&mut self) {
+        self.start_conflict_resolution_agent_with(true);
+    }
+
+    /// `focus` moves the selection to the resolver's row. An automatic resolver
+    /// started in the background leaves the user's selection alone.
+    fn start_conflict_resolution_agent_with(&mut self, focus: bool) {
         let Some(prompt) = self.conflict_resolution_prompt() else {
             return;
         };
@@ -20080,16 +20415,27 @@ Address the objection directly. If you disagree, say why inside \
                         },
                         summarize_task(&original_task)
                     );
+                    // Recorded as the resolver's turn, not the user's: the trailing
+                    // run of these is the attempt count (AgentRun::resolver_attempts).
                     run.turns.push(AgentTurn {
                         ts: now.clone(),
                         prompt: prompt.clone(),
-                        source: "user".to_string(),
+                        source: RESOLVER_TURN_SOURCE.to_string(),
                     });
                     run.last_user_input_at = now;
                 }
-                self.selected_agent = index;
-                self.focus = FocusPane::Worker;
-                self.notice = Some("AI conflict resolver running in this pane".to_string());
+                if focus {
+                    self.selected_agent = index;
+                    self.focus = FocusPane::Worker;
+                    self.notice = Some("AI conflict resolver running in this pane".to_string());
+                } else {
+                    let label = self
+                        .agents
+                        .get(index)
+                        .map(|run| run.task_summary.clone())
+                        .unwrap_or_default();
+                    self.notice = Some(format!("AI conflict resolver running in {}", short_task(&label)));
+                }
                 if let Some(run) = self.agents.get(index) {
                     let _ = save_native_run_record(&self.cwd, run);
                 }
@@ -20105,6 +20451,10 @@ Address the objection directly. If you disagree, say why inside \
                     run.merge_conflict_files = conflicted_files;
                     run.last_error = Some(error.to_string());
                     let _ = save_native_run_record(&self.cwd, run);
+                }
+                // Not retried every tick: `m` (or a restart) tries again.
+                if let Some(id) = agent_id {
+                    self.conflict_gave_up.insert(id);
                 }
                 self.notice = Some(format!(
                     "failed to start AI resolver: {error}; press m to retry"
@@ -20259,7 +20609,6 @@ What to do\n\
             anyhow::bail!("agent is still running; stop it or wait before merging");
         }
         let is_jj = Self::run_is_jj(run);
-        let review_source_ids = run.review_source_ids.clone();
         let run_id = run.id.clone();
 
         if is_jj {
@@ -20334,6 +20683,18 @@ What to do\n\
                 "this run predates Rudder's jj workspace model; restart it before integrating"
             );
         }
+        self.land_merged_run(index);
+        Ok(())
+    }
+
+    /// A merge landed: flip the row (and the rows it reviewed) to Merged, then
+    /// run the project's one quick check after the fact.
+    fn land_merged_run(&mut self, index: usize) {
+        let review_source_ids = self
+            .agents
+            .get(index)
+            .map(|run| run.review_source_ids.clone())
+            .unwrap_or_default();
         // Successful merge: keep the agent's row in the dashboard but flip it
         // to Merged so it appears in a dedicated section. Keep the workspace
         // path on the record and defer cleanup to delete, which keeps merge
@@ -20355,8 +20716,8 @@ What to do\n\
                 self.ingest_worker_followups(index);
             }
             self.mark_agent_and_review_sources_merged(index, review_source_ids);
+            self.start_post_merge_check(index);
         }
-        Ok(())
     }
 
     fn mark_agent_and_review_sources_merged(
@@ -20420,6 +20781,7 @@ What to do\n\
                 run.merge_conflict_files.clear();
                 run.needs_permission = false;
                 run.needs_user_input = false;
+                run.merge_requested = false;
                 run.restore_pre_conflict_identity();
                 if let Some(node_id) = run.node_id.clone() {
                     // Credit the run's OWN plan: node ids are per-plan, so recording a
@@ -21440,6 +21802,9 @@ What to do\n\
         // unblocks its children; leftover conflicts drop back to manual.
         if self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0 {
             self.finalize_merge_resolvers();
+            // Then give the next conflicted run its resolver: queued one at a
+            // time, rebuilt from run status after a restart.
+            self.drive_conflict_resolution();
         }
         // Predict cross-agent collisions and nudge the later agent to coordinate
         // (autonomous; self-throttled to ~5s). No confirm.

@@ -17,7 +17,7 @@
 //!   sees `session.idle`, `session.error`, `permission.asked` / `permission.replied`.
 //!
 //! All write `<rudder_home>/signals/<run_id>.json` =
-//! `{"state":"done"|"input"|"permission"|"working"|"error","detail":"..."}`.
+//! `{"state":"done"|"input"|"permission"|"working"|"error"|"compacted","detail":"..."}`.
 //! `detail` is optional and only carried by `error` (the backend's error type).
 
 #![allow(unused_imports)]
@@ -53,6 +53,14 @@ pub(crate) enum SignalState {
     /// `Stop` does not fire for it either — a row hit by a rate limit used to
     /// spin as "running" until you happened to look at the pane.
     Failed,
+    /// A manual `/compact` finished (Claude and Codex `PostCompact` with
+    /// `trigger: manual`). The agent is back at its prompt and no turn is
+    /// running. A manual compaction runs between turns and fires neither
+    /// `UserPromptSubmit` nor `Stop` (measured on Claude 2.1.318 and Codex
+    /// 0.166), so a row that compaction had flipped to Running stayed "working"
+    /// with nothing left to end it. An automatic compaction runs inside a turn,
+    /// whose own `Stop` ends it, so it reports nothing.
+    Compacted,
 }
 
 /// Extra launch wiring for a worker so it emits official completion signals.
@@ -237,6 +245,7 @@ pub(crate) fn parse_signal_state(body: &str) -> Option<SignalState> {
         "permission" => Some(SignalState::Permission),
         "working" => Some(SignalState::Working),
         "error" => Some(SignalState::Failed),
+        "compacted" => Some(SignalState::Compacted),
         _ => None,
     }
 }
@@ -316,9 +325,20 @@ fn write_signal_with_detail_command(signal: &Path, state: &str, key: &str) -> St
     )
 }
 
+/// Hook command for `PostCompact`: writes `compacted` for a manual compaction
+/// only. The whole payload is read before matching, so Claude never writes
+/// into a pipe the hook already closed. Claude and Codex write compact JSON; the
+/// spaced form is accepted too, as in the Codex script.
+fn write_compacted_signal_command(signal: &Path) -> String {
+    format!(
+        "case \"$(cat)\" in *'\"trigger\":\"manual\"'*|*'\"trigger\": \"manual\"'*) {} ;; esac",
+        write_signal_command(signal, "compacted")
+    )
+}
+
 /// The `claude --settings` JSON: a `Stop` hook (turn ended), a `StopFailure` hook
-/// (turn ended on an API error), and `Notification` hooks for the pause states,
-/// each writing the signal file.
+/// (turn ended on an API error), `Notification` hooks for the pause states, and
+/// a `PostCompact` hook (a manual `/compact` ended), each writing the signal file.
 ///
 /// Matcher names are Claude's OWN notification types, verified against the
 /// installed binary: `permission_prompt`, `idle_prompt`, `agent_needs_input`,
@@ -369,6 +389,14 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
                     { "type": "command", "command": write_signal_command(signal, "working") },
                     { "type": "command", "command": write_claude_session_command(signal) }
                 ]
+            }],
+            // A manual `/compact` ended. It fires no `UserPromptSubmit` and no
+            // `Stop` (measured on 2.1.318: PreCompact, SessionStart with source
+            // "compact", PostCompact), so without this nothing said the agent
+            // was back at its prompt. The command ignores automatic compactions:
+            // those run inside a turn, and that turn's `Stop` ends it.
+            "PostCompact": [{
+                "hooks": [{ "type": "command", "command": write_compacted_signal_command(signal) }]
             }]
         }
     });
@@ -388,7 +416,9 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
 /// - as a lifecycle hook (`hooks.<Event>` config overrides, see
 ///   `codex_hook_overrides`): Codex pipes the event JSON on stdin with
 ///   `hook_event_name` set. `Stop`/`Interrupt` -> done, `PermissionRequest` ->
-///   permission, `UserPromptSubmit` -> working.
+///   permission, `UserPromptSubmit` -> working, `PostCompact` of a manual
+///   `/compact` -> compacted (it fires no `Stop` and no `notify`, measured on
+///   codex 0.166, and a Codex without the event ignores the override).
 ///
 /// `notify` fires for EVERY thread, not just the conversation (measured on codex
 /// 0.162): the hidden title thread Codex runs ~4s into a first turn ("Generate a
@@ -448,6 +478,10 @@ case "$payload" in
   *'"hook_event_name":"Interrupt"'*|*'"hook_event_name": "Interrupt"'*) done_once "$(field turn_id "$payload")" ;;
   *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) emit permission ;;
   *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*) emit working ;;
+  *'"hook_event_name":"PostCompact"'*|*'"hook_event_name": "PostCompact"'*)
+    case "$payload" in
+      *'"trigger":"manual"'*|*'"trigger": "manual"'*) emit compacted ;;
+    esac ;;
 esac
 exit 0
 "#
@@ -456,12 +490,13 @@ exit 0
 
 /// The Codex hook events the signal script listens for, mapped onto the protocol.
 /// `SessionStart` maps to nothing: it records which thread is the conversation.
-pub(crate) const CODEX_HOOK_EVENTS: [&str; 5] = [
+pub(crate) const CODEX_HOOK_EVENTS: [&str; 6] = [
     "SessionStart",
     "Stop",
     "Interrupt",
     "PermissionRequest",
     "UserPromptSubmit",
+    "PostCompact",
 ];
 
 /// `-c hooks.<Event>=[...]` overrides pointing every lifecycle event Rudder cares

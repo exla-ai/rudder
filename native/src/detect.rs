@@ -30,6 +30,43 @@ pub(crate) fn recent_lines_look_busy(lines: &[String]) -> bool {
         .any(|line| looks_busy(line.as_str()))
 }
 
+/// `recent_lines_look_busy`, minus Claude's compaction spinner: the test for
+/// "a turn is under way", where `recent_lines_look_busy` asks "is the agent
+/// busy". The two differ only while compacting. A manual `/compact` runs
+/// between turns and no `Stop` follows it, so reading its spinner as a turn
+/// reopened a finished row (and lifted a wait) that nothing then ended: the
+/// row said "working" with the agent idle at its prompt. An automatic
+/// compaction runs inside a turn its prompt already opened.
+pub(crate) fn recent_lines_show_turn_work(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(14)
+        .any(|line| looks_busy(line.as_str()) && !looks_like_claude_compaction(line))
+}
+
+/// Claude Code's spinner while it compacts (2.1.318), and the hook phases
+/// around it: `✻ Compacting conversation… (2s · ↓ 327 tokens)`, `Running
+/// PreCompact hooks…`, `Running PostCompact hooks…`, and `Running SessionStart
+/// hooks…` (SessionStart fires again with source "compact"). None is a turn.
+fn looks_like_claude_compaction(line: &str) -> bool {
+    let line = line.trim_start();
+    let mut chars = line.chars();
+    if !chars.next().is_some_and(is_claude_spinner_glyph) {
+        return false;
+    }
+    let label = chars.as_str().trim_start();
+    [
+        "Compacting conversation",
+        "Running PreCompact hooks",
+        "Running PostCompact hooks",
+        "Running SessionStart hooks",
+    ]
+    .iter()
+    .any(|phase| label.starts_with(phase))
+}
+
 pub(crate) fn mark_run_done(run: &mut AgentRun) {
     if run.status != AgentStatus::Done {
         run.status = AgentStatus::Done;
@@ -67,6 +104,23 @@ pub(crate) fn mark_run_done(run: &mut AgentRun) {
         // jj runs only; skipped for the main agent and in tests (no workspace).
         describe_workspace_status(run, "done");
     }
+}
+
+/// A manual `/compact` ended (`SignalState::Compacted`) while the row said
+/// Running: the agent is at its prompt and no turn is running, and no `Stop` is
+/// coming. A wait the row shows (a question, an interrupt, a failed turn) still
+/// stands, since compacting answers none of them. Otherwise the row goes back to
+/// done without the review ping: a compaction is not new work, and the turn
+/// before it already rang. Returns whether the row changed.
+pub(crate) fn settle_after_compaction(run: &mut AgentRun) -> bool {
+    if run.status != AgentStatus::Running || run.wait_signal.is_some() {
+        return false;
+    }
+    run.status = AgentStatus::Done;
+    run.completed_at = Some(Instant::now());
+    run.needs_permission = false;
+    run.needs_user_input = false;
+    true
 }
 
 /// A worker whose process exited AFTER its turn had ended (the run was Done and
@@ -489,10 +543,7 @@ pub(crate) fn looks_busy(line: &str) -> bool {
 fn looks_like_claude_spinner(line: &str) -> bool {
     let line = line.trim_start();
     let mut chars = line.chars();
-    if !chars
-        .next()
-        .is_some_and(|glyph| matches!(glyph, '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '*'))
-    {
+    if !chars.next().is_some_and(is_claude_spinner_glyph) {
         return false;
     }
     let Some((verb, after)) = chars.as_str().trim_start().split_once('\u{2026}') else {
@@ -509,6 +560,10 @@ fn looks_like_claude_spinner(line: &str) -> bool {
             || after
                 .strip_prefix('(')
                 .is_some_and(|readout| readout.starts_with(|ch: char| ch.is_ascii_digit())))
+}
+
+fn is_claude_spinner_glyph(glyph: char) -> bool {
+    matches!(glyph, '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '*')
 }
 
 /// Claude Code's hint row under its spinner (`⎿  Tip: Use /permissions to

@@ -21375,12 +21375,17 @@ What to do\n\
                         && !is_orchestrator
                         && !run.plain_process;
                     let user_started_new_turn = if hooks_say_new_turn {
-                        let started = signals::read_signal(&run.id)
-                            == Some(signals::SignalState::Working);
-                        if started {
+                        let signal = signals::read_signal(&run.id);
+                        // A `/compact` that ended while the row was already done
+                        // tells it nothing; dropped here so it cannot end the
+                        // next turn the moment that turn starts.
+                        if matches!(
+                            signal,
+                            Some(signals::SignalState::Working | signals::SignalState::Compacted)
+                        ) {
                             signals::clear_signal(&run.id);
                         }
-                        started
+                        signal == Some(signals::SignalState::Working)
                     } else {
                         typed_since_done
                     };
@@ -21394,12 +21399,14 @@ What to do\n\
                     // fires `Stop` while its "Working · esc to interrupt" line is
                     // still on screen, and reading that leftover as new work
                     // reopened the row and rang "ready for review" twice per turn.
+                    // Claude's compaction spinner does not count: `/compact` is
+                    // not a turn and no `Stop` would ever close it.
                     let settled = run
                         .completed_at
                         .is_none_or(|at| at.elapsed() >= BUSY_REOPEN_GRACE);
                     let resumed_work = !user_started_new_turn
                         && settled
-                        && recent_lines_look_busy(&terminal.visible_lines_snapshot());
+                        && recent_lines_show_turn_work(&terminal.visible_lines_snapshot());
                     if user_started_new_turn || resumed_work {
                         run.status = AgentStatus::Running;
                         run.completed_at = None;
@@ -21424,10 +21431,11 @@ What to do\n\
                 // lifts a latched wait even when no backend said so. This is the
                 // only recovery Codex has (its `notify` reports turn-end and
                 // nothing else), and the belt-and-braces one for the other two.
+                // A compaction is not that proof: compacting answers no question.
                 if run.wait_signal.is_some()
                     && visible_lines
                         .as_ref()
-                        .is_some_and(|lines| recent_lines_look_busy(lines))
+                        .is_some_and(|lines| recent_lines_show_turn_work(lines))
                 {
                     run.wait_signal = None;
                 }
@@ -21616,6 +21624,16 @@ What to do\n\
                                     run.needs_permission = false;
                                     changed = true;
                                     notify_run(run, &format!("\u{2717} turn failed: {label}"));
+                                }
+                            }
+                            // A manual `/compact` ended. It fires no `Stop`, so a
+                            // row it flipped to Running (Codex reopens on the
+                            // typed command) would otherwise say "working" until
+                            // the next real turn ended.
+                            Some(signals::SignalState::Compacted) => {
+                                signals::clear_signal(&run.id);
+                                if settle_after_compaction(run) {
+                                    changed = true;
                                 }
                             }
                             None => {

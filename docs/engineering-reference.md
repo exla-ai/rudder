@@ -2479,6 +2479,18 @@ and latches `WaitSignal::Interrupted` ("interrupted · waiting for you", tab gly
 `UserPromptSubmit` → `working` signal of the next prompt, or a visible spinner, lifts it.
 This is a WAIT state, never completion: an interrupted plan worker must not auto-merge.
 
+**Compaction (measured on Claude 2.1.318 and Codex 0.166).** A manual `/compact` runs
+between turns and fires `PreCompact` → `SessionStart` (source `compact`, Claude only)
+→ `PostCompact`, all with `trigger: manual`, and no `UserPromptSubmit`, `Stop` or
+`notify`. An automatic compaction runs inside a turn (`UserPromptSubmit` … `PreCompact`
+→ `PostCompact` … `Stop`), so the turn's own `Stop` ends it. Claude's compaction spinner
+(`✻ Compacting conversation… (2s · ↓ 327 tokens)`) used to reopen a Done row through the
+busy-screen backstop, Codex reopens on the typed command, and nothing ended either, so
+the row read "working" with the agent idle. Now `recent_lines_show_turn_work` (the
+reopen and wait-lift test) ignores the compaction spinner, and both backends' `PostCompact`
+hooks write `compacted` for a manual compaction only. A Running row with no wait goes
+back to Done without the review ping (`settle_after_compaction`); a wait it shows stays.
+
 **The tab glyph reports news, not history** (`tab_status_glyph`). ⊗ marks a failure only
 until you next press a key or click in the dashboard (`last_user_activity`), and a Failed
 row loaded from disk (no `completed_at`: it died in an earlier session) never pins it.

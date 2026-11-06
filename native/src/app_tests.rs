@@ -24056,6 +24056,116 @@ fn a_finished_claude_row_only_resumes_on_the_prompt_hook_not_on_a_repaint() {
     let _ = std::fs::remove_file(&sig);
 }
 
+/// A manual `/compact` fires no `UserPromptSubmit` and no `Stop` (Claude
+/// 2.1.318: PreCompact, SessionStart with source "compact", PostCompact). Its
+/// spinner used to reopen a finished row, nothing ever ended that "turn", and
+/// the row said "working" with the agent idle at its prompt.
+#[cfg(not(windows))]
+#[test]
+fn a_manual_compaction_never_leaves_a_claude_row_working() {
+    let _env = env_guard();
+    let run_id = "sig-compact-itest";
+    let Some(sig) = crate::signals::signal_path(run_id) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&sig);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    // The pane mid-compaction, as Claude 2.1.318 draws it.
+    let script = "printf '✻ Sautéed for 3s\\n\\n❯ /compact\\n\\n✻ Compacting conversation… (2s · ↓ 327 tokens)\\n\\n❯ \\n\\n  ⏵⏵ bypass permissions on · 1 monitor\\n'; sleep 30";
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 12, cols: 80 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn worker pty");
+    let mut run = test_agent_run(run_id, "do the thing");
+    run.cwd = app.cwd.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Done;
+    run.completed_at = Some(Instant::now() - Duration::from_secs(30));
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    app.selected_agent = 0;
+    if let Some(parent) = sig.parent() {
+        std::fs::create_dir_all(parent).expect("signals dir");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_agents();
+        let screen = app.agents[0].terminal.as_ref().unwrap().visible_lines_snapshot().join("\n");
+        if screen.contains("bypass permissions on") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "pane never drawn: {screen:?}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    app.poll_agents();
+    assert_eq!(app.agents[0].status, AgentStatus::Done, "compacting is not a turn");
+
+    // A row the compaction did flip to Running (Codex reopens on the typed
+    // command): its PostCompact hook settles it back to done.
+    app.agents[0].status = AgentStatus::Running;
+    app.agents[0].completed_at = None;
+    std::fs::write(&sig, "{\"state\":\"compacted\"}").expect("write signal");
+    app.poll_agents();
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    assert!(!sig.exists(), "consumed one-shot");
+
+    // A wait the row showed outlives the spinner and the compaction.
+    app.agents[0].status = AgentStatus::Running;
+    app.agents[0].completed_at = None;
+    app.agents[0].wait_signal = Some(WaitSignal::Interrupted);
+    app.agents[0].needs_user_input = true;
+    std::fs::write(&sig, "{\"state\":\"compacted\"}").expect("write signal");
+    app.poll_agents();
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert_eq!(app.agents[0].wait_signal, Some(WaitSignal::Interrupted));
+    let _ = std::fs::remove_file(&sig);
+}
+
+/// Claude and Codex both fire `PostCompact` for every compaction. Only a manual
+/// one ends anything: an automatic one runs inside a turn its `Stop` ends.
+#[cfg(not(windows))]
+#[test]
+fn post_compact_hooks_report_a_manual_compaction_only() {
+    use crate::signals::{parse_signal_state, SignalState};
+    let dir = std::env::temp_dir().join(format!("rudder-compact-sig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let signal = dir.join("run.json");
+    let settings: serde_json::Value =
+        serde_json::from_str(&crate::signals::claude_settings_json(&signal, false))
+            .expect("settings json");
+    let claude = settings["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("PostCompact hook")
+        .to_string();
+    let script = dir.join("notify.sh");
+    std::fs::write(&script, crate::signals::codex_notify_script(&signal)).expect("script");
+    let codex = format!("sh '{}'", script.display());
+    for command in [&claude, &codex] {
+        run_hook_command(
+            command,
+            r#"{"session_id":"s","hook_event_name":"PostCompact","trigger":"auto","compact_summary":"x"}"#,
+        );
+        assert!(!signal.exists(), "auto compaction writes nothing: {command}");
+        run_hook_command(
+            command,
+            r#"{"session_id":"s","hook_event_name":"PostCompact","trigger":"manual","compact_summary":"x"}"#,
+        );
+        let body = std::fs::read_to_string(&signal).expect("signal written");
+        assert_eq!(parse_signal_state(&body), Some(SignalState::Compacted), "{command}");
+        let _ = std::fs::remove_file(&signal);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_idle_composer_detector_needs_the_composer_and_no_spinner() {
     let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();

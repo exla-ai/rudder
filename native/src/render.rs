@@ -543,7 +543,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     let row_start = lines.len();
     // Which card this is in the frame, for the staggered startup reveal.
     let ordinal = AGENT_ROW_SPANS.with(|spans| spans.borrow().len());
-    let selected = index == app.selected_agent && app.drawer_cursor.is_none();
+    let selected = index == app.selected_agent
+        && (app.drawer_cursor.is_none() || app.drawer_open() == app.drawer_cursor);
     let p = pal();
     // The rename box comes first: a main row used to take its summary
     // before this check, so `r` opened an editor nobody could see.
@@ -1404,20 +1405,27 @@ fn render_status_section<'a>(
             Span::styled(bucket.label(), header_style(focused)),
             Span::styled(format!(" {}", members.len()), muted_style(focused)),
             Span::styled(format!("  {chevron}"), muted_style(focused)),
+            Span::styled(
+                if open { "  click or Esc to collapse" } else { "  click or Enter to expand" },
+                muted_style(focused),
+            ),
         ])));
-        return true;
-    }
-    // The cloud section gets the ☁ glyph on the header so it reads as "live
-    // in Rudder Cloud", not as another local status bucket.
-    let header_label = if bucket == Bucket::Cloud {
-        "☁ cloud"
+        if !open {
+            return true;
+        }
     } else {
-        bucket.label()
-    };
-    lines.push((Line::from(vec![
-        Span::styled(header_label, header_style(focused)),
-        Span::styled(format!(" {}", members.len()), muted_style(focused)),
-    ])));
+        // The cloud section gets the ☁ glyph on the header so it reads as "live
+        // in Rudder Cloud", not as another local status bucket.
+        let header_label = if bucket == Bucket::Cloud {
+            "☁ cloud"
+        } else {
+            bucket.label()
+        };
+        lines.push((Line::from(vec![
+            Span::styled(header_label, header_style(focused)),
+            Span::styled(format!(" {}", members.len()), muted_style(focused)),
+        ])));
+    }
 
     let (children, has_in_section_parent, out_of_section) = section_nest(&app.agents, &members);
     let mut visited: HashSet<usize> = HashSet::new();
@@ -2199,7 +2207,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // header. Following only the agent case left the drawer headers unreachable
         // whenever they sat below the fold: j walked onto them and the pane never
         // scrolled, so the marker vanished off-screen.
-        if let Some(bucket) = app.drawer_cursor {
+        if let Some(bucket) = app.drawer_cursor.filter(|bucket| app.drawer_open() != Some(*bucket)) {
             for (i, m) in app.drawer_row_map.iter().enumerate() {
                 if *m == Some(bucket) {
                     first = Some(i);
@@ -3864,14 +3872,6 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let fit = block_inner(app.transition_slot.unwrap_or(area));
     let terminal_size = TerminalSize::new(fit.height.max(1), fit.width.max(1)).ok();
     let focused = app.focus == FocusPane::Worker;
-
-    // An open drawer owns this pane: the finished runs it holds, then the highlighted
-    // one's result. It replaces the terminal view because a merged or failed run has
-    // nothing live to show, and the point of collapsing them was to read the results.
-    if app.drawer_open().is_some() {
-        render_drawer(frame, area, app);
-        return;
-    }
 
     // The selected orchestrator gets the custom DAG command-center view ONLY once
     // its plan is ready. While it is still planning, show its raw PTY so the live

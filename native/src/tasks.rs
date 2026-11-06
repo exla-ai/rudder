@@ -15,11 +15,11 @@ pub(crate) const PARALLEL_WORK_RULE: &str = parallel_work_rule!();
 
 /// Waiting and reading cost context, not tool time (PLAN.md section 20): the
 /// measured v4 session had 866 empty polls, 523 clock checks and `sed -n`
-/// slabs worth about 15% of all input tokens. Codex accepts one `write_stdin`
-/// wait of up to `background_terminal_max_timeout` (300000 ms by default).
+/// slabs worth about 15% of all input tokens. Wait on the actual command rather
+/// than sleeping around polls, and keep the user informed during long waits.
 macro_rules! wait_and_read_rule {
     () => {
-        "- Run one quick check for what you changed; add a test only for a real bug or tricky logic, and skip full suites unless asked. Wait for long commands in one blocking call (Codex: one `write_stdin` wait up to 300000 ms), not repeated polls. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology."
+        "- Run one quick check for what you changed; add a test only for a real bug or tricky logic, and skip full suites unless asked. Wait on the running command directly, within the tool timeout, and report progress at least once a minute. Do not add sleeps before checking a command, repeatedly poll completed work, or watch CI unless delivery requires it. Check current CPU, memory and container limits before sizing a build; old host sizes are not current capacity. Preserve explicit user budgets and shared build-directory locks. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology."
     };
 }
 #[cfg(test)]
@@ -66,7 +66,7 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
-        "\n- Ship only when asked, using the repo's release workflow. Never force-push or write secrets into files. End with a short summary of what changed and anything unfinished."
+        "\n- Ship only when asked, using the repo's release workflow. End with a short summary of what changed and anything unfinished."
     );
     format!("{task}\n\n{CONTEXT}")
 }

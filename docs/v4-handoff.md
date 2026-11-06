@@ -27,6 +27,10 @@ Only two docs steer work. Everything else is reference or evidence.
 
 ## 2. Where main is (step 9, 2026-11-04)
 
+Collapsed sidebar sections (review, done, closed) expand their agent rows in
+the sidebar when clicked or opened with Enter. The worker pane continues to
+show the selected agent. Click the header again or press Esc to collapse.
+
 **4.0.0 shipped 2026-11-04.** npm `latest` is 4.0.0 for `@exla/rudder` and
 `@viraatdas/rudder` (tag v4.0.0, commit 500e5c3b, all release checks green on
 Linux, macOS arm64 and Intel). Cloud control plane deployed 16:25Z running
@@ -272,6 +276,25 @@ links"). Takes effect once the home runs the new dashboard (worker image) and
 the laptop runs a `rudder` release with `src/link-open.ts`.
 
 ## 8. Disk
+
+Cloud build speed (2026-11-06): inspected the running external home: 24 CPUs,
+92 GiB RAM, no visible CPU quota, and ample idle capacity. The scheduler's
+parallel limit is already 1000; it was not throttling agents to the old home.
+The local `/workspace/rudder-build/rcargo` still forced six build jobs and both
+build wrappers checked an absent sccache path and used an 800 MB cache budget.
+Both wrappers now use `cloud/host/build-resources.mjs` to size builds from CPU,
+memory and cgroup limits (22 jobs here), preserving explicit job overrides.
+They discover sccache on PATH and use the agent tool cache with a 20 GiB default.
+The image-pinned sccache 0.18.0 was missing from the running container; installed
+its checksum-verified binary in `/home/rudder/.cargo/bin` without restarting
+agents. A real Rust compile probe produced a miss followed by a hit. The shared
+Cargo target lock remains intentional. These wrapper edits are local host setup,
+not tracked product files; keep the helper available at the current checkout path.
+Native and headless prompt guidance now asks agents to inspect current host
+limits and wait on commands directly while reporting progress. Existing sessions
+retain their prompts; updated prompt guidance needs a later build/install.
+The observed 50-second sleep loop was registry-release polling, not a scheduler
+delay. No model preferences changed, and no release or deployment was performed.
 
 Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj
 workspaces are gone (`/workspace` 85%, 22G free). Old qualification `*.py`

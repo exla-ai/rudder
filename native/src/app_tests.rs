@@ -30444,3 +30444,30 @@ fn home_boot_continues_only_runs_that_were_mid_turn() {
         "{activity:?}"
     );
 }
+
+#[test]
+fn expanded_drawer_lists_agents_in_sidebar_and_preserves_worker_panel() {
+    let mut app = drawer_fleet();
+    app.focus = FocusPane::Agents;
+    app.open_drawer(Bucket::Done);
+    let area = Rect::new(0, 0, 80, 60);
+    let mut terminal = ratatui::Terminal::new(
+        ratatui::backend::TestBackend::new(area.width, area.height),
+    ).unwrap();
+    terminal.draw(|frame| render_agents(frame, area, &mut app)).unwrap();
+    let members = crate::render::drawer_members(&app.agents, Bucket::Done);
+    for &index in &members {
+        assert!(app.agent_row_map.contains(&Some(index)), "expanded member has a sidebar row");
+    }
+    app.select_next_agent();
+    assert_eq!(app.selected_agent, members[1]);
+    terminal.draw(|frame| crate::render::render_worker(frame, area, &mut app)).unwrap();
+    let expanded_worker = terminal.backend().buffer().clone();
+    app.close_drawer();
+    terminal.draw(|frame| crate::render::render_worker(frame, area, &mut app)).unwrap();
+    assert_eq!(&expanded_worker, terminal.backend().buffer(), "expanding only changes the sidebar");
+    terminal.draw(|frame| render_agents(frame, area, &mut app)).unwrap();
+    for index in members {
+        assert!(!app.agent_row_map.contains(&Some(index)), "collapsed member is hidden again");
+    }
+}

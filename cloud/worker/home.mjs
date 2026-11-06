@@ -36,7 +36,7 @@ import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
-import { hostInfo, offeredHomeUpdate, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
+import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
 
 let projectFiles;
 async function fileService() {
@@ -90,6 +90,10 @@ let vaultRefreshedAt = 0;
 // What Cloud would move this machine to, and how a dashboard's "update now" went.
 let homeUpdate = { current: null, target: null, state: "current", error: null };
 let homeUpdateRequestedAt = 0;
+// The last update the host set aside (its readHostUpdateFailure key): shown on
+// the dashboards once, and reported to Cloud once per control connection.
+let hostFailureShown = null;
+let hostFailureReported = null;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
 let privatePreviews;
 async function privatePreviewService() {
@@ -175,6 +179,7 @@ setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}
 setInterval(reportHeartbeat, 30_000);
 setHomeUpdate({ current: hostInfo(process.env).image, target: null, state: "current", error: null });
 setInterval(checkHomeUpdateRequest, 1000);
+setInterval(checkHostUpdateFailure, 5000);
 reportHeartbeat();
 // Metrics for the observability stack (observability/metrics.md); off unless
 // RUDDER_OTEL_ENDPOINT is set. Paths come from the child env because
@@ -477,6 +482,7 @@ function connectControl() {
     controlEverConnected = true;
     controlSocket = socket;
     lastStateJson = "";
+    hostFailureReported = null;
     log("control connected");
     void publishState();
   });
@@ -559,6 +565,29 @@ function checkHomeUpdateRequest() {
   // Cloud took it but the machine never restarted: say so instead of waiting forever.
   if (homeUpdate.state === "requested" && Date.now() - homeUpdateRequestedAt > 5 * 60_000) {
     setHomeUpdate({ ...homeUpdate, state: "failed", error: "the update did not start; try again" });
+  }
+}
+
+// The host set an update aside (cloud/host/rudder-home-apply-update): show why
+// on the dashboards, and tell Cloud so it drops that update's token and the
+// next press or idle update can go at once. Sent again after a reconnect;
+// Cloud ignores a report about a token it is no longer waiting on.
+function checkHostUpdateFailure() {
+  if (process.env.RUDDER_HOST_KIND !== "external") {
+    return;
+  }
+  const failure = readHostUpdateFailure(VOLUME);
+  if (!failure) {
+    return;
+  }
+  if (failure.key !== hostFailureShown) {
+    hostFailureShown = failure.key;
+    log(`update: the host could not apply ${failure.image ?? "the update"}: ${failure.reason}`);
+    setHomeUpdate({ ...homeUpdate, target: failure.image ?? homeUpdate.target, state: "failed", error: failure.reason });
+  }
+  if (failure.key !== hostFailureReported && controlSocket?.readyState === WebSocket.OPEN) {
+    hostFailureReported = failure.key;
+    sendControl({ type: "update-failed", tokenHash: failure.tokenHash, reason: failure.reason });
   }
 }
 

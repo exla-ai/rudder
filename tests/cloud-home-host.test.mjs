@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
-import { hostInfo, hostUpdatePath, homeUpdateRequestPath, homeUpdateStatusPath, offeredHomeUpdate, takeHomeUpdateRequest, validHostImage, validWorkerToken, writeHomeUpdateStatus, writeHostUpdate } from "../cloud/worker/home-host.mjs";
+import { hostInfo, hostUpdatePath, hostUpdateReasonPath, homeUpdateRequestPath, homeUpdateStatusPath, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, validHostImage, validWorkerToken, workerTokenHash, writeHomeUpdateStatus, writeHostUpdate } from "../cloud/worker/home-host.mjs";
 import { HOST_FILES, copyFromFlySteps, hostFilesDir, parseHostArgs, renderHomeEnv, validImage } from "../dist/cloud-host.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -322,11 +322,40 @@ serverTest("a busy home asks to update now: Cloud offers the newer image, then u
   assert.ok(!log().includes(update.params.workerToken));
 
   // A second press while that one is on its way is refused, not repeated.
+  const updates = () => messages.filter((m) => m.type === "rpc" && m.method === "update");
+  const results = () => messages.filter((m) => m.type === "update-now-result");
   ws.send(JSON.stringify({ type: "update-now" }));
-  const refused = await waitFor(() => messages.filter((m) => m.type === "update-now-result")[1]);
+  const refused = await waitFor(() => results()[1]);
   assert.equal(refused.ok, false);
   assert.match(refused.error, /already on its way/);
-  assert.equal(messages.filter((m) => m.type === "rpc" && m.method === "update").length, 1);
+  assert.equal(updates().length, 1);
+
+  // The host could not apply it, and the home reports that with the hash of
+  // the token it carried. A report about another token changes nothing.
+  ws.send(JSON.stringify({ type: "update-failed", tokenHash: tokenHash("rdrw_an_older_request_token"), reason: "old" }));
+  ws.send(JSON.stringify({ type: "update-now" }));
+  assert.equal((await waitFor(() => results()[2])).ok, false, "a report about another token changes nothing");
+  const reason = "docker pull was refused by registry.fly.io; log this host in again (sudo docker login registry.fly.io)";
+  ws.send(JSON.stringify({ type: "update-failed", tokenHash: tokenHash(update.params.workerToken), reason }));
+  await waitFor(() => row().next === null);
+  assert.equal(row().hash, tokenHash(token), "the old token keeps working");
+  assert.equal(db.prepare("select update_error as error from rudder_workspaces where id = 'home-n'").get().error, reason);
+  assert.match(log(), /home-n update failed on its host: docker pull was refused/);
+
+  // So the next press goes at once.
+  ws.send(JSON.stringify({ type: "update-now" }));
+  const retry = await waitFor(() => updates()[1]);
+  assert.equal((await waitFor(() => results()[3])).ok, true);
+  assert.deepEqual(row(), { hash: tokenHash(token), next: tokenHash(retry.params.workerToken) });
+
+  // An update nobody reports (a host or home from before 4.2.9) stops
+  // blocking once its token is older than 20 minutes; the next press replaces it.
+  db.prepare("update rudder_workspaces set worker_token_next_at = ? where id = 'home-n'").run(new Date(Date.now() - 21 * 60_000).toISOString());
+  ws.send(JSON.stringify({ type: "update-now" }));
+  const third = await waitFor(() => updates()[2]);
+  assert.equal((await waitFor(() => results()[4])).ok, true);
+  assert.deepEqual(row(), { hash: tokenHash(token), next: tokenHash(third.params.workerToken) });
+  assert.ok(![retry, third].some((m) => log().includes(m.params.workerToken)));
 });
 
 nodeTest("the home keeps an update status for its dashboards and takes their requests once", (t) => {
@@ -413,7 +442,7 @@ printf '%s\\n' "$*" >> "${dockerLog}"
 case "$1" in
   inspect) [ -n "\${FAKE_INSPECT:-}" ] || exit 1; printf '%s\\n' "$FAKE_INSPECT" ;;
   container) [ "\${FAKE_EXISTS:-0}" = 1 ] ;;
-  pull) [ "\${FAKE_PULL_FAIL:-0}" != 1 ] ;;
+  pull) [ "\${FAKE_PULL_FAIL:-0}" != 1 ] || { echo 'Error response from daemon: Head "https://registry.fly.io/v2/workers/manifests/4.2.1": unauthorized: authentication required' >&2; exit 1; } ;;
 esac
 `, { mode: 0o755 });
   const startLog = path.join(root, "start.log");
@@ -470,6 +499,9 @@ nodeTest("rudder-home-apply-update pulls, swaps only the token, and sets bad req
 
   const token = "rdrw_applied_token_abcdefghijklmnop";
   writeHostUpdate({ volume: host.data, image: NEW_IMAGE, workerToken: token });
+  // What an earlier failure left goes once an update works.
+  fs.writeFileSync(failed, "{}");
+  fs.writeFileSync(hostUpdateReasonPath(host.data), "an earlier failure\n");
   const applied = host.run("rudder-home-apply-update");
   assert.equal(applied.status, 0, applied.stderr);
   assert.ok(!`${applied.stdout}${applied.stderr}`.includes(token), "the token is never printed");
@@ -479,6 +511,8 @@ nodeTest("rudder-home-apply-update pulls, swaps only the token, and sets bad req
   assert.equal(fs.readFileSync(imagePath, "utf8").trim(), NEW_IMAGE);
   assert.equal(host.started().trim(), "started");
   assert.ok(!fs.existsSync(desired));
+  assert.ok(!fs.existsSync(failed) && !fs.existsSync(hostUpdateReasonPath(host.data)));
+  assert.equal(readHostUpdateFailure(host.data), null);
 
   const refused = (write, pattern, env = {}) => {
     host.reset();
@@ -490,13 +524,23 @@ nodeTest("rudder-home-apply-update pulls, swaps only the token, and sets bad req
     assert.ok(!fs.existsSync(desired) && fs.existsSync(failed), "set aside so the path unit does not loop");
     assert.equal(fs.readFileSync(envPath, "utf8"), before, "the env file is untouched");
     assert.equal(host.started(), "");
+    // The host says why in one line the home reads, never with the token.
+    const reasonFile = fs.readFileSync(hostUpdateReasonPath(host.data), "utf8");
+    assert.equal(reasonFile.split("\n").length, 2, reasonFile);
+    assert.ok(!reasonFile.includes("rdrw_"));
+    const failure = readHostUpdateFailure(host.data);
+    assert.match(failure.reason, pattern);
     fs.rmSync(failed);
+    return failure;
   };
   // The volume is writable from the container: another repository is refused.
   refused(() => writeHostUpdate({ volume: host.data, image: "evil.example/miner:1", workerToken: token }), /not the same repository/);
   refused(() => fs.writeFileSync(desired, JSON.stringify({ image: NEW_IMAGE, workerToken: "rdrw_$(touch /tmp/x)abcdefgh" })), /malformed/);
   refused(() => fs.writeFileSync(desired, JSON.stringify({ image: "a b", workerToken: token })), /valid reference/);
-  refused(() => writeHostUpdate({ volume: host.data, image: "registry.fly.io/workers:4.2.1", workerToken: token }), /docker pull/, { FAKE_PULL_FAIL: "1" });
+  const pull = refused(() => writeHostUpdate({ volume: host.data, image: "registry.fly.io/workers:4.2.1", workerToken: token }),
+    /docker pull was refused by registry\.fly\.io; log this host in again \(sudo docker login registry\.fly\.io\)/, { FAKE_PULL_FAIL: "1" });
+  assert.deepEqual(pull, { key: pull.key, image: "registry.fly.io/workers:4.2.1", tokenHash: workerTokenHash(token), reason: pull.reason });
+  assert.equal(workerTokenHash(token), tokenHash(token), "the control plane's hash");
 });
 
 nodeTest("host scripts parse, and the units point at what setup installs", () => {

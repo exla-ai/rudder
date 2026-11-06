@@ -794,10 +794,26 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     pull, swap the token line in `home.env`, recreate). A refusal clears the next token;
     a timeout keeps it pending, as with Fly. Images before 4.2 report no image and are
     never updated this way.
+  - A failed update never blocks the next one (4.2.9). The apply script sets the request
+    aside as `desired.failed.json` and writes one plain line saying why to
+    `desired.failed.reason`, as the directory's owner (uid 1500, via `setpriv`), never
+    as root, since the container can plant links there. A registry refusal names the
+    `docker login` to run. `home.mjs` checks every 5 s, puts the reason in
+    `status.json` (`failed`, `error`) and sends `{type:"update-failed", tokenHash,
+    reason}`; the control plane clears the next token only if the hash matches and
+    stores the reason (`update_error`, `updateError` in the home summary). A new
+    request deletes both files, and a successful apply removes them. Backstop for
+    homes or hosts that never report: a next token older than
+    `RUDDER_HOME_UPDATE_TOKEN_TTL_MS` (20 min, `worker_token_next_at`; tokens pending
+    before the column existed count from that boot) stops blocking Alt+r and the idle
+    sweep. It stays accepted until the next update replaces it, so a slow pull that
+    finishes late still connects. A run systemd stops (TERM) is set aside too, and an
+    apply whose request changed during the pull leaves the newer one for the next run.
   - `POST /api/rudder/home/host {kind:"fly"}` goes back: the old Fly machine is destroyed
     and a new one is made on the old volume with a new token. Nothing is copied back.
   - Private registries: the host needs `docker login` for the image's registry, or
-    updates fail at pull (the request is kept as `desired.failed.json`).
+    updates fail at pull (the request is kept as `desired.failed.json`, and the
+    dashboards say to log the host in again). That login is hand-made and expires.
 
 ### 9.6.1 Deleting cloud things (request + reaper)
 Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
@@ -1074,7 +1090,8 @@ brain lives in the cloud, and the phone is a first-class client.
   Alt+r, Alt+r (`native/src/home_update.rs`). home.mjs sends `{type:"update-now"}`, and `updateHomeNow` runs the same
   update as the idle sweep, busy or not (external: `update` RPC; Fly: in-place
   machine update), answering `update-now-result`. A pending replacement token
-  refuses a second press. The laptop's `rudder cloud` stays attached and
+  refuses a second press until the home connects with it, its host reports a
+  failure (external, 4.2.9), or it is 20 min old (see 9.6). The laptop's `rudder cloud` stays attached and
   reconnects. On the way down each dashboard marks agents that were mid-turn
   (`resume_turn`), and the boot reopen resumes those with one "continue where you
   left off" turn; the rest reopen idle as before.

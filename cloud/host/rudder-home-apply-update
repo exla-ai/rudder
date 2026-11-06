@@ -5,24 +5,50 @@
 # pull the image, put the new worker token in home.env, recreate the container.
 #
 # The token is never printed. A request that cannot be applied is set aside as
-# desired.failed.json so the path unit does not retry it in a loop; the control
-# plane keeps accepting the old token until the home connects with the new one.
+# desired.failed.json so the path unit does not retry it in a loop, with one
+# line saying why in desired.failed.reason. The home reports that to the
+# control plane, which drops the request's token so the next update can go.
+# The control plane keeps accepting the old token throughout.
 set -eu
 umask 077
 
 CONF=${RUDDER_HOST_CONF:-/etc/rudder}
 DATA=${RUDDER_HOST_DATA:-/srv/workspace}
 START=${RUDDER_HOME_START:-/usr/local/bin/rudder-home-start}
-DESIRED="$DATA/.rudder-host/desired.json"
-FAILED="$DATA/.rudder-host/desired.failed.json"
+DIR="$DATA/.rudder-host"
+DESIRED="$DIR/desired.json"
+FAILED="$DIR/desired.failed.json"
+REASON="$DIR/desired.failed.reason"
 
 [ -f "$DESIRED" ] || exit 0
 
+# The volume is writable from inside the container, so root never writes a
+# file there: the reason is written as the directory's owner (the worker,
+# uid 1500), and a link planted in its place reaches only what it could write.
+as_volume_owner() {
+  if [ "$(id -u)" = 0 ]; then
+    owner=$(stat -c %u:%g "$DIR") || return 1
+    setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups "$@"
+  else
+    "$@"
+  fi
+}
+
+# One short line for the home's dashboards. Only plain characters survive.
+note() {
+  line=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._:/@()?,;=+-' | cut -c 1-300)
+  as_volume_owner sh -c 'printf "%s\n" "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"' sh "$REASON" "$line" 2>/dev/null || true
+}
+
 fail() {
   echo "rudder-home-apply-update: $1" >&2
+  note "$1"
   mv -f "$DESIRED" "$FAILED" 2>/dev/null || rm -f "$DESIRED"
   exit 1
 }
+
+# systemd stops a run that takes longer than the unit's TimeoutStartSec.
+trap 'fail "the update was stopped before it finished (a pull took too long?)"' TERM INT HUP
 
 # One field of the single-line object home-host.mjs writes. Both values are
 # checked against strict shapes before docker or the env file sees them.
@@ -51,8 +77,27 @@ if [ -n "$CURRENT" ] && [ "$(repository "$IMAGE")" != "$(repository "$CURRENT")"
   fail "refusing $IMAGE: not the same repository as $CURRENT"
 fi
 
+case $IMAGE in
+  */*) REGISTRY=${IMAGE%%/*} ;;
+  *) REGISTRY=docker.io ;;
+esac
+case $REGISTRY in
+  *.*|*:*|localhost) ;;
+  *) REGISTRY=docker.io ;;
+esac
+
 echo "rudder-home-apply-update: pulling $IMAGE"
-docker pull -q "$IMAGE" >/dev/null || fail "docker pull $IMAGE failed (is this host logged in to its registry?)"
+if ! PULL_ERROR=$(docker pull -q "$IMAGE" 2>&1 >/dev/null); then
+  printf '%s\n' "$PULL_ERROR" >&2
+  if printf '%s\n' "$PULL_ERROR" | grep -Eqi 'unauthorized|denied|forbidden|authentication required|no basic auth'; then
+    fail "docker pull was refused by $REGISTRY; log this host in again (sudo docker login $REGISTRY)"
+  fi
+  fail "docker pull $IMAGE failed: $(printf '%s\n' "$PULL_ERROR" | grep . | tail -n 1)"
+fi
+
+# A newer request arrived during the pull: the path unit runs it next.
+[ "$(field workerToken)" = "$TOKEN" ] || exit 0
+trap - TERM INT HUP
 
 # Every other line of the env file stays; only the token changes.
 grep -v '^RUDDER_WORKER_TOKEN=' "$CONF/home.env" > "$CONF/home.env.tmp" || true
@@ -61,6 +106,6 @@ chmod 600 "$CONF/home.env.tmp"
 mv -f "$CONF/home.env.tmp" "$CONF/home.env"
 printf '%s\n' "$IMAGE" > "$CONF/image.tmp"
 mv -f "$CONF/image.tmp" "$CONF/image"
-rm -f "$DESIRED" "$FAILED"
+rm -f "$DESIRED" "$FAILED" "$REASON"
 
 "$START"

@@ -286,6 +286,19 @@ the home at once, busy or not (engineering reference "Update now"). Agents
 that were mid-turn reopen with one "continue where you left off" turn. The
 worker image also carries headless Chromium's libraries now.
 
+Stuck home updates (2026-11-06, for 4.2.9, not released): home-53c2 stayed
+on 4.2.0 because its host's `docker login` expired, the pull failed, and the
+pending replacement token then refused every Alt+r and idle update forever.
+Now a pending token stops blocking after 20 min (control plane only, so the
+4.2.0 home unblocks once Cloud deploys), the host writes why it failed next
+to `desired.failed.json`, and 4.2.9 homes report it so Cloud clears the token
+at once and the footer shows the reason (engineering reference 9.6). Still
+on the user: log home-53c2's host in to registry.fly.io again, then press
+Alt+r; rerun `rudder-host-setup` there to get the new apply script. Open
+decision: the hand-made, expiring registry login. Recommended: also push each
+worker image to a public registry (ghcr.io; the image holds no secrets and the
+repo is public) and point external hosts at it, so hosts need no login at all.
+
 Fewer checks (2026-11-06, not released): the user wants agents to test and
 use CI sparingly. Worker prompts now say "run one quick check for what you
 changed; add a test only for a real bug or tricky logic", the default

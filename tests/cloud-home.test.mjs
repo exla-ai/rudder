@@ -587,21 +587,32 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
 (workerReady ? nodeTest : (name, fn) => nodeTest(name, { skip: "worker deps not installed (npm --prefix cloud/worker install)" }, fn))(
   "the home supervisor boots, connects its control socket and reports credentials",
   async (t) => {
-    const { base, dbPath } = await bootServer(t);
+    const newImage = "registry.fly.io/workers:new";
+    const { base, dbPath, log: serverLog } = await bootServer(t, { RUDDER_WORKER_IMAGE: newImage });
     const cliToken = "rdr_boot_test_cli";
     const workerToken = "rdrw_boot_test_worker";
+    // An update this home's host could not apply before this boot: Cloud still
+    // waits on its token, and the host left the request and its reason on the
+    // volume (cloud/host/rudder-home-apply-update).
+    const failedToken = "rdrw_boot_test_failed_update_token";
+    const reason = "docker pull was refused by registry.fly.io; log this host in again (sudo docker login registry.fly.io)";
     const now = new Date().toISOString();
     const db = new Database(dbPath);
     db.pragma("journal_mode = WAL");
     db.prepare("insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)")
       .run(tokenHash(cliToken), "acct-boot", "me@example.com", now, now);
-    db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash, source_kind, created_at, updated_at, last_activity_at)
-      values ('home-boot', 'acct-boot', 'home', 'home', 'running', 'm-boot', ?, 'home', ?, ?, ?)`).run(tokenHash(workerToken), now, now, now);
+    db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+        worker_token_next_hash, worker_token_next_at, source_kind, created_at, updated_at, last_activity_at)
+      values ('home-boot', 'acct-boot', 'home', 'home', 'running', 'm-boot', ?, ?, ?, 'home', ?, ?, ?)`).run(tokenHash(workerToken), tokenHash(failedToken), now, now, now, now);
     db.close();
 
     // Stand-ins for the agent CLIs: logged out, so the credential check finishes
     // fast and never touches a real account.
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-boot-"));
+    const hostState = path.join(scratch, "volume", ".rudder-host");
+    fs.mkdirSync(hostState, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(hostState, "desired.failed.json"), `${JSON.stringify({ image: newImage, workerToken: failedToken })}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(hostState, "desired.failed.reason"), `${reason}\n`);
     const bin = path.join(scratch, "bin");
     fs.mkdirSync(bin);
     for (const tool of ["codex", "gh", "aws", "tailscaled", "tailscale"]) {
@@ -648,6 +659,8 @@ esac
         RUDDER_WORKER_TOKEN: workerToken,
         RUDDER_HOME_VOLUME: path.join(scratch, "volume"),
         RUDDER_HOME_TOOLCHAINS: "0",
+        RUDDER_HOST_KIND: "external",
+        RUDDER_HOST_IMAGE: "registry.fly.io/workers:old",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -668,6 +681,20 @@ esac
     }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
     assert.equal(state.home.credentials.claude.ok, false);
     assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
+
+    // The supervisor reports the failed update: Cloud stops waiting on its
+    // token and keeps why, and the dashboards' status file shows it.
+    const failedUpdate = await waitFor(async () => {
+      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+      return next.home?.updateError ? next.home : null;
+    }, { timeout: 15_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    assert.equal(failedUpdate.updateError, reason);
+    const check = new Database(dbPath, { readonly: true });
+    assert.equal(check.prepare("select worker_token_next_hash as next from rudder_workspaces where id = 'home-boot'").get().next, null);
+    check.close();
+    const updateStatus = JSON.parse(fs.readFileSync(path.join(home, ".rudder", "home-update", "status.json"), "utf8"));
+    assert.deepEqual([updateStatus.state, updateStatus.target, updateStatus.error], ["failed", newImage, reason]);
+    assert.ok(!log.includes(failedToken) && !serverLog().includes(failedToken), "the token is never logged");
 
     // Signing Claude Code in from the phone, through the real supervisor: the
     // app gets the CLI's URL, and the callback the phone caught finishes it.

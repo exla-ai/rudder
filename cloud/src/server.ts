@@ -123,6 +123,8 @@ type Workspace = {
   pinnedAt?: string;
   // "home" rows: where the home runs (home-host.ts). Fly unless switched.
   hostKind?: HomeHostKind;
+  // "home" rows: why the last image update failed on the host, until one works.
+  updateError?: string;
   lastActivityAt?: string;
   lastHeartbeatAt?: string;
   activeAgents?: number;
@@ -327,6 +329,15 @@ ensureColumn("rudder_workspaces", "git_ref", "text");
 // A replacement worker token handed to a home by its idle update. Both tokens
 // work until the home authenticates with the new one (see requireWorkerBearer).
 ensureColumn("rudder_workspaces", "worker_token_next_hash", "text");
+// When that replacement was issued: one the home never used stops blocking the
+// next update after HOME_UPDATE_TOKEN_TTL_MS. A replacement already pending
+// when this column arrived counts from this boot.
+ensureColumn("rudder_workspaces", "worker_token_next_at", "text");
+database.prepare(
+  "update rudder_workspaces set worker_token_next_at = ? where worker_token_next_hash is not null and worker_token_next_at is null",
+).run(new Date().toISOString());
+// Why the home's last update failed on its host, as the home reported it.
+ensureColumn("rudder_workspaces", "update_error", "text");
 // Busy signal reported by the worker supervisor in each heartbeat: how many
 // rudder runs are actively working in that machine. The idle sweep must not
 // stop a workspace whose agents are mid-task just because nobody is attached
@@ -572,12 +583,15 @@ const updateWorkspaceWorkerToken = database.prepare(`
   update rudder_workspaces
   set worker_token_hash = @workerTokenHash,
       worker_token_next_hash = null,
+      worker_token_next_at = null,
+      update_error = null,
       updated_at = @updatedAt
   where id = @id
 `);
 const setNextWorkerToken = database.prepare(`
   update rudder_workspaces
   set worker_token_next_hash = @nextHash,
+      worker_token_next_at = @updatedAt,
       updated_at = @updatedAt
   where id = @homeId or (home_id = @homeId and source_kind = 'home-repo')
 `);
@@ -588,6 +602,8 @@ const promoteHomeWorkerToken = database.prepare(`
   update rudder_workspaces
   set worker_token_hash = @nextHash,
       worker_token_next_hash = null,
+      worker_token_next_at = null,
+      update_error = null,
       updated_at = @updatedAt
   where id = @homeId or (home_id = @homeId and source_kind = 'home-repo')
 `);
@@ -598,14 +614,19 @@ const promoteWorkerToken = database.transaction((nextHash: string, updatedAt: st
     promoteHomeWorkerToken.run({ homeId: home.id, nextHash, updatedAt });
   }
 });
-// An update the home refused will never use its replacement token.
+// An update the home refused, or its host could not apply, will never use its
+// replacement token.
 const clearNextWorkerToken = database.prepare(`
   update rudder_workspaces
   set worker_token_next_hash = null,
+      worker_token_next_at = null,
       updated_at = @updatedAt
   where (id = @homeId or (home_id = @homeId and source_kind = 'home-repo'))
     and worker_token_next_hash = @nextHash
 `);
+const setHomeUpdateError = database.prepare(
+  "update rudder_workspaces set update_error = @error, updated_at = @updatedAt where id = @homeId and source_kind = 'home'",
+);
 const setHomeHostKind = database.prepare(
   "update rudder_workspaces set host_kind = @hostKind, updated_at = @updatedAt where id = @id and source_kind = 'home'",
 );
@@ -4278,6 +4299,7 @@ function rowToWorkspace(row: unknown): Workspace {
     failureReason: optionalString(value.failure_reason),
     pinnedAt: optionalString(value.pinned_at),
     hostKind: homeHostKind(value.host_kind),
+    updateError: optionalString(value.update_error),
     lastActivityAt: optionalString(value.last_activity_at),
     lastHeartbeatAt: optionalString(value.last_heartbeat_at),
     activeAgents: Number.isFinite(Number(value.active_agents)) && value.active_agents !== null
@@ -5337,7 +5359,7 @@ const setHomeRepoStatus = database.prepare(`
   where home_id = @homeId and source_kind = 'home-repo' and status not in ('deleting')
 `);
 const setHomeRepoTokens = database.prepare(`
-  update rudder_workspaces set worker_token_hash = @workerTokenHash, worker_token_next_hash = null, updated_at = @updatedAt
+  update rudder_workspaces set worker_token_hash = @workerTokenHash, worker_token_next_hash = null, worker_token_next_at = null, updated_at = @updatedAt
   where home_id = @homeId and source_kind = 'home-repo'
 `);
 const setRepoFailure = database.prepare(
@@ -5690,6 +5712,21 @@ const homeBusyNow = new Map<string, boolean>();
 const homeImageChecked = new Map<string, { at: number; image: string | null }>();
 const homeUpdating = new Map<string, number>();
 const homeUpdateFlights = new Set<string>();
+// A replacement token the home has not connected with blocks another update
+// for this long, then the next update replaces it. Until then it stays
+// accepted, so a slow pull that finishes late still connects. Without this, an
+// update whose host failed before the home could report it (an image before
+// 4.2.9, or a host that never ran the update) blocked every later one.
+const HOME_UPDATE_TOKEN_TTL_MS = Number(process.env.RUDDER_HOME_UPDATE_TOKEN_TTL_MS || 20 * 60 * 1000);
+
+/** Whether a home's replacement token is still waiting for the home to use it. */
+function homeUpdatePending(raw: Record<string, unknown> | undefined, now = Date.now()): boolean {
+  if (!optionalString(raw?.worker_token_next_hash)) {
+    return false;
+  }
+  const issuedAt = Date.parse(String(raw?.worker_token_next_at ?? ""));
+  return Number.isFinite(issuedAt) && now - issuedAt < HOME_UPDATE_TOKEN_TTL_MS;
+}
 const listHomeRows = database.prepare("select * from rudder_workspaces where source_kind = 'home' and status <> 'deleting'");
 const countSailsByStatus = database.prepare("select status, count(*) as n from rudder_sails group by status");
 
@@ -5765,9 +5802,10 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       continue;
     }
     // Keep an unresolved provider update's replacement token until the home
-    // authenticates with it. A read or a server restart cannot settle that
-    // original update, and must not replace its pending token with another.
-    if (optionalString(raw.worker_token_next_hash) || homeUpdateFlights.has(home.id)) {
+    // authenticates with it, its host reports a failure, or it expires. A read
+    // or a server restart cannot settle that update, and must not replace its
+    // pending token with another.
+    if (homeUpdatePending(raw, now) || homeUpdateFlights.has(home.id)) {
       continue;
     }
     const quietSince = Math.max(homeBusyAt.get(home.id) ?? now, Date.parse(home.lastActivityAt ?? "") || 0);
@@ -5814,7 +5852,7 @@ async function updateFlyHome(home: Workspace, raw: Record<string, unknown>, now:
     const current = findWorkspaceById.get(home.id) as Record<string, unknown> | undefined;
     const stillQuietSince = Math.max(homeBusyAt.get(home.id) ?? Date.now(), Date.parse(String(current?.last_activity_at ?? "")) || 0);
     if (!current || current.status === "deleting" || current.machine_id !== machineId
-      || current.worker_token_hash !== raw.worker_token_hash || optionalString(current.worker_token_next_hash)
+      || current.worker_token_hash !== raw.worker_token_hash || homeUpdatePending(current)
       || !isOpen(homeControls.get(home.id))
       || (whenQuiet && (homeBusyNow.get(home.id) !== false || Date.now() - stillQuietSince < HOME_IDLE_UPDATE_MS))) {
       return "the machine changed while Rudder Cloud checked it; try again";
@@ -5854,7 +5892,7 @@ async function updateHomeNow(homeId: string): Promise<void> {
   if (!raw || raw.status === "deleting") {
     throw new Error("this machine is being deleted");
   }
-  if (optionalString(raw.worker_token_next_hash) || homeUpdateFlights.has(homeId)) {
+  if (homeUpdatePending(raw) || homeUpdateFlights.has(homeId)) {
     throw new Error("an update is already on its way");
   }
   const home = rowToWorkspace(raw);
@@ -5914,6 +5952,27 @@ async function updateExternalHome(home: Workspace, now: number, reason = "idle")
   } finally {
     homeUpdateFlights.delete(home.id);
   }
+}
+
+// The home's host could not apply an update: rudder-home-apply-update set the
+// request aside as desired.failed.json and said why, and home.mjs reports the
+// hash of the token in it. That token will never be used, so the next press or
+// idle update can go at once. A report about any other token (an older
+// request) changes nothing.
+function noteHomeUpdateFailed(homeId: string, message: Json): void {
+  const nextHash = stringField(message, "tokenHash") ?? "";
+  if (!/^[0-9a-f]{32}$/.test(nextHash)) {
+    return;
+  }
+  const reason = (stringField(message, "reason") ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300)
+    || "the host could not apply the update";
+  const updatedAt = new Date().toISOString();
+  if (clearNextWorkerToken.run({ homeId, nextHash, updatedAt }).changes === 0) {
+    return;
+  }
+  setHomeUpdateError.run({ homeId, error: reason, updatedAt });
+  schedulePersistDatabase();
+  console.log(`[home] ${homeId} update failed on its host: ${reason}`);
 }
 
 // Fly calls for the build pool. Builders live in the worker app beside the
@@ -6385,6 +6444,10 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
       }
       return;
     }
+    if (type === "update-failed") {
+      noteHomeUpdateFailed(homeId, message);
+      return;
+    }
     if (type === "update-now") {
       void updateHomeNow(homeId).then(
         () => ws.send(JSON.stringify({ type: "update-now-result", ok: true })),
@@ -6769,6 +6832,7 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     stateLive: homeStateLive(home.id),
     hostKind: home.hostKind ?? "fly",
     hostImage: optionalString(state?.host?.image) ?? null,
+    updateError: home.updateError ?? null,
   };
 }
 

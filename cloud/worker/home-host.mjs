@@ -4,6 +4,7 @@
 // volume as desired.json, and the host's systemd path unit picks it up, pulls
 // the image, swaps the worker token in its env file and recreates the container.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -23,17 +24,80 @@ export function hostUpdatePath(volume) {
   return path.join(volume, ".rudder-host", "desired.json");
 }
 
+// Where the host sets aside a request it could not apply, and its one-line
+// reason (cloud/host/rudder-home-apply-update).
+export function hostUpdateFailedPath(volume) {
+  return path.join(volume, ".rudder-host", "desired.failed.json");
+}
+
+export function hostUpdateReasonPath(volume) {
+  return path.join(volume, ".rudder-host", "desired.failed.reason");
+}
+
 /** Writes desired.json atomically, readable only by its owner. */
 export function writeHostUpdate({ volume, image, workerToken }) {
   if (!validHostImage(image)) throw new Error("update: image is not a valid image reference");
   if (!validWorkerToken(workerToken)) throw new Error("update: workerToken is not a worker token");
   const file = hostUpdatePath(volume);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  // A new request replaces whatever failed before it.
+  for (const stale of [hostUpdateFailedPath(volume), hostUpdateReasonPath(volume)]) {
+    try {
+      fs.rmSync(stale, { force: true });
+    } catch {
+      // the host overwrites both if this request fails too
+    }
+  }
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify({ image, workerToken, requestedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, file);
   return file;
+}
+
+/** The hash the control plane keeps for a worker token (server.ts tokenHash). */
+export function workerTokenHash(token) {
+  return createHash("sha256").update(token).digest("hex").slice(0, 32);
+}
+
+export const HOST_UPDATE_FAILED = "the host could not apply the update; see journalctl -u rudder-home-update on the host";
+
+/**
+ * The request the host set aside, or null: its image, why it failed, and the
+ * hash of its token so the control plane can match it to the replacement it
+ * is waiting on. The token itself is never returned. `key` changes with each
+ * new failed request.
+ */
+export function readHostUpdateFailure(volume) {
+  let raw;
+  let mtimeMs;
+  try {
+    const file = hostUpdateFailedPath(volume);
+    mtimeMs = fs.statSync(file).mtimeMs;
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let desired = {};
+  try {
+    desired = JSON.parse(raw) ?? {};
+  } catch {
+    // a request the host could not read either
+  }
+  let reason = "";
+  try {
+    reason = fs.readFileSync(hostUpdateReasonPath(volume), "utf8").split("\n")[0];
+  } catch {
+    // a host from before 4.2.9 records no reason
+  }
+  reason = reason.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+  const tokenHash = validWorkerToken(desired.workerToken) ? workerTokenHash(desired.workerToken) : null;
+  return {
+    key: `${tokenHash ?? ""}:${mtimeMs}`,
+    image: validHostImage(desired.image) ? desired.image : null,
+    tokenHash,
+    reason: reason || HOST_UPDATE_FAILED,
+  };
 }
 
 /** What this home runs on, for the control plane's idle update decision. */

@@ -241,6 +241,9 @@ fn shutdown_app_until(
                     }
                     run.terminal = None;
                     if run.status == AgentStatus::Running {
+                        // Mid-turn agents get one "continue" turn when the home
+                        // machine boots again; agents idle at their prompt do not.
+                        run.resume_turn = agent_is_busy(run);
                         run.status = AgentStatus::Paused;
                         run.needs_permission = false;
                         run.needs_user_input = false;

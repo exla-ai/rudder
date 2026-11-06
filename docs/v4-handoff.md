@@ -228,6 +228,12 @@ vibeprint; viraat-gazette needs an uncommitted data file to build); an earlier R
 binary. Repos without root lockfiles (smol, snap, raindrop, ...) get a plain
 checkout, and non-jj repos get a snapshot after their first worktree agent.
 
+Update now (2026-11-06, 4.2.6): when Cloud runs a newer worker image than
+the home, its dashboards show "update" in the footer, and Alt+r twice updates
+the home at once, busy or not (engineering reference "Update now"). Agents
+that were mid-turn reopen with one "continue where you left off" turn. The
+worker image also carries headless Chromium's libraries now.
+
 Cloud link clicks (2026-11-05, not released): a click on a link in a
 `rudder cloud` pane ran `xdg-open` on the home, which has none. The dashboard
 now asks the attached laptop to open it (engineering reference "Clickable

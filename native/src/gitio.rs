@@ -348,6 +348,7 @@ pub(crate) fn create_main_agent(
         reviewed_at: None,
         reconcile_planner: false,
         swarm_experiment: false,
+        resume_turn: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -791,6 +792,10 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .get("swarmExperiment")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let resume_turn = record
+        .get("resumeTurn")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let merge_resolver = record
         .get("mergeResolver")
         .and_then(serde_json::Value::as_bool)
@@ -919,6 +924,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         // false, the real planner); load_persisted_agents filters true ones out.
         reconcile_planner,
         swarm_experiment,
+        resume_turn,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -1480,6 +1486,16 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     if run.terminal.is_none() && run.status != AgentStatus::Running {
         if let Some(map) = record.as_object_mut() {
             map.remove("process");
+        }
+    }
+    // Written only while set. The carry-over above keeps keys this projection
+    // leaves out, so a cleared flag must be removed explicitly or it would come
+    // back on the next boot.
+    if let Some(map) = record.as_object_mut() {
+        if run.resume_turn {
+            map.insert("resumeTurn".to_string(), serde_json::json!(true));
+        } else {
+            map.remove("resumeTurn");
         }
     }
     // What Rudder DID when it published this row: the branch it pushed and the PR

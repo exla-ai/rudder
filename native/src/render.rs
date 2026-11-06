@@ -5200,7 +5200,12 @@ pub(crate) fn notice_kind(text: &str) -> NoticeKind {
         "cannot",
         "disabled",
     ];
-    const CONFIRM_MARKERS: &[&str] = &["press d again", "press q / ctrl+c again", "still running"];
+    const CONFIRM_MARKERS: &[&str] = &[
+        "press d again",
+        "press q / ctrl+c again",
+        HOME_UPDATE_CONFIRM_MARKER,
+        "still running",
+    ];
     let lower = text.to_ascii_lowercase();
     if CONFIRM_MARKERS.iter().any(|marker| lower.contains(marker)) {
         NoticeKind::Confirm
@@ -6856,6 +6861,22 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 /// The four or five keys that matter in the current context.
 pub(crate) fn footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut keys = context_footer_keys(app);
+    // A newer image is ready on the home machine: offer it before the last
+    // hint, wherever the chord works and the footer is not showing typing keys.
+    let room = match app.focus {
+        FocusPane::Agents => app.drawer_cursor.is_none() && app.drawer.is_none(),
+        FocusPane::Worker => true,
+        FocusPane::Task => app.task_input.is_empty(),
+        FocusPane::Diff => false,
+    };
+    if room && !app.show_keys && app.rename_input.is_none() && app.home_update_offered() {
+        keys.insert(keys.len().saturating_sub(1), (HOME_UPDATE_KEY_LABEL, "update"));
+    }
+    keys
+}
+
+fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.show_keys {
         return vec![("esc", "close")];
     }

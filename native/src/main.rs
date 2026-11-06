@@ -120,6 +120,8 @@ mod signals;
 use crate::plan_stream::*;
 mod gam_link;
 use crate::gam_link::*;
+mod home_update;
+use crate::home_update::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 /// How long injected text sits in a live agent's input box before the deferred
@@ -224,6 +226,10 @@ const IDLE_WITHOUT_SIGNAL: Duration = Duration::from_secs(60);
 
 /// Most rows the home machine reopens on boot (`reopen_live_rows_after_home_boot`).
 const HOME_BOOT_REOPEN_CAP: usize = 12;
+
+/// The one turn a row that was mid-turn at shutdown (`resume_turn`) runs when
+/// the home machine boots again.
+const HOME_BOOT_CONTINUE_PROMPT: &str = "Rudder restarted this machine to update it. Continue the task where you left off. A command that was running when it stopped may have been cut off, so check its result or run it again. If you were waiting for the user's answer, ask again and stop.";
 
 /// How long a pane must have printed nothing before the cleanup may put its
 /// agent to sleep (`deliver_park_request`). A turn animates its spinner many
@@ -2213,6 +2219,9 @@ struct App {
     home_runtime: bool,
     /// The boot reopen (`reopen_live_rows_after_home_boot`) runs once per process.
     home_boot_reopen_done: bool,
+    /// Update the home machine now (`home_update.rs`): home.mjs's status file
+    /// and the update key's confirmation. Home runtime only.
+    home_update: HomeUpdate,
     /// Rows `reconcile_orphaned_runs` turned from Running into Orphaned at THIS
     /// start: they were live when the process died, unlike an orphan persisted by
     /// an earlier session.
@@ -2607,6 +2616,10 @@ struct AgentRun {
     /// review-all, drift nudges and follow-up expansion all pass it by. Persisted as
     /// `swarmExperiment` so a restart and the cloud supervisor see it too.
     swarm_experiment: bool,
+    /// The dashboard shut down while this agent was mid-turn. The home-boot
+    /// reopen resumes it with one "continue" turn instead of no turn, then
+    /// clears it. Persisted as `resumeTurn` only while true.
+    resume_turn: bool,
     /// Live planner stream parser for a RudderPlan run: turns the backend's JSON
     /// event stream into a conversation transcript + the reconstructed assistant
     /// text the RUDDER_PLAN_TASKS parser reads, and captures the session id for
@@ -3405,6 +3418,7 @@ impl App {
             restart_quarantined_ids: HashSet::new(),
             home_runtime: home_runtime_from_env(),
             home_boot_reopen_done: false,
+            home_update: HomeUpdate::from_env(),
             boot_orphaned_ids: HashSet::new(),
             rename_input: None,
             rename_cursor: 0,
@@ -4272,6 +4286,8 @@ impl App {
             self.notice = Some("quit cancelled".to_string());
             // fall through and let the key be handled normally
         }
+        // Same for a pending home update: only a second update key confirms.
+        self.cancel_home_update_confirm(&key);
 
         // Esc always dismisses the transient notice line (without being consumed:
         // its pane-specific meaning, like exiting the diff view, still applies).
@@ -4437,6 +4453,12 @@ impl App {
             // character, so it must not hijack a task the user is composing.
             KeyCode::Char('\u{02d9}') if self.focus != FocusPane::Task => {
                 self.toggle_solo_pane();
+                return false;
+            }
+            // Alt+r updates the home machine now (home_update.rs), with the same
+            // composer rule for its typed fallback. Off the home it is not claimed.
+            _ if self.home_update_claims(&key) => {
+                self.press_home_update_key();
                 return false;
             }
             KeyCode::Char('\u{00a1}') => {
@@ -8705,6 +8727,7 @@ impl App {
             // Discriminator: route completion to the APPEND path, not REPLACE.
             reconcile_planner: true,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -8887,6 +8910,7 @@ impl App {
             reviewed_at: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -9141,6 +9165,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             reviewed_at: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -9236,6 +9261,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             reviewed_at: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -10450,6 +10476,7 @@ Address the objection directly. If you disagree, say why inside \
             node_id: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -11006,11 +11033,15 @@ Address the objection directly. If you disagree, say why inside \
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
         candidates.truncate(HOME_BOOT_REOPEN_CAP);
         let mut reopened = 0usize;
+        let mut continued = 0usize;
         for (_, run_id) in candidates {
             let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
                 continue;
             };
             let run = &self.agents[index];
+            // Mid-turn at shutdown: run one turn that continues the task. The
+            // spawn clears the flag and saves the record.
+            let continue_turn = run.resume_turn;
             let entry = MigratedAgent {
                 run_id: run.id.clone(),
                 session_id: run.session_id.clone().unwrap_or_default(),
@@ -11018,7 +11049,7 @@ Address the objection directly. If you disagree, say why inside \
                     .workspace_path
                     .clone()
                     .unwrap_or_else(|| run.cwd.clone()),
-                fresh_prompt: None,
+                fresh_prompt: continue_turn.then(|| HOME_BOOT_CONTINUE_PROMPT.to_string()),
             };
             // Back to Running, as it was before the stop: the resumed session runs
             // no turn, and the idle backstop says so ("idle at its prompt").
@@ -11034,12 +11065,18 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 self.focus_resume_attempted.insert(run_id);
                 reopened += 1;
+                continued += usize::from(continue_turn);
             }
         }
         if reopened > 0 {
             self.push_activity(format!(
-                "home machine boot: reopened {reopened} agent session{}",
-                if reopened == 1 { "" } else { "s" }
+                "home machine boot: reopened {reopened} agent session{}{}",
+                if reopened == 1 { "" } else { "s" },
+                if continued > 0 {
+                    format!(", {continued} continuing mid-task")
+                } else {
+                    String::new()
+                }
             ));
             self.notice = Some(format!(
                 "reopened {reopened} agent{} that were live before the machine stopped",
@@ -11085,10 +11122,29 @@ Address the objection directly. If you disagree, say why inside \
         } else {
             entry.workspace_path.clone()
         };
+        // On a resumed session, `fresh_prompt` is the one turn it runs. Both CLIs
+        // take it as a positional after the session id (`claude --resume <id>
+        // <prompt>`, `codex resume <id> <prompt>`); without one, no turn runs.
+        let resume_prompt = entry
+            .fresh_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty());
         let mut command = if !entry.session_id.is_empty() && run.backend == Backend::Claude {
-            claude_resume_command(run, &entry.session_id)
+            let mut command = claude_resume_command(run, &entry.session_id);
+            if let Some(prompt) = resume_prompt {
+                command.args.push(prompt.to_string());
+                // The managed Claude profile moves this positional into its
+                // first turn, the same contract as a fresh launch.
+                command = command.with_env("RUDDER_AGENT_INITIAL_PROMPT", prompt);
+            }
+            command
         } else if !entry.session_id.is_empty() && run.backend == Backend::Codex {
-            codex_resume_command(run, &entry.session_id)
+            let mut command = codex_resume_command(run, &entry.session_id);
+            if let Some(prompt) = resume_prompt {
+                command.args.push(prompt.to_string());
+            }
+            command
         } else {
             let session_id = mint_session_id_for(run.backend);
             // If the local CLI built a context-rich handoff prompt for this
@@ -11142,6 +11198,9 @@ Address the objection directly. If you disagree, say why inside \
                 run.last_output_at = Instant::now();
                 run.last_error = None;
                 run.cwd = cwd;
+                // Any relaunch spends the boot "continue" flag, so it cannot
+                // add a second turn on a later boot.
+                run.resume_turn = false;
                 let _ = save_native_run_record(&self.cwd, run);
                 true
             }
@@ -11150,6 +11209,7 @@ Address the objection directly. If you disagree, say why inside \
                 // terminal forever (it would consume a parallelism slot and deadlock hard
                 // dependents silently). Mark it Failed so the slot frees and the
                 // "blocked by a FAILED dependency" notice can fire for its dependents.
+                run.resume_turn = false;
                 run.status = AgentStatus::Failed;
                 run.completed_at = Some(Instant::now());
                 run.last_error = Some(error.to_string());
@@ -13623,6 +13683,7 @@ Address the objection directly. If you disagree, say why inside \
             reviewed_at: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -18501,6 +18562,7 @@ Address the objection directly. If you disagree, say why inside \
             reviewed_at: None,
             reconcile_planner: false,
             swarm_experiment: false,
+            resume_turn: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -20346,6 +20408,8 @@ What to do\n\
             self.cloud_runtime = cloud.runtime;
             self.last_cloud_check = Instant::now();
         }
+        // Keeps its own cadence; a tiny local file, home runtime only.
+        self.poll_home_update();
 
         self.refresh_cloud_workspace_status();
         self.maybe_notify_workspace_idle();

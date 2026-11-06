@@ -69,7 +69,7 @@ const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
 const BURST_SOCKET = process.env.RUDDER_BURST_SOCKET || path.join(os.tmpdir(), "rudder-burst.sock");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
-// "Update now" (U in a dashboard here): status.json and request, home-host.mjs.
+// "Update now" (Alt+r in a dashboard here): status.json and request, home-host.mjs.
 const HOME_UPDATE_DIR = path.join(HOME, ".rudder", "home-update");
 const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();

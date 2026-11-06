@@ -141,6 +141,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         node_id: None,
         reconcile_planner: false,
         swarm_experiment: false,
+        resume_turn: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,

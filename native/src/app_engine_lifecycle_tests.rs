@@ -651,3 +651,37 @@ fn recovered_runtime_application_requires_app_custody_and_never_automatically_re
     assert!(h.app.notice.as_deref().unwrap().contains("requires explicit reconciliation"));
     h.finish(Ok(())).unwrap();
 }
+
+#[test]
+fn shutdown_marks_only_mid_turn_runs_to_continue_after_boot() {
+    let mut h = Harness::new();
+    h.fake_backend();
+    // A second live row, idle at its prompt between turns.
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "exec cat"])),
+        TerminalPaneOptions { size: TerminalSize { rows: 24, cols: 80 }, ..Default::default() },
+    )
+    .unwrap();
+    let mut idle = crate::app_tests::test_agent_run_with_terminal(&h.app, pane);
+    idle.id = "run-2".into();
+    idle.plain_process = true;
+    idle.wait_signal = Some(WaitSignal::Idle);
+    h.app.agents.push(idle);
+    assert!(agent_is_busy(&h.app.agents[0]) && !agent_is_busy(&h.app.agents[1]));
+
+    shutdown_app(&mut h.app, "test update").unwrap();
+
+    assert_eq!(h.app.agents[0].status, AgentStatus::Paused);
+    assert_eq!(h.app.agents[1].status, AgentStatus::Paused);
+    assert!(h.app.agents[0].resume_turn, "mid-turn: continue after boot");
+    assert!(!h.app.agents[1].resume_turn, "idle at its prompt: no turn");
+    assert_eq!(h.record()["resumeTurn"], true);
+    let idle_record: serde_json::Value = serde_json::from_slice(
+        &fs::read(native_run_dir(&h.app.cwd, "run-2").join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(idle_record.get("resumeTurn").is_none(), "{idle_record}");
+    // The flag survives a reload of the record.
+    assert!(agent_from_run_record(&h.app.cwd, h.record()).unwrap().resume_turn);
+    h.finish(Ok(())).unwrap();
+}

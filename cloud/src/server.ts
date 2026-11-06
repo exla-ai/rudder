@@ -5847,7 +5847,7 @@ async function updateFlyHome(home: Workspace, raw: Record<string, unknown>, now:
 
 const UP_TO_DATE = "this machine already runs the newest Rudder";
 
-// The user pressed U in a dashboard on the home: update now, busy or not. Its
+// The user pressed Alt+r in a dashboard on the home: update now, busy or not. Its
 // agents restart, and their dashboards reopen each one where it was.
 async function updateHomeNow(homeId: string): Promise<void> {
   const raw = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;

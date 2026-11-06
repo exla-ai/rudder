@@ -8043,6 +8043,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         node_id: None,
         reconcile_planner: false,
         swarm_experiment: false,
+        resume_turn: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -10000,6 +10001,7 @@ fn delete_agent_requires_second_d() {
         node_id: None,
         reconcile_planner: false,
         swarm_experiment: false,
+        resume_turn: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -29898,4 +29900,263 @@ fn any_key_skips_the_startup_reveal() {
     app.focus = FocusPane::Agents;
     app.handle_key(KeyEvent::from(KeyCode::Char('j')));
     assert!(app.reveal_started.is_none());
+}
+
+fn home_update_test_app(tag: &str) -> (App, std::path::PathBuf) {
+    let dir = unique_test_repo(tag);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.home_runtime = true;
+    app.home_update.dir = Some(dir.clone());
+    app.focus = FocusPane::Agents;
+    (app, dir)
+}
+
+fn write_home_update_status(dir: &std::path::Path, state: &str, error: Option<&str>) {
+    let body = serde_json::json!({
+        "current": "registry.fly.io/rudder-workers-exla:4.2.0",
+        "target": "registry.fly.io/rudder-workers-exla:4.2.6",
+        "state": state,
+        "error": error,
+        "at": "2026-11-06T00:00:00.000Z",
+    });
+    fs::write(dir.join("status.json"), body.to_string()).unwrap();
+}
+
+#[test]
+fn home_update_status_parses_and_offers_the_footer_hint() {
+    let hint = (HOME_UPDATE_KEY_LABEL, "update");
+    assert_eq!(HOME_UPDATE_KEY_LABEL, "\u{2325}r", "named like \u{2325}h in the footer");
+    let parse = HomeUpdateStatus::parse;
+    let available = parse(r#"{"current":"r/i:4.2.0","target":"registry.fly.io/rudder-workers-exla:4.2.6","state":"available","error":null,"at":"x"}"#).unwrap();
+    assert_eq!(available.state, HomeUpdateState::Available);
+    assert_eq!(available.version(), Some("4.2.6"));
+    assert_eq!(parse(r#"{"state":"current","target":null}"#).unwrap().state, HomeUpdateState::Current);
+    let failed = parse(r#"{"state":"failed","target":"img:4.2.6","error":"pull denied"}"#).unwrap();
+    assert_eq!(failed.error.as_deref(), Some("pull denied"));
+    for unknown in [r#"{"state":"later"}"#, r#"{"target":"img:1"}"#, "not json", ""] {
+        assert!(parse(unknown).is_none(), "{unknown:?} shows nothing");
+    }
+    for untagged in ["registry.fly.io/rudder-workers-exla", "host:5000/image", "image@sha256:abc"] {
+        let status = parse(&format!(r#"{{"state":"available","target":"{untagged}"}}"#)).unwrap();
+        assert_eq!(status.version(), None, "{untagged} has no version tag");
+    }
+
+    let (mut app, dir) = home_update_test_app("home-update-status");
+    // No file yet: nothing to show.
+    app.poll_home_update();
+    assert!(app.home_update.status.is_none());
+    assert!(!footer_keys(&app).contains(&hint));
+
+    write_home_update_status(&dir, "available", None);
+    app.apply_home_update_status(HomeUpdateStatus::parse(&fs::read_to_string(dir.join("status.json")).unwrap()));
+    assert!(footer_keys(&app).contains(&hint), "{:?}", footer_keys(&app));
+    assert_eq!(footer_keys(&app).last(), Some(&("?", "keys")), "the hint sits before ?");
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("Rudder 4.2.6 is ready on this machine. Press Alt+r to update; agents restart and pick up where they left off.")
+    );
+    // Once per target: the same status again leaves the notice alone.
+    app.notice = None;
+    app.apply_home_update_status(Some(available.clone()));
+    app.apply_home_update_status(HomeUpdateStatus::parse(&fs::read_to_string(dir.join("status.json")).unwrap()));
+    assert!(app.notice.is_none());
+    // The chord works from any pane, so the hint shows there too, but not
+    // over the keys for a task being typed.
+    app.focus = FocusPane::Worker;
+    assert!(footer_keys(&app).contains(&hint), "{:?}", footer_keys(&app));
+    app.focus = FocusPane::Task;
+    assert!(footer_keys(&app).contains(&hint));
+    app.task_input = "fix the parser".to_string();
+    assert!(!footer_keys(&app).contains(&hint));
+    app.task_input.clear();
+    app.focus = FocusPane::Agents;
+
+    app.apply_home_update_status(Some(failed));
+    assert!(footer_keys(&app).contains(&hint), "a failed update can be retried");
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("The update to 4.2.6 failed: pull denied. Press Alt+r to try again.")
+    );
+    assert_eq!(notice_kind(app.notice.as_deref().unwrap()), NoticeKind::Error);
+
+    app.apply_home_update_status(parse(r#"{"state":"requested","target":"img:4.2.6"}"#));
+    assert!(!footer_keys(&app).contains(&hint));
+    assert_eq!(app.notice.as_deref(), Some("Updating to 4.2.6. This screen reconnects by itself."));
+
+    app.apply_home_update_status(parse(r#"{"state":"current","target":null}"#));
+    assert!(!footer_keys(&app).contains(&hint));
+
+    // Off the home runtime nothing is read at all.
+    let mut laptop = App::new();
+    laptop.home_update.dir = Some(dir.clone());
+    laptop.poll_home_update();
+    assert!(laptop.home_update.status.is_none());
+    assert!(!footer_keys(&laptop).contains(&hint));
+
+    // The tick reads the file itself.
+    let (mut fresh, fresh_dir) = home_update_test_app("home-update-poll");
+    write_home_update_status(&fresh_dir, "available", None);
+    fresh.poll_home_update();
+    assert_eq!(fresh.home_update.status.as_ref().map(|s| s.state), Some(HomeUpdateState::Available));
+    let _ = fs::remove_dir_all(&fresh_dir);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn home_update_chord_writes_the_request_only_on_a_second_press() {
+    let alt_r = || KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+    let option_r = || KeyEvent::from(KeyCode::Char('\u{00ae}'));
+    let asked = "Update to 4.2.6 now? Agents restart and continue. Press Alt+r again to confirm; any other key cancels.";
+    let (mut app, dir) = home_update_test_app("home-update-key");
+    let request = dir.join("request");
+
+    // Nothing offered: the chord does nothing.
+    app.handle_key(alt_r());
+    app.frames_drawn += 1;
+    app.handle_key(alt_r());
+    assert!(!request.exists());
+
+    app.apply_home_update_status(HomeUpdateStatus::parse(r#"{"state":"current","target":null}"#));
+    app.handle_key(alt_r());
+    assert_eq!(app.notice.as_deref(), Some("Rudder is up to date"));
+
+    write_home_update_status(&dir, "available", None);
+    app.apply_home_update_status(HomeUpdateStatus::parse(&fs::read_to_string(dir.join("status.json")).unwrap()));
+
+    // Shift+U is usage and Shift+R is nothing: neither asks.
+    app.notice = None;
+    app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert_ne!(app.notice.as_deref(), Some(asked));
+
+    // One press asks.
+    app.handle_key(alt_r());
+    assert!(!request.exists(), "a single press never requests");
+    assert_eq!(app.notice.as_deref(), Some(asked));
+    assert_eq!(notice_kind(asked), NoticeKind::Confirm, "the question stays up");
+    // A second press before the question has rendered only asks again.
+    app.handle_key(alt_r());
+    assert!(!request.exists());
+
+    // Any other key cancels.
+    app.frames_drawn += 1;
+    app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+    assert_eq!(app.notice.as_deref(), Some("update cancelled"));
+    app.handle_key(alt_r());
+    assert!(!request.exists(), "after a cancel the next press asks again");
+
+    // In the composer Option+r's character is typing, never the update; the
+    // real chord still works there.
+    app.focus = FocusPane::Task;
+    app.frames_drawn += 1;
+    app.handle_key(option_r());
+    assert!(!request.exists());
+    assert!(app.task_input.contains('\u{00ae}'), "typed into the task: {:?}", app.task_input);
+    assert_eq!(app.notice.as_deref(), Some("update cancelled"));
+    app.task_input.clear();
+    app.handle_key(alt_r());
+    assert_eq!(app.notice.as_deref(), Some(asked));
+
+    // From a worker pane, the typed fallback confirms like the chord.
+    app.focus = FocusPane::Worker;
+    app.frames_drawn += 1;
+    app.handle_key(option_r());
+    assert!(request.exists(), "the second press writes the request");
+    let body: serde_json::Value = serde_json::from_str(&fs::read_to_string(&request).unwrap()).unwrap();
+    assert_eq!(body["project"], dir.file_name().unwrap().to_string_lossy().as_ref());
+    assert!(body["at"].as_str().is_some_and(|at| at.ends_with('Z') && at.len() == 24), "{body}");
+    let at = parse_iso8601_millis(body["at"].as_str().unwrap()).unwrap();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!((now - at).abs() < 60_000, "the timestamp is now in UTC: {body}");
+    let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")).collect();
+    assert!(leftovers.is_empty(), "the write is a rename, no temp file is left");
+    assert_eq!(app.notice.as_deref(), Some("Updating to 4.2.6. This screen reconnects by itself."));
+    assert!(!footer_keys(&app).contains(&(HOME_UPDATE_KEY_LABEL, "update")));
+
+    // Off the home machine the chord is not claimed at all.
+    let mut laptop = App::new();
+    laptop.home_update.dir = Some(dir.clone());
+    laptop.home_update.status = HomeUpdateStatus::parse(r#"{"state":"available","target":"img:4.2.6"}"#);
+    assert!(!laptop.home_update_claims(&alt_r()));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn home_boot_continues_only_runs_that_were_mid_turn() {
+    let _env = env_guard();
+    let dir = unique_test_repo("home-boot-continue");
+    let fake = dir.join("fake-agent.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(pwd)/argv\"\nsleep 5\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.home_runtime = true;
+    for (id, backend, flagged) in [
+        ("busy-claude", Backend::Claude, true),
+        ("idle-claude", Backend::Claude, false),
+        ("busy-codex", Backend::Codex, true),
+    ] {
+        let mut run = test_agent_run(id, "port the settings screen");
+        run.cwd = dir.join(id);
+        fs::create_dir_all(&run.cwd).unwrap();
+        run.backend = backend;
+        run.status = AgentStatus::Paused;
+        run.session_id = Some(format!("session-{id}"));
+        run.resume_turn = flagged;
+        save_native_run_record(&dir, &run).unwrap();
+        app.agents.push(run);
+    }
+    let record = |id: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(native_run_dir(&dir, id).join("run.json")).unwrap()).unwrap()
+    };
+    assert_eq!(record("busy-claude")["resumeTurn"], true);
+    assert!(record("idle-claude").get("resumeTurn").is_none());
+
+    app.reopen_live_rows_after_home_boot();
+
+    let argv = |id: &str| -> Vec<String> {
+        let path = dir.join(id).join("argv");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = fs::read_to_string(&path) {
+                if !text.is_empty() {
+                    return text.lines().map(str::to_string).collect();
+                }
+            }
+            assert!(Instant::now() < deadline, "{id} never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let busy_claude = argv("busy-claude");
+    let idle_claude = argv("idle-claude");
+    let busy_codex = argv("busy-codex");
+    let activity = app.activity_log.clone();
+    let flags: Vec<bool> = app.agents.iter().map(|run| run.resume_turn).collect();
+    let running = app.agents.iter().all(|run| run.status == AgentStatus::Running && run.terminal.is_some());
+    let records: Vec<serde_json::Value> = ["busy-claude", "idle-claude", "busy-codex"].iter().map(|id| record(id)).collect();
+    for run in app.agents.iter_mut() {
+        run.terminal = None;
+    }
+    let _ = fs::remove_dir_all(&dir);
+
+    let prompt = HOME_BOOT_CONTINUE_PROMPT.to_string();
+    let after = |args: &[String], flag: &str| args.iter().position(|arg| arg == flag).and_then(|at| args.get(at + 2)).cloned();
+    assert_eq!(after(&busy_claude, "--resume"), Some(prompt.clone()), "{busy_claude:?}");
+    assert!(!idle_claude.contains(&prompt), "an idle row reopens with no turn: {idle_claude:?}");
+    assert!(idle_claude.contains(&"session-idle-claude".to_string()));
+    assert_eq!(after(&busy_codex, "resume"), Some(prompt.clone()), "{busy_codex:?}");
+    assert!(running, "every row is back");
+    assert_eq!(flags, vec![false, false, false], "the flag is spent");
+    for record in &records {
+        assert!(record.get("resumeTurn").is_none(), "cleared on disk too: {record}");
+    }
+    assert!(
+        activity.iter().any(|line| line.contains("reopened 3 agent sessions, 2 continuing mid-task")),
+        "{activity:?}"
+    );
 }

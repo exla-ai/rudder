@@ -1279,7 +1279,9 @@ fn into_parts_retains_actual_source_cache_registry_and_authority_without_origina
     assert!(view.lookup(1, b"file-00000000").is_err());
     drop(view);
     let until = Instant::now() + Duration::from_secs(2);
-    while source.strong_count() != 0 && Instant::now() < until {
+    // Both are released by background threads after the view drops; wait for
+    // each, since a slow machine can free the source before the authority.
+    while (source.strong_count() != 0 || authority.strong_count() != 0) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(source.upgrade().is_none());

@@ -92,7 +92,8 @@ try {
   if (build.status !== 0) throw new Error(`flyctl build failed (exit ${build.status})`);
   const token = flyToken();
   for (let i = 0; !(await manifestServed(image, token)); i += 1) {
-    if (i >= 72) throw new Error(`flyctl finished but the registry does not serve ${image}`);
+    // registry.fly.io has taken about 6 minutes to serve a new tag after the push.
+    if (i >= 180) throw new Error(`flyctl finished but the registry does not serve ${image}`);
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
   console.log(`${image} is in the registry (${Math.round((Date.now() - started) / 1000)}s).`);

@@ -43,3 +43,45 @@ export function hostInfo(env = process.env) {
     image: env.RUDDER_HOST_IMAGE || env.FLY_IMAGE_REF || null,
   };
 }
+
+// "Update now" from a dashboard on this home. home.mjs keeps status.json (what
+// Cloud would move this machine to, and how a request went) for the dashboards
+// to read, and takes the `request` file a dashboard writes when the user asks.
+// The update itself is the same one as above: Cloud picks the image.
+
+export function homeUpdateStatusPath(dir) {
+  return path.join(dir, "status.json");
+}
+
+export function homeUpdateRequestPath(dir) {
+  return path.join(dir, "request");
+}
+
+/** The status after Cloud says what this home runs and what it would run. */
+export function offeredHomeUpdate(previous, { current, target }) {
+  const cur = typeof current === "string" && current ? current : null;
+  const tgt = typeof target === "string" && target ? target : null;
+  const newer = Boolean(cur && tgt && cur !== tgt);
+  // A request on its way, or one that failed, stays so for the same target.
+  const kept = previous?.target === tgt && (previous.state === "requested" || previous.state === "failed");
+  const state = !newer ? "current" : kept ? previous.state : "available";
+  return { current: cur, target: tgt, state, error: state === "failed" ? previous.error ?? null : null };
+}
+
+export function writeHomeUpdateStatus(dir, status) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = homeUpdateStatusPath(dir);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify({ ...status, at: new Date().toISOString() })}\n`);
+  fs.renameSync(tmp, file);
+}
+
+/** True once per request file a dashboard wrote; the file is gone afterwards. */
+export function takeHomeUpdateRequest(dir) {
+  try {
+    fs.unlinkSync(homeUpdateRequestPath(dir));
+    return true;
+  } catch {
+    return false;
+  }
+}

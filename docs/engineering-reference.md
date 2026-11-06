@@ -1044,6 +1044,19 @@ brain lives in the cloud, and the phone is a first-class client.
   IN PLACE (`POST machines/<id>` with the current config and the new image: same
   volume, env, mounts). The boot reopen brings the agents back. At most one attempt
   per 15 min. So after a release, you never restart the home by hand.
+- **Update now (U in a dashboard on the home).** Agents running all day keep the
+  idle rule from ever firing, so the home also offers the update. After each
+  `state`, the control plane sends `{type:"update-available", current, target}`
+  when either changes (`offerHomeUpdate`). home.mjs keeps
+  `~/.rudder/home-update/status.json` (`current`/`available`/`requested`/`failed`,
+  `RUDDER_HOME_UPDATE_DIR` for dashboards). A dashboard writes `request` there on
+  U, U. home.mjs sends `{type:"update-now"}`, and `updateHomeNow` runs the same
+  update as the idle sweep, busy or not (external: `update` RPC; Fly: in-place
+  machine update), answering `update-now-result`. A pending replacement token
+  refuses a second press. The laptop's `rudder cloud` stays attached and
+  reconnects. On the way down each dashboard marks agents that were mid-turn
+  (`resume_turn`), and the boot reopen resumes those with one "continue where you
+  left off" turn; the rest reopen idle as before.
 - **Hourly cleanup (`cloud/worker/cleanup.mjs`).** On 2026-11-02 the 16 GB home
   ran ~100 Claude processes (sessions resumed days earlier, agent teams), 23
   dashboards, dev servers and parallel `rustc`; memory pressure sat at 54% "full",

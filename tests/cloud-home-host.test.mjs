@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
-import { hostInfo, hostUpdatePath, validHostImage, validWorkerToken, writeHostUpdate } from "../cloud/worker/home-host.mjs";
+import { hostInfo, hostUpdatePath, homeUpdateRequestPath, homeUpdateStatusPath, offeredHomeUpdate, takeHomeUpdateRequest, validHostImage, validWorkerToken, writeHomeUpdateStatus, writeHostUpdate } from "../cloud/worker/home-host.mjs";
 import { HOST_FILES, copyFromFlySteps, hostFilesDir, parseHostArgs, renderHomeEnv, validImage } from "../dist/cloud-host.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -274,6 +274,84 @@ serverTest("an external home never touches Fly: switch, fence, refusals, update 
   assert.equal(after.machine_id, "m-new");
   assert.notEqual(after.hash, tokenHash(update.params.workerToken));
   assert.equal(await opens("home-a", update.params.workerToken), false, "the external host's token stops working");
+});
+
+serverTest("a busy home asks to update now: Cloud offers the newer image, then updates it at once", async (t) => {
+  const { port, dbPath, log } = await bootServer(t, {
+    RUDDER_WORKER_IMAGE: NEW_IMAGE,
+    // The idle update must never be what moves this home.
+    RUDDER_HOME_IDLE_UPDATE_MS: String(60 * 60 * 1000),
+    RUDDER_HOME_UPDATE_SWEEP_MS: "1000",
+    RUDDER_HOME_IDLE_MS: String(60 * 60 * 1000),
+  });
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const db = new Database(dbPath);
+  t.after(() => db.close());
+  const token = "rdrw_update_now_fixture_token";
+  db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, host_kind, worker_token_hash,
+      source_kind, created_at, updated_at, last_activity_at)
+    values ('home-n', 'acct-n', 'home', 'home', 'running', 'external', ?, 'home', ?, ?, ?)`).run(tokenHash(token), old, old, old);
+  const row = () => db.prepare("select worker_token_hash as hash, worker_token_next_hash as next from rudder_workspaces where id = 'home-n'").get();
+
+  const messages = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-n/control`, { headers: { authorization: `Bearer ${token}` } });
+  t.after(() => ws.close());
+  ws.on("message", (data) => {
+    const message = JSON.parse(data.toString());
+    messages.push(message);
+    if (message.type === "rpc") ws.send(JSON.stringify({ type: "rpc-result", id: message.id, result: { ok: true } }));
+  });
+  await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+  // An agent is working, so the idle rule would wait.
+  ws.send(JSON.stringify({
+    type: "state",
+    host: { kind: "external", image: OLD_IMAGE },
+    projects: [{ workspaceId: "r", repo: "a/b", name: "b", agents: [{ id: "1", status: "working", asks: [] }] }],
+  }));
+  const offer = await waitFor(() => messages.find((m) => m.type === "update-available"));
+  assert.deepEqual([offer.current, offer.target], [OLD_IMAGE, NEW_IMAGE]);
+  await sleep(1500);
+  assert.ok(!messages.some((m) => m.type === "rpc" && m.method === "update"), "busy: no idle update");
+
+  ws.send(JSON.stringify({ type: "update-now" }));
+  const update = await waitFor(() => messages.find((m) => m.type === "rpc" && m.method === "update"));
+  assert.equal(update.params.image, NEW_IMAGE);
+  assert.ok(validWorkerToken(update.params.workerToken));
+  assert.deepEqual(await waitFor(() => messages.find((m) => m.type === "update-now-result")), { type: "update-now-result", ok: true });
+  assert.deepEqual(row(), { hash: tokenHash(token), next: tokenHash(update.params.workerToken) });
+  assert.ok(!log().includes(update.params.workerToken));
+
+  // A second press while that one is on its way is refused, not repeated.
+  ws.send(JSON.stringify({ type: "update-now" }));
+  const refused = await waitFor(() => messages.filter((m) => m.type === "update-now-result")[1]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /already on its way/);
+  assert.equal(messages.filter((m) => m.type === "rpc" && m.method === "update").length, 1);
+});
+
+nodeTest("the home keeps an update status for its dashboards and takes their requests once", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-update-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const offer = { current: OLD_IMAGE, target: NEW_IMAGE };
+  const available = offeredHomeUpdate(null, offer);
+  assert.deepEqual(available, { current: OLD_IMAGE, target: NEW_IMAGE, state: "available", error: null });
+  assert.equal(offeredHomeUpdate(available, { current: NEW_IMAGE, target: NEW_IMAGE }).state, "current");
+  assert.equal(offeredHomeUpdate(available, { current: null, target: NEW_IMAGE }).state, "current", "an unknown image is left alone");
+  // A request on its way, or one that failed, holds for the same target only.
+  const failed = { ...available, state: "failed", error: "no" };
+  assert.deepEqual(offeredHomeUpdate(failed, offer), failed);
+  assert.equal(offeredHomeUpdate({ ...available, state: "requested" }, offer).state, "requested");
+  assert.equal(offeredHomeUpdate({ ...failed, target: "registry.fly.io/workers:older" }, offer).state, "available");
+
+  writeHomeUpdateStatus(dir, available);
+  const written = JSON.parse(fs.readFileSync(homeUpdateStatusPath(dir), "utf8"));
+  assert.equal(written.state, "available");
+  assert.ok(written.at);
+  assert.deepEqual(fs.readdirSync(dir), ["status.json"], "no temp file left behind");
+  assert.equal(takeHomeUpdateRequest(dir), false);
+  fs.writeFileSync(homeUpdateRequestPath(dir), "{}");
+  assert.equal(takeHomeUpdateRequest(dir), true);
+  assert.equal(takeHomeUpdateRequest(dir), false, "once per request");
 });
 
 libTest("home-host.ts: host kind, env bundle, refusals and the update decision", () => {

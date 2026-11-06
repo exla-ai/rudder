@@ -36,7 +36,7 @@ import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
-import { hostInfo, writeHostUpdate } from "./home-host.mjs";
+import { hostInfo, offeredHomeUpdate, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
 
 let projectFiles;
 async function fileService() {
@@ -69,6 +69,8 @@ const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
 const BURST_SOCKET = process.env.RUDDER_BURST_SOCKET || path.join(os.tmpdir(), "rudder-burst.sock");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
+// "Update now" (U in a dashboard here): status.json and request, home-host.mjs.
+const HOME_UPDATE_DIR = path.join(HOME, ".rudder", "home-update");
 const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
 // 1.5s: a prompt an agent is blocked on should reach the phone quickly.
@@ -85,6 +87,9 @@ let credentials = null;
 let credentialsRunning = false;
 let credentialsAgain = false;
 let vaultRefreshedAt = 0;
+// What Cloud would move this machine to, and how a dashboard's "update now" went.
+let homeUpdate = { current: null, target: null, state: "current", error: null };
+let homeUpdateRequestedAt = 0;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
 let privatePreviews;
 async function privatePreviewService() {
@@ -168,6 +173,8 @@ setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
 setInterval(reportHeartbeat, 30_000);
+setHomeUpdate({ current: hostInfo(process.env).image, target: null, state: "current", error: null });
+setInterval(checkHomeUpdateRequest, 1000);
 reportHeartbeat();
 // Metrics for the observability stack (observability/metrics.md); off unless
 // RUDDER_OTEL_ENDPOINT is set. Paths come from the child env because
@@ -489,6 +496,17 @@ function connectControl() {
       });
       return;
     }
+    if (message?.type === "update-available") {
+      setHomeUpdate(offeredHomeUpdate(homeUpdate, message));
+      return;
+    }
+    if (message?.type === "update-now-result") {
+      if (message.ok !== true) {
+        log(`update: Cloud refused: ${message.error || "no reason given"}`);
+        setHomeUpdate({ ...homeUpdate, state: "failed", error: String(message.error || "the update could not start") });
+      }
+      return;
+    }
     if (message?.type === "rpc" && typeof message.id === "string") {
       void handleRpc(message.method, message.params ?? {})
         .then((result) => sendControl({ type: "rpc-result", id: message.id, result: result ?? null }))
@@ -509,6 +527,39 @@ function connectControl() {
   socket.on("error", () => {
     try { socket.terminate(); } catch { /* ignore */ }
   });
+}
+
+function setHomeUpdate(next) {
+  homeUpdate = next;
+  try {
+    writeHomeUpdateStatus(HOME_UPDATE_DIR, homeUpdate);
+  } catch (error) {
+    log(`update status: ${error.message}`);
+  }
+}
+
+// A dashboard asked to update now: Cloud picks the image and restarts this
+// machine the same way an idle update does. Its dashboards stop agents
+// cleanly first, and the new ones reopen each where it was.
+function checkHomeUpdateRequest() {
+  if (takeHomeUpdateRequest(HOME_UPDATE_DIR)) {
+    if (homeUpdate.state !== "available" && homeUpdate.state !== "failed") {
+      return;
+    }
+    if (!controlSocket || controlSocket.readyState !== WebSocket.OPEN) {
+      setHomeUpdate({ ...homeUpdate, state: "failed", error: "Rudder Cloud is not connected; try again in a moment" });
+      return;
+    }
+    log(`update: a dashboard asked for ${homeUpdate.target}`);
+    homeUpdateRequestedAt = Date.now();
+    sendControl({ type: "update-now" });
+    setHomeUpdate({ ...homeUpdate, state: "requested", error: null });
+    return;
+  }
+  // Cloud took it but the machine never restarted: say so instead of waiting forever.
+  if (homeUpdate.state === "requested" && Date.now() - homeUpdateRequestedAt > 5 * 60_000) {
+    setHomeUpdate({ ...homeUpdate, state: "failed", error: "the update did not start; try again" });
+  }
 }
 
 function sendControl(message) {
@@ -1819,6 +1870,7 @@ function buildChildEnv(vaultEnv) {
     RUDDER_DISABLE_ONBOARD_INSTALL: "1",
     RUDDER_CODEX_BIN: process.env.RUDDER_CODEX_BIN || "codex",
     RUDDER_BURST_SOCKET: BURST_SOCKET,
+    RUDDER_HOME_UPDATE_DIR: HOME_UPDATE_DIR,
   };
   // Nothing an agent runs should be able to read the machine's own credentials.
   for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN", "TS_AUTHKEY", "TS_API_KEY", "RUDDER_HOME", "RUDDER_OTEL_TOKEN", "RUDDER_OTEL_ENDPOINT"]) {

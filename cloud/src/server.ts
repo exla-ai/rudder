@@ -5778,78 +5778,139 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       await updateExternalHome(home, now);
       continue;
     }
-    const machineId = home.machineId;
-    if (!flyReady || !machineId) {
+    if (!flyReady) {
       continue;
     }
-    const checked = homeImageChecked.get(home.id);
-    if (checked && now - checked.at < 5 * 60_000 && checked.image === flyWorkerImage) {
-      continue;
+    await updateFlyHome(home, raw, now, true);
+  }
+}
+
+/**
+ * Moves a Fly home onto the current worker image. The sweep (`whenQuiet`)
+ * re-checks the idle rule after the provider read; a user's "update now" from
+ * the home's dashboard skips it. Returns why nothing was sent, or null.
+ */
+async function updateFlyHome(home: Workspace, raw: Record<string, unknown>, now: number, whenQuiet: boolean): Promise<string | null> {
+  const machineId = home.machineId;
+  if (!flyApiToken || !flyAppName || !machineId) {
+    return "Rudder Cloud cannot update this machine right now";
+  }
+  const checked = homeImageChecked.get(home.id);
+  if (whenQuiet && checked && now - checked.at < 5 * 60_000 && checked.image === flyWorkerImage) {
+    return UP_TO_DATE;
+  }
+  // Claim before the first await: a slow provider GET can overlap sweeps.
+  homeUpdateFlights.add(home.id);
+  try {
+    const { image, config } = await homeMachineImage(machineId);
+    homeImageChecked.set(home.id, { at: now, image });
+    if (!config || !image) {
+      return "could not read which version this machine runs";
     }
-    // Claim before the first await: a slow provider GET can overlap sweeps.
-    homeUpdateFlights.add(home.id);
-    try {
-      const { image, config } = await homeMachineImage(machineId);
-      homeImageChecked.set(home.id, { at: now, image });
-      if (!config || !image || image === flyWorkerImage) {
-        continue;
-      }
-      // The home may have become busy or been replaced while the GET waited.
-      const current = findWorkspaceById.get(home.id) as Record<string, unknown> | undefined;
-      const stillQuietSince = Math.max(homeBusyAt.get(home.id) ?? Date.now(), Date.parse(String(current?.last_activity_at ?? "")) || 0);
-      if (!current || current.status === "deleting" || current.machine_id !== machineId
-        || current.worker_token_hash !== raw.worker_token_hash || optionalString(current.worker_token_next_hash)
-        || !isOpen(homeControls.get(home.id)) || homeBusyNow.get(home.id) !== false
-        || Date.now() - stillQuietSince < HOME_IDLE_UPDATE_MS) {
-        continue;
-      }
-      homeUpdating.set(home.id, now);
-      console.log(`[home] ${home.id} idle on ${image}; updating to ${flyWorkerImage}`);
-      // The restart is also the one moment a home can take a new worker token
-      // without cutting off an agent. The new token is accepted alongside the
-      // old one until the home uses it, so a failed or uncertain update cannot
-      // lock the home out.
-      const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
-      setNextWorkerToken.run({ homeId: home.id, nextHash: tokenHash(workerToken), updatedAt: new Date().toISOString() });
-      const env = config.env && typeof config.env === "object" ? config.env as JsonRecord : {};
-      await flyRequest<FlyMachine>(
-        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(machineId)}`,
-        { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken, ...homeTelemetryEnv() } } } },
-      );
-      homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
-    } catch (error) {
-      console.log(`[home] ${home.id} idle update failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      // Release only this local flight. Any attempted POST's pending token
-      // remains in SQLite through failure/uncertainty until authenticated use.
-      homeUpdateFlights.delete(home.id);
+    if (image === flyWorkerImage) {
+      return UP_TO_DATE;
     }
+    // The home may have become busy or been replaced while the GET waited.
+    const current = findWorkspaceById.get(home.id) as Record<string, unknown> | undefined;
+    const stillQuietSince = Math.max(homeBusyAt.get(home.id) ?? Date.now(), Date.parse(String(current?.last_activity_at ?? "")) || 0);
+    if (!current || current.status === "deleting" || current.machine_id !== machineId
+      || current.worker_token_hash !== raw.worker_token_hash || optionalString(current.worker_token_next_hash)
+      || !isOpen(homeControls.get(home.id))
+      || (whenQuiet && (homeBusyNow.get(home.id) !== false || Date.now() - stillQuietSince < HOME_IDLE_UPDATE_MS))) {
+      return "the machine changed while Rudder Cloud checked it; try again";
+    }
+    homeUpdating.set(home.id, now);
+    console.log(`[home] ${home.id} ${whenQuiet ? "idle" : "asked to update"} on ${image}; updating to ${flyWorkerImage}`);
+    // The restart is also the one moment a home can take a new worker token
+    // without cutting off an agent. The new token is accepted alongside the
+    // old one until the home uses it, so a failed or uncertain update cannot
+    // lock the home out.
+    const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+    setNextWorkerToken.run({ homeId: home.id, nextHash: tokenHash(workerToken), updatedAt: new Date().toISOString() });
+    const env = config.env && typeof config.env === "object" ? config.env as JsonRecord : {};
+    await flyRequest<FlyMachine>(
+      `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(machineId)}`,
+      { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken, ...homeTelemetryEnv() } } } },
+    );
+    homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
+    return null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[home] ${home.id} ${whenQuiet ? "idle " : ""}update failed: ${message}`);
+    return message;
+  } finally {
+    // Release only this local flight. Any attempted POST's pending token
+    // remains in SQLite through failure/uncertainty until authenticated use.
+    homeUpdateFlights.delete(home.id);
+  }
+}
+
+const UP_TO_DATE = "this machine already runs the newest Rudder";
+
+// The user pressed U in a dashboard on the home: update now, busy or not. Its
+// agents restart, and their dashboards reopen each one where it was.
+async function updateHomeNow(homeId: string): Promise<void> {
+  const raw = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!raw || raw.status === "deleting") {
+    throw new Error("this machine is being deleted");
+  }
+  if (optionalString(raw.worker_token_next_hash) || homeUpdateFlights.has(homeId)) {
+    throw new Error("an update is already on its way");
+  }
+  const home = rowToWorkspace(raw);
+  const now = Date.now();
+  const failure = home.hostKind === "external"
+    ? await updateExternalHome(home, now, "asked to update")
+    : await updateFlyHome(home, raw, now, false);
+  if (failure) {
+    throw new Error(failure);
+  }
+}
+
+// Tells a connected home what Cloud would move it to, whenever either side of
+// that changes, so its dashboards can offer "update now".
+const homeUpdateOffers = new WeakMap<WebSocket, string>();
+function offerHomeUpdate(homeId: string, ws: WebSocket): void {
+  const current = optionalString(homeStates.get(homeId)?.host?.image) ?? null;
+  const target = flyWorkerImage || null;
+  const key = `${current ?? ""} ${target ?? ""}`;
+  if (homeUpdateOffers.get(ws) === key) {
+    return;
+  }
+  homeUpdateOffers.set(ws, key);
+  try {
+    ws.send(JSON.stringify({ type: "update-available", current, target }));
+  } catch {
+    // the socket closed; the next connection gets its own offer
   }
 }
 
 // An external host pulls and restarts itself (cloud/host/rudder-home-apply-update).
 // The home reports the image it runs, and the update travels over its control
 // socket with the same accepted-alongside replacement token as a Fly update.
-async function updateExternalHome(home: Workspace, now: number): Promise<void> {
+async function updateExternalHome(home: Workspace, now: number, reason = "idle"): Promise<string | null> {
   const reportedImage = optionalString(homeStates.get(home.id)?.host?.image);
   if (!externalHomeNeedsUpdate({ reportedImage, targetImage: flyWorkerImage, pendingNextToken: false })) {
-    return;
+    return reportedImage ? UP_TO_DATE : "this machine has not said which version it runs yet";
   }
   homeUpdateFlights.add(home.id);
   homeUpdating.set(home.id, now);
   const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
   const nextHash = tokenHash(workerToken);
   try {
-    console.log(`[home] ${home.id} idle on ${reportedImage} (external host); updating to ${flyWorkerImage}`);
+    console.log(`[home] ${home.id} ${reason} on ${reportedImage} (external host); updating to ${flyWorkerImage}`);
     setNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
     await homeRpc(home.id, "update", { image: flyWorkerImage, workerToken }, 30_000);
+    return null;
   } catch (error) {
     // A refusal means nothing will ever use the replacement token. An unknown
     // effect (timeout, closed socket) keeps it pending, as a Fly update does.
     if (!(error instanceof HomeRpcEffectUnknownError)) {
       clearNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
     }
-    console.log(`[home] ${home.id} external update failed: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[home] ${home.id} external update failed: ${message}`);
+    return message;
   } finally {
     homeUpdateFlights.delete(home.id);
   }
@@ -6291,6 +6352,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         updatedAt: new Date().toISOString(),
         via: ws,
       });
+      offerHomeUpdate(homeId, ws);
       // "New agents here are private": pin each agent seen for the first time,
       // in the same tick the state lands, so no teammate ever reads it as team.
       let pinned = 0;
@@ -6321,6 +6383,13 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
           }
         }
       }
+      return;
+    }
+    if (type === "update-now") {
+      void updateHomeNow(homeId).then(
+        () => ws.send(JSON.stringify({ type: "update-now-result", ok: true })),
+        (error: unknown) => ws.send(JSON.stringify({ type: "update-now-result", ok: false, error: error instanceof Error ? error.message : String(error) })),
+      ).catch(() => undefined);
       return;
     }
     if (type === "rpc-result") {

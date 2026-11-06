@@ -100,7 +100,7 @@ export const PARALLEL_WORK_RULE =
 // Waiting and reading guidance. Mirrors the Rust `wait_and_read_rule!` in
 // native/src/tasks.rs; keep the text in parity (PLAN.md section 20).
 export const WAIT_AND_READ_RULE =
-  "Run one quick check for what you changed; add a test only for a real bug or tricky logic, and skip full suites unless asked. Wait on the running command directly in one blocking call (Codex: write_stdin up to 300000 ms when supported), not repeated polls or added sleeps. Give a short progress update for long waits; do not watch CI unless delivery requires it. Check current CPU, memory and container limits before sizing a build; old host sizes are not current capacity. Preserve explicit user budgets and shared build-directory locks. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology.";
+  "Run one quick check for what you changed; add a test only for a real bug or tricky logic, and skip full suites unless asked. Wait on commands directly (Codex: one write_stdin wait up to 300000 ms when supported), without extra sleeps or repeated polls. Size builds from current CPU, memory and container limits; honor explicit budgets and shared build locks. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting unless delivery requires it; no git archaeology.";
 
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles

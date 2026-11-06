@@ -421,6 +421,14 @@ every list row is still one screen row). The 17-row key list collapses to one
 line when the pane cannot fit it and the agents. Below `NARROW_LAYOUT_WIDTH`
 (90 columns) one pane takes the width beside the task bar: the worker, or the
 agent list while it has focus.
+
+**Hiding the worker (⌥h).** ⌥h (or `˙` outside the task composer) toggles
+`worker_hidden` and does nothing else: `split_layout` gives the agent list the
+whole band (an open diff panel keeps the right side), the task line stays, the
+selection stays, and the PTY keeps its last size. Focus moves only off the
+worker (to the agent list) and back on show. A key that focuses the hidden
+worker (⌥2, Enter) shows it; ^W Tab skips it; a scheduler launch that focuses
+it while hidden has focus put back on the tick. There is no full-screen mode.
 - **Agents**: the run list. Grouped: a `main`-branch agent section first, then
   workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
   focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running

@@ -1,6 +1,6 @@
 // ⌥d diff panel, end to end on the REAL binary: a worker writes a file into
 // its jj workspace, the panel opens beside the worker with that file parsed
-// from `jj diff`, scrolls, solos under ⌥h, and closes on Esc.
+// from `jj diff`, takes the worker's place under ⌥h, and closes on Esc.
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -40,16 +40,15 @@ test("⌥d opens a diff panel with the worker's change set and Esc closes it", {
   assert.ok(screen.includes("A DONE.txt"), `an added file is badged A:\n${screen}`);
   assert.ok(screen.includes("╭ claude"), `the worker pane stays beside it:\n${screen}`);
 
-  // ⌥h solos the focused panel: the diff fills the screen, nothing else drawn.
+  // ⌥h hides the worker: the diff takes its place, the header and the rest stay.
   await session.write(ALT_H);
   await session.waitFor(
-    // The header row (wordmark, branch) is only drawn with the split.
-    (s) => s.includes("╭ diff") && !s.includes("\u2387") && !s.includes("╭ claude"),
-    { timeout: 10_000, label: "the diff panel alone on screen" },
+    (s) => s.includes("╭ diff") && s.includes("\u2387") && !s.includes("╭ claude"),
+    { timeout: 10_000, label: "the diff panel in the worker's place" },
   );
   await session.write(ALT_H);
-  await session.waitForText("\u2387", { timeout: 10_000 });
-  assert.ok((await session.screen()).includes("╭ diff"), "the split comes back with the panel");
+  await session.waitForText("╭ claude", { timeout: 10_000 });
+  assert.ok((await session.screen()).includes("╭ diff"), "the worker comes back beside the panel");
 
   // Esc closes the panel and the worker pane widens again.
   await session.press("Escape");

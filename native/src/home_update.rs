@@ -7,7 +7,7 @@
 use super::*;
 
 pub(crate) const HOME_UPDATE_DIR_ENV: &str = "RUDDER_HOME_UPDATE_DIR";
-/// Alt+r, a dashboard chord like Alt+h full screen. `U` opens usage and
+/// Alt+r, a dashboard chord like Alt+h (hide the worker). `U` opens usage and
 /// Alt+u scrolls the worker.
 pub(crate) const HOME_UPDATE_ALT_KEY: char = 'r';
 /// What Option+r types on a US Mac layout when the terminal keeps the

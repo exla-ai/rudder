@@ -7,12 +7,6 @@ use crate::plan_stream::{PlanEntry, PlanEntryKind};
 pub(crate) const NARROW_LAYOUT_WIDTH: u16 = 90;
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
-    render_at(frame, app, Instant::now());
-}
-
-/// `render` at a given moment. Only the full-screen move reads it; tests pass
-/// a pinned clock to draw any frame of that move.
-pub(crate) fn render_at(frame: &mut Frame<'_>, app: &mut App, now: Instant) {
     refresh_palette();
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -34,40 +28,6 @@ pub(crate) fn render_at(frame: &mut Frame<'_>, app: &mut App, now: Instant) {
     }
 
     let task_height = task_pane_height(app, area.width);
-
-    // ⌥h MID-MOVE: the panes are on their way into or out of full screen.
-    if let Some((pane, fullness)) = solo_transition_at(app, now) {
-        render_solo_transition(frame, area, task_height, app, pane, fullness);
-        return;
-    }
-
-    // SOLO: the worker (or the open diff panel) takes the whole screen and the
-    // others are not drawn.
-    if app.solo_pane {
-        // FULL SCREEN: no sidebar, no task line, no gutters. The agent list and the
-        // task line are never shown alone; toggle_solo_pane moves focus off them
-        // so keystrokes still land somewhere you can see, and ⌥h restores both the
-        // split and the focus you had.
-        let solo = app.solo_shown_pane();
-        // Areas the hit-testing and scroll code read: a hidden pane gets NONE, so a
-        // stale rect cannot take a click meant for the pane that is actually drawn.
-        app.agents_area = None;
-        app.worker_area = (solo == FocusPane::Worker).then_some(area);
-        app.diff_area = (solo == FocusPane::Diff).then_some(area);
-        app.task_area = None;
-        if solo == FocusPane::Diff {
-            render_diff_panel(frame, area, app);
-        } else {
-            render_worker(frame, area, app);
-        }
-        render_cloud_prompt(frame, area, app);
-        render_merge_prompt(frame, area, app);
-        render_notice_pill(frame, area, app);
-        render_keys_overlay(frame, area, app);
-        render_mouse_debug(frame, area, app);
-        return;
-    }
-
     let layout = split_layout(app, area, task_height);
     app.task_area = Some(layout.task);
     app.agents_area = layout.agents;
@@ -102,8 +62,7 @@ pub(crate) fn render_at(frame: &mut Frame<'_>, app: &mut App, now: Instant) {
 }
 
 /// Where each part of the split dashboard goes. A pane that is not drawn is
-/// None. Pure, so the full-screen move can lay out the split it moves from or
-/// to without drawing it.
+/// None.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SplitLayout {
     pub(crate) header: Rect,
@@ -146,15 +105,25 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
     // Narrow (zoomed in, a split, a small window): a 34-column sidebar next to
     // the worker leaves neither readable, so one of them takes the width. The
     // worker normally; the agent list while it has focus (Option-1 / ^W 1).
-    // The same rule the diff panel follows below.
+    // The same rule the diff panel follows below. A worker hidden with ⌥h
+    // leaves the width to the agent list.
     if area.width < NARROW_LAYOUT_WIDTH {
         if app.focus == FocusPane::Agents {
             layout.agents = Some(layout.content);
         } else if app.diff_panel.open && app.focus == FocusPane::Diff {
             layout.diff = Some(layout.content);
+        } else if app.worker_hidden {
+            layout.agents = Some(layout.content);
         } else {
             layout.worker = Some(layout.content);
         }
+        return layout;
+    }
+
+    // ⌥h hid the worker and no diff panel is open: the agent list takes the
+    // whole band.
+    if app.worker_hidden && !app.diff_panel.open {
+        layout.agents = Some(layout.content);
         return layout;
     }
 
@@ -170,9 +139,9 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
     layout.agents_gutter = Some(main[1]);
     if app.diff_panel.open {
         // The diff panel sits beside the worker when there is room for both;
-        // on a narrow screen it takes the worker's place (⌥d brings the
-        // conversation back), never a squeezed pair that nobody can read.
-        if main[2].width >= 100 {
+        // on a narrow screen, or with the worker hidden (⌥h), it takes the
+        // worker's place, never a squeezed pair that nobody can read.
+        if main[2].width >= 100 && !app.worker_hidden {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -191,98 +160,6 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
         layout.worker = Some(main[2]);
     }
     layout
-}
-
-/// One frame of the ⌥h move. The split is drawn as it stands, minus the moving
-/// pane; the moving pane is drawn on top at a rect between its slot in the
-/// split and the whole screen. Going full screen it grows over the agent list,
-/// the task line and the header and footer rows; coming back it shrinks and
-/// uncovers them.
-///
-/// The moving pane lays its content out for its slot (`transition_slot`), the
-/// smaller of its two sizes, so the text inside never rewraps and the agent's
-/// PTY is not resized frame by frame: it takes its new size once.
-fn render_solo_transition(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    task_height: u16,
-    app: &mut App,
-    pane: FocusPane,
-    fullness: f32,
-) {
-    let leaving = !app.solo_pane;
-    let layout = split_layout(app, area, task_height);
-    let slot = match pane {
-        FocusPane::Diff => layout.diff.or(layout.worker),
-        _ => layout.worker.or(layout.diff),
-    }
-    .unwrap_or(layout.content);
-    let moving = lerp_rect(slot, area, fullness);
-
-    // The worker's title repeats the task when the agent list is not beside it;
-    // it reads as it will once the move lands.
-    app.agents_area = if leaving { layout.agents } else { None };
-    render_header(frame, layout.header, app);
-    if let Some(rect) = layout.agents {
-        render_agents(frame, rect, app);
-    }
-    if let Some(rect) = layout.agents_gutter {
-        render_gutter(frame, rect, Gutter::Vertical);
-    }
-    if let Some(rect) = layout.worker.filter(|_| pane != FocusPane::Worker) {
-        render_worker(frame, rect, app);
-    }
-    if let Some(rect) = layout.diff_gutter {
-        render_gutter(frame, rect, Gutter::Vertical);
-    }
-    if let Some(rect) = layout.diff.filter(|_| pane != FocusPane::Diff) {
-        render_diff_panel(frame, rect, app);
-    }
-    render_footer(frame, layout.footer, app);
-    // The prompt's cursor shows only once the moving pane is off the prompt.
-    render_task_with_cursor(frame, layout.task, app, !moving.intersects(layout.task));
-    render_suggestions(frame, layout.task, app);
-
-    frame.render_widget(Clear, moving);
-    frame.render_widget(Block::default().style(app_style()), moving);
-    app.transition_slot = Some(slot);
-    if pane == FocusPane::Diff {
-        render_diff_panel(frame, moving, app);
-    } else {
-        render_worker(frame, moving, app);
-    }
-    app.transition_slot = None;
-
-    // Only the moving pane takes clicks while it moves: the panes under it are
-    // partly covered, and a rect for one of them would take clicks meant for it.
-    app.agents_area = None;
-    app.task_area = None;
-    app.worker_area = (pane != FocusPane::Diff).then_some(moving);
-    app.diff_area = (pane == FocusPane::Diff).then_some(moving);
-
-    // The notice rides between where each resting layout puts it.
-    render_notice_pill(frame, lerp_rect(layout.content, area, fullness), app);
-    render_cloud_prompt(frame, area, app);
-    render_merge_prompt(frame, area, app);
-    render_keys_overlay(frame, area, app);
-    render_mouse_debug(frame, area, app);
-    if leaving {
-        render_perf_hud(frame, area, app);
-    }
-}
-
-/// The rect `amount` of the way from `from` to `to`, each edge rounded to a
-/// whole cell: 0 is `from`, 1 is `to`.
-pub(crate) fn lerp_rect(from: Rect, to: Rect, amount: f32) -> Rect {
-    let amount = amount.clamp(0.0, 1.0);
-    let mix = |a: u16, b: u16| {
-        (f32::from(a) + (f32::from(b) - f32::from(a)) * amount).round() as u16
-    };
-    let left = mix(from.left(), to.left());
-    let top = mix(from.top(), to.top());
-    let right = mix(from.right(), to.right()).max(left);
-    let bottom = mix(from.bottom(), to.bottom()).max(top);
-    Rect::new(left, top, right - left, bottom - top)
 }
 
 /// `/Users/me/code/x` as `~/code/x`: the sidebar is narrow and the home
@@ -3661,10 +3538,7 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
         );
         return;
     }
-    let fit = app
-        .transition_slot
-        .map_or(term_inner, |slot| block_inner(interactive_orchestrator_areas(slot).1));
-    if let Ok(size) = TerminalSize::new(fit.height.max(1), fit.width.max(1)) {
+    if let Ok(size) = TerminalSize::new(term_inner.height.max(1), term_inner.width.max(1)) {
         app.fit_pane(app.selected_agent, size);
     }
     let lines = worker_lines(app, term_inner.height as usize, term_inner.width as usize);
@@ -3869,10 +3743,7 @@ pub(crate) fn render_drawer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
 pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let inner = block_inner(area);
-    // Mid-move (⌥h) the pane is drawn bigger than the slot it is laid out for;
-    // the agent keeps the slot's size until the move lands.
-    let fit = block_inner(app.transition_slot.unwrap_or(area));
-    let terminal_size = TerminalSize::new(fit.height.max(1), fit.width.max(1)).ok();
+    let terminal_size = TerminalSize::new(inner.height.max(1), inner.width.max(1)).ok();
     let focused = app.focus == FocusPane::Worker;
 
     // The selected orchestrator gets the custom DAG command-center view ONLY once
@@ -3936,7 +3807,7 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // the mapping from the agents-pane highlight.
     // The title is what runs in the pane: backend, model and the run's key.
     // The task itself is on the selected card; only when the card list is
-    // hidden (narrow or solo) does the title repeat it.
+    // hidden (narrow screens) does the title repeat it.
     let sidebar_visible = app.agents_area.is_some();
     let identity = app.agents.get(app.selected_agent).map(|run| {
         let id = worker_title_id(app, run);
@@ -4252,11 +4123,7 @@ pub(crate) fn render_diff_panel(frame: &mut Frame<'_>, area: Rect, app: &mut App
         }
     };
     let viewport = inner.height as usize;
-    // Mid-move (⌥h) the lines keep the width of the slot the panel moves from
-    // or to, so they are not rewrapped on every frame.
-    let wrap_width = app
-        .transition_slot
-        .map_or(inner.width, |slot| block_inner(slot).width.min(inner.width));
+    let wrap_width = inner.width;
     let lines: Vec<Line<'static>> = match app.agents.get(app.selected_agent) {
         Some(run) => {
             let run_ref: &AgentRun = run;
@@ -4855,18 +4722,14 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
         render_gam_transcript(frame, strip, app, generator_index);
     }
     let (left, right) = gam_split_halves(panes);
-    // Mid-move (⌥h) each half keeps the size it has in the slot it moves from or to.
-    let (fit_left, fit_right) = app.transition_slot.map_or((left, right), |slot| {
-        gam_split_halves(gam_split_rows(slot, app, generator_index).0)
-    });
-    for (half, fit_half, index, role_label) in [
-        (left, fit_left, generator_index, "gen"),
-        (right, fit_right, adversarial_index, "adv"),
+    for (half, index, role_label) in [
+        (left, generator_index, "gen"),
+        (right, adversarial_index, "adv"),
     ] {
         // The PTY gets the half's INSIDE: sized to the outer rect, every full-width
         // line of agent output was two columns too wide and wrapped its tail onto
         // a line of its own.
-        let half_inner_size = block_inner(fit_half);
+        let half_inner_size = block_inner(half);
         let size = TerminalSize::new(half_inner_size.height.max(1), half_inner_size.width.max(1)).ok();
         if let Some(size) = size {
             app.fit_pane(index, size);
@@ -5368,12 +5231,6 @@ fn task_placeholder(app: &App) -> &'static str {
 }
 
 pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    render_task_with_cursor(frame, area, app, true);
-}
-
-/// The task line; `cursor` false keeps the terminal cursor off it (while the
-/// full-screen move draws a pane over it).
-fn render_task_with_cursor(frame: &mut Frame<'_>, area: Rect, app: &App, cursor: bool) {
     let focused = app.focus == FocusPane::Task;
     let p = pal();
     let text = task_text_rect(area);
@@ -5472,7 +5329,7 @@ fn render_task_with_cursor(frame: &mut Frame<'_>, area: Rect, app: &App, cursor:
         );
     }
 
-    if cursor && app.focus == FocusPane::Task {
+    if app.focus == FocusPane::Task {
         let visible_cursor_line = cursor_line.saturating_sub(input_start);
         let x = text.x + cursor_column as u16;
         let y = text.y + visible_cursor_line as u16;
@@ -6979,7 +6836,7 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("\u{2325}1", "agents"),
             ("\u{2325}3", "prompt"),
             ("\u{2325}d", "diff"),
-            ("\u{2325}h", "full screen"),
+            ("\u{2325}h", "hide"),
             ("^W", "pane keys"),
         ],
         FocusPane::Diff => vec![
@@ -7211,7 +7068,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("\u{2325}[ ]", "previous, next agent"),
             ("\u{2325}j k", "scroll"),
             ("\u{2325}v b", "previous, next message"),
-            ("\u{2325}h", "hide panes"),
+            ("\u{2325}h", "hide or show worker"),
             ("\u{2325}d", "diff"),
             ("\u{2325}g", "god's view"),
             ("esc", "dismiss notice"),
@@ -7440,105 +7297,6 @@ pub(crate) fn motion_pending(app: &App, now: Instant) -> bool {
             .card_flashes
             .values()
             .any(|(at, _)| now.duration_since(*at) < tail)
-}
-
-/// One step of the ⌥h move: about 30 fps, the App loop's own 33ms tick, so the
-/// move needs no extra wakeups. The panes only move on this grid, so a frame
-/// drawn between steps for another reason (agent output) shows the same rects
-/// and sends no more than that output would (this matters over Rudder Cloud).
-/// A step repaints the moving pane; 60 fps would double those bytes for
-/// little gain, since motion is in whole cells anyway.
-pub(crate) const SOLO_STEP: Duration = Duration::from_millis(33);
-/// Steps in a whole move, split to full screen or back: about 200ms. A move
-/// reversed part way takes its share.
-pub(crate) const SOLO_STEPS: u32 = 7;
-
-/// The ⌥h move between the split and full screen. `solo_pane` and focus flip
-/// at once so keys go where they will land; only the drawing moves.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SoloTransition {
-    pub(crate) started: Instant,
-    /// How full screen the panes were drawn when the move began: 0 is the
-    /// split, 1 is full screen. A reversal starts from where they were.
-    pub(crate) from: f32,
-    /// Heading to full screen (true) or back to the split.
-    pub(crate) entering: bool,
-    /// The pane that shrinks when leaving full screen: the worker or the diff.
-    /// Entering, the pane is whatever full screen will show.
-    pub(crate) pane: FocusPane,
-    /// The step the App loop last asked a frame for.
-    pub(crate) step_shown: u32,
-}
-
-impl SoloTransition {
-    fn target(&self) -> f32 {
-        if self.entering {
-            1.0
-        } else {
-            0.0
-        }
-    }
-
-    /// Steps this move takes; 1 means there is nothing to animate.
-    pub(crate) fn steps(&self) -> u32 {
-        ((self.target() - self.from).abs() * SOLO_STEPS as f32).round().max(1.0) as u32
-    }
-
-    /// The step on screen at `now`, or None once the move has landed: the last
-    /// step is the resting layout itself, drawn by the normal path.
-    pub(crate) fn step_at(&self, now: Instant) -> Option<u32> {
-        let elapsed = now.saturating_duration_since(self.started).as_millis();
-        let step = u32::try_from(elapsed / SOLO_STEP.as_millis()).unwrap_or(u32::MAX);
-        (step.saturating_add(1) < self.steps()).then_some(step)
-    }
-
-    /// How full screen the panes are on `step`, eased out: quick to start,
-    /// settling gently. The first frame already moves.
-    pub(crate) fn fullness(&self, step: u32) -> f32 {
-        let progress = (step.saturating_add(1) as f32 / self.steps() as f32).min(1.0);
-        let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
-        self.from + (self.target() - self.from) * eased
-    }
-}
-
-/// The ⌥h move to draw at `now`: which pane moves and how full screen it is.
-/// None when nothing is moving, including once the move has landed.
-pub(crate) fn solo_transition_at(app: &App, now: Instant) -> Option<(FocusPane, f32)> {
-    let transition = app.solo_transition?;
-    if transition.entering != app.solo_pane {
-        return None;
-    }
-    let fullness = transition.fullness(transition.step_at(now)?);
-    let pane = if app.solo_pane {
-        app.solo_shown_pane()
-    } else {
-        transition.pane
-    };
-    let pane = if pane == FocusPane::Diff && !app.diff_panel.open {
-        FocusPane::Worker
-    } else {
-        pane
-    };
-    Some((pane, fullness))
-}
-
-/// Move a view's ⌥h transition along. True when it needs a frame: a new step,
-/// or the landing frame (the transition is then cleared).
-pub(crate) fn step_solo_transition(slot: &mut Option<SoloTransition>, now: Instant) -> bool {
-    let Some(transition) = slot.as_mut() else {
-        return false;
-    };
-    match transition.step_at(now) {
-        None => {
-            *slot = None;
-            true
-        }
-        Some(step) if step != transition.step_shown => {
-            transition.step_shown = step;
-            true
-        }
-        Some(_) => false,
-    }
 }
 
 /// `text` with a bright band sweeping left to right across it, one step per

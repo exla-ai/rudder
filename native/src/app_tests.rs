@@ -20016,98 +20016,83 @@ fn a_branch_switch_invalidates_the_cached_branch() {
 }
 
 #[test]
-fn solo_hides_the_other_panes_and_toggles_back() {
-    let mut app = App::new();
-    assert!(!app.solo_pane, "the split is the default");
-
-    app.focus = FocusPane::Worker;
-    app.toggle_solo_pane();
-    assert!(app.solo_pane);
-    assert!(
-        app.notice.as_deref().unwrap_or_default().contains("⌥h"),
-        "the notice says how to get back: {:?}",
-        app.notice
-    );
-    assert_eq!(app.focus, FocusPane::Worker);
-
-    app.toggle_solo_pane();
-    assert!(!app.solo_pane);
-    assert_eq!(app.focus, FocusPane::Worker);
-
-    // From the TASK pane, focus has to move: the task line is not drawn in full
-    // screen, so keys typed at it would land in an input the user cannot see.
-    app.focus = FocusPane::Task;
-    app.toggle_solo_pane();
-    assert_eq!(
-        app.focus,
-        FocusPane::Worker,
-        "focus leaves the hidden task line"
-    );
-    app.toggle_solo_pane();
-    assert_eq!(
-        app.focus,
-        FocusPane::Task,
-        "and comes back when the panes do"
-    );
-
-    // The agent list is never shown alone either: full screen is the worker.
-    app.focus = FocusPane::Agents;
-    app.toggle_solo_pane();
-    assert_eq!(app.focus, FocusPane::Worker, "focus leaves the hidden agent list");
-    app.toggle_solo_pane();
-    assert_eq!(app.focus, FocusPane::Agents, "and comes back with the split");
-}
-
-#[test]
-fn solo_leaves_no_stale_rect_for_the_hidden_pane() {
-    // agents_area/worker_area are what mouse hit-testing and scroll routing read.
-    // A rect left behind for a pane that is no longer drawn would take clicks meant
-    // for the soloed pane.
-    let mut app = App::new();
-    app.solo_pane = true;
-    app.focus = FocusPane::Worker;
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut app))
-        .expect("draw");
-    assert!(app.worker_area.is_some(), "the soloed pane owns a rect");
-    assert!(app.agents_area.is_none(), "the hidden pane owns none");
-    // The task line is hidden too, so it must not keep a rect that would take
-    // clicks over the full-screen pane now drawn where it used to be.
-    assert!(app.task_area.is_none(), "the hidden task line owns none");
-
-    // Focus on the agent list still draws the worker: the list never takes the
-    // whole screen.
-    app.focus = FocusPane::Agents;
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut app))
-        .expect("draw");
-    assert!(app.agents_area.is_none());
-    assert!(app.worker_area.is_some());
-}
-
-#[test]
-fn moving_focus_to_a_hidden_pane_brings_the_split_back() {
-    // In full screen only the worker (or the open diff) is drawn. ⌥1 and ⌥3 ask
-    // for the agent list and the task line, so the split returns with focus
-    // there instead of keys landing in a pane nobody can see.
-    for (key, pane) in [('1', FocusPane::Agents), ('3', FocusPane::Task)] {
+fn alt_h_hides_only_the_worker_and_the_agent_list_takes_its_space() {
+    // Wide and narrow (the 90-column single-pane rule).
+    for (width, height) in [(160_u16, 30_u16), (80, 30)] {
         let mut app = App::new();
-        app.focus = FocusPane::Worker;
-        app.handle_key(alt('h'));
-        assert!(app.solo_pane);
+        app.agents = vec![test_agent_run("a", "first")];
+        app.focus = FocusPane::Task;
+        render_screen(&mut app, width, height);
+        let before = (app.agents_area, app.worker_area, app.task_area);
+        assert!(app.worker_area.is_some());
 
-        app.handle_key(alt(key));
-        assert!(!app.solo_pane, "⌥{key} restores the split");
-        assert_eq!(app.focus, pane);
-        let screen = render_screen(&mut app, 120, 30);
-        assert!(app.agents_area.is_some() && app.worker_area.is_some(), "{screen}");
+        app.handle_key(alt('h'));
+        assert!(app.worker_hidden);
+        assert_eq!(app.focus, FocusPane::Task, "the prompt keeps focus");
+        assert!(
+            app.notice.as_deref().unwrap_or_default().contains("⌥h"),
+            "the notice says how to get it back: {:?}",
+            app.notice
+        );
+        let screen = render_screen(&mut app, width, height);
+        assert!(app.worker_area.is_none(), "{width}: {screen}");
+        assert_eq!(app.task_area, before.2, "{width}: the task line stays");
+        let list = app.agents_area.expect("the agent list stays");
+        assert_eq!(list.width, width, "{width}: and takes the whole width");
+
+        app.handle_key(alt('h'));
+        assert!(!app.worker_hidden);
+        render_screen(&mut app, width, height);
+        assert_eq!(
+            (app.agents_area, app.worker_area, app.task_area),
+            before,
+            "{width}: back exactly as it was"
+        );
     }
 }
 
 #[test]
-fn alt_h_hides_the_panes_and_stepping_is_brackets_only() {
+fn alt_h_moves_focus_only_off_the_worker_and_back() {
+    let mut app = App::new();
+    app.focus = FocusPane::Worker;
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Agents, "focus leaves the hidden worker");
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Worker, "and comes back with it");
+
+    // Focus anywhere else is left alone both ways.
+    app.focus = FocusPane::Agents;
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Agents);
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Agents);
+}
+
+#[test]
+fn focusing_the_hidden_worker_shows_it_and_the_pane_cycle_skips_it() {
+    let mut app = App::new();
+    app.focus = FocusPane::Agents;
+    app.handle_key(alt('h'));
+    app.cycle_focus(true);
+    assert_eq!(app.focus, FocusPane::Task, "^W Tab steps over the hidden worker");
+    app.cycle_focus(false);
+    assert_eq!(app.focus, FocusPane::Agents);
+
+    // A scheduler launch focusing the worker does not bring it back, and the
+    // next key goes where it went before, not to a terminal nobody can see.
+    app.focus = FocusPane::Worker;
+    app.settle_hidden_worker_focus(FocusPane::Task);
+    assert!(app.worker_hidden);
+    assert_eq!(app.focus, FocusPane::Task);
+
+    // ⌥2 asks for the worker, so it comes back.
+    app.handle_key(alt('2'));
+    assert!(!app.worker_hidden);
+    assert_eq!(app.focus, FocusPane::Worker);
+}
+
+#[test]
+fn alt_h_hides_the_worker_and_stepping_is_brackets_only() {
     // Alt+h used to be an ALIAS for the agent stepper; the real binding is
     // Alt+[ / Alt+], which is why spending the alias on hiding costs nothing.
     let mut app = App::new();
@@ -20116,20 +20101,20 @@ fn alt_h_hides_the_panes_and_stepping_is_brackets_only() {
     app.selected_agent = 1;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(app.solo_pane, "Alt+h hides the other panes");
-    assert_eq!(app.focus, FocusPane::Worker, "the worker has the screen");
+    assert!(app.worker_hidden, "Alt+h hides the worker");
+    assert_eq!(app.focus, FocusPane::Agents, "focus stays on the list");
     assert_eq!(app.selected_agent, 1, "and does not move the selection");
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(!app.solo_pane, "Alt+h again restores the split");
-    assert_eq!(app.focus, FocusPane::Agents, "with focus back on the list");
+    assert!(!app.worker_hidden, "Alt+h again shows it");
+    assert_eq!(app.focus, FocusPane::Agents);
 
-    // Stepping is Alt+[ / Alt+] only — the letter aliases are gone.
+    // Stepping is Alt+[ / Alt+] only; the letter aliases are gone.
     app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT));
     assert_eq!(app.selected_agent, 0, "Alt+[ steps back");
     app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
     assert_eq!(app.selected_agent, 1, "Alt+] steps forward");
-    assert!(!app.solo_pane, "stepping never toggles the hide");
+    assert!(!app.worker_hidden, "stepping never toggles the hide");
 
     // Alt+l no longer steps: it is free again.
     app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
@@ -23390,28 +23375,27 @@ fn cloud_worker_is_connected_without_exposing_worker_token_to_dashboard() {
 }
 
 #[test]
-fn alt_h_hides_panes_from_the_task_pane_too() {
+fn alt_h_hides_the_worker_from_the_task_pane_too() {
     let mut app = App::new();
     app.focus = FocusPane::Task;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
     assert!(
-        app.solo_pane,
+        app.worker_hidden,
         "Option+h works at the cloud dashboard's initial task focus"
     );
-    assert_eq!(
-        app.focus,
-        FocusPane::Worker,
-        "hidden task input cannot retain focus"
-    );
+    assert_eq!(app.focus, FocusPane::Task, "the task input stays and keeps focus");
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(!app.solo_pane);
-    assert_eq!(
-        app.focus,
-        FocusPane::Task,
-        "restoring panes restores task focus"
-    );
+    assert!(!app.worker_hidden);
+    assert_eq!(app.focus, FocusPane::Task);
+
+    // Option+h typed as ˙ is only a character in the composer; elsewhere it hides.
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{02d9}'), KeyModifiers::NONE));
+    assert!(!app.worker_hidden && app.task_input.contains('\u{02d9}'));
+    app.focus = FocusPane::Agents;
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{02d9}'), KeyModifiers::NONE));
+    assert!(app.worker_hidden);
 }
 
 // --- Desktop notifications (notify.rs) -------------------------------------
@@ -24952,415 +24936,39 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
 }
 
 #[test]
-fn soloing_with_the_diff_panel_focused_shows_only_the_diff_and_alt_h_restores() {
+fn alt_h_with_the_diff_open_gives_the_worker_slot_to_the_diff() {
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
-    let mut run = test_agent_run("diff-solo", "tighten the parser");
+    let mut run = test_agent_run("diff-hide", "tighten the parser");
     run.cwd = app.cwd.clone();
     app.agents.push(run);
     app.selected_agent = 0;
     app.focus = FocusPane::Worker;
     app.handle_key(alt('d'));
-    app.diff_panel.apply(
-        "diff-solo",
-        Ok((
-            SAMPLE_DIFF.to_string(),
-            crate::diffview::DiffSource::Jj,
-            false,
-        )),
-    );
+    render_screen(&mut app, 200, 30);
+    let (agents, diff) = (app.agents_area, app.diff_area);
+    assert!(app.worker_area.is_some() && diff.is_some());
 
+    // Focus on the diff stays there; the diff takes the worker's place.
     app.handle_key(alt('h'));
-    assert!(app.solo_pane);
-    let solo = render_screen(&mut app, 160, 30);
-    assert!(solo.contains("╭ diff"), "{solo}");
-    assert!(app.agents_area.is_none() && app.worker_area.is_none());
-    assert_eq!(app.diff_area.map(|a| a.width), Some(160), "full width");
-
-    app.handle_key(alt('h'));
-    assert!(!app.solo_pane);
-    let back = render_screen(&mut app, 160, 30);
-    assert!(
-        back.contains("╭ diff"),
-        "panel comes back with the split: {back}"
-    );
-    assert!(app.agents_area.is_some() && app.worker_area.is_some() && app.diff_area.is_some());
-}
-
-fn diff_solo_app(id: &str) -> App {
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    let mut run = test_agent_run(id, "tighten the parser");
-    run.cwd = app.cwd.clone();
-    app.agents.push(run);
-    app.selected_agent = 0;
-    app.focus = FocusPane::Worker;
-    app
-}
-
-#[test]
-fn closing_the_diff_in_full_screen_leaves_the_worker_full_screen() {
-    let mut app = diff_solo_app("diff-close-solo");
-    app.handle_key(alt('d'));
-    app.handle_key(alt('h'));
-    assert!(app.solo_pane && app.focus == FocusPane::Diff);
-
-    // ⌥d closes the panel; the worker takes the screen and the focus.
-    app.handle_key(alt('d'));
-    assert!(app.solo_pane, "closing the diff does not leave full screen");
-    assert_eq!(app.focus, FocusPane::Worker);
-    render_screen(&mut app, 120, 30);
-    assert!(app.worker_area.is_some() && app.diff_area.is_none() && app.agents_area.is_none());
-
-    app.handle_key(alt('h'));
-    assert!(!app.solo_pane);
-    assert_eq!(app.focus, FocusPane::Worker);
-}
-
-#[test]
-fn opening_the_diff_in_full_screen_shows_it_and_alt_h_restores_the_old_focus() {
-    let mut app = diff_solo_app("diff-open-solo");
-    app.focus = FocusPane::Agents;
-    app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Worker);
-
-    app.handle_key(alt('d'));
-    assert!(app.solo_pane, "⌥d keeps full screen");
     assert_eq!(app.focus, FocusPane::Diff);
-    render_screen(&mut app, 120, 30);
-    assert!(app.diff_area.is_some() && app.worker_area.is_none());
+    render_screen(&mut app, 200, 30);
+    assert!(app.worker_area.is_none());
+    assert_eq!(app.agents_area, agents, "the agent list keeps its place");
+    assert!(app.diff_area.unwrap().width > diff.unwrap().width);
 
-    app.handle_key(alt('h'));
-    assert!(!app.solo_pane);
-    assert_eq!(app.focus, FocusPane::Agents, "focus from before full screen");
-    assert!(app.diff_panel.open, "the panel stays open beside the worker");
-}
-
-#[test]
-fn full_screen_never_restores_focus_to_a_closed_diff_panel() {
-    let mut app = diff_solo_app("diff-stale-focus");
-    // A focus left on the diff after it closed is not a pane to solo or return to.
-    app.focus = FocusPane::Diff;
-    assert!(!app.diff_panel.open);
-    app.toggle_solo_pane();
-    assert_eq!(app.focus, FocusPane::Worker);
-    app.toggle_solo_pane();
-    assert_eq!(app.focus, FocusPane::Worker, "not the closed diff");
-}
-
-/// The dashboard drawn at a pinned moment (render.rs `render_at`), so any
-/// frame of the ⌥h move can be drawn without sleeping.
-fn render_buffer_at(
-    app: &mut App,
-    width: u16,
-    height: u16,
-    now: Instant,
-) -> ratatui::buffer::Buffer {
-    let backend = ratatui::backend::TestBackend::new(width, height);
-    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
-    terminal
-        .draw(|frame| crate::render::render_at(frame, app, now))
-        .expect("draw");
-    terminal.backend().buffer().clone()
-}
-
-/// A dashboard with one agent and focus on its worker. `motion` is what a real
-/// terminal session turns on.
-fn solo_move_app(motion: bool) -> App {
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    let mut run = test_agent_run("solo-move", "tighten the parser");
-    run.cwd = app.cwd.clone();
-    app.agents.push(run);
-    app.selected_agent = 0;
-    app.focus = FocusPane::Worker;
-    app.motion = motion;
-    app
-}
-
-/// A moment inside `step` of a move: steps change on a 33ms grid.
-fn solo_step_time(transition: SoloTransition, step: u32) -> Instant {
-    transition.started + SOLO_STEP * step + Duration::from_millis(3)
-}
-
-/// The pane's rounded corners sit exactly on `rect`: what is drawn is where
-/// the hit rect says.
-fn assert_pane_corners(buffer: &ratatui::buffer::Buffer, rect: Rect, what: &str) {
-    let symbol = |x: u16, y: u16| buffer.cell((x, y)).map(|cell| cell.symbol().to_string());
-    let (left, top, right, bottom) = (rect.left(), rect.top(), rect.right() - 1, rect.bottom() - 1);
-    assert_eq!(symbol(left, top).as_deref(), Some("╭"), "{what}: top left of {rect:?}");
-    assert_eq!(symbol(right, top).as_deref(), Some("╮"), "{what}: top right of {rect:?}");
-    assert_eq!(symbol(left, bottom).as_deref(), Some("╰"), "{what}: bottom left of {rect:?}");
-    assert_eq!(symbol(right, bottom).as_deref(), Some("╯"), "{what}: bottom right of {rect:?}");
-}
-
-fn rect_within(inner: Rect, outer: Rect) -> bool {
-    inner.left() >= outer.left()
-        && inner.top() >= outer.top()
-        && inner.right() <= outer.right()
-        && inner.bottom() <= outer.bottom()
-}
-
-#[test]
-fn the_full_screen_move_lands_on_the_frame_an_instant_switch_draws() {
-    // Wide and narrow (the 90-column single-pane rule), both directions: once the
-    // move lands, the screen and every hit rect are exactly what the dashboard
-    // draws with motion off.
-    for (width, height) in [(160_u16, 40_u16), (80, 30)] {
-        let mut moving = solo_move_app(true);
-        let mut still = solo_move_app(false);
-        for app in [&mut moving, &mut still] {
-            render_buffer_at(app, width, height, Instant::now());
-            app.handle_key(alt('h'));
-        }
-        for leg in ["into full screen", "back to the split"] {
-            let transition = moving.solo_transition.expect("motion on: the panes move");
-            assert_eq!(transition.entering, moving.solo_pane);
-            for step in 0..SOLO_STEPS - 1 {
-                render_buffer_at(&mut moving, width, height, solo_step_time(transition, step));
-            }
-            let landed_at = solo_step_time(transition, SOLO_STEPS - 1);
-            assert!(moving.advance_solo_transition(landed_at), "the landing frame is asked for");
-            assert!(moving.solo_transition.is_none(), "and ends the move");
-            let landed = render_buffer_at(&mut moving, width, height, landed_at);
-            let instant = render_buffer_at(&mut still, width, height, Instant::now());
-            assert_eq!(landed, instant, "{width}x{height} {leg}");
-            assert_eq!(
-                (moving.agents_area, moving.worker_area, moving.diff_area, moving.task_area),
-                (still.agents_area, still.worker_area, still.diff_area, still.task_area),
-                "{width}x{height} {leg}: hit rects"
-            );
-            assert_eq!(moving.focus, still.focus);
-            for app in [&mut moving, &mut still] {
-                app.handle_key(alt('h'));
-            }
-        }
-    }
-}
-
-#[test]
-fn mid_move_the_only_hit_rect_is_the_moving_pane_exactly_as_drawn() {
-    let (width, height) = (160_u16, 40_u16);
-    let screen = Rect::new(0, 0, width, height);
-    let mut app = solo_move_app(true);
-    render_buffer_at(&mut app, width, height, Instant::now());
-    let slot = app.worker_area.expect("the split draws the worker");
-
-    app.handle_key(alt('h'));
-    let entering = app.solo_transition.expect("moving");
-    let mut previous = slot;
-    for step in 0..SOLO_STEPS - 1 {
-        let buffer = render_buffer_at(&mut app, width, height, solo_step_time(entering, step));
-        let rect = app.worker_area.expect("the moving worker takes clicks");
-        assert!(
-            app.agents_area.is_none() && app.task_area.is_none() && app.diff_area.is_none(),
-            "step {step}: the half-covered panes take no clicks"
-        );
-        assert!(
-            rect != previous && rect_within(previous, rect),
-            "step {step}: {previous:?} grows to {rect:?}"
-        );
-        assert!(rect != screen && rect_within(rect, screen), "step {step}: still moving");
-        assert_pane_corners(&buffer, rect, &format!("entering step {step}"));
-        previous = rect;
-    }
-
-    app.advance_solo_transition(solo_step_time(entering, SOLO_STEPS));
-    app.handle_key(alt('h'));
-    let leaving = app.solo_transition.expect("moving back");
-    let mut previous = screen;
-    for step in 0..SOLO_STEPS - 1 {
-        let buffer = render_buffer_at(&mut app, width, height, solo_step_time(leaving, step));
-        let rect = app.worker_area.expect("the moving worker takes clicks");
-        assert!(app.agents_area.is_none() && app.task_area.is_none() && app.diff_area.is_none());
-        assert!(
-            rect != previous && rect_within(rect, previous),
-            "step {step}: {previous:?} shrinks to {rect:?}"
-        );
-        assert!(rect != slot && rect_within(slot, rect), "step {step}: still moving");
-        assert_pane_corners(&buffer, rect, &format!("leaving step {step}"));
-        previous = rect;
-    }
-    let landed = render_buffer_at(&mut app, width, height, solo_step_time(leaving, SOLO_STEPS));
-    assert_eq!(app.worker_area, Some(slot), "back in its slot");
-    assert!(app.agents_area.is_some() && app.task_area.is_some());
-    assert_pane_corners(&landed, slot, "landed");
-}
-
-#[test]
-fn a_second_alt_h_mid_move_turns_back_from_where_the_panes_are() {
-    let (width, height) = (160_u16, 40_u16);
-    let screen = Rect::new(0, 0, width, height);
-    let mut app = solo_move_app(true);
-    render_buffer_at(&mut app, width, height, Instant::now());
-    let slot = app.worker_area.expect("split");
-    app.handle_key(alt('h'));
-    // Three steps in when the second ⌥h comes.
-    let mut first = app.solo_transition.expect("moving");
-    first.started = Instant::now() - (SOLO_STEP * 3 + Duration::from_millis(5));
-    app.solo_transition = Some(first);
-
-    app.handle_key(alt('h'));
-    assert!(!app.solo_pane, "state flips at once");
-    let second = app.solo_transition.expect("still moving, the other way");
-    assert!(!second.entering);
-    let turned_at = first.fullness(first.step_at(second.started).expect("mid-move"));
-    assert_eq!(second.from, turned_at, "it starts from the frame on screen");
-    assert!(second.from > 0.0 && second.from < 1.0);
-
-    let where_it_was = crate::render::lerp_rect(slot, screen, turned_at);
-    render_buffer_at(&mut app, width, height, solo_step_time(second, 0));
-    let rect = app.worker_area.expect("moving worker");
-    assert!(
-        rect != where_it_was && rect_within(rect, where_it_was),
-        "one step back from {where_it_was:?}: {rect:?}"
-    );
-    assert!(rect != slot && rect_within(slot, rect), "not a jump to the split: {rect:?}");
-
-    render_buffer_at(&mut app, width, height, solo_step_time(second, second.steps()));
-    assert_eq!(app.worker_area, Some(slot), "lands on the split");
-}
-
-#[test]
-fn with_motion_off_alt_h_switches_at_once() {
-    let mut app = solo_move_app(false);
-    render_screen(&mut app, 160, 40);
-    app.handle_key(alt('h'));
-    assert!(app.solo_pane && app.solo_transition.is_none(), "no move without motion");
-    assert!(!app.advance_solo_transition(Instant::now()), "and no frames for one");
-    render_screen(&mut app, 160, 40);
-    assert_eq!(app.worker_area, Some(Rect::new(0, 0, 160, 40)), "full screen on the first frame");
-    app.handle_key(alt('h'));
-    assert!(!app.solo_pane && app.solo_transition.is_none());
-    render_screen(&mut app, 160, 40);
-    assert!(app.agents_area.is_some() && app.task_area.is_some());
-
-    // Focus moving to a hidden pane brings the split back, moving when motion is on.
-    let mut app = solo_move_app(true);
-    render_screen(&mut app, 160, 40);
-    app.handle_key(alt('h'));
-    app.solo_transition = None;
-    render_screen(&mut app, 160, 40);
-    app.handle_key(alt('1'));
-    assert!(!app.solo_pane && app.focus == FocusPane::Agents);
-    let back = app.solo_transition.expect("the split comes back moving");
-    assert!(!back.entering && back.from == 1.0 && back.pane == FocusPane::Worker);
-}
-
-#[test]
-fn the_move_asks_for_one_frame_per_step_and_one_to_land() {
-    let mut app = solo_move_app(true);
-    app.handle_key(alt('h'));
-    let transition = app.solo_transition.expect("moving");
-    app.dirty = false;
-    assert!(!app.advance_solo_transition(transition.started), "the key's own frame is step 0");
-    for step in 1..SOLO_STEPS - 1 {
-        assert!(app.advance_solo_transition(solo_step_time(transition, step)), "step {step}");
-        assert!(app.take_dirty());
-        let later_in_step = solo_step_time(transition, step) + Duration::from_millis(20);
-        assert!(
-            !app.advance_solo_transition(later_in_step),
-            "step {step}: nothing new until the next step"
-        );
-    }
-    assert!(app.advance_solo_transition(solo_step_time(transition, SOLO_STEPS - 1)), "landing");
-    assert!(app.solo_transition.is_none());
-    assert!(!app.advance_solo_transition(solo_step_time(transition, SOLO_STEPS + 3)), "then idle");
-}
-
-#[cfg(not(windows))]
-#[test]
-fn the_agent_pty_resizes_once_per_move_not_per_frame() {
-    let (width, height) = (160_u16, 40_u16);
-    let mut app = solo_move_app(true);
-    app.agents.clear();
-    let command = TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 5"]);
-    let pane = TerminalPane::spawn_shell_or_command(
-        Some(command),
-        TerminalPaneOptions {
-            size: TerminalSize { rows: 10, cols: 40 },
-            cwd: Some(app.cwd.clone()),
-            ..Default::default()
-        },
-    )
-    .expect("spawn fake worker PTY");
-    let run = test_agent_run_with_terminal(&app, pane);
-    app.agents.push(run);
-    let pty_size = |app: &App| app.agents[0].terminal.as_ref().expect("live pane").size();
-    let inner_size = |rect: Rect| {
-        let inner = block_inner(rect);
-        TerminalSize { rows: inner.height, cols: inner.width }
-    };
-
-    render_buffer_at(&mut app, width, height, Instant::now());
-    let split = inner_size(app.worker_area.expect("split worker"));
-    assert_eq!(pty_size(&app), split);
-    let full = inner_size(Rect::new(0, 0, width, height));
-
-    // Into full screen: the agent keeps the split size while the pane grows
-    // around it (nothing is clipped or rewrapped), then takes the full size once.
-    app.handle_key(alt('h'));
-    let entering = app.solo_transition.expect("moving");
-    for step in 0..SOLO_STEPS - 1 {
-        render_buffer_at(&mut app, width, height, solo_step_time(entering, step));
-        assert_eq!(pty_size(&app), split, "entering step {step}: no resize mid-move");
-    }
-    render_buffer_at(&mut app, width, height, solo_step_time(entering, SOLO_STEPS));
-    assert_eq!(pty_size(&app), full, "one resize when it lands");
-    app.advance_solo_transition(solo_step_time(entering, SOLO_STEPS));
-
-    // Back to the split: one resize on the first frame, none after.
-    app.handle_key(alt('h'));
-    let leaving = app.solo_transition.expect("moving back");
-    for step in 0..SOLO_STEPS - 1 {
-        render_buffer_at(&mut app, width, height, solo_step_time(leaving, step));
-        assert_eq!(pty_size(&app), split, "leaving step {step}: split size from frame one");
-    }
-    render_buffer_at(&mut app, width, height, solo_step_time(leaving, SOLO_STEPS));
-    assert_eq!(pty_size(&app), split);
-    assert_eq!(app.agents[0].terminal_size, Some(split));
-}
-
-#[test]
-fn the_full_screen_diff_panel_moves_too() {
-    let (width, height) = (160_u16, 30_u16);
-    let screen = Rect::new(0, 0, width, height);
-    let mut app = solo_move_app(true);
-    app.agents[0].id = "diff-move".to_string();
+    // Closing the diff while the worker is hidden leaves it hidden and puts
+    // focus on the agent list, which now has the whole band.
     app.handle_key(alt('d'));
-    app.diff_panel.apply(
-        "diff-move",
-        Ok((SAMPLE_DIFF.to_string(), crate::diffview::DiffSource::Jj, false)),
-    );
-    render_buffer_at(&mut app, width, height, Instant::now());
-    let slot = app.diff_area.expect("the split draws the diff");
+    assert!(app.worker_hidden);
+    assert_eq!(app.focus, FocusPane::Agents);
+    render_screen(&mut app, 200, 30);
+    assert!(app.worker_area.is_none() && app.diff_area.is_none());
+
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Agents, "focus was not taken from the worker");
+    render_screen(&mut app, 200, 30);
     assert!(app.worker_area.is_some());
-
-    app.handle_key(alt('h'));
-    let entering = app.solo_transition.expect("moving");
-    let mut previous = slot;
-    for step in 0..SOLO_STEPS - 1 {
-        let buffer = render_buffer_at(&mut app, width, height, solo_step_time(entering, step));
-        let rect = app.diff_area.expect("the moving diff takes clicks");
-        assert!(app.worker_area.is_none() && app.agents_area.is_none() && app.task_area.is_none());
-        assert!(rect != previous && rect_within(previous, rect), "step {step}");
-        assert_pane_corners(&buffer, rect, &format!("diff step {step}"));
-        previous = rect;
-    }
-    let solo = render_buffer_at(&mut app, width, height, solo_step_time(entering, SOLO_STEPS));
-    assert_eq!(app.diff_area, Some(screen));
-    assert_pane_corners(&solo, screen, "diff full screen");
-
-    app.advance_solo_transition(solo_step_time(entering, SOLO_STEPS));
-    app.handle_key(alt('h'));
-    let leaving = app.solo_transition.expect("moving back");
-    assert_eq!(leaving.pane, FocusPane::Diff, "the diff is what shrinks");
-    render_buffer_at(&mut app, width, height, solo_step_time(leaving, 2));
-    let rect = app.diff_area.expect("moving diff");
-    assert!(rect != slot && rect_within(slot, rect) && rect_within(rect, screen));
-    render_buffer_at(&mut app, width, height, solo_step_time(leaving, SOLO_STEPS));
-    assert_eq!(app.diff_area, Some(slot));
-    assert!(app.worker_area.is_some() && app.agents_area.is_some());
 }
 
 #[test]
@@ -25405,13 +25013,10 @@ fn alt_4_and_leader_4_focus_the_diff_panel_opening_it_first_and_never_closing_it
         "safe to mash"
     );
 
-    // ⌥4 then ⌥h: the diff has the whole screen.
+    // ⌥4 then ⌥h: the worker goes, the diff and the agent list stay.
     app.handle_key(alt('h'));
-    let solo = render_screen(&mut app, 160, 30);
-    assert!(
-        solo.contains("╭ diff") && !solo.contains("╭ worker"),
-        "{solo}"
-    );
+    render_screen(&mut app, 160, 30);
+    assert!(app.worker_area.is_none() && app.diff_area.is_some() && app.agents_area.is_some());
     app.handle_key(alt('h'));
 
     // Option+4 without an Alt modifier arrives as ¢ on a US layout.

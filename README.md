@@ -193,9 +193,9 @@ selected agent's change set parsed from `jj diff` (or `git diff` against HEAD
 plus untracked files in a plain checkout), with per-file `+`/`−` counts, line
 numbers, and the run's token usage and estimated API-rate cost in the header.
 It refreshes as the agent edits. `j`/`k` and the wheel scroll, `n`/`p` jump
-between files, `r` refreshes, `Esc` or `⌥d` closes it, and `⌥h` solos it like
-any other pane. On a narrow terminal it takes the worker's place instead of
-squeezing both. `v` opens the same panel.
+between files, `r` refreshes, and `Esc` or `⌥d` closes it. On a narrow
+terminal, or with the worker hidden (`⌥h`), it takes the worker's place
+instead of squeezing both. `v` opens the same panel.
 
 ### God's view
 
@@ -229,7 +229,7 @@ through Review before it can merge.
 | --- | --- |
 | `Option-1` / `Option-2` / `Option-3` | Focus the agents, worker, or task pane |
 | `Option-[` / `Option-]` | Step to the previous / next agent, staying in the pane you are in |
-| `Option-h` | Full screen: the focused pane takes the whole terminal; press again to bring the panes back |
+| `Option-h` | Hide the worker pane so the agent list and task line get the room; press again to show it |
 | `Option-g` | God's view: every agent tiled on one screen; press again to close |
 | `Option-d` | Diff panel for the selected agent |
 | `Ctrl-V` | Paste a screenshot or copied files into an agent (works in `rudder cloud` too) |

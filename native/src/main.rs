@@ -371,7 +371,7 @@ const AGENT_PANE_HINTS: &[&str] = &[
     // list is as long as the agents pane can afford, and an extra row costs
     // every user a row of agents forever.
     "⌥j/k scroll · ⌥v/b msg",
-    "⌥h worker only",
+    "⌥h hide worker",
     "⌥[/] agents",
     "Enter focus",
     "r rename",
@@ -1954,9 +1954,6 @@ struct App {
     /// When the startup reveal began; None once it is over or skipped. Only
     /// a real terminal session sets it, so tests render the settled look.
     reveal_started: Option<Instant>,
-    /// Panes may animate (the ⌥h move). Set by the same rule as the reveal: a
-    /// real terminal session; tests and headless hosts switch at once.
-    motion: bool,
     /// Each agent's last drawn card kind, to notice state changes.
     card_kinds: HashMap<String, CardKind>,
     /// Cards glowing after a state change: when it started and its color.
@@ -2117,19 +2114,12 @@ struct App {
     /// Where the ⌥d diff panel was drawn this frame (None when hidden).
     diff_area: Option<Rect>,
     diff_panel: DiffPanel,
-    /// SOLO view: the focused pane full-screen, with the sidebar, task line and
-    /// gutters all hidden.
-    solo_pane: bool,
-    /// Focus to put back when solo ends. Soloing from the task pane has to move
-    /// focus to the worker (the task line is not drawn, so keys typed at it would
-    /// go somewhere invisible); this remembers where to return.
-    solo_restore_focus: Option<FocusPane>,
-    /// The ⌥h move between the split and full screen while it is drawn
-    /// (render.rs `SoloTransition`).
-    solo_transition: Option<SoloTransition>,
-    /// Set only while render draws the moving pane: the slot that pane is laid
-    /// out for, so its agent keeps one size until the move lands.
-    transition_slot: Option<Rect>,
+    /// ⌥h hid the worker pane: the agent list (and the diff panel, when open)
+    /// take its space. The agent's PTY keeps running at its last size.
+    worker_hidden: bool,
+    /// Hiding moved focus off the worker onto the agent list; showing it
+    /// again puts focus back if it is still there.
+    worker_hidden_took_focus: bool,
     task_area: Option<Rect>,
     cloud_connected: bool,
     cloud_runtime: Option<String>,
@@ -3460,7 +3450,6 @@ impl App {
             notice_seen: None,
             show_keys: false,
             reveal_started: None,
-            motion: false,
             card_kinds: HashMap::new(),
             card_flashes: HashMap::new(),
             engine_headless: false,
@@ -3524,10 +3513,8 @@ impl App {
             worker_area: None,
             diff_area: None,
             diff_panel: DiffPanel::new(),
-            solo_pane: false,
-            solo_restore_focus: None,
-            solo_transition: None,
-            transition_slot: None,
+            worker_hidden: false,
+            worker_hidden_took_focus: false,
             task_area: None,
             cloud_connected: cloud.connected,
             cloud_runtime: cloud.runtime,
@@ -3955,113 +3942,53 @@ impl App {
         self.dirty = true;
     }
 
-    /// Full-screen the focused pane, or restore the split. Toggling twice returns
-    /// you exactly where you were, focus included.
-    fn toggle_solo_pane(&mut self) {
-        let now = Instant::now();
-        let from = self.solo_fullness(now);
-        let shown = self.solo_shown_pane();
-        self.solo_pane = !self.solo_pane;
-        if self.solo_pane {
-            // Full screen is only ever the worker (or the open diff panel): the
-            // agent list and the task line are never useful on their own. Focus
-            // on either moves to the worker, or keystrokes would land in a pane
-            // the user cannot see; ⌥h again puts it back.
-            let soloable = self.focus == FocusPane::Worker
-                || (self.focus == FocusPane::Diff && self.diff_panel.open);
-            if soloable {
-                self.solo_restore_focus = None;
-            } else {
-                self.solo_restore_focus = Some(self.focus);
+    /// ⌥h: hide the worker pane, or show it again. Nothing else changes: the
+    /// agent list and the task line stay, the selection stays, and the agent
+    /// keeps running at its last size. Focus moves only off a worker that is
+    /// going away (to the agent list), and comes back when it returns.
+    fn toggle_worker_hidden(&mut self) {
+        self.worker_hidden = !self.worker_hidden;
+        if self.worker_hidden {
+            self.worker_hidden_took_focus = self.focus == FocusPane::Worker;
+            if self.worker_hidden_took_focus {
+                self.focus = FocusPane::Agents;
+            }
+            self.notice = Some("worker hidden · ⌥h shows it".to_string());
+        } else {
+            if std::mem::take(&mut self.worker_hidden_took_focus)
+                && self.focus == FocusPane::Agents
+            {
                 self.focus = FocusPane::Worker;
             }
-        } else if let Some(previous) = self.solo_restore_focus.take() {
-            // The diff panel may have closed while the worker had the screen.
-            self.focus = if previous == FocusPane::Diff && !self.diff_panel.open {
-                FocusPane::Worker
-            } else {
-                previous
-            };
+            self.notice = Some("worker shown".to_string());
         }
-        self.begin_solo_transition(from, shown, now);
-        self.notice = Some(if self.solo_pane {
-            "full screen · ⌥h restores the panes".to_string()
-        } else {
-            "panes restored".to_string()
-        });
         self.dirty = true;
     }
 
-    /// The pane full screen shows: the open diff panel while it has focus,
-    /// otherwise the worker.
-    fn solo_shown_pane(&self) -> FocusPane {
-        if self.focus == FocusPane::Diff && self.diff_panel.open {
-            FocusPane::Diff
-        } else {
-            FocusPane::Worker
-        }
-    }
-
-    /// How full screen the panes are drawn at `now`: 0 is the split, 1 is full
-    /// screen, between is mid-move.
-    fn solo_fullness(&self, now: Instant) -> f32 {
-        self.solo_transition
-            .filter(|transition| transition.entering == self.solo_pane)
-            .and_then(|transition| transition.step_at(now).map(|step| transition.fullness(step)))
-            .unwrap_or(if self.solo_pane { 1.0 } else { 0.0 })
-    }
-
-    /// `solo_pane` just flipped: draw the move to the new layout, starting
-    /// from where the panes were (`from`), unless motion is off.
-    fn begin_solo_transition(&mut self, from: f32, pane: FocusPane, now: Instant) {
-        let transition = SoloTransition {
-            started: now,
-            from,
-            entering: self.solo_pane,
-            pane,
-            step_shown: 0,
-        };
-        self.solo_transition = (self.motion && transition.steps() > 1).then_some(transition);
-    }
-
-    /// Ask for the ⌥h move's next frame when its step comes up.
-    fn advance_solo_transition(&mut self, now: Instant) -> bool {
-        let due = step_solo_transition(&mut self.solo_transition, now);
-        if due {
+    /// After a key or click: one that put focus on a hidden worker (⌥2, ^W 2,
+    /// Enter on an agent, a new task) asked for it, so it comes back.
+    fn reconcile_hidden_worker(&mut self) {
+        if self.worker_hidden && self.focus == FocusPane::Worker {
+            self.worker_hidden = false;
+            self.worker_hidden_took_focus = false;
+            self.notice = Some("worker shown".to_string());
             self.dirty = true;
         }
-        due
     }
 
-    /// Full screen shows only the worker or the open diff panel. A key that
-    /// moved focus to the agent list or the task line (⌥1, ⌥3, Tab, Esc) asked
-    /// for that pane, so the split comes back with focus where it went; focus
-    /// left on a diff panel that just closed goes to the worker on screen.
-    fn reconcile_solo_focus(&mut self) {
-        if !self.solo_pane
-            || self.focus == FocusPane::Worker
-            || (self.focus == FocusPane::Diff && self.diff_panel.open)
-        {
-            return;
-        }
-        if self.focus == FocusPane::Diff {
-            self.focus = FocusPane::Worker;
-        } else {
-            let now = Instant::now();
-            let from = self.solo_fullness(now);
-            // Focus already left the pane on screen; the last frame's rects say
-            // which one that was.
-            let shown = if self.diff_area.is_some() && self.worker_area.is_none() {
-                FocusPane::Diff
+    /// On the App tick: something other than the user (a scheduler launch)
+    /// put focus on the hidden worker. It stays hidden and focus goes back to
+    /// where it was before the tick, so the next key never lands in a terminal
+    /// nobody can see.
+    fn settle_hidden_worker_focus(&mut self, before: FocusPane) {
+        if self.worker_hidden && self.focus == FocusPane::Worker {
+            self.focus = if before == FocusPane::Worker {
+                FocusPane::Agents
             } else {
-                FocusPane::Worker
+                before
             };
-            self.solo_pane = false;
-            self.solo_restore_focus = None;
-            self.begin_solo_transition(from, shown, now);
-            self.notice = Some("panes restored".to_string());
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
     fn selected_is_main(&self) -> bool {
@@ -4409,7 +4336,7 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         let quit = self.dispatch_key(key);
-        self.reconcile_solo_focus();
+        self.reconcile_hidden_worker();
         quit
     }
 
@@ -4585,7 +4512,7 @@ impl App {
                 return false;
             }
             // ⌥4 is the diff panel's seat in the pane row: it opens the panel if
-            // it is closed and focuses it either way, so ⌥4 then ⌥h solos the diff.
+            // it is closed and focuses it either way, so it is safe to mash.
             KeyCode::Char('4') if alt_like => {
                 self.focus_diff_panel();
                 return false;
@@ -4598,23 +4525,22 @@ impl App {
                 self.toggle_diff_panel();
                 return false;
             }
-            // Alt+h shows the worker full screen. It previously stepped to the previous
-            // agent, but that was only an alias: the stepper's real binding is
-            // Alt+[ / Alt+], which still works. Hiding is the more valuable thing
-            // to reach with one hand on a key you can find by feel.
+            // Alt+h hides the worker pane and shows it again; that is all it does.
+            // It previously stepped to the previous agent, but that was only an
+            // alias: the stepper's real binding is Alt+[ / Alt+], which still works.
             // Works from ANY pane, the task input included. Task is the focus you
             // start in and the one you are in while typing, so a guard excluding it
             // would block the key exactly when it is wanted. A real ALT modifier is
-            // unambiguous here — it cannot be confused with typing the letter.
+            // unambiguous here: it cannot be confused with typing the letter.
             KeyCode::Char('h') if alt_like => {
-                self.toggle_solo_pane();
+                self.toggle_worker_hidden();
                 return false;
             }
             // Terminals that swallow the Option modifier send the typographic
             // character instead; Option+h is ˙ on a US layout. That one IS just a
             // character, so it must not hijack a task the user is composing.
             KeyCode::Char('\u{02d9}') if self.focus != FocusPane::Task => {
-                self.toggle_solo_pane();
+                self.toggle_worker_hidden();
                 return false;
             }
             // Alt+r updates the home machine now (home_update.rs), with the same
@@ -5355,6 +5281,10 @@ impl App {
                 FocusPane::Diff => FocusPane::Worker,
             }
         };
+        // A hidden worker is not a stop on the cycle; ⌥h or ⌥2 shows it.
+        if self.worker_hidden && self.focus == FocusPane::Worker {
+            self.cycle_focus(forward);
+        }
     }
 
     fn handle_worker_key(&mut self, key: KeyEvent) -> bool {
@@ -6061,13 +5991,18 @@ impl App {
 
     /// ⌥d: show or hide the diff panel. Opening focuses it and counts as having
     /// reviewed the row (same weak gate as `v`); closing returns focus to the
-    /// worker so the next keystroke lands where the conversation is.
+    /// worker so the next keystroke lands where the conversation is, or to the
+    /// agent list while ⌥h has the worker hidden.
     fn toggle_diff_panel(&mut self) {
         if self.diff_panel.open {
             self.diff_panel.open = false;
             self.diff_area = None;
             if self.focus == FocusPane::Diff {
-                self.focus = FocusPane::Worker;
+                self.focus = if self.worker_hidden {
+                    FocusPane::Agents
+                } else {
+                    FocusPane::Worker
+                };
             }
             self.notice = None;
         } else {
@@ -6083,7 +6018,7 @@ impl App {
             self.mark_selected_reviewed();
             self.refresh_diff_panel();
             self.notice = Some(
-                "diff panel · j/k scroll · n/p or ⌥n/⌥b next/prev file · r refresh · ⌥d or Esc closes · ⌥h solo"
+                "diff panel · j/k scroll · n/p or ⌥n/⌥b next/prev file · r refresh · ⌥d or Esc closes"
                     .to_string(),
             );
         }
@@ -7075,7 +7010,7 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         let handled = self.dispatch_mouse(mouse);
-        self.reconcile_solo_focus();
+        self.reconcile_hidden_worker();
         handled
     }
 
@@ -21089,6 +21024,7 @@ What to do\n\
 
     fn poll_agents(&mut self) {
         let poll_started = Instant::now();
+        let focus_before = self.focus;
         self.poll_board_open();
         // Background work (workspace removal) reports its outcome here.
         while let Ok(message) = self.bg_notice_rx.try_recv() {
@@ -21834,7 +21770,7 @@ What to do\n\
         // calm 10fps rather than forcing a full terminal repaint on every planner
         // heartbeat (which made Ghostty and WindowServer amplify Rudder's own CPU use).
         self.advance_spinner_if_due(Instant::now());
-        self.advance_solo_transition(Instant::now());
+        self.settle_hidden_worker_focus(focus_before);
 
         // MIRROR plan-launched agents' status transitions (running->review->merged
         // / failed) into graph.json so the board tracks them. Only when something
@@ -22429,7 +22365,6 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
         // fade in one after another. Drawing only; input works throughout.
         if terminal.is_some() {
             app.reveal_started = Some(Instant::now());
-            app.motion = true;
         }
 
         loop {

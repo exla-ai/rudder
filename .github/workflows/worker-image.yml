@@ -1,0 +1,123 @@
+name: Worker image
+
+# Publishes a release's Rudder Cloud worker image to the public
+# ghcr.io/exla-ai/rudder-worker:<version>, so external home hosts (cloud/host/)
+# pull it with no registry login. It is the build scripts/worker-image.mjs runs
+# on Fly's builder for registry.fly.io: cloud/worker/Dockerfile at the release
+# tag with RUDDER_SOURCE=release, so dist and the linux-x64 binaries come from
+# the published npm package. The image holds only this public repo's source
+# and that package.
+#
+# A vX.Y.Z tag starts it. It waits until npm serves that version (the Release
+# workflow publishes it), so it never holds up or fails the npm publish.
+# For a version already on npm:
+#   gh workflow run worker-image.yml -f version=4.2.8
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published @exla/rudder version, for example 4.2.8"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-image-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Publish ghcr.io/exla-ai/rudder-worker
+    runs-on: ubuntu-24.04
+    # Most of this is waiting for the Release workflow to publish.
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/exla-ai/rudder-worker
+      PACKAGE: "@exla/rudder"
+    steps:
+      - name: Resolve the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then VERSION="$INPUT_VERSION"; else VERSION="${GITHUB_REF_NAME#v}"; fi
+          if ! printf '%s\n' "$VERSION" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'; then
+            echo "::error::'$VERSION' is not a release version like 4.2.8"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until npm serves the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          for _ in $(seq 1 420); do
+            if [ "$(npm view "$PACKAGE@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "$PACKAGE@$VERSION is on npm"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::$PACKAGE@$VERSION did not appear on npm within 3.5 hours"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v${{ steps.version.outputs.version }}
+          persist-credentials: false
+
+      - name: Record the source revision
+        id: source
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: cloud/worker/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            RUDDER_SOURCE=release
+            RUDDER_VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/exla-ai/rudder
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
+            org.opencontainers.image.description=Rudder Cloud worker image (homes and workspaces)
+          tags: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          # One plain image manifest, like the registry.fly.io copy.
+          provenance: false
+          push: true
+
+      # A new package starts private; only an org owner can make it public, in
+      # the package settings. Until then external hosts cannot pull it.
+      - name: Check anyone can pull it
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:exla-ai/rudder-worker:pull" | jq -r '.token // empty' || true)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/exla-ai/rudder-worker/manifests/$VERSION" || true)
+          if [ "$code" = 200 ]; then
+            echo "Anyone can pull $IMAGE:$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::An anonymous pull of $IMAGE:$VERSION got HTTP $code. Make the package public: https://github.com/orgs/exla-ai/packages/container/rudder-worker/settings"
+          fi

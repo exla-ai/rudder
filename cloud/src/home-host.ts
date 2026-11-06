@@ -57,6 +57,43 @@ export type ExternalUpdateInput = {
   pendingNextToken: boolean;
 };
 
+// Every release's worker image is in both repositories under the same tag:
+// the public GHCR copy (.github/workflows/worker-image.yml) needs no login,
+// the Fly copy (scripts/worker-image.mjs) is what Fly homes run.
+export const PUBLIC_WORKER_REPOSITORY = "ghcr.io/exla-ai/rudder-worker";
+const WORKER_REPOSITORIES = [PUBLIC_WORKER_REPOSITORY, "registry.fly.io/rudder-workers-exla"];
+
+/** An image reference without its tag or digest (as rudder-home-apply-update reads it). */
+export function imageRepository(image: string): string {
+  const ref = image.split("@")[0] ?? "";
+  const tagAt = ref.lastIndexOf(":");
+  return tagAt > ref.lastIndexOf("/") ? ref.slice(0, tagAt) : ref;
+}
+
+function imageTag(image: string): string | null {
+  const ref = image.split("@")[0] ?? "";
+  const tagAt = ref.lastIndexOf(":");
+  return tagAt > ref.lastIndexOf("/") ? ref.slice(tagAt + 1) : null;
+}
+
+/**
+ * The image an external home should run for Cloud's worker image: the same
+ * tag in the repository the home already runs, since its host refuses any
+ * other repository. A new host, or one on a repository Rudder does not
+ * publish to, gets the public one. A worker image outside both repositories
+ * (a dev or test Cloud) is sent as it is.
+ */
+export function externalHomeImage(target: string, reportedImage?: string | null): string {
+  const tag = imageTag(target);
+  const targetRepository = imageRepository(target);
+  if (!tag || !WORKER_REPOSITORIES.includes(targetRepository)) {
+    return target;
+  }
+  const current = reportedImage ? imageRepository(reportedImage) : "";
+  const repository = WORKER_REPOSITORIES.includes(current) ? current : PUBLIC_WORKER_REPOSITORY;
+  return repository === targetRepository ? target : `${repository}:${tag}`;
+}
+
 /** Whether an idle external home should be sent an image update now. */
 export function externalHomeNeedsUpdate(input: ExternalUpdateInput): boolean {
   if (input.pendingNextToken || !input.targetImage) {

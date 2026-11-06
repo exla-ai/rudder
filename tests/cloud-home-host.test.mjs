@@ -358,6 +358,55 @@ serverTest("a busy home asks to update now: Cloud offers the newer image, then u
   assert.ok(![retry, third].some((m) => log().includes(m.params.workerToken)));
 });
 
+serverTest("an external home on GHCR is offered a GHCR image; one on the Fly registry stays there", async (t) => {
+  const FLY = "registry.fly.io/rudder-workers-exla";
+  const GHCR = "ghcr.io/exla-ai/rudder-worker";
+  const { port, base, dbPath } = await bootServer(t, {
+    RUDDER_WORKER_IMAGE: `${FLY}:4.2.9`,
+    RUDDER_HOME_IDLE_UPDATE_MS: String(60 * 60 * 1000),
+    RUDDER_HOME_IDLE_MS: String(60 * 60 * 1000),
+  });
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const db = new Database(dbPath);
+  t.after(() => db.close());
+  const token = "rdrw_ghcr_offer_fixture_token";
+  db.prepare("insert into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)")
+    .run(tokenHash("rdr_ghcr_cli"), "acct-g", "g@example.com", old, old);
+  db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, host_kind, worker_token_hash,
+      source_kind, created_at, updated_at, last_activity_at)
+    values ('home-g', 'acct-g', 'home', 'home', 'running', 'external', ?, 'home', ?, ?, ?)`).run(tokenHash(token), old, old, old);
+
+  // A new host is set up on the public image.
+  const host = await (await fetch(`${base}/api/rudder/home/host`, { headers: { authorization: "Bearer rdr_ghcr_cli" } })).json();
+  assert.equal(host.image, `${GHCR}:4.2.9`);
+
+  const messages = [];
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-g/control`, { headers: { authorization: `Bearer ${token}` } });
+  t.after(() => ws.close());
+  ws.on("message", (data) => {
+    const message = JSON.parse(data.toString());
+    messages.push(message);
+    if (message.type === "rpc") ws.send(JSON.stringify({ type: "rpc-result", id: message.id, result: { ok: true } }));
+  });
+  await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+  const publish = (image) => ws.send(JSON.stringify({
+    type: "state",
+    host: { kind: "external", image },
+    projects: [{ workspaceId: "r", repo: "a/b", name: "b", agents: [{ id: "1", status: "working", asks: [] }] }],
+  }));
+  const offers = () => messages.filter((m) => m.type === "update-available");
+
+  publish(`${FLY}:4.2.0`);
+  assert.equal((await waitFor(() => offers()[0])).target, `${FLY}:4.2.9`, "an old host keeps its registry");
+  publish(`${GHCR}:4.2.8`);
+  assert.deepEqual(await waitFor(() => offers()[1]), { type: "update-available", current: `${GHCR}:4.2.8`, target: `${GHCR}:4.2.9` });
+
+  ws.send(JSON.stringify({ type: "update-now" }));
+  const update = await waitFor(() => messages.find((m) => m.type === "rpc" && m.method === "update"));
+  assert.equal(update.params.image, `${GHCR}:4.2.9`);
+  assert.equal((await waitFor(() => messages.find((m) => m.type === "update-now-result"))).ok, true);
+});
+
 nodeTest("the home keeps an update status for its dashboards and takes their requests once", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-update-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -402,6 +451,16 @@ libTest("home-host.ts: host kind, env bundle, refusals and the update decision",
   assert.equal(decide(OLD_IMAGE, true), false, "a pending token is still unresolved");
   assert.equal(decide(null), false, "a home that never said what it runs is left alone");
   assert.equal(lib.externalHomeNeedsUpdate({ reportedImage: OLD_IMAGE, targetImage: "", pendingNextToken: false }), false);
+  const FLY = "registry.fly.io/rudder-workers-exla";
+  const GHCR = "ghcr.io/exla-ai/rudder-worker";
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${GHCR}:4.2.8`), `${GHCR}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9@sha256:abc`, `${GHCR}:4.2.8@sha256:def`), `${GHCR}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${GHCR}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`), `${GHCR}:4.2.9`, "a new host gets the public image");
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, "localhost:5000/mine:1"), `${GHCR}:4.2.9`);
+  assert.equal(lib.externalHomeImage(NEW_IMAGE, OLD_IMAGE), NEW_IMAGE, "a dev Cloud's own image is sent as it is");
+  assert.equal(lib.imageRepository("localhost:5000/a/b:1@sha256:x"), "localhost:5000/a/b");
 });
 
 nodeTest("the worker writes desired.json atomically, 0600, and only with sane values", () => {

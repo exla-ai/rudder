@@ -41,7 +41,7 @@ import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
 import { startControlTelemetry, type ControlSnapshot, type ControlTelemetry } from "./telemetry.js";
 import { BuilderPoolError, builderPolicy, createBuilderPool, type BuilderFly, type BuilderPool } from "./builders.js";
-import { externalHomeNeedsUpdate, externalHomeRefusal, HOME_HOST_OFFLINE, homeHostEnv, homeHostKind, parseHomeHostKind, type HomeHostKind } from "./home-host.js";
+import { externalHomeImage, externalHomeNeedsUpdate, externalHomeRefusal, HOME_HOST_OFFLINE, homeHostEnv, homeHostKind, parseHomeHostKind, type HomeHostKind } from "./home-host.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -5663,7 +5663,7 @@ function switchHomeToExternal(home: Workspace): JsonRecord {
   return {
     home: homeSummary(rowToWorkspace(findWorkspaceById.get(home.id))),
     hostKind: "external",
-    image: flyWorkerImage,
+    image: externalHomeImage(flyWorkerImage),
     env: homeHostEnv({ homeId: home.id, accountId: home.accountId, workerToken, cloudUrl: baseURL }),
   };
 }
@@ -5905,12 +5905,19 @@ async function updateHomeNow(homeId: string): Promise<void> {
   }
 }
 
+// What Cloud would move a home to. A Fly home runs the worker image itself; an
+// external host gets that tag in the repository it already pulls from.
+function homeUpdateTarget(homeId: string, current: string | null | undefined): string {
+  const raw = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  return homeHostKind(raw?.host_kind) === "external" ? externalHomeImage(flyWorkerImage, current) : flyWorkerImage;
+}
+
 // Tells a connected home what Cloud would move it to, whenever either side of
 // that changes, so its dashboards can offer "update now".
 const homeUpdateOffers = new WeakMap<WebSocket, string>();
 function offerHomeUpdate(homeId: string, ws: WebSocket): void {
   const current = optionalString(homeStates.get(homeId)?.host?.image) ?? null;
-  const target = flyWorkerImage || null;
+  const target = homeUpdateTarget(homeId, current) || null;
   const key = `${current ?? ""} ${target ?? ""}`;
   if (homeUpdateOffers.get(ws) === key) {
     return;
@@ -5926,9 +5933,11 @@ function offerHomeUpdate(homeId: string, ws: WebSocket): void {
 // An external host pulls and restarts itself (cloud/host/rudder-home-apply-update).
 // The home reports the image it runs, and the update travels over its control
 // socket with the same accepted-alongside replacement token as a Fly update.
+// The new tag stays in the repository the host pulls from (externalHomeImage).
 async function updateExternalHome(home: Workspace, now: number, reason = "idle"): Promise<string | null> {
   const reportedImage = optionalString(homeStates.get(home.id)?.host?.image);
-  if (!externalHomeNeedsUpdate({ reportedImage, targetImage: flyWorkerImage, pendingNextToken: false })) {
+  const targetImage = externalHomeImage(flyWorkerImage, reportedImage);
+  if (!externalHomeNeedsUpdate({ reportedImage, targetImage, pendingNextToken: false })) {
     return reportedImage ? UP_TO_DATE : "this machine has not said which version it runs yet";
   }
   homeUpdateFlights.add(home.id);
@@ -5936,9 +5945,9 @@ async function updateExternalHome(home: Workspace, now: number, reason = "idle")
   const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
   const nextHash = tokenHash(workerToken);
   try {
-    console.log(`[home] ${home.id} ${reason} on ${reportedImage} (external host); updating to ${flyWorkerImage}`);
+    console.log(`[home] ${home.id} ${reason} on ${reportedImage} (external host); updating to ${targetImage}`);
     setNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
-    await homeRpc(home.id, "update", { image: flyWorkerImage, workerToken }, 30_000);
+    await homeRpc(home.id, "update", { image: targetImage, workerToken }, 30_000);
     return null;
   } catch (error) {
     // A refusal means nothing will ever use the replacement token. An unknown
@@ -7048,7 +7057,8 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
   if (url.pathname === "/api/rudder/home/host") {
     const home = findHomeRow(authContext.accountId);
     if (req.method === "GET") {
-      sendJson(res, 200, { hostKind: home?.hostKind ?? null, image: flyWorkerImage, home: homeSummary(home) });
+      // The image a new external host runs: the public copy, pulled with no login.
+      sendJson(res, 200, { hostKind: home?.hostKind ?? null, image: externalHomeImage(flyWorkerImage), home: homeSummary(home) });
       return;
     }
     if (req.method === "POST") {

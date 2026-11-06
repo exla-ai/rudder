@@ -5,7 +5,8 @@
 //
 //   1. copy cloud/host to the host and run rudder-host-setup (Docker, rsync,
 //      sysctls, the data disk at /srv/workspace, the units)
-//   2. check the host can pull the current worker image
+//   2. check the host can pull the current worker image (the public
+//      ghcr.io/exla-ai/rudder-worker copy, so no registry login)
 //   3. POST /api/rudder/home/host {kind:"external"}: the control plane rotates
 //      the worker token (the Fly machine's stops working) and returns the env
 //      bundle once
@@ -206,7 +207,8 @@ export async function hostCommand(rawArgs: string[], client: HostClient, options
   console.log(`Pulling ${current.image} on ${args.target}...`);
   const pulled = await ssh(args.target, ["sudo", "-n", "docker", "pull", "-q", current.image]);
   if (pulled.code !== 0) {
-    throw new Error(`${args.target} cannot pull ${current.image}. Log it in to the registry first (for registry.fly.io: \`fly auth token\` on a laptop, then on the host \`sudo docker login registry.fly.io -u x --password-stdin\`), then run this again.`);
+    const registry = current.image.includes("/") ? current.image.slice(0, current.image.indexOf("/")) : "docker.io";
+    throw new Error(`${args.target} cannot pull ${current.image}. Check it can reach ${registry} (a private registry also needs \`sudo docker login ${registry}\` on the host), then run this again.`);
   }
 
   if (!(await confirmSwitch(args.target, args.yes))) {

@@ -324,6 +324,17 @@ decision: the hand-made, expiring registry login. Recommended: also push each
 worker image to a public registry (ghcr.io; the image holds no secrets and the
 repo is public) and point external hosts at it, so hosts need no login at all.
 
+Public worker image (2026-11-06, for 4.2.9, not released): CI now pushes every
+release's worker image to the public `ghcr.io/exla-ai/rudder-worker:<version>`
+(`.github/workflows/worker-image.yml`, on `v*` tags after npm serves the
+version, or by hand with `-f version=X`). New external hosts run it with no
+login. Cloud sends an external home the new tag in the repository it already
+runs, so GHCR hosts update with Alt+r and old registry.fly.io hosts behave as
+before. To move home-53c2 off the expiring Fly login (on its host, once 4.2.8
+is public there): `sudo docker pull ghcr.io/exla-ai/rudder-worker:4.2.8`, then
+`echo ghcr.io/exla-ai/rudder-worker:4.2.8 | sudo tee /etc/rudder/image` and
+`sudo rudder-home-start`.
+
 Fewer checks (2026-11-06, not released): the user wants agents to test and
 use CI sparingly. Worker prompts now say "run one quick check for what you
 changed; add a test only for a real bug or tricky logic", the default

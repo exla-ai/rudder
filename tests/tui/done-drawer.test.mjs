@@ -1,7 +1,7 @@
 // The finished-work drawer as a SEQUENCE against the real binary. A long session
 // ends with dozens of merged and failed rows; listing each one buries the two that
 // are still moving. `done` and `closed` collapse to a single sidebar row that opens
-// into a list + result view in the worker pane.
+// into member cards in the sidebar while preserving the worker pane.
 //
 // Unit tests cover the state machine; this covers what a user actually does — merge
 // a worker, watch its row leave the sidebar, open the drawer, and read the result —
@@ -55,9 +55,9 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
       throw new Error(`j never landed the cursor on the done header:\n${beforeOpen}`);
     }
     await session.press("Enter");
-    // The worker pane is now the drawer: titled by bucket, listing its members.
-    await session.waitForText("done · 1", { timeout: 20_000 });
-    await session.waitForText("What it did", { timeout: 20_000 });
+    // Expansion reveals the member card in the sidebar and keeps its session visible.
+    await session.waitForText("click or Esc to", { timeout: 20_000 });
+    await session.waitForText("This agent is not running", { timeout: 20_000 });
     // The status coding survives the collapse: the row inside the drawer still
     // says what state the run ended in.
     await session.waitForText("merged locally", { timeout: 20_000 });
@@ -67,15 +67,13 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     await session.press("Escape");
     // A lone ESC is held briefly by the input reader while it waits to see whether
     // an escape SEQUENCE follows, so wait for the drawer to go rather than snapshot.
-    await session.waitForGone("done \u00b7 1", { timeout: 20_000 });
+    await session.waitForGone("click or Esc to", { timeout: 20_000 });
     const screen = await session.screen();
     if (!screen.includes("done 1")) {
       throw new Error(`the collapsed header survives closing the drawer:\n${screen}`);
     }
-    // "done · 1" is the drawer pane's own title; the per-run done card (which also
-    // says "What it did") is what legitimately shows after backing out.
-    if (screen.includes("done \u00b7 1")) {
-      throw new Error(`the drawer view should be gone after Esc:\n${screen}`);
+    if (screen.includes("click or Esc to")) {
+      throw new Error(`the expanded sidebar should be gone after Esc:\n${screen}`);
     }
     if (!screen.includes("\u203a")) {
       throw new Error(`the chevron should read closed after Esc:\n${screen}`);

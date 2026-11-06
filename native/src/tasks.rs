@@ -19,7 +19,7 @@ pub(crate) const PARALLEL_WORK_RULE: &str = parallel_work_rule!();
 /// than sleeping around polls, and keep the user informed during long waits.
 macro_rules! wait_and_read_rule {
     () => {
-        "- Run one quick check for what you changed; add a test only for a real bug or tricky logic, and skip full suites unless asked. Wait on commands directly (Codex: one write_stdin wait up to 300000 ms when supported), without extra sleeps or repeated polls. Size builds from current CPU, memory and container limits; honor explicit budgets and shared build locks. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting unless delivery requires it; no git archaeology."
+        "- Run one targeted check; add tests for bugs or tricky logic. Full suites only when asked. Wait on commands directly (Codex: write_stdin up to 300000 ms when supported); avoid sleeps and repeated polls. Size builds from CPU, memory and container limits; honor explicit budgets and shared build locks. Cap long output (`| tail -50`). Read targeted ranges. No CI babysitting unless delivery requires it; no git archaeology."
     };
 }
 #[cfg(test)]

@@ -9005,8 +9005,8 @@ fn main_prompt_is_an_end_to_end_delivery_contract() {
     assert!(prompt.starts_with("deploy the app"), "goal comes first");
     assert!(prompt.contains("Preserve unrelated edits"));
     assert!(prompt.contains("Ship only when asked"));
-    assert!(prompt.contains("Never force-push"));
-    assert!(prompt.contains("write secrets"));
+    assert!(!prompt.contains("Never force-push or write secrets into files"));
+    assert!(prompt.contains("End with a short summary"));
     for removed in ["rudder done", "followup", "evidence", "DECISIONS.md", "verifiedAt"] {
         assert!(!prompt.to_lowercase().contains(&removed.to_lowercase()), "no {removed}");
     }
@@ -9429,6 +9429,8 @@ fn a_slow_workspace_is_prepared_off_the_app_loop_behind_a_preparing_row() {
 
     let mut app = App::new();
     app.cwd = repo.clone();
+    app.backend = Backend::Claude;
+    app.model = default_model_for(Backend::Claude).to_string();
     app.workspace_prep_inline = false;
     let started = Instant::now();
     app.start_single_run_task("add a health check endpoint");
@@ -9451,7 +9453,7 @@ fn a_slow_workspace_is_prepared_off_the_app_loop_behind_a_preparing_row() {
     let run = &app.agents[0];
     assert_eq!(run.workspace_path.as_deref(), Some(workspace.as_path()));
     assert_eq!(run.workspace_name.as_deref(), Some("rudder-async-prep"));
-    assert!(run.terminal.is_some(), "the agent starts in the prepared workspace");
+    assert!(run.terminal.is_some(), "the agent starts in the prepared workspace: {:?}", run.last_error);
     let _ = fs::remove_dir_all(&repo);
 }
 
@@ -19153,68 +19155,41 @@ fn drawer_list_shows_node_labels_and_marks_the_selection() {
 }
 
 #[test]
-fn open_drawer_takes_over_the_worker_pane() {
+fn open_drawer_preserves_the_selected_worker_pane() {
     let mut app = drawer_fleet();
     app.focus = FocusPane::Agents;
     app.open_drawer(Bucket::Done);
     let area = Rect::new(0, 0, 60, 30);
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).expect("test backend");
-    terminal
-        .draw(|frame| render_worker(frame, area, &mut app))
-        .expect("draw worker pane");
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-
-    assert!(
-        text.contains("done \u{b7} 3"),
-        "list pane titled by bucket: {text}"
-    );
-    assert!(
-        text.contains("identity consolidation"),
-        "the drawer lists its members: {text}"
-    );
-    assert!(
-        text.contains("one human, one account"),
-        "and shows the highlighted run's result below: {text}"
-    );
+    terminal.draw(|frame| render_worker(frame, area, &mut app)).expect("draw worker pane");
+    let expanded = terminal.backend().buffer().clone();
+    app.close_drawer();
+    terminal.draw(|frame| render_worker(frame, area, &mut app)).expect("draw worker pane");
+    assert_eq!(&expanded, terminal.backend().buffer(), "expansion only changes the sidebar");
 }
 
 #[test]
-fn keys_in_an_open_drawer_never_reach_a_hidden_pty() {
-    // Focus can land on the worker pane while a drawer is open (Ctrl+W, a click).
-    // The pane is showing a list, so keys must drive the list — not type into the
-    // finished agent's session behind it.
+fn worker_keys_do_not_navigate_the_expanded_sidebar() {
     let mut app = drawer_fleet();
     app.open_drawer(Bucket::Done);
     app.focus = FocusPane::Worker;
-
+    let selected = (app.drawer_selection(), app.selected_agent);
     app.handle_worker_key(KeyEvent::from(KeyCode::Char('j')));
-    assert_eq!((app.drawer_selection(), app.selected_agent), (1, 3));
+    assert_eq!((app.drawer_selection(), app.selected_agent), selected);
     app.handle_worker_key(KeyEvent::from(KeyCode::Char('k')));
-    assert_eq!((app.drawer_selection(), app.selected_agent), (0, 2));
-
-    // Enter hands the pane back to the highlighted run's own session.
-    app.handle_worker_key(KeyEvent::from(KeyCode::Enter));
-    assert_eq!(app.drawer_open(), None);
-    assert_eq!(app.selected_agent, 2);
+    assert_eq!((app.drawer_selection(), app.selected_agent), selected);
+    assert_eq!(app.drawer_open(), Some(Bucket::Done));
 }
 
 #[test]
-fn esc_in_an_open_drawer_returns_focus_to_the_sidebar() {
+fn worker_escape_preserves_the_expanded_sidebar() {
     let mut app = drawer_fleet();
     app.open_drawer(Bucket::Done);
     app.focus = FocusPane::Worker;
-
     app.handle_worker_key(KeyEvent::from(KeyCode::Esc));
-
-    assert_eq!(app.drawer_open(), None);
-    assert_eq!(app.focus, FocusPane::Agents);
+    assert_eq!(app.drawer_open(), Some(Bucket::Done));
+    assert_eq!(app.focus, FocusPane::Worker);
 }
 
 #[test]

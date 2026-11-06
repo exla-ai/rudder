@@ -2,9 +2,9 @@
 # Prepares a Linux host (Ubuntu or Debian, as root) to run a Rudder Cloud home:
 # Docker, rsync, the sysctls agents need, the data disk at /srv/workspace and
 # the systemd units. Safe to run again. It does not start the home: `rudder
-# cloud host` writes /etc/rudder/home.env and /etc/rudder/image (the public
-# ghcr.io/exla-ai/rudder-worker image, so no registry login), then starts
-# rudder-home.service.
+# cloud host` writes /etc/rudder/home.env and /etc/rudder/image (the private
+# registry.fly.io/rudder-worker-images image; log in once with a deploy token
+# for that app alone), then starts rudder-home.service.
 #
 #   sudo ./rudder-host-setup [--data-disk /dev/nvme1n1]
 #

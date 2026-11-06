@@ -344,6 +344,16 @@ is public there): `sudo docker pull ghcr.io/exla-ai/rudder-worker:4.2.8`, then
 `echo ghcr.io/exla-ai/rudder-worker:4.2.8 | sudo tee /etc/rudder/image` and
 `sudo rudder-home-start`.
 
+Private worker images for external hosts (2026-11-06, after 4.2.9): the GHCR
+package could not be made public, so external hosts pull from
+`registry.fly.io/rudder-worker-images`, a Fly app with no machines and no
+secrets. `scripts/worker-image.mjs` copies each release there, and Cloud sends
+hosts on it updates there. A deploy token for that app alone (5 years) is the
+host's one login. 4.2.9 is copied (same digest). For home-53c2 the token was
+left at `/workspace/.rudder-host-pull-token` (host path
+`/srv/workspace/.rudder-host-pull-token`) for the user's one-time host step,
+which deletes it.
+
 Fewer checks (2026-11-06, not released): the user wants agents to test and
 use CI sparingly. Worker prompts now say "run one quick check for what you
 changed; add a test only for a real bug or tricky logic", the default

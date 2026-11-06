@@ -57,11 +57,14 @@ export type ExternalUpdateInput = {
   pendingNextToken: boolean;
 };
 
-// Every release's worker image is in both repositories under the same tag:
-// the public GHCR copy (.github/workflows/worker-image.yml) needs no login,
-// the Fly copy (scripts/worker-image.mjs) is what Fly homes run.
-export const PUBLIC_WORKER_REPOSITORY = "ghcr.io/exla-ai/rudder-worker";
-const WORKER_REPOSITORIES = [PUBLIC_WORKER_REPOSITORY, "registry.fly.io/rudder-workers-exla"];
+// Every release's worker image is in these repositories under the same tag.
+// registry.fly.io/rudder-worker-images holds nothing else (no machines, no
+// secrets; scripts/worker-image.mjs copies each release there), so an external
+// host logs in to it once with a deploy token for that app alone. Tokens for
+// rudder-workers-exla, which Fly homes run, also reach those homes' machines.
+// The GHCR copy (.github/workflows/worker-image.yml) is private for now.
+export const EXTERNAL_WORKER_REPOSITORY = "registry.fly.io/rudder-worker-images";
+const WORKER_REPOSITORIES = [EXTERNAL_WORKER_REPOSITORY, "ghcr.io/exla-ai/rudder-worker", "registry.fly.io/rudder-workers-exla"];
 
 /** An image reference without its tag or digest (as rudder-home-apply-update reads it). */
 export function imageRepository(image: string): string {
@@ -80,7 +83,7 @@ function imageTag(image: string): string | null {
  * The image an external home should run for Cloud's worker image: the same
  * tag in the repository the home already runs, since its host refuses any
  * other repository. A new host, or one on a repository Rudder does not
- * publish to, gets the public one. A worker image outside both repositories
+ * publish to, gets the external hosts' one. A worker image outside these
  * (a dev or test Cloud) is sent as it is.
  */
 export function externalHomeImage(target: string, reportedImage?: string | null): string {
@@ -90,7 +93,7 @@ export function externalHomeImage(target: string, reportedImage?: string | null)
     return target;
   }
   const current = reportedImage ? imageRepository(reportedImage) : "";
-  const repository = WORKER_REPOSITORIES.includes(current) ? current : PUBLIC_WORKER_REPOSITORY;
+  const repository = WORKER_REPOSITORIES.includes(current) ? current : EXTERNAL_WORKER_REPOSITORY;
   return repository === targetRepository ? target : `${repository}:${tag}`;
 }
 

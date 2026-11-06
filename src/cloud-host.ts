@@ -5,8 +5,9 @@
 //
 //   1. copy cloud/host to the host and run rudder-host-setup (Docker, rsync,
 //      sysctls, the data disk at /srv/workspace, the units)
-//   2. check the host can pull the current worker image (the public
-//      ghcr.io/exla-ai/rudder-worker copy, so no registry login)
+//   2. check the host can pull the current worker image (the private
+//      registry.fly.io/rudder-worker-images copy; log the host in once with
+//      a deploy token for that app alone)
 //   3. POST /api/rudder/home/host {kind:"external"}: the control plane rotates
 //      the worker token (the Fly machine's stops working) and returns the env
 //      bundle once

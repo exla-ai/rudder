@@ -816,7 +816,7 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
   - `rudder cloud host <ssh-target> [--data-disk /dev/X] [--hostname N]` (`src/cloud-host.ts`)
     runs `rudder-host-setup` (docker.io, rsync, `90-rudder.conf` sysctls, an empty data
     disk formatted as `LABEL=rudder-ws` at `/srv/workspace`, units), checks the host can
-    pull the image (the public `ghcr.io/exla-ai/rudder-worker:<version>`, no login),
+    pull the image (`registry.fly.io/rudder-worker-images:<version>`, see Registries),
     then `POST /api/rudder/home/host {kind:"external"}`. That rotates the
     home and home-repo worker tokens (the Fly machine can no longer connect; its sockets
     are dropped) and returns `{env, image}` once. The CLI writes `/etc/rudder/home.env`
@@ -831,9 +831,10 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     sets a next token and sends the `update` RPC `{image, workerToken}`. The image is
     `RUDDER_WORKER_IMAGE`'s tag in the repository the home reports
     (`externalHomeImage`): `registry.fly.io/rudder-workers-exla` stays there,
-    `ghcr.io/exla-ai/rudder-worker` stays there, anything else (and a new host) gets
-    GHCR; the Alt+r offer uses the same target. A worker image outside both
-    repositories (a dev Cloud) is sent unchanged. Fly homes keep `RUDDER_WORKER_IMAGE`.
+    `ghcr.io/exla-ai/rudder-worker` and `registry.fly.io/rudder-worker-images` stay
+    there, anything else (and a new host) gets `rudder-worker-images`; the Alt+r offer
+    uses the same target. A worker image outside these repositories (a dev Cloud) is
+    sent unchanged. Fly homes keep `RUDDER_WORKER_IMAGE`.
     `home.mjs` writes `/workspace/.rudder-host/desired.json` (0600) and acks; the host's
     `rudder-home-update.path` runs `rudder-home-apply-update` (same repository only,
     pull, swap the token line in `home.env`, recreate). A refusal clears the next token;
@@ -856,15 +857,19 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     apply whose request changed during the pull leaves the newer one for the next run.
   - `POST /api/rudder/home/host {kind:"fly"}` goes back: the old Fly machine is destroyed
     and a new one is made on the old volume with a new token. Nothing is copied back.
-  - Registries (4.2.9): every release's image is public at
-    `ghcr.io/exla-ai/rudder-worker:<version>` (`.github/workflows/worker-image.yml`,
-    pushed by CI after npm serves the version), so hosts on it need no login. Hosts set up
-    before that run `registry.fly.io/rudder-workers-exla`, which needs a hand-made
-    `docker login` that expires; a refused pull fails the update (`desired.failed.json`,
-    the dashboards say to log in again). Move such a host to GHCR once:
-    `echo ghcr.io/exla-ai/rudder-worker:<version> | sudo tee /etc/rudder/image` and
-    `sudo rudder-home-start` (pull first to keep the restart short). The apply script
-    still refuses a repository change, so Cloud never moves a host between registries.
+  - Registries: external hosts pull `registry.fly.io/rudder-worker-images:<version>`, a
+    Fly app with no machines and no secrets that `scripts/worker-image.mjs` copies each
+    release into (blob mounts, same digest). The host logs in once, as root, with a
+    deploy token for that app alone (`fly tokens create deploy -a rudder-worker-images
+    -x 43800h`): it can pull and push only there, and reaches no home's machines, unlike
+    a `rudder-workers-exla` token. The token lives in root's docker config on the host,
+    never on the volume. Hosts set up before this run `rudder-workers-exla` with a
+    hand-made login that expires; move one once with `docker login`, then
+    `echo registry.fly.io/rudder-worker-images:<version> | sudo tee /etc/rudder/image`
+    and `sudo rudder-home-start`. CI also pushes a GHCR copy
+    (`ghcr.io/exla-ai/rudder-worker`, `.github/workflows/worker-image.yml`); the package
+    is private, so it needs a login too. The apply script refuses a repository change,
+    so Cloud never moves a host between registries.
 
 ### 9.6.1 Deleting cloud things (request + reaper)
 Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
@@ -919,8 +924,9 @@ reports a final heartbeat on exit. On restart it checks `.rudder-staged.json` an
 re-fetches a fresh signed URL from the snapshot-url endpoint.
 
 Release images: `node scripts/worker-image.mjs <version>` after npm publish pushes
-`registry.fly.io/rudder-workers-exla:<version>` for Fly homes. CI pushes the same build
-to the public `ghcr.io/exla-ai/rudder-worker:<version>` for external hosts
+`registry.fly.io/rudder-workers-exla:<version>` for Fly homes and copies it to
+`registry.fly.io/rudder-worker-images:<version>` for external hosts. CI pushes the same
+build to the private `ghcr.io/exla-ai/rudder-worker:<version>`
 (`.github/workflows/worker-image.yml`: on each `v*` tag once npm serves it, or
 `gh workflow run worker-image.yml -f version=X`). With
 `RUDDER_SOURCE=release` the builder fetches `@exla/rudder@RUDDER_VERSION` and takes its

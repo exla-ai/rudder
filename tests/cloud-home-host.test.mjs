@@ -376,9 +376,9 @@ serverTest("an external home on GHCR is offered a GHCR image; one on the Fly reg
       source_kind, created_at, updated_at, last_activity_at)
     values ('home-g', 'acct-g', 'home', 'home', 'running', 'external', ?, 'home', ?, ?, ?)`).run(tokenHash(token), old, old, old);
 
-  // A new host is set up on the public image.
+  // A new host is set up on the image-only Fly app.
   const host = await (await fetch(`${base}/api/rudder/home/host`, { headers: { authorization: "Bearer rdr_ghcr_cli" } })).json();
-  assert.equal(host.image, `${GHCR}:4.2.9`);
+  assert.equal(host.image, `registry.fly.io/rudder-worker-images:4.2.9`);
 
   const messages = [];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-g/control`, { headers: { authorization: `Bearer ${token}` } });
@@ -457,8 +457,10 @@ libTest("home-host.ts: host kind, env bundle, refusals and the update decision",
   assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
   assert.equal(lib.externalHomeImage(`${FLY}:4.2.9@sha256:abc`, `${GHCR}:4.2.8@sha256:def`), `${GHCR}:4.2.9`);
   assert.equal(lib.externalHomeImage(`${GHCR}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
-  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`), `${GHCR}:4.2.9`, "a new host gets the public image");
-  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, "localhost:5000/mine:1"), `${GHCR}:4.2.9`);
+  const IMAGES = "registry.fly.io/rudder-worker-images";
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`), `${IMAGES}:4.2.9`, "a new host gets the image-only app");
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, "localhost:5000/mine:1"), `${IMAGES}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.10`, `${IMAGES}:4.2.9`), `${IMAGES}:4.2.10`, "a host on it stays there");
   assert.equal(lib.externalHomeImage(NEW_IMAGE, OLD_IMAGE), NEW_IMAGE, "a dev Cloud's own image is sent as it is");
   assert.equal(lib.imageRepository("localhost:5000/a/b:1@sha256:x"), "localhost:5000/a/b");
 });

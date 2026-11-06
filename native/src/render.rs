@@ -7044,6 +7044,31 @@ pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     );
 }
 
+/// The most rows of text a notice pill shows. More would cover the panes.
+pub(crate) const NOTICE_PILL_MAX_ROWS: usize = 3;
+
+/// A notice wrapped to `width` columns, at most `max_rows` rows. When rows
+/// are left out, the last row shown ends in "…" and still fits the width.
+pub(crate) fn notice_pill_rows(text: &str, width: usize, max_rows: usize) -> Vec<String> {
+    let width = width.max(2);
+    let mut rows = wrap_text(text, width as u16);
+    if rows.len() > max_rows.max(1) {
+        rows.truncate(max_rows.max(1));
+        if let Some(last) = rows.last_mut() {
+            let mut kept: String = last.chars().take(width - 1).collect();
+            // Room for "…" cut into a word: cut at the word before it instead,
+            // when one ends near the edge.
+            if last.chars().count() > width - 1 {
+                if let Some(at) = kept.rfind(' ').filter(|at| *at >= kept.len() / 2) {
+                    kept.truncate(at);
+                }
+            }
+            *last = format!("{}\u{2026}", kept.trim_end());
+        }
+    }
+    rows
+}
+
 /// The notice as a small rounded pill at the bottom right of `area`.
 pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     if !notice_pill_visible(app, Instant::now()) || area.height < 3 || area.width < 16 {
@@ -7065,13 +7090,17 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     };
     // The pill is as wide as its text: a short notice stays small, a long one
     // (a /help listing, an error with its cause) widens and wraps only when
-    // it must, so a sentence is not broken across rows needlessly.
-    let max_w = (area.width as usize).saturating_sub(6).clamp(12, 120);
-    let wrapped = wrap_text(&text, max_w.saturating_sub(2) as u16);
-    let max_rows = (area.height as usize).saturating_sub(3).max(1);
-    let lines: Vec<Line<'static>> = wrapped
-        .iter()
-        .take(max_rows)
+    // it must, so a sentence is not broken across rows needlessly. At full
+    // width it keeps two columns clear on each side.
+    let max_w = (area.width as usize).saturating_sub(8).clamp(12, 120);
+    // A notice is a glance, not a page: a few rows, the rest cut with "…".
+    // /help is the exception, a listing the user asked to read.
+    let max_rows = (area.height as usize).saturating_sub(3).max(1).min(
+        if text == dashboard_help() { usize::MAX } else { NOTICE_PILL_MAX_ROWS },
+    );
+    let rows = notice_pill_rows(&text, max_w.saturating_sub(2), max_rows);
+    let lines: Vec<Line<'static>> = rows
+        .into_iter()
         .enumerate()
         .map(|(index, row)| {
             Line::from(vec![
@@ -7079,7 +7108,7 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
                     if index == 0 { format!("{glyph} ") } else { "  ".to_string() },
                     Style::default().fg(colors.glyph),
                 ),
-                Span::styled(row.clone(), colors.text),
+                Span::styled(row, colors.text),
             ])
         })
         .collect();

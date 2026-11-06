@@ -194,6 +194,14 @@ pub(crate) fn refresh_palette() {
     DARK_CHROME.with(|cell| cell.set(dark));
 }
 
+/// Pick the dark or light palette for this thread without asking the terminal,
+/// so a test can draw either one. `render` re-reads it, so draw the widget
+/// directly.
+#[cfg(test)]
+pub(crate) fn set_dark_chrome_for_test(dark: bool) {
+    DARK_CHROME.with(|cell| cell.set(dark));
+}
+
 pub(crate) fn pal() -> Palette {
     if DARK_CHROME.with(std::cell::Cell::get) {
         DARK

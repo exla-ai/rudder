@@ -774,6 +774,10 @@ fn web_steer_running_worker_injects_and_persists_a_user_turn() {
     app.agents.push(run);
 
     let _ = app.deliver_steer_request("n-running", "focus on the failing parser test");
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("steered n-running: \"focus on the failing parser test\"")
+    );
 
     let run = &app.agents[0];
     assert_eq!(run.status, AgentStatus::Running);
@@ -8353,6 +8357,138 @@ fn notice_style_colors_errors_and_pending_confirms() {
     );
     assert_eq!(notice_kind("merge stopped: boom"), NoticeKind::Error);
     assert_eq!(notice_kind("deleted agent from dashboard"), NoticeKind::Info);
+}
+
+/// The steer message from the screenshot that covered half the dashboard.
+const LONG_STEER: &str = "Note from the main Rudder session before you deploy: your 4.2.7 commit points cloud/fly.toml at registry.fly.io/rudder-workers-exla:4.2.7, but that worker image does not exist (the registry returns 404); you only built rudder-cloud-control:4.2.7.\n\nAfter npm serves 4.2.7, build it with `node scripts/worker-image.mjs 4.2.7`, check the worker manifest exists, and only then deploy the control plane.";
+
+#[test]
+fn a_steer_notice_quotes_only_the_start_of_a_long_message() {
+    let preview = steer_preview(LONG_STEER);
+    assert!(preview.starts_with("Note from the main Rudder session"), "{preview}");
+    assert!(preview.ends_with('\u{2026}'), "{preview}");
+    assert!(preview.chars().count() <= STEER_PREVIEW_CHARS + 1, "{preview}");
+    // Cut at a word, not mid-word.
+    let head = preview.trim_end_matches('\u{2026}');
+    assert!(LONG_STEER.starts_with(head), "{preview}");
+    assert_eq!(LONG_STEER[head.len()..].chars().next(), Some(' '), "{preview}");
+
+    // A short one-line message is quoted whole; a short first line with more
+    // after it says there is more.
+    assert_eq!(steer_preview("focus on the failing parser test"), "focus on the failing parser test");
+    assert_eq!(steer_preview("fix the parser\n\nthen rerun the tests"), "fix the parser\u{2026}");
+    // One long word (a URL) is cut, not dropped.
+    let url = format!("https://example.com/{}", "a".repeat(200));
+    assert_eq!(steer_preview(&url).chars().count(), STEER_PREVIEW_CHARS + 1);
+
+    // The notice built from it reads as done, not as work in progress (an
+    // ellipsis at the very end keeps the pill up with a spinner).
+    let notice = format!("steered context-check-i-think-09cdb: \"{preview}\"");
+    assert!(!notice_in_progress(&notice), "{notice}");
+    assert_eq!(notice_kind(&notice), NoticeKind::Info);
+}
+
+#[test]
+fn a_notice_pill_never_runs_past_its_row_cap() {
+    let text = format!("steered context-check-i-think-09cdb: {}", LONG_STEER.replace('\n', " "));
+    for width in [20, 40, 72, 118] {
+        let rows = notice_pill_rows(&text, width, NOTICE_PILL_MAX_ROWS);
+        assert_eq!(rows.len(), NOTICE_PILL_MAX_ROWS, "width {width}: {rows:?}");
+        assert!(rows.iter().all(|row| row.chars().count() <= width), "width {width}: {rows:?}");
+        assert!(rows.last().unwrap().ends_with('\u{2026}'), "width {width}: {rows:?}");
+    }
+    // A notice that fits is left alone.
+    assert_eq!(notice_pill_rows("merged n3", 40, NOTICE_PILL_MAX_ROWS), vec!["merged n3"]);
+    let fits = notice_pill_rows("one two three four five", 9, NOTICE_PILL_MAX_ROWS);
+    assert_eq!(fits, vec!["one two", "three", "four five"]);
+    // One row too many: the last row is cut at a word to make room for "…".
+    let cut = notice_pill_rows("one two three four five six", 9, NOTICE_PILL_MAX_ROWS);
+    assert_eq!(cut, vec!["one two", "three", "four\u{2026}"]);
+}
+
+/// Draw only the notice pill on a `width`x24 screen with the light or dark
+/// palette and return the buffer.
+fn draw_notice_pill(app: &mut App, width: u16, dark: bool) -> ratatui::buffer::Buffer {
+    crate::theme::set_dark_chrome_for_test(dark);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24))
+        .expect("test backend");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            crate::render::render_notice_pill(frame, area, app);
+        })
+        .expect("draw");
+    terminal.backend().buffer().clone()
+}
+
+#[test]
+fn notice_pill_text_reads_on_light_and_dark_terminals_and_stays_on_screen() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::theme::set_dark_chrome_for_test(true);
+            set_color_mode(ColorMode::Terminal);
+        }
+    }
+    let _restore = Restore;
+    set_color_mode(ColorMode::Terminal);
+    let long = format!("steered context-check-i-think-09cdb: {}", LONG_STEER.replace('\n', " "));
+    let mut glyphs = Vec::new();
+    for dark in [true, false] {
+        for width in [80u16, 200] {
+            let mut app = App::new();
+            app.notice = Some(long.clone());
+            let buffer = draw_notice_pill(&mut app, width, dark);
+            let at = |x: u16, y: u16| buffer.cell((x, y)).expect("cell in buffer");
+            let find = |symbol: &str| {
+                (0..24u16)
+                    .flat_map(|y| (0..width).map(move |x| (x, y)))
+                    .find(|&(x, y)| at(x, y).symbol() == symbol)
+                    .unwrap_or_else(|| panic!("no {symbol} drawn at width {width}"))
+            };
+            let (left, top) = find("\u{256d}");
+            let (right, bottom) = find("\u{256f}");
+            let case = format!("{} width {width}", if dark { "dark" } else { "light" });
+            // Three rows of text, two columns clear of each screen edge.
+            assert_eq!(bottom - top - 1, NOTICE_PILL_MAX_ROWS as u16, "{case}");
+            assert!(left >= 2 && right <= width - 3, "{case}: box at {left}..={right}");
+            // Padding: a blank column inside each border.
+            for y in top + 1..bottom {
+                assert_eq!(at(left + 1, y).symbol(), " ", "{case} left padding");
+                assert_eq!(at(right - 1, y).symbol(), " ", "{case} right padding");
+            }
+            // The words use the terminal's own text color, never a fixed gray
+            // or dim, so they read on a light and a dark background alike.
+            let words: Vec<_> = (top + 1..bottom)
+                .flat_map(|y| (left + 4..right - 1).map(move |x| (x, y)))
+                .filter(|&(x, y)| at(x, y).symbol() != " ")
+                .collect();
+            assert!(words.len() > 40, "{case}: {} word cells", words.len());
+            for (x, y) in words {
+                let cell = at(x, y);
+                assert_eq!(cell.fg, Color::Reset, "{case} text at {x},{y}");
+                assert!(!cell.modifier.contains(Modifier::DIM), "{case} dim text at {x},{y}");
+            }
+            let glyph = at(left + 2, top + 1);
+            assert_eq!(glyph.symbol(), "\u{2713}", "{case}");
+            assert_eq!(glyph.fg, pal().accent, "{case} glyph follows the palette");
+            assert_eq!(at(left, top).fg, notice_pill_colors(NoticeKind::Info).border, "{case}");
+            glyphs.push(glyph.fg);
+            // The cut row says so.
+            let last: String = (left + 2..right - 1).map(|x| at(x, bottom - 1).symbol()).collect();
+            assert!(last.trim_end().ends_with('\u{2026}'), "{case}: {last:?}");
+        }
+    }
+    assert_ne!(glyphs[0], glyphs[2], "the light palette was drawn");
+
+    // /help is a listing the user asked for: it is not cut to three rows.
+    let mut app = App::new();
+    app.notice = Some(dashboard_help().to_string());
+    let buffer = draw_notice_pill(&mut app, 80, true);
+    let rows = (0..24u16)
+        .filter(|&y| (0..80u16).any(|x| buffer.cell((x, y)).unwrap().symbol() == "\u{2502}"))
+        .count();
+    assert!(rows > NOTICE_PILL_MAX_ROWS, "/help shows {rows} rows");
 }
 
 #[test]

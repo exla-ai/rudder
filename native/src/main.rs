@@ -15429,7 +15429,12 @@ Address the objection directly. If you disagree, say why inside \
                         run.needs_user_input = false;
                         let _ = save_native_run_record(&cwd, run);
                     }
-                    self.push_activity(format!("steered {label}: {instruction}"));
+                    // Quoted, so a cut preview ending in "…" does not read as
+                    // work in progress (a spinner pill that never settles).
+                    self.push_activity(format!(
+                        "steered {label}: \"{}\"",
+                        steer_preview(&instruction)
+                    ));
                     SteerDelivery::Delivered
                 } else {
                     self.push_activity(format!("steer: {label} has no live terminal"));
@@ -15448,7 +15453,10 @@ Address the objection directly. If you disagree, say why inside \
                 // then type the message into it. This is the phone case: after the
                 // cloud machine restarts every row is Paused with no process.
                 if self.steer_resume_main(index, &instruction) {
-                    self.push_activity(format!("resumed {label} with: {instruction}"));
+                    self.push_activity(format!(
+                        "resumed {label} with: \"{}\"",
+                        steer_preview(&instruction)
+                    ));
                     SteerDelivery::Delivered
                 } else {
                     self.record_activity(format!("steer: {label} could not be resumed"));
@@ -21296,6 +21304,30 @@ fn sanitize_steer_instruction(raw: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+/// How much of a steer message its notice quotes.
+pub(crate) const STEER_PREVIEW_CHARS: usize = 72;
+
+/// A steer message as its notice quotes it: the first line, cut at a word near
+/// STEER_PREVIEW_CHARS, with "…" when anything was left out. The agent gets the
+/// whole message; the notice only says which one went, and a message can be
+/// paragraphs long.
+pub(crate) fn steer_preview(instruction: &str) -> String {
+    let mut lines = instruction.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let more_lines = lines.next().is_some();
+    if first.chars().count() <= STEER_PREVIEW_CHARS {
+        return if more_lines { format!("{first}\u{2026}") } else { first.to_string() };
+    }
+    let head: String = first.chars().take(STEER_PREVIEW_CHARS).collect();
+    // Cut at the last space, unless that throws away most of the line (one
+    // long path or URL).
+    let head = match head.rfind(' ') {
+        Some(at) if at >= head.len() / 2 => &head[..at],
+        _ => head.as_str(),
+    };
+    format!("{}\u{2026}", head.trim_end())
 }
 
 /// Open a URL in the user's default browser. Spawned detached with null stdio so

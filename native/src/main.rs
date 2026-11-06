@@ -17093,8 +17093,12 @@ Address the objection directly. If you disagree, say why inside \
         // workspace somebody else made (any name Rudder does not give) stays
         // registered, and its directory is protected below: one made by hand
         // for a scorer was forgotten under it a minute after it was created.
+        // Read-only: without --ignore-working-copy every listing snapshots the
+        // user's checkout and writes an operation to the shared op log, once a
+        // minute, racing the agents' own jj commands.
         let list = |args: &[&str]| {
             Command::new("jj")
+                .arg("--ignore-working-copy")
                 .args(args)
                 .current_dir(&repo)
                 .stdin(std::process::Stdio::null())

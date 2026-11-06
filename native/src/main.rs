@@ -20441,6 +20441,17 @@ What to do\n\
         // cannot starve behind a continuously noisy earlier agent.
         const UNFOCUSED_DRAIN_INTERVAL: Duration = Duration::from_millis(500);
         const BACKGROUND_DRAINS_PER_TICK: usize = 2;
+        // The selected pane drains its whole queue before the frame, so moving
+        // the selection to a busy agent shows its current screen at once
+        // instead of replaying the backlog one 64KB batch per frame.
+        const FOCUSED_DRAIN_BUDGET: Duration = Duration::from_millis(12);
+        let drain = |terminal: &mut TerminalPane, focused: bool| {
+            if focused {
+                terminal.drain_output_within(FOCUSED_DRAIN_BUDGET)
+            } else {
+                terminal.drain_output()
+            }
+        };
         let focused_index = self.selected_agent;
         let now = Instant::now();
         let repo_root = self.cwd.clone();
@@ -20496,7 +20507,7 @@ What to do\n\
             if terminal.is_output_only() {
                 if due_to_drain {
                     run.last_drain_at = Some(now);
-                    if !terminal.drain_output().is_empty() {
+                    if !drain(terminal, is_focused).is_empty() {
                         any_dirty = true;
                     }
                 }
@@ -20508,7 +20519,7 @@ What to do\n\
             if matches!(terminal.execution_profile(), Some("claude-sdk" | "codex-app-server")) {
                 if due_to_drain {
                     run.last_drain_at = Some(now);
-                    if !terminal.drain_output().is_empty() {
+                    if !drain(terminal, is_focused).is_empty() {
                         run.last_output_at = now;
                         any_dirty = true;
                     }
@@ -20553,7 +20564,7 @@ What to do\n\
             }
             run.last_drain_at = Some(now);
             let drain_started = Instant::now();
-            let drained = terminal.drain_output();
+            let drained = drain(terminal, is_focused);
             let drained_bytes = drained.len();
             let had_output = drained_bytes > 0;
             // The backend's OWN desktop notification escapes (Claude's OSC 777
@@ -21667,6 +21678,14 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
 
         loop {
             let frame_started = Instant::now();
+            // Input that arrived during the last frame goes before the poll, so
+            // a selection key's new pane is drained before it is drawn. This
+            // also consumes PtyOutput nudges, which is only safe before the
+            // waker reset below: swallowed after poll_agents, a nudge for bytes
+            // that arrived mid-poll left them on screen a 33ms tick late.
+            if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx)? {
+                break;
+            }
             // Reset the PTY-output waker BEFORE poll_agents drains, so a byte arriving
             // mid-drain re-arms it and enqueues a fresh wake instead of being lost.
             pty_output_pending.store(false, Ordering::Release);
@@ -21685,9 +21704,6 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
                 if let Some(text) = app.notice.take() {
                     app.publish_engine_notice(text);
                 }
-            }
-            if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx)? {
-                break;
             }
             // Second views (view.rs) redraw whenever this one would, plus on their
             // own input.

@@ -1332,6 +1332,23 @@ impl TerminalPane {
         drained
     }
 
+    /// Drain batches until the queue is empty or `budget` has passed. For the
+    /// pane on screen: an agent that was not selected has a backlog of up to a
+    /// full queue, and one bounded batch per frame showed it catching up over
+    /// a dozen frames (100-300ms) after the selection moved to it.
+    pub fn drain_output_within(&mut self, budget: Duration) -> Vec<u8> {
+        let started = Instant::now();
+        let mut drained = self.drain_output();
+        while !drained.is_empty() && started.elapsed() < budget {
+            let more = self.drain_output();
+            if more.is_empty() {
+                break;
+            }
+            drained.extend_from_slice(&more);
+        }
+        drained
+    }
+
     /// The terminal's colors changed (light/dark): tell an agent that asked.
     fn report_theme_change(&mut self) {
         let generation = colors_generation();
@@ -2693,6 +2710,35 @@ mod tests {
         drop(sender);
         pane.drain_output();
         assert!(pane.try_wait_after_output().unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn selected_pane_drains_a_full_backlog_in_one_call() {
+        // An agent that printed while another row was selected has up to a
+        // full queue waiting. One bounded batch per frame replayed it over
+        // several frames after the selection moved; the selected pane's drain
+        // takes all of it so the next frame shows its current screen.
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "sleep 30"])),
+            TerminalPaneOptions::default(),
+        )
+        .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        pane.output_rx = receiver;
+        let line = b"0123456789abcdefghijklmnopqrstuvwxyz\r\n";
+        let chunk: Vec<u8> = line.iter().copied().cycle().take(PTY_READ_CHUNK_BYTES).collect();
+        for _ in 0..MAX_PTY_QUEUED_CHUNKS {
+            sender.send(chunk.clone()).unwrap();
+        }
+        sender.send(b"BACKLOG-END".to_vec()).unwrap();
+        let total = MAX_PTY_QUEUED_CHUNKS * PTY_READ_CHUNK_BYTES + b"BACKLOG-END".len();
+
+        let batch = pane.drain_output();
+        assert!(batch.len() <= MAX_PTY_DRAIN_BYTES, "one batch is bounded");
+        let rest = pane.drain_output_within(Duration::from_secs(10));
+
+        assert_eq!(batch.len() + rest.len(), total);
+        assert!(pane.visible_lines_snapshot().join("\n").contains("BACKLOG-END"));
     }
 
     #[test]

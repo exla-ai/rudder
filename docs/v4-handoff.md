@@ -52,6 +52,14 @@ when reported. This is a request snapshot, separate from cumulative billing;
 Claude capacity and prompt/file/tool categories are not inferred. Usage is
 read off the UI thread and refreshed every ten seconds.
 
+Selection speed: moving the selection to a busy agent now shows its current
+screen on the next frame. The selected pane drains its whole output queue
+before drawing (it used to replay up to 256 KB one 64 KB batch per frame), and
+input is handled before the poll, so a PTY wake is no longer swallowed (that
+cost a 33 ms tick). Key-to-frame on the host was already about 1 ms; on a Cloud
+home the rest is the network and the home relay (`home.mjs` blocks its event
+loop for about 80 ms every 5 s while it spawns the preview scan).
+
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
 `rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
 workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero

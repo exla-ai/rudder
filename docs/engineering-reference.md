@@ -392,7 +392,13 @@ notes); they feed data that the loop ingests, they do not mutate `App`.
 **PTY drain throttling.** `poll_agents` fully drains the FOCUSED agent's PTY every
 frame, throttles unfocused agents to once per `UNFOCUSED_DRAIN_INTERVAL` = 500 ms (so
 vt100 parse cost scales with focus, not agent count), and always drains a streaming
-planner every tick. Completion of an interactive agent is declared once it has looked
+planner every tick. "Fully" matters when the selection moves: an unselected busy
+agent has up to a full queue (256 KB) waiting, and the focused pane drains batches
+until its queue is empty (`FOCUSED_DRAIN_BUDGET` = 12 ms) instead of one 64 KB batch
+per frame, which replayed the backlog over several frames. Ready input is handled at
+the top of the loop, before the waker reset and `poll_agents`, so a selection key's
+new pane is drained before it is drawn and a PtyOutput nudge is never swallowed after
+the poll (that left mid-poll output a 33 ms tick late). Completion of an interactive agent is declared once it has looked
 idle for `READY_GRACE` = 3200 ms (or on clean process exit), which is robust against a
 TUI that repaints while idle.
 

@@ -161,6 +161,21 @@ home adopts it on its first idle window.
   are in us-east-1. Attach also replays up to 256KB that the repaint it asks
   for makes redundant.
 
+Stray `[<0;23;3m`-like text and flicker while typing in `rudder cloud`
+(unreleased, client side, src/key-sequences.ts): predictive echo treated the
+bytes of escape-sequence keys (mouse clicks, arrows, Shift+Enter, focus and
+paste markers) as typed characters. Since the held-keys change in 4.2.2 it
+drew them at the caret on the next keypress, plus the already echoed keys
+again, then rolled them back. It now skips whole sequences and pastes, and a
+rollback that lands mid-frame repaints at the frame's end instead of leaving
+the cells drawn. The client also sends keys in whole escape sequences: a read
+that split one (`ESC` | `[<0;23;3M`) reached the dashboard's crossterm as Esc
+plus typed text, and a split color reply was typed as `11;rgb:...`. Other
+terminal replies (`CSI ?`/`>`/`=`, OSC, DCS, APC) are dropped from keys. The
+Home's preview scan queries projects one at a time: each spawn forks the
+supervisor (about 5ms at its size), so batches of four held keystrokes and
+frames for about 20ms each.
+
 `/sync` (native/src/agent_sync.rs): bare `/sync` now tells every running and
 review agent in the project, main included, what the others are doing: one
 compact message (about 2,000 characters at most) built from run records and

@@ -330,3 +330,32 @@ test("a chunk that closes the echo frame and opens the next still redraws the pr
   assert.ok(written.slice(0, close).includes("\x1b[3;4H\x1b[0mi"), "the key in flight is redrawn before the first frame closes");
   assert.ok(written.endsWith("\x1b[?2026h\x1b[6;1H*"), "the frame left open is untouched");
 });
+
+test("a key sent as an escape sequence is never drawn as typed text", async () => {
+  const { predictor, out, tick } = setup();
+  const drawn = () => out.join("").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("", 3));
+  await settle();
+  // A click to focus the pane, then keys typed while the cloud catches up.
+  predictor.onInput("\x1b[<0;23;3M\x1b[<0;23;3m");
+  for (const key of "hel") {
+    tick(60);
+    predictor.onInput(key);
+  }
+  predictor.onServerData(frameWith("hel", 6));
+  await settle();
+  tick(200);
+  predictor.onInput("l");
+  assert.equal(drawn(), "l", "only the key typed now: never the click's tail, nor the echoed keys again");
+  predictor.onServerData(frameWith("hell", 7));
+  await settle();
+  assert.equal(predictor.rollbacks, 0);
+  out.length = 0;
+  predictor.onInput("\x1b[200~pasted text\x1b[201~");
+  tick(1000);
+  predictor.onServerData(frameWith("hell[Pasted]", 15));
+  await settle();
+  predictor.onInput("o");
+  assert.equal(drawn(), "o", "nothing from the paste or its markers");
+});

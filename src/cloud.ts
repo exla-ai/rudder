@@ -3266,7 +3266,7 @@ async function runAttach(
       cleaned = true;
       offLeave();
       clearInterval(liveness);
-      stdin.off("data", onStdin);
+      session.keys.off("data", onStdin);
       offTheme();
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
@@ -3431,7 +3431,7 @@ async function runAttach(
       }
       if (!probeMode) {
         stdin.resume();
-        stdin.on("data", onStdin);
+        session.keys.on("data", onStdin);
       } else {
         // A worker that never boots would otherwise hang the probe forever:
         // there is no TTY and no human to Ctrl+C it.

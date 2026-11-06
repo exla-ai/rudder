@@ -17,6 +17,7 @@
 // blank cell (typing at the end of the input, the common case).
 
 import { createRequire } from "node:module";
+import { KeySequenceScanner, type KeyByte } from "./key-sequences.js";
 
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
@@ -50,6 +51,8 @@ const SYNC_BEGIN = "\x1b[?2026h";
 const SYNC_END = "\x1b[?2026l";
 const CURSOR_SHOW = "\x1b[?25h";
 const CURSOR_HIDE = "\x1b[?25l";
+const PASTE_BEGIN = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
 
 export class EchoPredictor {
   private readonly model: HeadlessTerminal;
@@ -82,6 +85,15 @@ export class EchoPredictor {
   // as someone typed faster than about five keys a second.
   private heldKeys: string[] = [];
   private suspendedUntil = 0;
+  // Keys that arrive as escape sequences (arrows, Shift+Enter, mouse reports,
+  // paste markers). None of their bytes is typed text: drawn as predictions,
+  // a click's tail showed as "[<0;23;3m" at the caret until the rollback.
+  private readonly keys = new KeySequenceScanner();
+  private sequence = "";
+  private pasting = false;
+  // Cells drawn as predictions and taken back while the cloud was mid-frame:
+  // repainted from the model at the next boundary, or they stay on screen.
+  private stale: { row: number; col: number }[] = [];
   private srtt: number | null = null;
   // Smoothed keystroke-to-echo time from confirmed predictions. The ping round
   // trip only covers the laptop-to-relay leg; the echo also crosses to the home.
@@ -141,6 +153,8 @@ export class EchoPredictor {
 
   resize(cols: number, rows: number): void {
     this.rollback();
+    // The cloud repaints a resized screen whole.
+    this.stale = [];
     this.model.resize(Math.max(1, cols), Math.max(1, rows));
   }
 
@@ -214,6 +228,7 @@ export class EchoPredictor {
           this.caret = { row: buffer.cursorY, col: buffer.cursorX };
         }
         this.reconcile();
+        this.repaintStale();
       }
     });
   }
@@ -221,10 +236,16 @@ export class EchoPredictor {
   /** Keystrokes the user typed (already sent to the cloud). */
   onInput(data: Buffer | string): void {
     const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
-    if (!this.predict || !this.active) {
-      return;
-    }
+    const predicting = this.predict && this.active;
     for (const byte of bytes) {
+      const kind = this.keys.next(byte);
+      if (kind !== "text") {
+        this.sequenceByte(kind, byte, predicting);
+        continue;
+      }
+      if (this.pasting || !predicting) {
+        continue;
+      }
       if (byte >= 0x20 && byte <= 0x7e) {
         const ch = String.fromCharCode(byte);
         if (this.hold && !this.releaseHold()) {
@@ -240,6 +261,29 @@ export class EchoPredictor {
         }
       } else {
         this.setHold();
+      }
+    }
+    this.keys.endRead();
+  }
+
+  /** One byte of a key sent as an escape sequence: it holds, never types. */
+  private sequenceByte(kind: KeyByte, byte: number, predicting: boolean): void {
+    if (kind === "start") {
+      this.sequence = "";
+      if (predicting) {
+        this.setHold();
+      }
+    }
+    if (this.sequence.length < PASTE_BEGIN.length) {
+      this.sequence += String.fromCharCode(byte);
+    }
+    if (kind === "end") {
+      // A pasted block is not typed at the caret either: the dashboard folds
+      // it into a chip or inserts it whole.
+      if (this.sequence === PASTE_BEGIN) {
+        this.pasting = true;
+      } else if (this.sequence === PASTE_END) {
+        this.pasting = false;
       }
     }
   }
@@ -342,12 +386,16 @@ export class EchoPredictor {
       // Deleting text the cloud already drew: let the cloud do it.
       return false;
     }
-    if (last.shown && this.atBoundary()) {
+    if (last.shown) {
       // Deleting the only character typed over a hint brings the hint back.
       const hint = this.predictions.length === 0 ? this.placeholder : null;
-      const repaint = hint ? this.paintCells(hint.row, hint.start, hint.end) : this.cellPaint(last.row, last.col);
-      const from = hint ? hint.start : last.col;
-      this.out(`\x1b[${last.row + 1};${from + 1}H${repaint}\x1b[0m\x1b[${last.row + 1};${last.col + 1}H`);
+      if (this.atBoundary()) {
+        const repaint = hint ? this.paintCells(hint.row, hint.start, hint.end) : this.cellPaint(last.row, last.col);
+        const from = hint ? hint.start : last.col;
+        this.out(`\x1b[${last.row + 1};${from + 1}H${repaint}\x1b[0m\x1b[${last.row + 1};${last.col + 1}H`);
+      } else {
+        this.markStale(hint, [last]);
+      }
     }
     if (this.predictions.length === 0) {
       this.placeholder = null;
@@ -467,7 +515,11 @@ export class EchoPredictor {
     this.placeholder = null;
     this.rollbacks += 1;
     this.suspendedUntil = this.now() + this.cooldownMs;
-    if (shown.length === 0 || !this.atBoundary()) {
+    if (shown.length === 0) {
+      return;
+    }
+    if (!this.atBoundary()) {
+      this.markStale(hint, shown);
       return;
     }
     let text = hint ? `\x1b[${hint.row + 1};${hint.start + 1}H${this.paintCells(hint.row, hint.start, hint.end)}` : "";
@@ -477,6 +529,37 @@ export class EchoPredictor {
     const buffer = this.model.buffer.active;
     text += `\x1b[0m\x1b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`;
     this.out(text);
+  }
+
+  private markStale(hint: { row: number; start: number; end: number } | null, cells: { row: number; col: number }[]): void {
+    if (hint) {
+      for (let col = hint.start; col < hint.end; col += 1) {
+        this.stale.push({ row: hint.row, col });
+      }
+    }
+    this.stale.push(...cells.map(({ row, col }) => ({ row, col })));
+  }
+
+  /** Repaint the cells taken back mid-frame now that the frame has ended. */
+  private repaintStale(): void {
+    if (this.stale.length === 0 || !this.atBoundary()) {
+      return;
+    }
+    let text = "";
+    for (const { row, col } of this.stale) {
+      // A key typed since may have been drawn there again.
+      if (!this.predictions.some((prediction) => prediction.shown && prediction.row === row && prediction.col === col)) {
+        text += `\x1b[${row + 1};${col + 1}H${this.cellPaint(row, col)}`;
+      }
+    }
+    this.stale = [];
+    if (!text) {
+      return;
+    }
+    const last = this.predictions[this.predictions.length - 1];
+    const buffer = this.model.buffer.active;
+    const cursor = last?.shown ? `\x1b[${last.row + 1};${last.col + 2}H` : `\x1b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`;
+    this.out(`${text}\x1b[0m${cursor}`);
   }
 
   private ensureTimer(): void {

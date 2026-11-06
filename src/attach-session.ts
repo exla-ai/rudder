@@ -11,6 +11,7 @@
 // over the old picture in place.
 
 import { randomUUID } from "node:crypto";
+import { KeyFramer } from "./key-sequences.js";
 import { EchoPredictor } from "./predict.js";
 import { THEME_QUERY, THEME_REPORTS_OFF, THEME_REPORTS_ON, TerminalThemeWatcher, type TerminalColors } from "./terminal-theme.js";
 
@@ -73,6 +74,44 @@ export function containsCtrlC(data: Buffer): boolean {
   return data.includes(0x03) || /\x1b\[99;5(?::[123])?u/.test(data.toString("latin1"));
 }
 
+/**
+ * The terminal's keys in whole escape sequences (src/key-sequences.ts). A read
+ * that stops inside a mouse report or a color reply would otherwise reach the
+ * dashboard as Esc plus its tail typed as text. Every reader of keys (the live
+ * connection and the reconnect gap) listens here, not on stdin.
+ */
+class FramedKeys {
+  private readonly listeners = new Set<(chunk: Buffer) => void>();
+  private readonly framer = new KeyFramer((chunk) => {
+    for (const listener of [...this.listeners]) {
+      listener(chunk);
+    }
+  });
+
+  constructor(private readonly source: SessionInput) {}
+
+  on(_event: "data", listener: (chunk: Buffer) => void): void {
+    if (this.listeners.size === 0) {
+      this.source.on("data", this.onData);
+    }
+    this.listeners.add(listener);
+  }
+
+  off(_event: "data", listener: (chunk: Buffer) => void): void {
+    if (this.listeners.delete(listener) && this.listeners.size === 0) {
+      this.source.off("data", this.onData);
+    }
+  }
+
+  dispose(): void {
+    this.framer.dispose();
+  }
+
+  private onData = (chunk: Buffer | string): void => {
+    this.framer.push(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+  };
+}
+
 export class AttachSession {
   /** Sent as `?client=`: the relay lets this terminal take its own place back. */
   readonly clientId = randomUUID();
@@ -81,6 +120,8 @@ export class AttachSession {
   readonly predictor: EchoPredictor | null;
   /** This terminal's colors, for the cloud's agents to theme themselves by. */
   readonly theme: TerminalThemeWatcher | null;
+  /** The keys typed here, in whole escape sequences: listen here, not on stdin. */
+  readonly keys: FramedKeys;
   /** Connections that reached `open`. */
   connections = 0;
   /** The cloud has drawn on this terminal: a reconnect resumes that picture. */
@@ -106,6 +147,7 @@ export class AttachSession {
   constructor(label: string, input: SessionInput, output: SessionOutput, options: SessionOptions) {
     this.label = label;
     this.input = input;
+    this.keys = new FramedKeys(input);
     this.output = output;
     this.interactive = options.interactive;
     this.log = options.log ?? ((text) => process.stderr.write(text));
@@ -183,6 +225,7 @@ export class AttachSession {
       this.output.write(ALT_SCREEN_OFF);
     }
     this.predictor?.dispose();
+    this.keys.dispose();
     this.input.pause();
   }
 
@@ -201,7 +244,7 @@ export class AttachSession {
     this.closeOpenSequence();
     this.setTitle(`Rudder cloud: ${this.label} · reconnecting`);
     this.showStatus("Reconnecting · your agents keep running");
-    this.input.on("data", this.onGapInput);
+    this.keys.on("data", this.onGapInput);
     this.output.on("resize", this.onGapResize);
     this.input.resume();
   }
@@ -359,7 +402,7 @@ export class AttachSession {
   };
 
   private stopGapInput(): void {
-    this.input.off("data", this.onGapInput);
+    this.keys.off("data", this.onGapInput);
     this.output.off("resize", this.onGapResize);
   }
 

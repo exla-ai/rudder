@@ -19,6 +19,12 @@ export const THEME_REPORTS_OFF = "\x1b[?2031l";
 const COLOR_REPLY = /\x1b\](1[01]);rgb:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\x07|\x1b\\)/g;
 // The appearance changed (1 dark, 2 light): ask for the colors again.
 const THEME_CHANGED = /\x1b\[\?997;[12]n/g;
+// Any other reply a terminal can send: `CSI ? ...`, `CSI > ...` and `CSI = ...`
+// (device attributes, mode and keyboard flag reports) and OSC, DCS and APC
+// strings. No key is spelled like these. Nothing on this side asks for them,
+// and the dashboard's parser would hold `CSI ? ... n` until a later key, or
+// type the rest of `CSI > 1;10;0 c` or an OSC into the composer.
+const OTHER_REPLY = /\x1b\[[=>?][0-?]*[ -/]*[@-~]|\x1b[\]P_][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 function channel(hex: string): string {
   // Scale 1 to 4 hex digits to 8 bits, as xterm does.
@@ -41,13 +47,14 @@ export class TerminalThemeWatcher {
   }
 
   /**
-   * Take color replies and appearance notices out of a chunk of input and
-   * return the keys that are left. Terminals answer in one write, so a reply
-   * split across chunks is not stitched; it passes through as keys.
+   * Take color replies, appearance notices and any other terminal reply out of
+   * a chunk of input and return the keys that are left. AttachSession hands
+   * over keys in whole escape sequences, so a reply split across reads arrives
+   * here whole.
    */
   filter(data: Buffer): Buffer {
     const text = data.toString("latin1");
-    if (!text.includes("\x1b]1") && !text.includes("\x1b[?997;")) {
+    if (!/\x1b(?:[\]P_]|\[[=>?])/.test(text)) {
       return data;
     }
     const next = { ...this.colors };
@@ -59,7 +66,7 @@ export class TerminalThemeWatcher {
     rest = rest.replace(THEME_CHANGED, () => {
       reask = true;
       return "";
-    });
+    }).replace(OTHER_REPLY, "");
     if (next.fg !== this.colors.fg || next.bg !== this.colors.bg) {
       this.colors = next;
       this.changed(next);

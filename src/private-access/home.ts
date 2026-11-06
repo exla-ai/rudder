@@ -16,15 +16,16 @@ export class HomePrivatePreviews {
   }
   async #reconcile(projects: Project[]): Promise<void> {
     const next = new Map<string, RegisteredPreviewProcess[]>();
-    // Bound concurrent native owner snapshots. A disappeared owner clears its
-    // reports in this tick rather than preserving stale published URLs.
-    for (let i = 0; i < Math.min(projects.length, 64); i += 4) {
-      await Promise.all(projects.slice(i, i + 4).map(async project => {
-        try {
-          const rows = await this.query(project.dir, "previews");
-          if (Array.isArray(rows)) next.set(project.workspaceId, rows as RegisteredPreviewProcess[]);
-        } catch { /* no current custody, so no preview */ }
-      }));
+    // One native owner snapshot at a time. Each spawn forks the Home supervisor,
+    // which also relays every terminal: about 5 ms of blocked event loop at its
+    // size, so four at once held keystrokes and frames for ~20 ms per batch,
+    // ~100 ms per scan with 22 projects. A disappeared owner clears its reports
+    // in this tick rather than preserving stale published URLs.
+    for (const project of projects.slice(0, 64)) {
+      try {
+        const rows = await this.query(project.dir, "previews");
+        if (Array.isArray(rows)) next.set(project.workspaceId, rows as RegisteredPreviewProcess[]);
+      } catch { /* no current custody, so no preview */ }
     }
     this.#projects = next;
     this.#roots = new Map(projects.slice(0,64).map(project=>[project.workspaceId,project.dir]));

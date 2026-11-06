@@ -153,3 +153,22 @@ test("paintRegion redraws cells as the model has them and restores the cursor", 
   assert.equal(out.length, 0);
   predictor.dispose();
 });
+
+test("keys reach the cloud in whole escape sequences, even when a read splits one", async () => {
+  const { session, input } = heldSession();
+  session.enterGap();
+  // A click whose read stopped right after its ESC, then a typed key.
+  input.emit("data", Buffer.from("\x1b"));
+  input.emit("data", Buffer.from("[<0;23;3M"));
+  input.emit("data", Buffer.from("x"));
+  // A color reply split in two is taken out whole instead of typed.
+  input.emit("data", Buffer.from("\x1b]11;rgb:2323/2323/"));
+  input.emit("data", Buffer.from("3333\x1b\\y"));
+  assert.equal(session.takeQueued()?.toString("latin1"), "\x1b[<0;23;3Mxy");
+  // A lone ESC that nothing follows was the Esc key: it goes once the wait ends.
+  input.emit("data", Buffer.from("\x1b"));
+  assert.equal(session.takeQueued(), null);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(session.takeQueued()?.toString("latin1"), "\x1b");
+  session.release();
+});

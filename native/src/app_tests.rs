@@ -29056,6 +29056,137 @@ fn an_agent_talking_about_a_permission_is_not_on_a_permission_prompt() {
     assert!(terminal_composer_blocked(Backend::Claude, &prompt).is_some());
 }
 
+/// Claude 2.1.318 mid-turn, as the libra "bild" agent showed it while its row
+/// said "needs permission" for the whole turn: the spinner no longer carries
+/// "esc to interrupt", and the tip under it ("pre-approve ... edit") matched
+/// the permission keywords on every tick.
+fn claude_2_1_318_working_screen() -> Vec<String> {
+    [
+        "⏺ Nothing is posted. Say go and I will send it as is, or tell me what to change.",
+        "",
+        "❯ no no put more details that you did earlier and I want the context thing to be a chart",
+        "",
+        "✢ Bootstrapping… (1s · ↓ 38 tokens)",
+        "  ⎿  Tip: Use /permissions to pre-approve and pre-deny bash, edit, and MCP tools",
+        "",
+        "──────────────────────────────────────────────────────────────────────",
+        "❯ ",
+        "──────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+#[test]
+fn claude_2_1_318_spinner_and_tip_are_work_not_a_permission_prompt() {
+    let working = claude_2_1_318_working_screen();
+    assert!(recent_lines_look_busy(&working), "the 2.1.318 spinner is a busy spinner");
+    assert!(!terminal_needs_permission_from_lines(Backend::Claude, &working));
+    assert!(!terminal_needs_user_input_from_lines(Backend::Claude, &working));
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &working), None);
+    // The tip alone, with the spinner already gone, is still not a prompt.
+    let tip_only: Vec<String> = working.iter().filter(|line| !line.starts_with('✢')).cloned().collect();
+    assert!(!terminal_needs_permission_from_lines(Backend::Claude, &tip_only));
+    // The finished-turn row is not a spinner.
+    assert!(!looks_busy("✻ Churned for 4s · done 2:08 AM · 1 monitor still running"));
+    assert!(looks_busy("✻ Sautéing…"));
+
+    // A real 2.1.318 permission dialog (captured): no spinner, still a prompt.
+    let dialog: Vec<String> = [
+        "● Bash(touch hello.txt)",
+        "  ⎿  Waiting…",
+        "──────────────────────────────────────────────────────────────────────",
+        " Bash command",
+        " Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below",
+        " Create empty file hello.txt",
+        " touch hello.txt",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. Yes, and always allow access to /workspace/demo from this project",
+        "   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+        "   4. No",
+        " Esc to cancel · Tab to amend",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(!recent_lines_look_busy(&dialog));
+    assert!(terminal_needs_permission_from_lines(Backend::Claude, &dialog));
+}
+
+/// The libra sequence end to end: a running Claude worker whose pane shows the
+/// 2.1.318 spinner and tip must not be persisted as `attention: "permission"`,
+/// and a permission wait latched from a hook lifts once the spinner is back.
+#[cfg(not(windows))]
+#[test]
+fn a_working_claude_2_1_318_pane_never_reads_as_needing_permission() {
+    let _env = env_guard();
+    let run_id = "perm-spinner-tip-itest";
+    let Some(sig) = crate::signals::signal_path(run_id) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&sig);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    let repo = unique_test_repo("perm-spinner-tip");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let printed = claude_2_1_318_working_screen()
+        .iter()
+        .map(|line| format!("'{line}'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!("printf '%s\\n' {printed}; sleep 30");
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 20, cols: 100 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn worker pty");
+    let mut run = test_agent_run(run_id, "bild");
+    run.cwd = repo.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    // As if a hook had said "permission" earlier in the turn.
+    run.wait_signal = Some(WaitSignal::Permission);
+    run.needs_permission = true;
+    save_native_run_record(&repo, &run).expect("seed record");
+    assert_eq!(read_run_json(&repo, run_id)["attention"], "permission");
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    app.selected_agent = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_agents();
+        let shown = app.agents[0]
+            .terminal
+            .as_ref()
+            .is_some_and(|pane| pane.visible_lines_snapshot().iter().any(|line| line.contains("Tip:")));
+        if shown && app.agents[0].wait_signal.is_none() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the spinner never lifted the permission wait");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Keep reading the same screen: the tip must not put it back.
+    for _ in 0..5 {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!app.agents[0].needs_permission);
+    assert_eq!(run_attention(&app.agents[0]), None);
+    assert_eq!(read_run_json(&repo, run_id)["attention"], serde_json::Value::Null);
+    if let Some(terminal) = app.agents[0].terminal.as_mut() {
+        terminal.request_termination();
+    }
+    let _ = std::fs::remove_file(&sig);
+    let _ = fs::remove_dir_all(&repo);
+}
+
 // ---------------------------------------------------------------------------
 // Persisted status truth for remote readers (the cloud supervisor, the phone)
 // ---------------------------------------------------------------------------

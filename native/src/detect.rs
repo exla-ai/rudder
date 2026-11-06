@@ -17,10 +17,15 @@ pub(crate) fn post_completion_output_is_new_turn(
 /// Used as a backstop to reopen an agent that was mis-flagged done while still
 /// working: a live spinner is unambiguous proof the turn never actually ended,
 /// whereas an idle resize/repaint shows no spinner.
+/// Blank rows are skipped, as the permission and input readers skip them: a
+/// pane that is not full yet has empty rows under Claude's footer, and counting
+/// them pushed the spinner out of this window while the tip above stayed in
+/// theirs.
 pub(crate) fn recent_lines_look_busy(lines: &[String]) -> bool {
     lines
         .iter()
         .rev()
+        .filter(|line| !line.trim().is_empty())
         .take(14)
         .any(|line| looks_busy(line.as_str()))
 }
@@ -213,6 +218,7 @@ pub(crate) fn recent_agent_lines(backend: Backend, lines: &[String], take: usize
         .filter(|line| !line.is_empty())
         .filter(|line| !looks_like_idle_chrome(backend, line))
         .filter(|line| !looks_like_agent_prompt(backend, line))
+        .filter(|line| !(backend == Backend::Claude && looks_like_claude_tip(line)))
         .take(take)
         .collect()
 }
@@ -324,6 +330,14 @@ pub(crate) fn has_numbered_menu_pattern(recent_rev: &[String]) -> bool {
 }
 
 pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[String]) -> bool {
+    // Claude's permission dialog replaces its spinner (checked on 2.1.318), so
+    // a visible spinner means the turn is running, whatever text sits above it.
+    // Without this, a tip or a tool line full of permission words held a working
+    // agent at "needs permission" for its whole turn, since this is re-read
+    // every tick.
+    if backend == Backend::Claude && recent_lines_look_busy(lines) {
+        return false;
+    }
     // Chrome-filtered for the same reason as above: Codex's status bar and
     // composer are two of the last three rows, so an unfiltered 14-line window
     // spent them on text the agent never wrote.
@@ -463,6 +477,46 @@ pub(crate) fn looks_busy(line: &str) -> bool {
         || busy_timer_after(&lower, "thinking (")
         || busy_timer_after(&lower, "working (")
         || busy_timer_after(&lower, "running (")
+        || looks_like_claude_spinner(line)
+}
+
+/// Claude Code's spinner row since its interrupt hint left it (2.1.318):
+/// `✢ Bootstrapping… (1s · ↓ 38 tokens)`. A spinner glyph, the verb, an
+/// ellipsis, then nothing or the elapsed-time readout. None of the markers
+/// above match it, so every "a spinner means it is working" check was dead for
+/// Claude. The finished-turn row (`✻ Churned for 4s · done 2:08 AM`) has no
+/// ellipsis and never matches.
+fn looks_like_claude_spinner(line: &str) -> bool {
+    let line = line.trim_start();
+    let mut chars = line.chars();
+    if !chars
+        .next()
+        .is_some_and(|glyph| matches!(glyph, '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '*'))
+    {
+        return false;
+    }
+    let Some((verb, after)) = chars.as_str().trim_start().split_once('\u{2026}') else {
+        return false;
+    };
+    let verb_shaped = !verb.is_empty()
+        && verb.chars().count() <= 40
+        && verb
+            .chars()
+            .all(|ch| ch.is_alphabetic() || matches!(ch, ' ' | '-' | '\''));
+    let after = after.trim_start();
+    verb_shaped
+        && (after.is_empty()
+            || after
+                .strip_prefix('(')
+                .is_some_and(|readout| readout.starts_with(|ch: char| ch.is_ascii_digit())))
+}
+
+/// Claude Code's hint row under its spinner (`⎿  Tip: Use /permissions to
+/// pre-approve and pre-deny bash, edit, and MCP tools`). Claude wrote it, not
+/// the agent, and that one tip reads as a permission request word for word.
+fn looks_like_claude_tip(line: &str) -> bool {
+    line.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{23bf}')
+        .starts_with("Tip:")
 }
 
 /// True when `marker` (e.g. "thinking (") appears in `lower` immediately followed

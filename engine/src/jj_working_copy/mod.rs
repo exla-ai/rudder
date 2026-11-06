@@ -4,7 +4,9 @@
 //! workspace namespace helper, see `workspace/linux.rs`):
 //!
 //! - lower: a read-only directory holding one jj tree, materialized once into a
-//!   shared cache (`lowers/<tree-key>`) and reused by every fork of that tree;
+//!   shared cache (`lowers/<tree-key>`) and reused by every fork of that tree.
+//!   A stacked warm snapshot's top layer lists its whole stack in
+//!   `<dir>.lowerdir` (see [`lower_layers`]); the mount helper passes that list.
 //! - upper: this working copy's private changes (`<state>/upper`);
 //! - work: OverlayFS scratch (`<state>/work`).
 //!
@@ -93,13 +95,67 @@ pub struct OverlayMount {
 
 impl OverlayMount {
     pub fn options(&self) -> String {
+        let lowers: Vec<String> = lower_layers(&self.lower).iter().map(|l| l.display().to_string()).collect();
         format!(
             "lowerdir={},upperdir={},workdir={},userxattr",
-            self.lower.display(),
+            lowers.join(":"),
             self.upper.display(),
             self.work.display()
         )
     }
+}
+
+/// The read-only layers under a working copy, top first: the lower directory
+/// itself, or, when it is the top layer of a stacked warm snapshot, the layers
+/// listed in `<real path>.lowerdir` (colon-separated, as OverlayFS takes them).
+pub fn lower_layers(lower: &Path) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let real = fs::canonicalize(lower).unwrap_or_else(|_| lower.to_owned());
+    let mut list = real.clone().into_os_string();
+    list.push(".lowerdir");
+    let layers: Vec<PathBuf> = fs::read(&list)
+        .map(|bytes| {
+            bytes
+                .split(|b| *b == b':' || *b == b'\n')
+                .filter(|part| !part.is_empty())
+                .map(|part| PathBuf::from(std::ffi::OsStr::from_bytes(part)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if layers.is_empty() { vec![real] } else { layers }
+}
+
+/// Where OverlayFS finds directory `name` below the given layers: each layer's
+/// `name` directory, top first, until an opaque directory or a non-directory
+/// entry (a file, symlink or whiteout) hides the layers beneath.
+fn child_layers(layers: &[PathBuf], name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for layer in layers {
+        let path = layer.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {
+                let opaque = is_opaque(&path);
+                out.push(path);
+                if opaque {
+                    break;
+                }
+            }
+            Ok(_) => break,
+            Err(_) => {}
+        }
+    }
+    out
+}
+
+/// The `.gitignore` the overlay shows in a directory: the topmost entry in the
+/// upper directory or the layers. A whiteout is returned as well: it is not a
+/// file, so it adds no patterns and hides the ones below.
+fn ignore_file(upper: &Path, layers: &[PathBuf]) -> PathBuf {
+    std::iter::once(upper)
+        .chain(layers.iter().map(PathBuf::as_path))
+        .map(|dir| dir.join(".gitignore"))
+        .find(|path| fs::symlink_metadata(path).is_ok())
+        .unwrap_or_else(|| upper.join(".gitignore"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -487,11 +543,13 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// `lowers` are this directory in each read-only layer that shows through
+    /// (used for `.gitignore` lookups only).
     async fn dir(
         &mut self,
         upper: &Path,
         dir: &RepoPath,
-        lower: Option<&Path>,
+        lowers: &[PathBuf],
         ignores: Arc<GitIgnoreFile>,
     ) -> anyhow::Result<()> {
         for entry in fs::read_dir(upper)? {
@@ -515,16 +573,10 @@ impl Walk<'_> {
                 if opaque || (base_value.is_present() && !base_value.is_tree()) {
                     self.remove_subtree(&path)?;
                 }
-                let child_lower = if opaque { None } else { lower.map(|l| l.join(name)) };
-                let gitignore = if disk.join(".gitignore").exists() {
-                    disk.join(".gitignore")
-                } else if let Some(l) = &child_lower {
-                    l.join(".gitignore")
-                } else {
-                    disk.join(".gitignore")
-                };
+                let child_lowers = if opaque { Vec::new() } else { child_layers(lowers, name) };
+                let gitignore = ignore_file(&disk, &child_lowers);
                 let child_ignores = ignores.chain_with_file(&path.to_internal_dir_string(), gitignore)?;
-                Box::pin(self.dir(&disk, &path, child_lower.as_deref(), child_ignores)).await?;
+                Box::pin(self.dir(&disk, &path, &child_lowers, child_ignores)).await?;
             } else if file_type.is_file() || file_type.is_symlink() {
                 self.file(&disk, &path, &meta, &ignores).await?;
             }
@@ -613,13 +665,9 @@ impl LockedOverlayWorkingCopy {
             options,
             stats: SnapshotStats::default(),
         };
-        let root_ignore = if mount.upper.join(".gitignore").exists() {
-            mount.upper.join(".gitignore")
-        } else {
-            mount.lower.join(".gitignore")
-        };
-        let ignores = options.base_ignores.chain_with_file("", root_ignore)?;
-        walk.dir(&mount.upper, RepoPath::root(), Some(&mount.lower), ignores).await?;
+        let lowers = lower_layers(&mount.lower);
+        let ignores = options.base_ignores.chain_with_file("", ignore_file(&mount.upper, &lowers))?;
+        walk.dir(&mount.upper, RepoPath::root(), &lowers, ignores).await?;
         let stats = walk.stats;
         let tree = walk.builder.write_tree().await?;
         Ok((tree, stats))

@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createNodeWorkspace, forgetWorkspace } from "../dist/jj.js";
-import { buildWarmSnapshot, createForkWorkspace, currentBaseCommit, inFork, seedFromPrevious, warmBuildSkipReason, warmCommands, warmDir } from "../dist/warm-snapshot.js";
+import { buildWarmSnapshot, createForkWorkspace, currentBaseCommit, inFork, pruneWarmSnapshots, readySnapshots, seedFromPrevious, warmBuildSkipReason, warmCommands, warmDir } from "../dist/warm-snapshot.js";
 import { rudderJjPath } from "../dist/util.js";
 
 const FILES = 3000;
@@ -22,16 +22,27 @@ function countFiles(dir) {
   return n;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * A launch on a base without a snapshot starts a detached warm build for it
- * (its log appears before it starts); it must finish before the repo goes.
+ * A launch starts the project's detached warm builder, which follows the base.
+ * Let a build in progress finish, then stop the builder (its process group).
  */
 async function waitForBuilders(repo) {
-  const running = () => {
-    const names = fs.existsSync(warmDir(repo)) ? fs.readdirSync(warmDir(repo)) : [];
-    return names.some((n) => n.endsWith(".log") && !names.includes(n.replace(/\.log$/, ".ready")) && !names.includes(n.replace(/\.log$/, ".failed")));
-  };
-  for (let i = 0; i < 150 && running(); i += 1) await new Promise((resolve) => setTimeout(resolve, 200));
+  const names = () => (fs.existsSync(warmDir(repo)) ? fs.readdirSync(warmDir(repo)) : []);
+  for (let i = 0; i < 150 && names().some((n) => n.endsWith(".building")); i += 1) await sleep(200);
+  try {
+    const pid = Number(fs.readFileSync(path.join(warmDir(repo), "builder.pid"), "utf8"));
+    if (pid) process.kill(-pid, "SIGTERM");
+  } catch {
+    /* no builder running */
+  }
+}
+
+/** Removes a test root, including OverlayFS work dirs (mode 000) a stopped build left. */
+function removeRoot(root) {
+  spawnSync("chmod", ["-R", "u+rwX", root]);
+  fs.rmSync(root, { recursive: true, force: true });
 }
 
 /** Every file under cwd but runtime dirs: path -> "file|exec <bytes>" or "link <target>". */
@@ -97,7 +108,7 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   t.after(async () => {
     for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
     await waitForBuilders(repo);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeRoot(root);
   });
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
   for (let i = 0; i < FILES; i += 1) fs.writeFileSync(path.join(repo, "src", `f${i}.txt`), `${i}\n`);
@@ -178,7 +189,7 @@ test("a fork moved onto a newer base matches it byte for byte, symlinks and mode
   t.after(async () => {
     for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
     await waitForBuilders(repo);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeRoot(root);
   });
   const put = (rel, text, mode = 0o644) => {
     const p = path.join(repo, rel);
@@ -270,6 +281,102 @@ test("a fork moved onto a newer base matches it byte for byte, symlinks and mode
   assert.deepEqual(manifest(ws, enter, [process.execPath]), want);
 });
 
+test("refreshes stack on the previous snapshot, follow the base, compact when deep, and keep what forks use", { skip: process.platform !== "linux" || !rudderJjPath() }, async (t) => {
+  const scratch = process.env.RUDDER_TEST_DISK ?? (fs.existsSync("/workspace/rudder-scratch") ? "/workspace/rudder-scratch" : os.tmpdir());
+  const root = fs.mkdtempSync(path.join(scratch, "rudder-warm-stack-"));
+  const repo = path.join(root, "repo");
+  const forks = [];
+  t.after(async () => {
+    for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
+    await waitForBuilders(repo);
+    removeRoot(root);
+  });
+  const put = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  };
+  for (let i = 0; i < 200; i += 1) put(`src/f${i}.txt`, `${i}\n`);
+  put("gone/a.txt", "a\n");
+  put(".gitignore", "node_modules\n.rudder-workspaces\n*.log\n");
+  // Every build appends to a file the builds before it left, and copies a source file.
+  put("rudder.toml", '[warm]\ncommands = ["mkdir -p node_modules/dep && echo run >> node_modules/dep/runs && cp src/f1.txt node_modules/dep/built"]\n');
+  sh(repo, "git", ["init", "-q"]);
+  sh(repo, "git", ["add", "."]);
+  sh(repo, "git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  sh(repo, "jj", ["git", "init", "--colocate"]);
+  // About ten files change per move: edits, an addition and a deletion.
+  const move = (n) => {
+    for (let i = 0; i < 8; i += 1) put(`src/f${i}.txt`, `${i} v${n}\n`);
+    put(`added${n}.txt`, `${n}\n`);
+    fs.rmSync(path.join(repo, n === 2 ? "gone" : `added${n - 1}.txt`), { recursive: true, force: true });
+    sh(repo, "jj", ["commit", "-m", `move ${n}`]);
+  };
+  const manifest = (cwd, command, args = []) => {
+    const ran = spawnSync(command, [...args, "-e", MANIFEST], { cwd, env, encoding: "utf8" });
+    assert.equal(ran.status, 0, ran.stderr);
+    return JSON.parse(ran.stdout);
+  };
+  const fork = async (nodeId) => {
+    const ws = await createNodeWorkspace({ repoRoot: repo, nodeId, task: nodeId });
+    forks.push({ workspaceName: ws.workspaceName, workspacePath: ws.path });
+    return { ...ws, enter: `${ws.path}.fork/enter` };
+  };
+
+  const s1 = await buildWarmSnapshot(repo, await currentBaseCommit(repo));
+  assert.ok(s1, "first snapshot built");
+  assert.equal(s1.layers, undefined);
+  move(2);
+  const s2 = await buildWarmSnapshot(repo, await currentBaseCommit(repo));
+  assert.deepEqual(s2.layers, [s2.dir, s1.dir]);
+  assert.ok(countFiles(s2.dir) <= 15, `a thin layer, not a copy (${countFiles(s2.dir)} files)`);
+
+  // A fork of the stack holds the base byte for byte plus both builds' output,
+  // and the .gitignore that only the bottom layer has still applies.
+  // (Taken first: a launch adds Rudder's lines to the checkout's .gitignore.)
+  const want2 = manifest(repo, process.execPath);
+  const f2 = await fork("stack2");
+  if (!fs.existsSync(f2.enter)) {
+    t.skip("rootless OverlayFS unavailable here; launches used full checkouts");
+    return;
+  }
+  assert.deepEqual(manifest(f2.path, f2.enter, [process.execPath]), want2);
+  const seen = spawnSync(f2.enter, ["sh", "-ec", "cat node_modules/dep/runs node_modules/dep/built; echo x > out.log; echo y > new.txt; jj diff --summary"], { cwd: f2.path, env, encoding: "utf8" });
+  assert.equal(seen.status, 0, seen.stderr);
+  assert.equal(seen.stdout, "run\nrun\n1 v2\nA new.txt\n");
+
+  // The base moves: the builder that launch started refreshes in the background.
+  move(3);
+  const base3 = await currentBaseCommit(repo);
+  let s3;
+  for (let i = 0; i < 150 && !s3; i += 1) {
+    s3 = readySnapshots(repo).find((snap) => snap.commit === base3);
+    if (!s3) await sleep(200);
+  }
+  assert.ok(s3, "the builder followed the base");
+  assert.deepEqual(s3.layers, [s3.dir, s2.dir, s1.dir]);
+
+  // A refresh on a stack as deep as the limit is a plain copy.
+  await waitForBuilders(repo);
+  move(4);
+  const s4 = await buildWarmSnapshot(repo, await currentBaseCommit(repo), { maxLayers: 3 });
+  assert.equal(s4.layers, undefined);
+  assert.deepEqual(fs.readdirSync(path.join(s4.dir, ".jj")), [], "not a jj workspace, only a mount point");
+  assert.equal(fs.readFileSync(path.join(s4.dir, "node_modules/dep/runs"), "utf8"), "run\n".repeat(4));
+  const want4 = manifest(repo, process.execPath);
+  const f4 = await fork("flat4");
+  assert.deepEqual(manifest(f4.path, f4.enter, [process.execPath]), want4);
+
+  // That build pruned s3 but kept the layers the first fork mounts (s2 on s1).
+  const keys = () => readySnapshots(repo).map((snap) => snap.key).sort();
+  assert.deepEqual(keys(), [s1.key, s2.key, s4.key].sort());
+  assert.equal(fs.existsSync(s3.dir), false);
+  // Once that fork is gone, so are its layers.
+  await forgetWorkspace({ repoRoot: repo, ...forks.shift() });
+  await pruneWarmSnapshots(repo);
+  assert.deepEqual(keys(), [s4.key]);
+  assert.equal(fs.existsSync(s2.dir) || fs.existsSync(s1.dir), false);
+});
+
 // macOS: forks are APFS clones of the warm snapshot (rudder-jj rudder-clone-add).
 const onMac = { skip: process.platform !== "darwin" || !rudderJjPath() };
 const BIG = 32 * 1024 * 1024;
@@ -285,7 +392,7 @@ async function macRepo(t, warm = "mkdir -p node_modules/dep && echo dep > node_m
   t.after(async () => {
     for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
     await waitForBuilders(repo);
-    fs.rmSync(root, { recursive: true, force: true });
+    removeRoot(root);
   });
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
   for (let i = 0; i < 200; i += 1) fs.writeFileSync(path.join(repo, "src", `f${i}.txt`), `${i}\n`);
@@ -374,9 +481,14 @@ test("macOS: a clone fork starts at current main, or at a branched change", onMa
   assert.equal(fs.existsSync(path.join(ws.path, "src", "f3.txt")), false);
   assert.equal(fs.readFileSync(path.join(ws.path, "added.txt"), "utf8"), "added\n");
   assert.equal(fs.readFileSync(path.join(ws.path, "node_modules", "dep", "index.js"), "utf8"), "dep\n");
-  // As on Linux, the new base gets its own warm build (when the disk has room).
-  const started = fs.readdirSync(warmDir(repo)).some((n) => n.startsWith(base.slice(0, 12)));
-  assert.equal(started, warmBuildSkipReason(warmDir(repo)) === null, "warm build started for the new base");
+  // As on Linux, the builder the launch started refreshes for the new base (when the disk has room).
+  const roomy = warmBuildSkipReason(warmDir(repo)) === null;
+  let started = false;
+  for (let i = 0; i < (roomy ? 75 : 1) && !started; i += 1) {
+    started = fs.readdirSync(warmDir(repo)).some((n) => n.startsWith(base.slice(0, 12)));
+    if (!started) await sleep(200);
+  }
+  assert.equal(started, roomy, "warm build started for the new base");
 
   // Branching an agent forks from that agent's change.
   fs.writeFileSync(path.join(ws.path, "agent.txt"), "agent\n");

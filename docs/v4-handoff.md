@@ -97,6 +97,31 @@ finishes; a quit drops the row and leaves any late workspace to the orphan
 sweep. `/gam` still prepares its generator's workspace on the loop. On
 2026-11-06 a 182s `__launch-node` froze a libra dashboard for its whole run.
 
+Warm snapshots follow trunk (src/warm-snapshot.ts header). One detached
+builder per project (started by launches and clean integrations, exits after
+30 idle minutes) polls the jj op heads and builds a snapshot whenever
+`currentBaseCommit` moves; quick moves coalesce, and after a refresh a small
+move waits 60 s (or as long as that refresh took) while a move over 500 files
+builds at once. Linux refreshes are a thin OverlayFS layer over the nearest
+snapshot's layers: the builder mounts the stack at the fixed path
+`.warm/build`, applies the base change with the same Git two-tree checkout and
+runs the warm commands there, so outputs are reused at the paths they were
+made at. `.warm/<key>.lowerdir` lists the stack; the fork enter script mounts
+it and binds the fork at `.warm/build` so paths baked into build output
+resolve. At 8 layers the next refresh copies the merged view into a plain
+directory. rudder-jj's overlay snapshot reads `.gitignore` through the stack.
+macOS refreshes are APFS clones of the previous snapshot (not run on a Mac
+yet). Branch launches no longer build: they fork the nearest base snapshot
+and patch. A project's first launch waits up to 90 s for its first snapshot.
+Pruning keeps the newest snapshot plus every layer a kept snapshot or a fork
+(`.fork/lower` or its current lower) mounts. New forks link trees under
+`.warm/lower-links`, so forks with the old one-layer enter script never
+resolve a tree to a stacked snapshot. Synthetic pnpm project (3,000 files,
+Next/React/AWS SDK deps, incremental tsc, 425 MB of node_modules and dist):
+a 10-file base move is ready 2.6 s later; the refresh itself takes 1.6-1.9 s
+against 1.8-2.1 s from scratch and adds 0.9 MB of disk against 427 MB; a fork
+of it takes 0.09 s; compaction took 2.1 s.
+
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
 `rudder merge` (and the dashboard `m`) merges first and then runs the
 rudder.toml check once inside the workspace, reporting a failure without

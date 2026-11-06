@@ -16,7 +16,7 @@ import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./sta
 import { DECISIONS_HEADER } from "./surfaces.js";
 import { withIntegrationLock } from "./rudder-md.js";
 import { managedJjInstallError } from "./jj-binary.js";
-import { createForkWorkspace, removeForkState } from "./warm-snapshot.js";
+import { createForkWorkspace, removeForkState, startWarmBuild } from "./warm-snapshot.js";
 
 // Minimum jj version we are confident in. Older releases may lack flags we use
 // (e.g. `jj workspace add -r`); we warn rather than throw so an older jj still
@@ -597,6 +597,12 @@ async function finalizeJjIntegration(run: RunRecord, mergeChangeId: string): Pro
     error: undefined,
   };
   await saveRunRecord(run);
+  // The base moved: make sure the warm builder is following it (detached).
+  try {
+    startWarmBuild(run.repoRoot);
+  } catch {
+    /* a warm snapshot is an optimization */
+  }
   return run;
 }
 

@@ -2070,8 +2070,8 @@ struct App {
     /// agent rows first, then the drawer headers in `Bucket::DRAWERS` order.
     drawer_cursor: Option<Bucket>,
     /// The open drawer and which of its members is highlighted. Enter on a drawer
-    /// header opens it; Esc closes it. While open, the worker pane shows the drawer
-    /// (finished-run list on top, that run's result card below) instead of a terminal.
+    /// header expands its agent rows in the sidebar; Esc collapses them.
+    /// The worker pane continues to show the selected agent.
     drawer: Option<DrawerState>,
     /// Conductor activity log: an append-only, bounded record of every autonomous
     /// action the orchestrator takes (auto-expanded a node, steered an agent, etc.),
@@ -4308,10 +4308,7 @@ impl App {
             return self.handle_leader_key(key);
         }
 
-        // An open drawer is a pane-level overlay, so Esc backs out of it from
-        // ANY focus. Routing this per-pane meant Esc silently did nothing whenever
-        // focus had drifted (a merge, for instance, leaves it on the task pane) and
-        // the drawer could only be closed by first re-focusing the sidebar.
+        // Esc collapses an expanded sidebar section from any pane.
         if key.code == KeyCode::Esc && self.drawer.is_some() {
             self.close_drawer();
             self.focus = FocusPane::Agents;
@@ -4937,8 +4934,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
             KeyCode::Enter => {
                 // The sidebar cursor is on a collapsed drawer header: Enter opens it
-                // (or closes an already-open one), which is the only thing that row
-                // can mean. Checked before every agent action below, because no agent
+                // and a second Enter focuses its selected member. Checked before
+                // every agent action below, because no agent
                 // is "selected" in the sidebar sense while the cursor sits here.
                 if let Some(bucket) = self.drawer_cursor {
                     self.delete_pending = None;
@@ -5191,25 +5188,6 @@ impl App {
     }
 
     fn handle_worker_key(&mut self, key: KeyEvent) -> bool {
-        // While a drawer is open it OWNS this pane: there is no terminal on screen to
-        // type into, so keys move the drawer's list or back out of it. Without this,
-        // focusing the worker pane wrote keystrokes into a finished agent's hidden PTY.
-        if self.drawer.is_some() {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.move_drawer_selection(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.move_drawer_selection(1),
-                KeyCode::Esc | KeyCode::Left => {
-                    self.close_drawer();
-                    self.focus = FocusPane::Agents;
-                }
-                // Enter reopens the highlighted run: close the drawer and hand the
-                // pane to that run's session, ready to type into.
-                KeyCode::Enter => self.reopen_drawer_selection(),
-                KeyCode::Char('q') => return self.confirm_or_quit(),
-                _ => {}
-            }
-            return false;
-        }
         if self.worker_view == WorkerView::PlanReview {
             return self.handle_plan_review_key(key);
         }
@@ -7104,9 +7082,19 @@ impl App {
                 self.orch_follow_bottom = true;
                 self.orch_selection = None;
             }
-            // Clicking a live row leaves the drawer: the cursor is on an agent again.
-            self.drawer_cursor = None;
-            self.close_drawer();
+            // Selecting an expanded member keeps the section visible in the sidebar.
+            if let Some(drawer) = self.drawer {
+                let members = crate::render::drawer_members(&self.agents, drawer.bucket);
+                if let Some(selected) = members.iter().position(|&member| member == index) {
+                    self.drawer = Some(DrawerState { selected, ..drawer });
+                    self.drawer_cursor = Some(drawer.bucket);
+                } else {
+                    self.drawer_cursor = None;
+                    self.close_drawer();
+                }
+            } else {
+                self.drawer_cursor = None;
+            }
             self.selected_agent = index;
         }
     }

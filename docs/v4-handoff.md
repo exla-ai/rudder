@@ -27,6 +27,10 @@ Only two docs steer work. Everything else is reference or evidence.
 
 ## 2. Where main is (step 9, 2026-11-04)
 
+Collapsed sidebar sections (review, done, closed) expand their agent rows in
+the sidebar when clicked or opened with Enter. The worker pane continues to
+show the selected agent. Click the header again or press Esc to collapse.
+
 **4.0.0 shipped 2026-11-04.** npm `latest` is 4.0.0 for `@exla/rudder` and
 `@viraatdas/rudder` (tag v4.0.0, commit 500e5c3b, all release checks green on
 Linux, macOS arm64 and Intel). Cloud control plane deployed 16:25Z running

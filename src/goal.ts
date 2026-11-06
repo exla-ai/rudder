@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 
 // Used when the planner/caller did not supply an explicit success condition.
-export const DEFAULT_SUCCESS = "the task is implemented and its own verification passes";
+export const DEFAULT_SUCCESS = "the task is implemented and works as asked";
 
 // Keep the launch goal lines under the backend's slash-command limit too, because
 // legacy prompts can still be recovered from `/goal` and because users can forward

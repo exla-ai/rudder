@@ -36,7 +36,7 @@ const PLAN_END = "RUDDER_PLAN_TASKS_END";
 const GOAL_RULES = [
   "Goal rules (REQUIRED for every task):",
   "- `goal`: one line naming the single objective the worker should accomplish.",
-  "- `success`: the verifiable DONE-WHEN condition (the commands, artifacts, or criteria that mean it is complete).",
+  "- `success`: the DONE-WHEN condition, the observable outcome that means it is complete. Name at most one quick targeted check, never a full test suite or CI.",
   "- Always include both. Never omit them and never leave them empty.",
 ].join("\n");
 
@@ -343,11 +343,11 @@ export async function planTask(task: string, ctx: PlanContext): Promise<PlanDag>
   const instructionText = instructions.length
     ? `\n\nRepository instructions:\n${instructions.map((file) => `### ${file.path}\n${file.content}`).join("\n\n")}`
     : "";
-  // Ground `success` in this repo's REAL check commands; without them the model
-  // invents unverifiable prose bars ("its own verification passes").
+  // Ground `success` in this repo's real check commands, so a named check is one
+  // that exists. Agents write good code; one targeted check is enough.
   const checks = await suggestTests(ctx.root).catch(() => [] as string[]);
   const checksText = checks.length
-    ? `\nVerification commands available in this repository (base each task's \`success\` on the relevant ones): ${checks.join(", ")}`
+    ? `\nChecks available in this repository (name at most the one most relevant check in a task's \`success\`, never a whole suite): ${checks.join(", ")}`
     : "";
   const user = [
     `Repository root (for your read-only inspection ONLY — do NOT put this path in any task prompt; workers run elsewhere): ${ctx.root}`,
@@ -495,13 +495,13 @@ export function buildFanoutDag(task: string, n: number, opts: FanoutOptions = {}
     const id = `v${index}`;
     variantIds.push(id);
     // Each variant: objective = the task with its angle; success = its approach
-    // is implemented and its own verification passes. The objective-format header is
+    // is implemented and works as asked. The objective-format header is
     // applied at scaffold time (scaffoldPlan), so the body stays raw here.
     nodes.push({
       id,
       title: `variant ${index + 1}/${count}: ${shortTitle}`,
       goal: `${trimmed} (favoring ${angle})`,
-      success: "your approach is implemented and its own verification passes",
+      success: "your approach is implemented and works as asked",
       prompt: [
         trimmed,
         "",
@@ -515,7 +515,7 @@ export function buildFanoutDag(task: string, n: number, opts: FanoutOptions = {}
   }
 
   // Judge: objective = pick/synthesize the best; success = the final
-  // implementation is complete and verified. The objective-format header is applied
+  // implementation is complete and works as asked. The objective-format header is applied
   // at scaffold time (scaffoldPlan).
   const judgePrompt = [
     `${count} independent agents each attempted this task: ${trimmed}`,
@@ -529,7 +529,7 @@ export function buildFanoutDag(task: string, n: number, opts: FanoutOptions = {}
     id: "judge",
     title: `judge: ${shortTitle}`,
     goal: `pick or synthesize the best implementation for: ${trimmed}`,
-    success: "the final implementation is complete and verified",
+    success: "the final implementation is complete and works as asked",
     prompt: judgePrompt,
     deps: variantIds.map((variantId) => ({ on: variantId, type: "judge" as EdgeType })),
     ...(opts.backend ? { backend: opts.backend } : {}),

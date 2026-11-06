@@ -231,7 +231,7 @@ test("parsePlanBlock parses goal and success and derives defaults when absent", 
   // Backward-compatible: a block omitting goal/success still parses, deriving
   // goal from the title and the canonical default success.
   assert.equal(b.goal, "build the ui");
-  assert.equal(b.success, "the task is implemented and its own verification passes");
+  assert.equal(b.success, "the task is implemented and works as asked");
 });
 
 test("parsePlanBlock preflights long goal and success before storing nodes", () => {
@@ -440,10 +440,10 @@ test("buildFanoutDag sets goal + success on every variant and the judge", () => 
   const judge = dag.nodes.find((n) => n.id === "judge");
   // Each variant: objective = task with its angle; success = its own verification.
   assert.ok(variants.every((v) => v.goal && v.goal.includes("build a parser")));
-  assert.ok(variants.every((v) => v.success === "your approach is implemented and its own verification passes"));
+  assert.ok(variants.every((v) => v.success === "your approach is implemented and works as asked"));
   // Judge: objective = pick/synthesize the best; success = final impl verified.
   assert.ok(judge.goal.includes("build a parser"));
-  assert.equal(judge.success, "the final implementation is complete and verified");
+  assert.equal(judge.success, "the final implementation is complete and works as asked");
 });
 
 test("buildFanoutDag clamps N to [2,6] and applies the backend option", () => {

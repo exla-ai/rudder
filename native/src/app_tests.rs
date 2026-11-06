@@ -1259,7 +1259,7 @@ fn jj_merge_conflict_prompt_uses_jj_not_git() {
 fn manual_goal_prompt_leads_with_objective_and_done_when() {
     let prompt = manual_goal_prompt("fix the flaky login test");
     assert!(prompt.starts_with("Objective: fix the flaky login test\n"));
-    assert!(prompt.contains("Done when: the task is implemented and its own verification passes"));
+    assert!(prompt.contains("Done when: the task is implemented and works as asked"));
     // The full task body follows the header.
     assert!(prompt.contains("fix the flaky login test"));
 }
@@ -5962,7 +5962,7 @@ fn rudder_plan_worker_prompt_derives_goal_and_success_when_absent() {
         "derived objective from title: {prompt}"
     );
     assert!(
-        prompt.contains("Done when: the task is implemented and its own verification passes"),
+        prompt.contains("Done when: the task is implemented and works as asked"),
         "derived Done-when default: {prompt}"
     );
 }

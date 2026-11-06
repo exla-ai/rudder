@@ -240,6 +240,13 @@ the home at once, busy or not (engineering reference "Update now"). Agents
 that were mid-turn reopen with one "continue where you left off" turn. The
 worker image also carries headless Chromium's libraries now.
 
+Fewer checks (2026-11-06, not released): the user wants agents to test and
+use CI sparingly. Worker prompts now say "run one quick check for what you
+changed; add a test only for a real bug or tricky logic", the default
+`Done when:` is "the task is implemented and works as asked", and planners
+name at most one targeted check in `success`. AGENTS.md keeps the full suite
+for releases only.
+
 Cloud link clicks (2026-11-05, not released): a click on a link in a
 `rudder cloud` pane ran `xdg-open` on the home, which has none. The dashboard
 now asks the attached laptop to open it (engineering reference "Clickable

@@ -71,16 +71,14 @@ reference, plan or task history for a small change.
 
 ## Verification
 
-Run relevant checks; broaden only when a change or failure warrants it.
+Agents write good code; checks are a quick sanity pass, not a ritual.
 
-```sh
-npm run check
-npm test
-npm --prefix cloud run build
-cargo test --workspace
-npm run build
-RUDDER_NATIVE_BIN="$PWD/target/release/rudder-native" npm run test:tui
-```
+- Run one targeted check for what you changed: one test file, one
+  `cargo test` filter, or `npm run check`. Docs and copy edits need none.
+- Add a test only when it pins a real bug or tricky logic, not to show work.
+- No full suites, TUI suite or `npm run build` per change, and no waiting
+  on CI. The full suite runs once per release (see Shipping).
+- Re-run a failing test alone before treating it as real.
 
 The build cleans `dist/`, compiles TS/board/native and copies the binary. Do not
 run it concurrently with `npm test`, which also writes `dist/`. The TUI suite
@@ -95,9 +93,8 @@ create, read-only ones included.
 - **Work on `main`.** No feature branches, PRs or long-lived side branches.
   Commit small and often to local `main`. `release-check/*` branches exist only
   during a release and are deleted after it.
-- **Run only the checks for what you changed** (one test file, one `cargo test`
-  filter, `npm run check`). The full suite above runs once per release, not per
-  commit, task or agent. Re-run a failing test alone before treating it as real.
+- **Run only the check for what you changed** (see Verification). The full
+  suite runs once per release, not per commit, task or agent.
 - **No prereleases until 4.0.0.** Do not cut alpha versions or deploy Cloud.
   CI is disabled except the tag-triggered Release workflow. Push `main` to
   GitHub when it makes sense (a working milestone, end of day); no version
@@ -119,11 +116,20 @@ An explicit push/ship/publish/install/deploy request authorizes the documented
 workflow; preserve that authorization across turns. Ordinary edits alone do not
 authorize unrelated deployment. Never force-push.
 
-Until 4.0.0, pushing `main` needs no release. A release is: run the full
-checks, commit, `npm version`, then push main and the created tag. Tag CI
+Pushing `main` needs no release. A release is: run the full checks below
+once, commit, `npm version`, then push main and the created tag. Tag CI
 publishes; do not manually `npm publish`. v4 prereleases use `next`;
 stable uses `latest`. Verify CI and actual registry availability. Docs-only
 pushes do not require a product version bump.
+
+```sh
+npm run check
+npm test
+npm --prefix cloud run build
+cargo test --workspace
+npm run build
+RUDDER_NATIVE_BIN="$PWD/target/release/rudder-native" npm run test:tui
+```
 
 Cloud also needs the worker image and Fly control-plane deployment. Verify
 `https://rudder.exla.ai/app`, revision/image/deployment, UTC time and smoke checks.

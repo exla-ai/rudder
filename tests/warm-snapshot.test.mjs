@@ -22,6 +22,36 @@ function countFiles(dir) {
   return n;
 }
 
+/**
+ * A launch on a base without a snapshot starts a detached warm build for it
+ * (its log appears before it starts); it must finish before the repo goes.
+ */
+async function waitForBuilders(repo) {
+  const running = () => {
+    const names = fs.existsSync(warmDir(repo)) ? fs.readdirSync(warmDir(repo)) : [];
+    return names.some((n) => n.endsWith(".log") && !names.includes(n.replace(/\.log$/, ".ready")) && !names.includes(n.replace(/\.log$/, ".failed")));
+  };
+  for (let i = 0; i < 150 && running(); i += 1) await new Promise((resolve) => setTimeout(resolve, 200));
+}
+
+/** Every file under cwd but runtime dirs: path -> "file|exec <bytes>" or "link <target>". */
+const MANIFEST = `
+const fs = require("node:fs");
+const skip = new Set([".git", ".jj", ".rudder-workspaces", "node_modules"]);
+const out = {};
+(function walk(dir) {
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (dir === "." && skip.has(name)) continue;
+    const p = dir === "." ? name : dir + "/" + name;
+    const st = fs.lstatSync(p);
+    if (st.isDirectory()) walk(p);
+    else if (st.isSymbolicLink()) out[p] = "link " + fs.readlinkSync(p);
+    else out[p] = (st.mode & 0o111 ? "exec " : "file ") + fs.readFileSync(p, "latin1");
+  }
+})(".");
+process.stdout.write(JSON.stringify(out));
+`;
+
 test("warmCommands reads rudder.toml and detects lockfiles", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-warm-cmd-"));
   try {
@@ -66,6 +96,7 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   const forks = [];
   t.after(async () => {
     for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
+    await waitForBuilders(repo);
     fs.rmSync(root, { recursive: true, force: true });
   });
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });
@@ -139,6 +170,106 @@ test("ten agents fork the warm snapshot in seconds without copying files", { ski
   assert.equal(seen.stdout, `changed\nnew\ndep\n${change}`);
 });
 
+test("a fork moved onto a newer base matches it byte for byte, symlinks and modes included", { skip: process.platform !== "linux" || !rudderJjPath() }, async (t) => {
+  const scratch = process.env.RUDDER_TEST_DISK ?? (fs.existsSync("/workspace/rudder-scratch") ? "/workspace/rudder-scratch" : os.tmpdir());
+  const root = fs.mkdtempSync(path.join(scratch, "rudder-warm-move-"));
+  const repo = path.join(root, "repo");
+  const forks = [];
+  t.after(async () => {
+    for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
+    await waitForBuilders(repo);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const put = (rel, text, mode = 0o644) => {
+    const p = path.join(repo, rel);
+    fs.rmSync(p, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text);
+    fs.chmodSync(p, mode);
+  };
+  const link = (rel, target) => {
+    const p = path.join(repo, rel);
+    fs.rmSync(p, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.symlinkSync(target, p);
+  };
+  const rm = (rel) => fs.rmSync(path.join(repo, rel), { recursive: true, force: true });
+  for (let i = 0; i < 50; i += 1) put(`src/f${i}.txt`, `${i}\n`);
+  put("gone/a.txt", "a\n");
+  put("gone/sub/b.txt", "b\n");
+  put("dir2file/inner.txt", "inner\n");
+  put("file2dir", "file\n");
+  put("bin/on.sh", "on\n");
+  put("bin/off.sh", "off\n", 0o755);
+  link("ln/retarget", "one");
+  put("ln/f2l", "file\n");
+  link("ln/l2f", "link");
+  link("ln/del", "../src");
+  put('odd/del "me".txt', "del\n");
+  put("odd/mod\nme.txt", "old\n");
+  put(".gitignore", "node_modules\n.rudder-workspaces\n*.log\n");
+  // The build leaves untracked output in a directory the base turns into a file.
+  put("rudder.toml", '[warm]\ncommands = ["mkdir -p node_modules/dep && echo dep > node_modules/dep/index.js && echo built > dir2file/out.log"]\n');
+  sh(repo, "git", ["init", "-q"]);
+  sh(repo, "git", ["add", "."]);
+  sh(repo, "git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  sh(repo, "jj", ["git", "init", "--colocate"]);
+  const snapshot = await buildWarmSnapshot(repo, await currentBaseCommit(repo));
+  assert.ok(snapshot, "warm snapshot built");
+
+  // Main moves on: deletions, file/directory and file/symlink swaps, mode-only
+  // changes, odd names, and attributes that would convert files on checkout.
+  rm("gone");
+  put("dir2file", "now a file\n");
+  rm("file2dir");
+  put("file2dir/inner.txt", "now a dir\n");
+  put("src/f1.txt", "changed\n");
+  fs.chmodSync(path.join(repo, "bin/on.sh"), 0o755);
+  fs.chmodSync(path.join(repo, "bin/off.sh"), 0o644);
+  link("ln/retarget", "two");
+  link("ln/f2l", "now a link");
+  put("ln/l2f", "now a file\n");
+  rm("ln/del");
+  link("ln/new", "../src/f0.txt");
+  rm('odd/del "me".txt');
+  put("odd/mod\nme.txt", "new\n");
+  for (const name of ["with space.txt", 'quote"d.txt', "single'q.txt", "new\nline.txt", "-dash.txt", "back\\slash.txt", "ünï 文.txt", "$x*?.txt"]) put(`odd/${name}`, `${name}\n`);
+  put(".gitattributes", "*.txt text eol=crlf ident\n");
+  put("ident.txt", "$Id$\n");
+  sh(repo, "jj", ["commit", "-m", "main moved"]);
+  const base = await currentBaseCommit(repo);
+  assert.notEqual(base, snapshot.commit);
+
+  // The main checkout holds the base as jj wrote it.
+  const manifest = (cwd, command, args = []) => {
+    const ran = spawnSync(command, [...args, "-e", MANIFEST], { cwd, env, encoding: "utf8" });
+    assert.equal(ran.status, 0, ran.stderr);
+    return JSON.parse(ran.stdout);
+  };
+  const want = manifest(repo, process.execPath);
+  assert.equal(want["ln/retarget"], "link two");
+  assert.equal(want["bin/on.sh"], "exec on\n");
+  assert.equal(want["ident.txt"], "file $Id$\n");
+  assert.equal(want["odd/new\nline.txt"], "file new\nline.txt\n");
+  assert.equal(want["gone/a.txt"], undefined);
+
+  const ws = path.join(repo, ".rudder-workspaces", "moved");
+  const made = await createForkWorkspace({ repoRoot: repo, targetPath: ws, workspaceName: "rudder-moved" });
+  forks.push({ workspaceName: "rudder-moved", workspacePath: ws });
+  if (/overlay mount unavailable/.test(made.reason ?? "")) {
+    t.skip("rootless OverlayFS unavailable here");
+    return;
+  }
+  assert.equal(made.reason, undefined);
+  assert.equal(made.snapshot.key, snapshot.key);
+  const enter = `${ws}.fork/enter`;
+  const status = spawnSync(enter, ["sh", "-ec", "jj log --no-graph -r @- -T 'commit_id ++ \"\\n\"'; jj diff -r @ --summary; cat node_modules/dep/index.js"], { cwd: ws, env, encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  // On the base with nothing to commit, and still on the warm lower.
+  assert.equal(status.stdout, `${base}\ndep\n`);
+  assert.deepEqual(manifest(ws, enter, [process.execPath]), want);
+});
+
 // macOS: forks are APFS clones of the warm snapshot (rudder-jj rudder-clone-add).
 const onMac = { skip: process.platform !== "darwin" || !rudderJjPath() };
 const BIG = 32 * 1024 * 1024;
@@ -153,13 +284,7 @@ async function macRepo(t, warm = "mkdir -p node_modules/dep && echo dep > node_m
   const forks = [];
   t.after(async () => {
     for (const fork of forks) await forgetWorkspace({ repoRoot: repo, ...fork }).catch(() => undefined);
-    // A detached warm builder for a newer base (its log appears before it
-    // starts) must finish before the repo goes.
-    const running = () => {
-      const names = fs.readdirSync(warmDir(repo));
-      return names.some((n) => n.endsWith(".log") && !names.includes(n.replace(/\.log$/, ".ready")) && !names.includes(n.replace(/\.log$/, ".failed")));
-    };
-    for (let i = 0; i < 150 && running(); i += 1) await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitForBuilders(repo);
     fs.rmSync(root, { recursive: true, force: true });
   });
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });

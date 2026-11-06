@@ -60,6 +60,16 @@ cost a 33 ms tick). Key-to-frame on the host was already about 1 ms; on a Cloud
 home the rest is the network and the home relay (`home.mjs` blocks its event
 loop for about 80 ms every 5 s while it spawns the preview scan).
 
+Linux fork creation: moving a fork from its snapshot to the base used three
+jj processes per differing file (182 s for a 9,294-file branch fork of
+libra). It is now one Git two-tree checkout (`git read-tree --reset -u`) with
+a throwaway index, run through the mounted overlay, with checkout conversions
+and repo hooks turned off (needs Git 2.42+ for `--attr-source`, else a full
+checkout). Synthetic repo: 4,000 files 55.8 s to 0.6 s; 9,300 files about
+1.2 s. A launch now uses the ready snapshot nearest its base (not the newest),
+starts a warm build for a branch base too, and waits up to 90 s for that build
+when every snapshot is over 500 files away. Conflicted bases get a full checkout.
+
 After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
 `rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
 workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero

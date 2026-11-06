@@ -313,23 +313,95 @@ PATH="$F/bin:$PATH"; export PATH
 exec unshare -U --map-user="$U" --map-group="$G" -- "$@"' sh "$F" "$M" "$U" "$G" "$@"
 `;
 
-// $1 = snapshot commit, $2 = base. Paths come NUL-free from jj, one per line.
+/** Git's empty tree. As the attribute source it turns off in-tree .gitattributes. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+// Runs inside the mounted fork. $1 = git dir, $2 = throwaway index file,
+// $3 = snapshot commit, $4 = base. jj commits are Git commits in the colocated
+// repo, so Git's two-tree checkout (what `git checkout` does to switch
+// branches) writes exactly the paths that differ, in one process: removals
+// (whiteouts in the upper layer), executable bits, symlinks and file/directory
+// swaps. It uses its own index file; the repo's index and refs are never
+// written. The overrides keep line-ending, filter and attribute settings,
+// hooks, sparse checkout and fsmonitor from changing what is written: the
+// bytes must be the commit's, as jj writes them. Git without --attr-source
+// (before 2.42) fails here, and the launch makes a full checkout.
 const MOVE_TO_BASE = `
-jj diff --ignore-working-copy --from "$1" --to "$2" --name-only | while IFS= read -r f; do
-  if jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > /dev/null 2>&1; then
-    mkdir -p "$(dirname "$f")"; rm -rf "$f"
-    jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > "$f"
-    if [ "$(jj file list --ignore-working-copy -r "$2" -T 'executable' -- "root-file:\\"$f\\"")" = true ]; then chmod +x "$f"; fi
-  else
-    rm -rf "$f"
-  fi
-done
-jj rebase -r @ -d "$2"
+G="$1"; I="$2"; S="$3"; B="$4"
+g() {
+  GIT_INDEX_FILE="$I" GIT_ATTR_NOSYSTEM=1 git --git-dir="$G" --work-tree=. --attr-source=${EMPTY_TREE} \\
+    -c core.autocrlf=false -c core.symlinks=true -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \\
+    -c core.fsmonitor=false -c core.splitIndex=false "$@"
+}
+g read-tree "$S"
+g read-tree --reset -u --no-sparse-checkout "$S" "$B"
+jj rebase -r @ -d "$B"
 `;
 
+/** Ready snapshots further than this many files from the base wait for the base's own build. */
+const NEAR_SNAPSHOT_FILES = 500;
+const WAIT_FOR_BUILD_MS = 90_000;
+
+/** The Git directory behind the jj repo (`.git` when colocated), or null. */
+async function gitDirOf(repoRoot: string): Promise<string | null> {
+  const result = await runCommand("jj", ["git", "root", "--ignore-working-copy"], { cwd: repoRoot, allowFailure: true });
+  const dir = result.stdout.trim();
+  return result.code === 0 && dir ? dir : null;
+}
+
+/** How many files differ between two commits (Infinity when Git cannot tell). */
+async function filesApart(gitDir: string, from: string, to: string): Promise<number> {
+  const result = await runCommand("git", ["--git-dir", gitDir, "diff-tree", "-r", "-z", "--no-renames", "--name-only", from, to], { allowFailure: true });
+  return result.code === 0 ? result.stdout.split("\0").length - 1 : Infinity;
+}
+
+/** The ready snapshot fewest files away from `base` (the newer one on a tie). */
+async function nearestSnapshot(gitDir: string | null, snaps: WarmSnapshot[], base: string): Promise<{ snap: WarmSnapshot; files: number }> {
+  const files = await Promise.all(snaps.map((snap) => (gitDir ? filesApart(gitDir, snap.commit, base) : Infinity)));
+  let best = 0;
+  for (let i = 1; i < snaps.length; i += 1) if (files[i]! < files[best]!) best = i;
+  return { snap: snaps[best]!, files: files[best]! };
+}
+
 /**
- * Creates `targetPath` as a fork of the newest warm snapshot: an overlay fork
- * on Linux, an APFS clone on macOS. Returns a reason (after cleaning up) when
+ * Waits up to `timeoutMs` for the warm build of `commit` to become ready.
+ * Returns null when it fails, or no live builder holds its lock.
+ */
+async function waitForWarmBuild(repoRoot: string, commit: string, timeoutMs: number): Promise<WarmSnapshot | null> {
+  const key = commit.slice(0, 12);
+  const marker = (suffix: string) => path.join(warmDir(repoRoot), `${key}.${suffix}`);
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (fs.existsSync(marker("ready"))) return readySnapshots(repoRoot).find((snap) => snap.key === key) ?? null;
+    if (fs.existsSync(marker("failed"))) return null;
+    // A detached builder takes the lock right after it starts.
+    if (Date.now() - started > 5_000 && !builderAlive(marker("building"))) return null;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
+function builderAlive(lock: string): boolean {
+  let pid: number;
+  try {
+    pid = Number(fs.readFileSync(lock, "utf8").trim());
+  } catch {
+    return false;
+  }
+  if (!pid) return true; // lock taken, pid not written yet
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Creates `targetPath` as a fork of the warm snapshot nearest its base: an
+ * overlay fork on Linux, an APFS clone on macOS. A base without its own
+ * snapshot starts a build for it; when every ready snapshot is far away, the
+ * launch waits a while for that build. Returns a reason (after cleaning up) when
  * there is no snapshot or the fork cannot be made here; the caller then makes
  * a full jj checkout.
  */
@@ -350,14 +422,42 @@ export async function createForkWorkspace(params: {
   // Projects with nothing to install or build keep the plain checkout.
   const warmable = warmCommands(params.repoRoot).length > 0;
   let skipped: string | null = null;
-  if (!params.atChangeId && base && !snaps.some((snap) => snap.commit === base) && warmable) {
-    skipped = startWarmBuild(params.repoRoot, base);
+  let snapshot = snaps.find((snap) => snap.commit === base);
+  if (base && !snapshot && warmable) skipped = startWarmBuild(params.repoRoot, base);
+  let gitDir: string | null = null;
+  if (base && !snapshot && snaps.length > 0) {
+    gitDir = await gitDirOf(params.repoRoot);
+    const nearest = await nearestSnapshot(gitDir, snaps, base);
+    snapshot = nearest.snap;
+    // Far from every ready snapshot: the base's own build (seeded from the
+    // previous one) is usually quicker than patching thousands of files.
+    if (nearest.files > NEAR_SNAPSHOT_FILES && warmable && !skipped) {
+      snapshot = (await waitForWarmBuild(params.repoRoot, base, WAIT_FOR_BUILD_MS)) ?? snapshot;
+    }
   }
-  const snapshot = snaps.find((snap) => snap.commit === base) ?? snaps[0];
+  snapshot ??= snaps[0];
   if (!snapshot) return { reason: skipped ?? (warmable ? "no warm snapshot yet (building)" : "nothing to install or build") };
   const rudderJj = rudderJjPath();
   if (!rudderJj) return { reason: "rudder-jj is not available" };
   if (process.platform === "darwin") return await createCloneWorkspace(params, snapshot, base ?? snapshot.commit);
+  const move = base && base !== snapshot.commit ? base : null;
+  if (move) {
+    gitDir ??= await gitDirOf(params.repoRoot);
+    if (!gitDir) return { reason: "no Git store behind the jj repo" };
+    // A conflicted commit's Git tree holds jj's conflict layout, not files.
+    const conflicted = await runCommand(
+      "jj",
+      ["log", "--no-graph", "--ignore-working-copy", "-r", `${snapshot.commit}|${move}`, "-T", 'if(conflict, "conflict\\n")'],
+      { cwd: params.repoRoot, allowFailure: true },
+    );
+    if (conflicted.code !== 0 || conflicted.stdout.trim()) return { reason: `${move.slice(0, 12)} has conflicts` };
+  }
+  // Claim the snapshot before adding the fork: a warm build that finishes
+  // meanwhile prunes snapshots no `.fork/lower` names, and the nearest one is
+  // often not among the newest.
+  const state = forkStateDir(params.targetPath);
+  await fsp.mkdir(state, { recursive: true });
+  await fsp.writeFile(path.join(state, "lower"), snapshot.dir);
   const added = await runCommand(
     "jj",
     [
@@ -368,28 +468,29 @@ export async function createForkWorkspace(params: {
     { cwd: params.repoRoot, allowFailure: true },
   );
   if (added.code !== 0) {
+    await removeForkState(params.targetPath);
     await fsp.rm(params.targetPath, { recursive: true, force: true });
     return { reason: added.stderr.trim() || "rudder-jj rudder-fork-add failed" };
   }
-  const state = forkStateDir(params.targetPath);
   try {
     for (const sub of ["jjmnt", "bin"]) await fsp.mkdir(path.join(state, sub), { recursive: true });
     await fsp.symlink(rudderJj, path.join(state, "bin", "jj"));
-    await fsp.writeFile(path.join(state, "lower"), snapshot.dir);
     await fsp.writeFile(path.join(state, "enter"), ENTER_SCRIPT, { mode: 0o755 });
     const probe = spawnSync(path.join(state, "enter"), ["true"], { cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"] });
     if (probe.status !== 0) throw new Error(`overlay mount unavailable: ${probe.stderr?.toString().trim()}`);
     // The snapshot supplies dependencies and build output; the code must be
     // current. Move the fork's change onto the main checkout's base so only the
     // files that differ are written into the upper layer.
-    if (base && base !== snapshot.commit) {
+    if (move && gitDir) {
       // Write the differing files through the mounted overlay (it records
       // deletions itself), then move @ onto the base. The tree is then
       // identical, so the working copy keeps the warm lower.
-      const moved = spawnSync(path.join(state, "enter"), ["sh", "-ec", MOVE_TO_BASE, "sh", snapshot.commit, base], {
-        cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"],
+      const index = path.join(state, "move-index");
+      const moved = await runCommand(path.join(state, "enter"), ["sh", "-ec", MOVE_TO_BASE, "sh", gitDir, index, snapshot.commit, move], {
+        cwd: params.targetPath, allowFailure: true,
       });
-      if (moved.status !== 0) throw new Error(`could not move fork to ${base.slice(0, 12)}: ${moved.stderr?.toString().trim()}`);
+      await fsp.rm(index, { force: true });
+      if (moved.code !== 0) throw new Error(`could not move fork to ${move.slice(0, 12)}: ${moved.stderr.trim()}`);
     }
     return { snapshot };
   } catch (error) {

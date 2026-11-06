@@ -304,7 +304,8 @@ Native and headless prompt guidance now asks agents to inspect current host
 limits and wait on commands directly while reporting progress. Existing sessions
 retain their prompts; updated prompt guidance needs a later build/install.
 The observed 50-second sleep loop was registry-release polling, not a scheduler
-delay. No model preferences changed, and no release or deployment was performed.
+delay. No model preferences changed. These changes are included in the combined
+4.2.8 release candidate; publication and Cloud adoption must be verified separately.
 
 Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj
 workspaces are gone (`/workspace` 85%, 22G free). Old qualification `*.py`

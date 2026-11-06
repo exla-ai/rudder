@@ -433,7 +433,7 @@ it while hidden has focus put back on the tick. There is no full-screen mode.
   workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
   focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running
   plan worker; keeps its workspace), `g` toggle nested DAG view. (The `u` sync key was
-  removed along with `/sync`; jj keeps workspaces current.)
+  removed along with the old workspace `/sync`; jj keeps workspaces current.)
 - **Worker**: the real PTY of the focused agent (claude/codex). Keystrokes are
   forwarded to the child so its prompts, slash commands, selection, and `Tab`
   behave natively. Trackpad scroll moves scrollback like a terminal; alternate
@@ -650,6 +650,37 @@ frontmatter `name` must be `rudder-<dir>` (a test enforces it).
   `~/.config/namecheap/credentials.env`; Namecheap also whitelists the caller's
   IPv4, and a cloud machine's egress IP is not static. It was `namecheap-dns`
   for one release; `RETIRED_AGENT_SKILLS` removes the old `rudder-` copy.
+
+### `/sync`: agents share what the others are doing (`native/src/agent_sync.rs`)
+Bare `/sync` sends every running, waiting or finished-not-merged agent in the
+project (main included; not stopped, merged, preparing, planner, shell or cloud
+rows) one compact message: a fixed context-only preamble, then a block per agent
+with name, backend, status, one-line task, latest (the completion summary, or the
+newest `⏺`/`•` line of its pane while working), the sidebar's cached diff stat and
+what it is blocked on. The recipient's own entry is one line marked `(you)`. It is
+built from memory only (no jj, no model, no disk), capped near 2,000 characters
+(a brief form, then whole entries dropped and counted), and rebuilt when it is
+delivered, so a busy agent gets the state at its turn end.
+
+Delivery: `pending_syncs` is flushed every poll tick. A sync is typed in (the
+steer path's `live_inject_at`, bracketed paste plus the deferred Enter) only when
+the row is Done with no wait, nothing has been typed since its turn ended (a draft
+or a local command may sit in the composer), a planned node's completion note was
+already ingested, and no menu or prompt owns the keyboard. Never Esc, never
+mid-turn. Not typed into: rows without a pane (asleep), `/gam` pairs, resolvers,
+conflicted or integrating rows, managed-protocol rows, and planned nodes about to
+merge on their own. A newer `/sync` replaces a waiting one; a pane restart or 30
+minutes drops it. The notice says `synced N agents (B busy, they get it when their
+turn ends)`, plus how many were not sent; one activity line records it.
+
+A sync is not the user talking: no turn is recorded (planned nodes keep their
+"one user turn" auto-merge rule and main's done summary is not replaced),
+`merge_requested`, `user_typed_runs`, `last_user_input_at` and `current_prompt`
+are untouched, `next_conflict_to_resolve` does not read it as recent input
+(`sync_was_last_input`), and the reply turn ends through `mark_run_done_quietly`
+(`sync_reply_ended`): no sound, no "ready for review" notification, no jj
+describe. Each idle agent spends one short reply turn. `/sync cloud|all|move` keep
+the cloud machine sync below (section 9).
 
 ### Review and merge-all
 `v` opens a review pane showing the run's `jj diff` (`ensure_review_diff`). The old
@@ -1067,7 +1098,8 @@ brain lives in the cloud, and the phone is a first-class client.
   the home no longer has; `known: false` (asleep, cloning) is never read as deleted.
   `dd` on a moved row runs `rudder cloud home delete`, which the control plane queues
   until a sleeping home reconnects.
-- **`/sync` (`rudder cloud sync`, `src/checkout-sync.ts`).** GitHub is the meeting
+- **`/sync cloud` (`rudder cloud sync`, `src/checkout-sync.ts`).** Bare `/sync` is
+  agent context sharing (section 7); the cloud form is `/sync cloud`. GitHub is the meeting
   point between devices, so sync is: this checkout and the home machine's clone
   (`rudder __sync-checkout`, run by the supervisor's `sync` RPC behind
   `POST /api/rudder/home/sync`, which wakes the home) each fetch and move to the newest
@@ -1222,7 +1254,7 @@ brain lives in the cloud, and the phone is a first-class client.
   (sccache keys hold absolute target paths), so crates compiled in one
   workspace hit in another. Incremental compiles (a crate's own debug build)
   are never cached; dependencies and release builds are.
-- **`/sync` also shows the agents.** After syncing it lists the cloud's agents for
+- **`/sync cloud` also shows the agents.** After syncing it lists the cloud's agents for
   the repo (needs you / working / done, from the home's last state) and the laptop's
   still-running movable agents; `/sync move` hands those over through the same
   pause-then-move path as `H` (`request_move_all_home`).

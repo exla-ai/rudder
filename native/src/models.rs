@@ -556,7 +556,7 @@ pub(crate) fn dashboard_help() -> &'static str {
     concat!(
         "plain input -> one isolated mergeable worker in its own jj workspace; multi-part implementation plans wait for approval. ",
         "/main [task] -> agent in this shared checkout. Send follow-ups in the owning agent's pane. ",
-        "/model chooses model/effort · /resume continues a conversation · /cloud changes new-task location · /help shortcuts. ",
+        "/model chooses model/effort · /resume continues a conversation · /sync tells every agent what the others are doing · /cloud changes new-task location · /help shortcuts. ",
         "Option-1/2/3/4 or ^W panes · Enter start/focus · m merge · u undo merge · x stop · $ command opens a shell in this checkout."
     )
 }
@@ -636,8 +636,13 @@ fn searchable_command_suggestions() -> Vec<Suggestion> {
         },
         Suggestion {
             label: "/sync".to_string(),
-            detail: "pull the latest here and on the cloud machine, and sync config".to_string(),
+            detail: "tell every running and review agent what the others are doing (context only, no reply needed)".to_string(),
             action: SuggestionAction::RunCommand("/sync".to_string()),
+        },
+        Suggestion {
+            label: "/sync cloud".to_string(),
+            detail: "pull the latest here and on the cloud machine, and sync config".to_string(),
+            action: SuggestionAction::RunCommand("/sync cloud".to_string()),
         },
         Suggestion {
             label: "/sync move".to_string(),

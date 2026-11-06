@@ -122,6 +122,8 @@ mod gam_link;
 use crate::gam_link::*;
 mod home_update;
 use crate::home_update::*;
+mod agent_sync;
+use crate::agent_sync::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 /// How long injected text sits in a live agent's input box before the deferred
@@ -1884,6 +1886,11 @@ struct App {
     /// sites write the text as a bracketed paste and queue the CR here; it is
     /// flushed as a separate write once ENTER_SUBMIT_DELAY has passed.
     pending_enters: Vec<PendingEnter>,
+    /// `/sync` messages waiting for their agent's turn to end (agent_sync.rs).
+    pending_syncs: Vec<PendingSync>,
+    /// Runs a `/sync` was typed into, so the reply turn ends without a review
+    /// ping and the sync never reads as the user's recent input.
+    sync_deliveries: HashMap<String, SyncDelivery>,
     claude_message_navs: Vec<ClaudeMessageNav>,
     /// Injected tasks waiting to be folded into the active plan, one at a time.
     /// Without this, rapid injections each spawned their own RudderPlan planner
@@ -3394,6 +3401,8 @@ impl App {
             gods_view_tile_map: Vec::new(),
             pty_output_waker: None,
             pending_enters: Vec::new(),
+            pending_syncs: Vec::new(),
+            sync_deliveries: HashMap::new(),
             claude_message_navs: Vec::new(),
             pending_reconcile_inputs: Vec::new(),
             cwd,
@@ -12684,26 +12693,43 @@ Address the objection directly. If you disagree, say why inside \
                 true
             }
             Some("/sync") => {
-                // Laptop <-> cloud through GitHub: this checkout and the home
-                // machine's clone each pull the newest default branch when safe,
-                // and the vault's copy of this laptop's config is brought level
-                // (`rudder cloud sync`). `/sync all` does every repo on the home.
+                // Bare `/sync` tells every agent in this project what the others
+                // are doing (agent_sync.rs). It is context only: typed into each
+                // agent once it is idle at its prompt, never counted as the user
+                // following up.
+                let sub = parts.next();
+                let Some(sub) = sub else {
+                    self.start_agent_sync();
+                    return true;
+                };
+                if !matches!(sub, "cloud" | "all" | "move") {
+                    self.notice = Some(
+                        "usage: /sync shares what every agent is doing with all of them · /sync cloud|all|move syncs with the cloud machine"
+                            .to_string(),
+                    );
+                    return true;
+                }
+                // `/sync cloud`: laptop <-> cloud through GitHub. This checkout
+                // and the home machine's clone each pull the newest default
+                // branch when safe, and the vault's copy of this laptop's config
+                // is brought level (`rudder cloud sync`). `/sync all` does every
+                // repo on the home.
                 if !rudder_cloud_authenticated() {
                     self.notice = Some("not logged in to Rudder Cloud; run /login first".to_string());
                     return true;
                 }
                 let mut args = vec!["cloud".to_string(), "sync".to_string()];
-                match parts.next() {
-                    Some("all") => args.push("--all".to_string()),
+                match sub {
+                    "all" => args.push("--all".to_string()),
                     // `/sync move`: also hand this laptop's running agents to the
                     // home machine, through the same pause-then-move path as H.
-                    Some("move") if self.home_runtime => {
+                    "move" if self.home_runtime => {
                         self.notice = Some(
                             "these agents are already on the cloud machine; /sync move is for a laptop".to_string(),
                         );
                         return true;
                     }
-                    Some("move") => self.request_move_all_home(),
+                    "move" => self.request_move_all_home(),
                     _ => {}
                 }
                 self.start_rudder_cli_command("cloud sync", args);
@@ -17757,9 +17783,11 @@ Address the objection directly. If you disagree, say why inside \
                 && !is_cloud_owned_agent(run)
                 && !run.needs_permission
                 && !run.needs_user_input
-                && run
+                && (run
                     .last_worker_input_at
                     .map_or(true, |at| at.elapsed() >= CONFLICT_RESOLVER_IDLE)
+                    // A /sync is not the user typing into it.
+                    || self.sync_was_last_input(run))
         })
     }
 
@@ -21046,6 +21074,7 @@ What to do\n\
         self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();
         self.flush_pending_enters();
+        self.flush_pending_syncs();
         self.drive_claude_message_navs();
         self.maybe_start_queued_reconcile();
         self.poll_task_summary_workers();
@@ -21502,7 +21531,13 @@ What to do\n\
                             Some(signals::SignalState::Done) => {
                                 signals::clear_signal(&run.id);
                                 run.wait_signal = None;
-                                mark_run_done(run);
+                                // A turn that only answered a /sync is not new
+                                // work to review: no ping.
+                                if sync_reply_ended(&mut self.sync_deliveries, run) {
+                                    mark_run_done_quietly(run);
+                                } else {
+                                    mark_run_done(run);
+                                }
                                 changed = true;
                             }
                             // Each of these is consumed the way Done always was.

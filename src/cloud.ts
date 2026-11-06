@@ -4418,7 +4418,7 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
   return problems.length;
 }
 
-// `rudder cloud sync` (and `/sync` in the dashboard): GitHub is the meeting
+// `rudder cloud sync` (and `/sync cloud` in the dashboard): GitHub is the meeting
 // point, so this checkout and the home machine's clone each fetch and move to
 // the newest default branch when that is safe, and the vault's copy of this
 // laptop's config is brought level. Unpushed or uncommitted work on either side
@@ -4464,7 +4464,7 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
     body: all || !slug ? {} : { repos: [slug], ...(work ? { work } : {}) },
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message === "fetch failed" ? "the cloud machine did not answer in time (it may be restarting); run /sync again in a minute" : message);
+    throw new Error(message === "fetch failed" ? "the cloud machine did not answer in time (it may be restarting); run /sync cloud again in a minute" : message);
   }).finally(() => fsp.rm(scratch, { recursive: true, force: true }).catch(() => undefined));
   const results = cloud.results ?? [];
   // And the cloud's work comes back here.
@@ -4526,7 +4526,7 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
   console.log(lines.filter(Boolean).join("\n"));
 }
 
-// `/sync` typed on the cloud machine itself. The laptop path needs a CLI login
+// `/sync cloud` typed on the cloud machine itself. The laptop path needs a CLI login
 // the home never has and would sync the machine with itself; here the useful
 // half is this machine's clone(s) taking the newest default branch from GitHub
 // when nothing would be lost. Work travels between devices from the laptop side.
@@ -4556,7 +4556,7 @@ async function homeMachineSync(args: string[], options: CloudCommandOptions): Pr
     return;
   }
   const lines = results.map((result) => (result.report ? describeSync(`cloud machine (${result.repo})`, result.report) : `cloud machine (${result.repo}): ${result.error}`));
-  lines.push("To bring a laptop's work here (or this machine's work to a laptop), run /sync on the laptop.");
+  lines.push("To bring a laptop's work here (or this machine's work to a laptop), run /sync cloud on the laptop.");
   console.log(lines.join("\n"));
 }
 

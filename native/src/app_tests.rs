@@ -27837,6 +27837,171 @@ fn sync_subcommands_appear_only_in_the_named_family() {
     let labels: Vec<String> = suggestions_for(&app).into_iter().map(|s| s.label).collect();
     assert!(labels.iter().any(|l| l == "/sync move"));
     assert!(labels.iter().any(|l| l == "/sync all"));
+    assert!(labels.iter().any(|l| l == "/sync cloud"));
+}
+
+#[cfg(not(windows))]
+fn sync_test_pane(dir: &Path) -> TerminalPane {
+    TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "sleep 30"])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 6, cols: 60 },
+            cwd: Some(dir.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake agent pane")
+}
+
+#[test]
+fn sync_summary_covers_running_and_review_agents_but_not_merged_ones() {
+    let mut app = App::new();
+    let mut main = test_agent_run("main-run", "main branch");
+    main.mode = AgentMode::Main;
+    main.status = AgentStatus::Done;
+    let mut running = test_agent_run("run-auth", "Retry the token refresh once on a 401");
+    running.backend = Backend::Codex;
+    running.task_summary = "Fix auth retry".to_string();
+    running.done_summary = Some("Edited src/auth.ts and its tests".to_string());
+    let mut review = test_agent_run("run-sync", "Add a sync command to the task panel");
+    review.task_summary = "Add sync command".to_string();
+    review.status = AgentStatus::Done;
+    review.workspace_name = Some("ws-sync".to_string());
+    review.done_summary = Some("Added the command with tests".to_string());
+    review.wait_signal = None;
+    let mut blocked = test_agent_run("run-docs", "Update the docs");
+    blocked.needs_permission = true;
+    let mut merged = test_agent_run("run-old", "Old landed work");
+    merged.status = AgentStatus::Merged;
+    let mut stopped = test_agent_run("run-stop", "Abandoned experiment");
+    stopped.status = AgentStatus::Stopped;
+    app.agents = vec![main, running, review, blocked, merged, stopped];
+    app.diff_summary_cache.insert(
+        "run-sync".to_string(),
+        (Instant::now(), Some("3 files changed, 40 insertions(+), 2 deletions(-)".to_string())),
+    );
+
+    let message = app.sync_message_for(1).expect("two or more agents to share");
+    assert!(message.starts_with(SYNC_PREAMBLE));
+    assert!(message.contains("- Fix auth retry (you) · codex · working"), "{message}");
+    assert!(message.contains("- main agent (shared checkout) · claude · idle at its prompt"), "{message}");
+    assert!(message.contains("- Add sync command · claude · finished, ready for review"), "{message}");
+    assert!(message.contains("  task: Add a sync command to the task panel"), "{message}");
+    assert!(message.contains("  latest: Added the command with tests"), "{message}");
+    assert!(message.contains("  changes: 3 files, +40 -2"), "{message}");
+    assert!(message.contains("  blocked on: a permission prompt"), "{message}");
+    assert!(!message.contains("Old landed work") && !message.contains("Abandoned"), "{message}");
+    assert!(!message.contains('\u{2014}'), "no em dashes: {message}");
+    // The recipient's own entry is one line: it knows its own task.
+    assert!(!message.contains("Edited src/auth.ts"), "{message}");
+    // A merged or stopped row gets nothing.
+    assert!(app.sync_message_for(4).is_none());
+
+    // Many long entries still fit the cap, with the rest counted.
+    let long = "x".repeat(300);
+    for index in 0..30 {
+        let mut run = test_agent_run(&format!("bulk-{index}"), &format!("{long} {index}"));
+        run.done_summary = Some(long.clone());
+        app.agents.push(run);
+    }
+    let message = app.sync_message_for(1).unwrap();
+    assert!(message.chars().count() <= SYNC_MESSAGE_CAP, "{}", message.chars().count());
+    assert!(message.contains("more agents not shown"), "{message}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn sync_waits_until_a_busy_agent_is_idle_at_its_prompt() {
+    let dir = unique_test_repo("sync-busy");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut busy = test_agent_run("run-busy", "Refactor the parser");
+    busy.cwd = dir.clone();
+    busy.terminal = Some(sync_test_pane(&dir));
+    let mut idle = test_agent_run("run-idle", "Write the changelog");
+    idle.cwd = dir.clone();
+    idle.status = AgentStatus::Done;
+    idle.completed_at = Some(Instant::now());
+    idle.terminal = Some(sync_test_pane(&dir));
+    app.agents = vec![busy, idle];
+
+    app.start_agent_sync();
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("synced 2 agents (1 busy, they get it when their turn ends)")
+    );
+    assert!(app.sync_deliveries.contains_key("run-idle"), "idle agent got it now");
+    assert!(app.pending_enters.iter().any(|enter| enter.run_id == "run-idle"));
+    assert!(!app.sync_deliveries.contains_key("run-busy"), "a working agent is not typed into");
+    assert_eq!(app.pending_syncs.len(), 1);
+    assert!(app.activity_log.iter().any(|line| line.starts_with("sync: shared what 2 agents")));
+
+    // Still mid-turn: nothing happens.
+    app.flush_pending_syncs();
+    assert!(!app.sync_deliveries.contains_key("run-busy"));
+
+    // Its turn ended, but someone typed into its composer since: a draft may
+    // be sitting there, so it still waits.
+    app.agents[0].status = AgentStatus::Done;
+    app.agents[0].completed_at = Some(Instant::now());
+    app.agents[0].last_worker_input_at = Some(Instant::now());
+    app.flush_pending_syncs();
+    assert!(!app.sync_deliveries.contains_key("run-busy"));
+
+    // A turn that ended with nothing typed since: it gets the sync.
+    app.agents[0].last_worker_input_at = None;
+    app.agents[0].completed_at = Some(Instant::now());
+    app.flush_pending_syncs();
+    assert!(app.sync_deliveries.contains_key("run-busy"));
+    assert!(app.pending_syncs.is_empty());
+
+    for run in &mut app.agents {
+        run.terminal = None;
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_sync_is_not_a_user_follow_up_for_a_planned_node() {
+    let dir = unique_test_repo("sync-planned");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut node = test_agent_run("run-node", "Add the retry helper");
+    node.cwd = dir.clone();
+    node.node_id = Some("n1".to_string());
+    node.workspace_name = Some("ws-n1".to_string());
+    node.status = AgentStatus::Done;
+    node.completed_at = Some(Instant::now());
+    node.merge_requested = true;
+    node.terminal = Some(sync_test_pane(&dir));
+    let other = test_agent_run("run-other", "Wire the retry helper in");
+    app.agents = vec![node, other];
+    assert!(app.is_auto_integration_candidate(&app.agents[0]));
+
+    assert!(app.deliver_sync_to(0));
+    let run = &app.agents[0];
+    assert_eq!(run.turns.len(), 1, "no turn recorded for a sync");
+    assert_eq!(run.current_prompt, "Add the retry helper");
+    assert_eq!(run.last_user_input_at, "1");
+    assert!(run.merge_requested, "a sync does not withdraw a merge request");
+    assert!(!app.user_typed_runs.contains("run-node"));
+    assert!(app.plan_may_merge(run));
+    // Not the user typing into it, for the conflict resolver's idle gate.
+    assert!(app.sync_was_last_input(run));
+
+    // The reply turn runs and ends without a review ping, and the node is
+    // still one that merges on its own.
+    app.agents[0].status = AgentStatus::Running;
+    app.agents[0].completed_at = None;
+    assert!(sync_reply_ended(&mut app.sync_deliveries, &app.agents[0]));
+    mark_run_done_quietly(&mut app.agents[0]);
+    assert!(app.is_auto_integration_candidate(&app.agents[0]));
+    // The next turn end is an ordinary one again.
+    assert!(!sync_reply_ended(&mut app.sync_deliveries, &app.agents[0]));
+
+    app.agents[0].terminal = None;
+    let _ = fs::remove_dir_all(&dir);
 }
 
 fn gods_view_app(count: usize) -> App {

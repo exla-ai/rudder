@@ -68,6 +68,16 @@ fn looks_like_claude_compaction(line: &str) -> bool {
 }
 
 pub(crate) fn mark_run_done(run: &mut AgentRun) {
+    finish_turn(run, true);
+}
+
+/// A turn that only answered a `/sync` ended: the same bookkeeping, but no
+/// review ping and no jj description change. Nothing new is ready for review.
+pub(crate) fn mark_run_done_quietly(run: &mut AgentRun) {
+    finish_turn(run, false);
+}
+
+fn finish_turn(run: &mut AgentRun, announce: bool) {
     if run.status != AgentStatus::Done {
         run.status = AgentStatus::Done;
         run.completed_at = Some(Instant::now());
@@ -93,7 +103,7 @@ pub(crate) fn mark_run_done(run: &mut AgentRun) {
         // re-enters review — "a new thing" — and rings again, which is intended.
         // Pinned planners (orchestrator / plan-mode front-end) are excluded: their
         // completion is a planning transition, not work awaiting your review.
-        if !run.is_pinned_planner() {
+        if announce && !run.is_pinned_planner() {
             play_completion_sound();
             // Same once-per-transition guarantee as the sound, so an unfocused
             // Ghostty tab surfaces "ready for review" as an OS notification.
@@ -102,7 +112,9 @@ pub(crate) fn mark_run_done(run: &mut AgentRun) {
         // Reflect the transition in the workspace's jj description so `jj log`
         // (and any agent reading it) sees this node reach review. Best-effort,
         // jj runs only; skipped for the main agent and in tests (no workspace).
-        describe_workspace_status(run, "done");
+        if announce {
+            describe_workspace_status(run, "done");
+        }
     }
 }
 

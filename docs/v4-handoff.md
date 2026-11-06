@@ -161,6 +161,15 @@ home adopts it on its first idle window.
   are in us-east-1. Attach also replays up to 256KB that the repaint it asks
   for makes redundant.
 
+`/sync` (native/src/agent_sync.rs): bare `/sync` now tells every running and
+review agent in the project, main included, what the others are doing: one
+compact message (about 2,000 characters at most) built from run records and
+in-memory pane state, typed into each agent only once it is idle at its prompt,
+so busy agents get it when their turn ends. It is context, not a follow-up: no
+user turn, merge requests and planned-node auto-merge untouched, and the reply
+turn ends with no review ping. The cloud machine sync moved to `/sync cloud`
+(`/sync all` and `/sync move` unchanged). See engineering-reference section 7.
+
 Dashboard look for 4.2 (native render.rs/theme.rs): agents are cards (title,
 then a colored status line with elapsed time and +N -N; the selected card is a
 rounded outline), a header row (wordmark, project, branch, version), a

@@ -14,10 +14,11 @@ hardening follow-up queue was emptied (backup:
 for Fly and external homes; active homes adopt them when idle. The recovered
 cloud-typing work is integrated, and the three obsolete Git worktrees are removed.
 
-The next version is bumped to 4.3.0; it is not published yet. Context text
-on individual agent cards indicates an older dashboard: current rendering
-shows context only at the bottom of the agent sidebar. This home still has
-a root-owned 4.2.10 installation; its in-place npm update fails with EACCES.
+4.3.0 is published on npm and deployed to Cloud, with worker images for Fly
+and external homes. Context usage appears only at the bottom of the agent
+sidebar; individual cards have no context text. Active homes adopt the image
+when idle. The root-owned CLI in a home updates with its image, rather than
+through an in-place global npm install.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

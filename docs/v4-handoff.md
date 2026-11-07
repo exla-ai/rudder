@@ -10,6 +10,10 @@ workers are merged or cancelled, the planner run is deleted, and the
 hardening follow-up queue was emptied (backup:
 `/workspace/rudder-build/hardening-queue-backup.json`).
 
+4.2.12 is published on npm and deployed to Cloud. Worker images are available
+for Fly and external homes; active homes adopt them when idle. The recovered
+cloud-typing work is integrated, and the three obsolete Git worktrees are removed.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.
@@ -54,7 +58,7 @@ Agent context: graphs at the bottom of the sidebar (`context_panel.rs`) for
 the selected agent: window fill (cached, cache write, fresh, free), the
 estimated fixed base (first request since start or compaction) against the
 conversation, context per request (last 60), and the time split. The agent
-card shows no context lines. Pending 4.2.12, the panel uses at most a third
+card shows no context lines. Since 4.2.12, the panel uses at most a third
 of the sidebar: 4 rows for usage/cache, 6 with growth, 13 with base and time
 on tall screens. It keeps at least 10 agent-list rows, uses only 2 while
 waiting, and hides in narrow layouts or when Alt+h hides the agent panel. The diff panel keeps its text lines. Codex
@@ -181,7 +185,7 @@ Home's preview scan queries projects one at a time: each spawn forks the
 supervisor (about 5ms at its size), so batches of four held keystrokes and
 frames for about 20ms each.
 
-The same stray text, fixed where every client's keys land (pending 4.2.12,
+The same stray text, fixed where every client's keys land (4.2.12,
 cloud/worker/terminal-transport.mjs `createKeyFramer`): the 4.2.10 fix only
 helps a laptop running 4.2.10 or later, and the machine wrote each socket
 message to the dashboard's PTY as its own write (node-pty queues one
@@ -420,7 +424,7 @@ now asks the attached laptop to open it (engineering reference "Clickable
 links"). Takes effect once the home runs the new dashboard (worker image) and
 the laptop runs a `rudder` release with `src/link-open.ts`.
 
-Alt+h (pending 4.2.12): hides or shows only the left agent panel and
+Alt+h (4.2.12): hides or shows only the left agent panel and
 bottom task panel. The worker pane stays visible and expands into their space;
 the header, footer and open diff stay visible. Toggling back restores focus
 and the task draft. Focusing a hidden panel shows it again.

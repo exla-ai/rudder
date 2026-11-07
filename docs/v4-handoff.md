@@ -14,6 +14,11 @@ hardening follow-up queue was emptied (backup:
 for Fly and external homes; active homes adopt them when idle. The recovered
 cloud-typing work is integrated, and the three obsolete Git worktrees are removed.
 
+The next version is bumped to 4.3.0; it is not published yet. Context text
+on individual agent cards indicates an older dashboard: current rendering
+shows context only at the bottom of the agent sidebar. This home still has
+a root-owned 4.2.10 installation; its in-place npm update fails with EACCES.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

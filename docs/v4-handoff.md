@@ -179,7 +179,7 @@ Home's preview scan queries projects one at a time: each spawn forks the
 supervisor (about 5ms at its size), so batches of four held keystrokes and
 frames for about 20ms each.
 
-The same stray text, fixed where every client's keys land (unreleased,
+The same stray text, fixed where every client's keys land (pending 4.2.12,
 cloud/worker/terminal-transport.mjs `createKeyFramer`): the 4.2.10 fix only
 helps a laptop running 4.2.10 or later, and the machine wrote each socket
 message to the dashboard's PTY as its own write (node-pty queues one

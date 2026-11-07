@@ -165,7 +165,7 @@ home adopts it on its first idle window.
   for makes redundant.
 
 Stray `[<0;23;3m`-like text and flicker while typing in `rudder cloud`
-(unreleased, client side, src/key-sequences.ts): predictive echo treated the
+(4.2.10, client side, src/key-sequences.ts): predictive echo treated the
 bytes of escape-sequence keys (mouse clicks, arrows, Shift+Enter, focus and
 paste markers) as typed characters. Since the held-keys change in 4.2.2 it
 drew them at the caret on the next keypress, plus the already echoed keys
@@ -178,6 +178,22 @@ terminal replies (`CSI ?`/`>`/`=`, OSC, DCS, APC) are dropped from keys. The
 Home's preview scan queries projects one at a time: each spawn forks the
 supervisor (about 5ms at its size), so batches of four held keystrokes and
 frames for about 20ms each.
+
+The same stray text, fixed where every client's keys land (unreleased,
+cloud/worker/terminal-transport.mjs `createKeyFramer`): the 4.2.10 fix only
+helps a laptop running 4.2.10 or later, and the machine wrote each socket
+message to the dashboard's PTY as its own write (node-pty queues one
+`fs.write` per call), so a split from an older client reached crossterm as a
+lone ESC (Esc) plus the tail typed. The transport now holds a sequence that
+ends a message for up to 50ms, writes a lone Esc on its own, drops a sequence
+cut short, passes bracketed pastes through untouched and drops terminal
+replies, which crossterm types even when whole (OSC as Alt+] plus
+`11;rgb:...`, `CSI >` as `1;10;0c`) or takes every key after (`CSI ?...n`
+until a "c" or "u"). Home dashboards and sails both go through it. The
+browser app sends composed text and named keys over HTTP, and the private
+access terminal is read-only, so `rudder cloud` is the only raw key path.
+tests/cloud-dashboard-keys.test.mjs splits a burst at every byte against a
+model of crossterm 0.29's parser.
 
 `/sync` (native/src/agent_sync.rs): bare `/sync` now tells every running and
 review agent in the project, main included, what the others are doing: one

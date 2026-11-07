@@ -961,6 +961,14 @@ the relay still counts as controller until a ping fails (`SOCKET_PING_MS`, now 1
 before this the returning terminal sat read-only with its keys dropped. A client without
 an id, or with another id, still only watches.
 
+Keys reach the PTY on the machine through `createKeyFramer` in
+`cloud/worker/terminal-transport.mjs`, whatever the client: escape sequences whole (one
+that ends a message waits up to 50ms for the rest), a lone Esc as its own write, and no
+terminal replies (OSC, DCS, APC, `CSI ?`/`>`/`=`). The dashboard's crossterm reads an ESC
+that ends a read as Esc and types the rest, and types or swallows keys around replies even
+when they are whole. `rudder cloud` frames the same way on the laptop
+(`src/key-sequences.ts`).
+
 ### 9.8 Worker image (`cloud/worker/`)
 `Dockerfile` (base `node:22-slim`, runs as non-root `rudder`) + `entrypoint.sh` +
 `supervisor.mjs`. The supervisor installs the agent CLIs (claude-code, codex, acpx,

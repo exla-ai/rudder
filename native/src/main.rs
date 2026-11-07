@@ -374,7 +374,7 @@ const AGENT_PANE_HINTS: &[&str] = &[
     // list is as long as the agents pane can afford, and an extra row costs
     // every user a row of agents forever.
     "⌥j/k scroll · ⌥v/b msg",
-    "⌥h hide worker",
+    "⌥h full screen",
     "⌥[/] agents",
     "Enter focus",
     "r rename",
@@ -2137,12 +2137,10 @@ struct App {
     /// Where the ⌥d diff panel was drawn this frame (None when hidden).
     diff_area: Option<Rect>,
     diff_panel: DiffPanel,
-    /// ⌥h hid the worker pane: the agent list (and the diff panel, when open)
-    /// take its space. The agent's PTY keeps running at its last size.
-    worker_hidden: bool,
-    /// Hiding moved focus off the worker onto the agent list; showing it
-    /// again puts focus back if it is still there.
-    worker_hidden_took_focus: bool,
+    /// ⌥h: the worker pane alone on the whole screen (no agent list, task
+    /// line, header or footer), whatever had focus. Holds the focus to put
+    /// back when ⌥h shows the panes again; focus is on the worker meanwhile.
+    full_screen: Option<FocusPane>,
     task_area: Option<Rect>,
     cloud_connected: bool,
     cloud_runtime: Option<String>,
@@ -3544,8 +3542,7 @@ impl App {
             worker_area: None,
             diff_area: None,
             diff_panel: DiffPanel::new(),
-            worker_hidden: false,
-            worker_hidden_took_focus: false,
+            full_screen: None,
             task_area: None,
             cloud_connected: cloud.connected,
             cloud_runtime: cloud.runtime,
@@ -3974,51 +3971,40 @@ impl App {
         self.dirty = true;
     }
 
-    /// ⌥h: hide the worker pane, or show it again. Nothing else changes: the
-    /// agent list and the task line stay, the selection stays, and the agent
-    /// keeps running at its last size. Focus moves only off a worker that is
-    /// going away (to the agent list), and comes back when it returns.
-    fn toggle_worker_hidden(&mut self) {
-        self.worker_hidden = !self.worker_hidden;
-        if self.worker_hidden {
-            self.worker_hidden_took_focus = self.focus == FocusPane::Worker;
-            if self.worker_hidden_took_focus {
-                self.focus = FocusPane::Agents;
-            }
-            self.notice = Some("worker hidden · ⌥h shows it".to_string());
-        } else {
-            if std::mem::take(&mut self.worker_hidden_took_focus)
-                && self.focus == FocusPane::Agents
-            {
+    /// ⌥h: the worker pane full screen, or the panes back. It is always the
+    /// worker, whatever had focus, and keys go to it while it is full screen.
+    /// ⌥h again puts focus back exactly where it was; a half-typed task is
+    /// never touched, so it is still there. The switch is instant, and the
+    /// agent's PTY takes the new size once, on the next frame (`fit_pane`).
+    fn toggle_full_screen(&mut self) {
+        match self.full_screen.take() {
+            None => {
+                self.full_screen = Some(self.focus);
                 self.focus = FocusPane::Worker;
+                self.notice = Some("full screen · ⌥h shows the panes".to_string());
             }
-            self.notice = Some("worker shown".to_string());
+            Some(previous) => {
+                // The diff panel may have closed while the worker had the screen.
+                self.focus = if previous == FocusPane::Diff && !self.diff_panel.open {
+                    FocusPane::Worker
+                } else {
+                    previous
+                };
+                self.notice = Some("panes shown".to_string());
+            }
         }
         self.dirty = true;
     }
 
-    /// After a key or click: one that put focus on a hidden worker (⌥2, ^W 2,
-    /// Enter on an agent, a new task) asked for it, so it comes back.
-    fn reconcile_hidden_worker(&mut self) {
-        if self.worker_hidden && self.focus == FocusPane::Worker {
-            self.worker_hidden = false;
-            self.worker_hidden_took_focus = false;
-            self.notice = Some("worker shown".to_string());
-            self.dirty = true;
-        }
-    }
-
-    /// On the App tick: something other than the user (a scheduler launch)
-    /// put focus on the hidden worker. It stays hidden and focus goes back to
-    /// where it was before the tick, so the next key never lands in a terminal
-    /// nobody can see.
-    fn settle_hidden_worker_focus(&mut self, before: FocusPane) {
-        if self.worker_hidden && self.focus == FocusPane::Worker {
-            self.focus = if before == FocusPane::Worker {
-                FocusPane::Agents
-            } else {
-                before
-            };
+    /// Full screen draws only the worker. After a key, a click or a tick that
+    /// needs another pane (⌥1, ⌥3, ⌥d, ^W Tab, a rename, a failed launch that
+    /// hands focus to the task line), the panes come back with focus where it
+    /// went, so nothing lands in a pane nobody can see.
+    fn reconcile_full_screen(&mut self) {
+        if self.full_screen.is_some()
+            && (self.focus != FocusPane::Worker || self.rename_input.is_some())
+        {
+            self.full_screen = None;
             self.dirty = true;
         }
     }
@@ -4369,7 +4355,7 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         let quit = self.dispatch_key(key);
-        self.reconcile_hidden_worker();
+        self.reconcile_full_screen();
         quit
     }
 
@@ -4433,8 +4419,10 @@ impl App {
             return self.handle_leader_key(key);
         }
 
-        // Esc collapses an expanded sidebar section from any pane.
-        if key.code == KeyCode::Esc && self.drawer.is_some() {
+        // Esc collapses an expanded sidebar section from any pane. Not while
+        // the worker is full screen: the section is out of sight, and Esc is
+        // the agent's (it interrupts Claude and Codex).
+        if key.code == KeyCode::Esc && self.drawer.is_some() && self.full_screen.is_none() {
             self.close_drawer();
             self.focus = FocusPane::Agents;
             return false;
@@ -4558,7 +4546,7 @@ impl App {
                 self.toggle_diff_panel();
                 return false;
             }
-            // Alt+h hides the worker pane and shows it again; that is all it does.
+            // Alt+h puts the worker pane full screen and brings the panes back.
             // It previously stepped to the previous agent, but that was only an
             // alias: the stepper's real binding is Alt+[ / Alt+], which still works.
             // Works from ANY pane, the task input included. Task is the focus you
@@ -4566,14 +4554,14 @@ impl App {
             // would block the key exactly when it is wanted. A real ALT modifier is
             // unambiguous here: it cannot be confused with typing the letter.
             KeyCode::Char('h') if alt_like => {
-                self.toggle_worker_hidden();
+                self.toggle_full_screen();
                 return false;
             }
             // Terminals that swallow the Option modifier send the typographic
             // character instead; Option+h is ˙ on a US layout. That one IS just a
             // character, so it must not hijack a task the user is composing.
             KeyCode::Char('\u{02d9}') if self.focus != FocusPane::Task => {
-                self.toggle_worker_hidden();
+                self.toggle_full_screen();
                 return false;
             }
             // Alt+r updates the home machine now (home_update.rs), with the same
@@ -5329,10 +5317,6 @@ impl App {
                 FocusPane::Diff => FocusPane::Worker,
             }
         };
-        // A hidden worker is not a stop on the cycle; ⌥h or ⌥2 shows it.
-        if self.worker_hidden && self.focus == FocusPane::Worker {
-            self.cycle_focus(forward);
-        }
     }
 
     fn handle_worker_key(&mut self, key: KeyEvent) -> bool {
@@ -6248,18 +6232,18 @@ impl App {
 
     /// ⌥d: show or hide the diff panel. Opening focuses it and counts as having
     /// reviewed the row (same weak gate as `v`); closing returns focus to the
-    /// worker so the next keystroke lands where the conversation is, or to the
-    /// agent list while ⌥h has the worker hidden.
+    /// worker so the next keystroke lands where the conversation is.
     fn toggle_diff_panel(&mut self) {
-        if self.diff_panel.open {
+        if self.diff_panel.open && self.full_screen.is_some() {
+            // Full screen hides an open panel; ⌥d asks to see it, so it takes
+            // focus and the panes come back (`reconcile_full_screen`).
+            self.focus = FocusPane::Diff;
+            self.dirty = true;
+        } else if self.diff_panel.open {
             self.diff_panel.open = false;
             self.diff_area = None;
             if self.focus == FocusPane::Diff {
-                self.focus = if self.worker_hidden {
-                    FocusPane::Agents
-                } else {
-                    FocusPane::Worker
-                };
+                self.focus = FocusPane::Worker;
             }
             self.notice = None;
         } else {
@@ -7262,7 +7246,7 @@ impl App {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         let handled = self.dispatch_mouse(mouse);
-        self.reconcile_hidden_worker();
+        self.reconcile_full_screen();
         handled
     }
 
@@ -21315,7 +21299,6 @@ What to do\n\
 
     fn poll_agents(&mut self) {
         let poll_started = Instant::now();
-        let focus_before = self.focus;
         self.poll_board_open();
         // Background work (workspace removal) reports its outcome here.
         while let Ok(message) = self.bg_notice_rx.try_recv() {
@@ -22069,7 +22052,8 @@ What to do\n\
         // calm 10fps rather than forcing a full terminal repaint on every planner
         // heartbeat (which made Ghostty and WindowServer amplify Rudder's own CPU use).
         self.advance_spinner_if_due(Instant::now());
-        self.settle_hidden_worker_focus(focus_before);
+        // A failed launch hands focus to the task line or the agent list.
+        self.reconcile_full_screen();
 
         // MIRROR plan-launched agents' status transitions (running->review->merged
         // / failed) into graph.json so the board tracks them. Only when something

@@ -422,13 +422,19 @@ line when the pane cannot fit it and the agents. Below `NARROW_LAYOUT_WIDTH`
 (90 columns) one pane takes the width beside the task bar: the worker, or the
 agent list while it has focus.
 
-**Hiding the worker (⌥h).** ⌥h (or `˙` outside the task composer) toggles
-`worker_hidden` and does nothing else: `split_layout` gives the agent list the
-whole band (an open diff panel keeps the right side), the task line stays, the
-selection stays, and the PTY keeps its last size. Focus moves only off the
-worker (to the agent list) and back on show. A key that focuses the hidden
-worker (⌥2, Enter) shows it; ^W Tab skips it; a scheduler launch that focuses
-it while hidden has focus put back on the tick. There is no full-screen mode.
+**Full screen (⌥h).** ⌥h (or `˙` outside the task composer) toggles
+`full_screen`, which holds the focus to restore. Full screen is always the
+worker pane, whatever had focus: render draws only `render_worker` over the
+whole frame (no sidebar, task line, diff, header or footer) and gives the
+hidden panes no rect, so clicks and scrolls land on the worker. Focus is the
+worker while it lasts; ⌥h again puts focus back exactly where it was (the task
+draft is untouched). The switch is instant, and the PTY is resized once each
+way by `fit_pane`, which only resizes on a change. `reconcile_full_screen`
+runs after every key, click and tick: anything that moves focus off the worker
+(⌥1, ⌥3, ⌥d/⌥4, ^W Tab, a failed launch) or opens a rename brings the panes
+back with focus where it went. Esc does not collapse a sidebar drawer while
+full screen; it goes to the agent. Notices, prompts and the keys overlay draw
+on top.
 
 **Subagents under an agent's row (`native/src/subagents.rs`).** A card whose
 agent spawned subagents gets a summary line (`▸ 3 subagents (1 running)`).

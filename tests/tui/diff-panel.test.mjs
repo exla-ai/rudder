@@ -1,6 +1,6 @@
 // ⌥d diff panel, end to end on the REAL binary: a worker writes a file into
 // its jj workspace, the panel opens beside the worker with that file parsed
-// from `jj diff`, takes the worker's place under ⌥h, and closes on Esc.
+// from `jj diff`, gives way to the full-screen worker under ⌥h, and closes on Esc.
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -40,15 +40,22 @@ test("⌥d opens a diff panel with the worker's change set and Esc closes it", {
   assert.ok(screen.includes("A DONE.txt"), `an added file is badged A:\n${screen}`);
   assert.ok(screen.includes("╭ claude"), `the worker pane stays beside it:\n${screen}`);
 
-  // ⌥h hides the worker: the diff takes its place, the header and the rest stay.
+  // ⌥h with the diff focused still puts the WORKER full screen: no diff, no
+  // header row (wordmark, branch), no task line. Its title repeats the task
+  // with the sidebar gone, so it reads "<task> · claude ..." there.
   await session.write(ALT_H);
   await session.waitFor(
-    (s) => s.includes("╭ diff") && s.includes("\u2387") && !s.includes("╭ claude"),
-    { timeout: 10_000, label: "the diff panel in the worker's place" },
+    (s) =>
+      s.includes("· claude") &&
+      !s.includes("╭ diff") &&
+      !s.includes("\u2387") &&
+      !s.includes("describe a task"),
+    { timeout: 10_000, label: "the worker alone on screen" },
   );
+  // ⌥h again: the split comes back with focus on the panel (Esc below needs it).
   await session.write(ALT_H);
+  await session.waitForText("╭ diff", { timeout: 10_000 });
   await session.waitForText("╭ claude", { timeout: 10_000 });
-  assert.ok((await session.screen()).includes("╭ diff"), "the worker comes back beside the panel");
 
   // Esc closes the panel and the worker pane widens again.
   await session.press("Escape");

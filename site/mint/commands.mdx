@@ -45,9 +45,9 @@ Press U (or type `/usage web`) for a page in your browser that tracks what your 
 | j / k | Move down and up the agents list. |
 | Enter | Focus the selected agent's pane. |
 | Option-[ / Option-] | Step to the previous or next agent from any pane. |
-| Option-h | Full-screen the focused pane; press again to bring the others back. |
+| Option-h | Full screen: the worker pane alone on the whole screen, from any pane; press again to bring the panes back. |
 | Option-d | Open or close the diff panel: the selected agent's change set parsed into files and hunks, with line numbers, per-file counts, and the run's tokens and cost in the header. j/k scroll, n/p jump between files, r refreshes, Esc closes. |
-| Option-4 | Focus the diff panel, opening it if needed. Option-4 then Option-h gives the diff the whole screen. [See it](/first-agent#diff). |
+| Option-4 | Focus the diff panel, opening it if needed. [See it](/first-agent#diff). |
 | U | Open the usage dashboard in the browser. |
 | Option-j / Option-k | Scroll the worker's scrollback a line; Option-u / Option-n half a page. |
 | m | Merge the selected agent. |
@@ -66,6 +66,6 @@ Press U (or type `/usage web`) for a page in your browser that tracks what your 
 
 Option-1, Option-2, Option-3 and Option-4 always mean Agents, Worker, Task and the diff panel. The diff panel is the one pane that is closed by default: Option-4 opens it beside the worker and focuses it, Option-d toggles it, and on a narrow terminal it takes the worker's place instead of squeezing both.
 
-Option-h gives the focused pane the whole screen: no sidebar, no task line, no gutters. Press it again to bring them back. Reaching for it from the task line hands the screen to the worker, since the task input is no longer drawn, and you land back on the task line when the panes return.
+Option-h gives the worker pane the whole screen, whatever pane you were in: no sidebar, no task line, no diff panel, and your keys go to the agent. Press it again to bring the panes back with focus where it was, a half-typed task included. Option-1, Option-3 or Option-d also bring the panes back, on the pane you asked for.
 
 The worker pane belongs to the agent, so its keystrokes go to Claude or Codex, not to Rudder. To send a dashboard key from inside it, use the Ctrl-W leader: Ctrl-W v opens the diff panel, Ctrl-W m merges, Ctrl-W 1/2/3/4 switches panes.

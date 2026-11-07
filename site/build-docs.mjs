@@ -898,9 +898,9 @@ agent process. Subscription usage is not billed per token, so the page shows
     <tr><td>j / k</td><td>Move down and up the agents list.</td></tr>
     <tr><td>Enter</td><td>Focus the selected agent's pane.</td></tr>
     <tr><td>Option-[ / Option-]</td><td>Step to the previous or next agent from any pane.</td></tr>
-    <tr><td>Option-h</td><td>Hide the worker pane; press again to show it.</td></tr>
+    <tr><td>Option-h</td><td>Full screen: the worker pane alone on the whole screen, from any pane; press again to bring the panes back.</td></tr>
     <tr><td>Option-d</td><td>Open or close the diff panel: the selected agent's change set parsed into files and hunks, with line numbers, per-file counts, and the run's tokens and cost in the header. <kbd>j</kbd>/<kbd>k</kbd> scroll, <kbd>n</kbd>/<kbd>p</kbd> jump between files, <kbd>r</kbd> refreshes, <kbd>Esc</kbd> closes.</td></tr>
-    <tr><td>Option-4</td><td>Focus the diff panel, opening it if needed. <kbd>Option-4</kbd> then <kbd>Option-h</kbd> gives the diff the worker's place. <a href="/docs/first-agent#diff">See it</a>.</td></tr>
+    <tr><td>Option-4</td><td>Focus the diff panel, opening it if needed. <a href="/docs/first-agent#diff">See it</a>.</td></tr>
     <tr><td>U</td><td>Open the usage dashboard in the browser.</td></tr>
     <tr><td>Option-j / Option-k</td><td>Scroll the worker's scrollback a line; <kbd>Option-u</kbd> / <kbd>Option-n</kbd> half a page.</td></tr>
     <tr><td>m</td><td>Merge the selected agent.</td></tr>
@@ -923,10 +923,11 @@ always mean Agents, Worker, Task and the diff panel. The diff panel is the one p
 that is closed by default: <kbd>Option-4</kbd> opens it beside the worker and focuses
 it, <kbd>Option-d</kbd> toggles it, and on a narrow terminal it takes the worker's
 place instead of squeezing both.</p>
-<p><kbd>Option-h</kbd> hides the worker pane and nothing else: the agent list takes
-its room, the task line stays, and the agent keeps running. Press it again to bring
-the worker back. Focus moves only if it was on the worker, to the agent list and
-back, so you can keep typing a task while you hide or show it.</p>
+<p><kbd>Option-h</kbd> puts the worker pane full screen: the agent list, the task
+line and the diff panel step aside, whatever pane you were in, and your keys go to
+the agent. Press it again to bring the panes back with focus where it was, a
+half-typed task included. <kbd>Option-1</kbd>, <kbd>Option-3</kbd> or
+<kbd>Option-d</kbd> also bring the panes back, on the pane you asked for.</p>
 <p>The worker pane belongs to the agent, so its keystrokes go to Claude or Codex, not
 to Rudder. To send a dashboard key from inside it, use the <kbd>Ctrl-W</kbd> leader:
 <kbd>Ctrl-W v</kbd> opens the diff panel, <kbd>Ctrl-W m</kbd> merges, <kbd>Ctrl-W 1/2/3/4</kbd>

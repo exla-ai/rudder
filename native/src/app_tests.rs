@@ -20190,109 +20190,178 @@ fn a_branch_switch_invalidates_the_cached_branch() {
 }
 
 #[test]
-fn alt_h_hides_only_the_worker_and_the_agent_list_takes_its_space() {
-    // Wide and narrow (the 90-column single-pane rule).
+fn alt_h_leaves_only_the_worker_from_any_focus_and_restores_the_exact_layout() {
+    // Wide and narrow (the 90-column single-pane rule), from the sidebar, the
+    // task input with a half-typed task, and the worker itself.
     for (width, height) in [(160_u16, 30_u16), (80, 30)] {
-        let mut app = App::new();
-        app.agents = vec![test_agent_run("a", "first")];
-        app.focus = FocusPane::Task;
-        render_screen(&mut app, width, height);
-        let before = (app.agents_area, app.worker_area, app.task_area);
-        assert!(app.worker_area.is_some());
+        for focus in [FocusPane::Agents, FocusPane::Task, FocusPane::Worker] {
+            let case = format!("{width} cols, {focus:?}");
+            let mut app = App::new();
+            app.agents = vec![test_agent_run("a", "first"), test_agent_run("b", "second")];
+            app.selected_agent = 1;
+            app.focus = focus;
+            if focus == FocusPane::Task {
+                app.replace_task_input("half a ta".to_string());
+            }
+            render_screen(&mut app, width, height);
+            let before = (app.agents_area, app.worker_area, app.diff_area, app.task_area);
 
-        app.handle_key(alt('h'));
-        assert!(app.worker_hidden);
-        assert_eq!(app.focus, FocusPane::Task, "the prompt keeps focus");
-        assert!(
-            app.notice.as_deref().unwrap_or_default().contains("⌥h"),
-            "the notice says how to get it back: {:?}",
-            app.notice
-        );
-        let screen = render_screen(&mut app, width, height);
-        assert!(app.worker_area.is_none(), "{width}: {screen}");
-        assert_eq!(app.task_area, before.2, "{width}: the task line stays");
-        let list = app.agents_area.expect("the agent list stays");
-        assert_eq!(list.width, width, "{width}: and takes the whole width");
+            app.handle_key(alt('h'));
+            assert_eq!(app.focus, FocusPane::Worker, "{case}: keys go to the worker");
+            assert!(
+                app.notice.as_deref().unwrap_or_default().contains("⌥h"),
+                "{case}: the notice says how to get back: {:?}",
+                app.notice
+            );
+            let screen = render_screen(&mut app, width, height);
+            assert_eq!(
+                app.worker_area,
+                Some(Rect::new(0, 0, width, height)),
+                "{case}: the worker takes the whole screen:\n{screen}"
+            );
+            assert!(
+                app.agents_area.is_none() && app.task_area.is_none() && app.diff_area.is_none(),
+                "{case}: nothing else is drawn:\n{screen}"
+            );
+            assert!(!screen.contains("half a ta"), "{case}: no task line:\n{screen}");
 
-        app.handle_key(alt('h'));
-        assert!(!app.worker_hidden);
-        render_screen(&mut app, width, height);
-        assert_eq!(
-            (app.agents_area, app.worker_area, app.task_area),
-            before,
-            "{width}: back exactly as it was"
-        );
+            // A click where the sidebar was lands on the worker, as in the split.
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 4,
+                modifiers: KeyModifiers::empty(),
+            });
+            assert!(app.full_screen.is_some(), "{case}: a click keeps full screen");
+            assert_eq!(app.selected_agent, 1, "{case}: and never hits an agent row");
+
+            app.handle_key(alt('h'));
+            assert_eq!(app.focus, focus, "{case}: focus goes back where it was");
+            render_screen(&mut app, width, height);
+            assert_eq!(
+                (app.agents_area, app.worker_area, app.diff_area, app.task_area),
+                before,
+                "{case}: back exactly as it was"
+            );
+            if focus == FocusPane::Task {
+                assert_eq!(app.task_input, "half a ta", "{case}: the draft is intact");
+            }
+        }
     }
 }
 
 #[test]
-fn alt_h_moves_focus_only_off_the_worker_and_back() {
+fn keys_that_need_another_pane_bring_the_split_back_and_esc_stays_the_agents() {
+    // ⌥1 and ⌥3 ask for the agent list and the task line: the panes come back
+    // with focus there instead of keys landing in a pane nobody can see.
+    for (key, pane) in [('1', FocusPane::Agents), ('3', FocusPane::Task)] {
+        let mut app = App::new();
+        app.focus = FocusPane::Task;
+        app.handle_key(alt('h'));
+        app.handle_key(alt(key));
+        assert!(app.full_screen.is_none(), "⌥{key} shows the panes");
+        assert_eq!(app.focus, pane);
+    }
+
+    // ^W Tab steps to the task line, so the same.
     let mut app = App::new();
-    app.focus = FocusPane::Worker;
     app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Agents, "focus leaves the hidden worker");
-    app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Worker, "and comes back with it");
-
-    // Focus anywhere else is left alone both ways.
-    app.focus = FocusPane::Agents;
-    app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Agents);
-    app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Agents);
-}
-
-#[test]
-fn focusing_the_hidden_worker_shows_it_and_the_pane_cycle_skips_it() {
-    let mut app = App::new();
-    app.focus = FocusPane::Agents;
-    app.handle_key(alt('h'));
-    app.cycle_focus(true);
-    assert_eq!(app.focus, FocusPane::Task, "^W Tab steps over the hidden worker");
-    app.cycle_focus(false);
-    assert_eq!(app.focus, FocusPane::Agents);
-
-    // A scheduler launch focusing the worker does not bring it back, and the
-    // next key goes where it went before, not to a terminal nobody can see.
-    app.focus = FocusPane::Worker;
-    app.settle_hidden_worker_focus(FocusPane::Task);
-    assert!(app.worker_hidden);
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.full_screen.is_none());
     assert_eq!(app.focus, FocusPane::Task);
 
-    // ⌥2 asks for the worker, so it comes back.
-    app.handle_key(alt('2'));
-    assert!(!app.worker_hidden);
+    // A failed launch hands focus to the task line on the tick: same rule.
+    let mut app = App::new();
+    app.handle_key(alt('h'));
+    app.focus = FocusPane::Task;
+    app.reconcile_full_screen();
+    assert!(app.full_screen.is_none());
+
+    // An open done drawer is out of sight in full screen: Esc is the agent's
+    // and the drawer stays for when the panes come back.
+    let mut app = App::new();
+    app.focus = FocusPane::Agents;
+    app.drawer = Some(DrawerState { bucket: Bucket::Done, selected: 0 });
+    app.handle_key(alt('h'));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.full_screen.is_some() && app.drawer.is_some());
     assert_eq!(app.focus, FocusPane::Worker);
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Agents);
 }
 
 #[test]
-fn alt_h_hides_the_worker_and_stepping_is_brackets_only() {
+fn alt_h_full_screens_the_worker_and_stepping_is_brackets_only() {
     // Alt+h used to be an ALIAS for the agent stepper; the real binding is
-    // Alt+[ / Alt+], which is why spending the alias on hiding costs nothing.
+    // Alt+[ / Alt+], which is why spending the alias on full screen costs nothing.
     let mut app = App::new();
     app.agents = vec![test_agent_run("a", "first"), test_agent_run("b", "second")];
     app.focus = FocusPane::Agents;
     app.selected_agent = 1;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(app.worker_hidden, "Alt+h hides the worker");
-    assert_eq!(app.focus, FocusPane::Agents, "focus stays on the list");
+    assert!(app.full_screen.is_some(), "Alt+h puts the worker full screen");
     assert_eq!(app.selected_agent, 1, "and does not move the selection");
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(!app.worker_hidden, "Alt+h again shows it");
-    assert_eq!(app.focus, FocusPane::Agents);
-
-    // Stepping is Alt+[ / Alt+] only; the letter aliases are gone.
+    // Stepping is Alt+[ / Alt+] only, and full screen follows the step.
     app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT));
     assert_eq!(app.selected_agent, 0, "Alt+[ steps back");
     app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
     assert_eq!(app.selected_agent, 1, "Alt+] steps forward");
-    assert!(!app.worker_hidden, "stepping never toggles the hide");
+    assert!(app.full_screen.is_some(), "stepping keeps full screen");
 
     // Alt+l no longer steps: it is free again.
     app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
     assert_eq!(app.selected_agent, 1, "Alt+l is no longer a stepper alias");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
+    assert!(app.full_screen.is_none(), "Alt+h again shows the panes");
+    assert_eq!(app.focus, FocusPane::Agents);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn alt_h_resizes_the_agent_pty_once_each_way() {
+    let (width, height) = (160_u16, 40_u16);
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    let command = TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 5"]);
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 10, cols: 40 },
+            cwd: Some(app.cwd.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker PTY");
+    app.agents.push(test_agent_run_with_terminal(&app, pane));
+    app.focus = FocusPane::Task;
+    let pty_size = |app: &App| app.agents[0].terminal.as_ref().expect("live pane").size();
+    let inner_size = |rect: Rect| {
+        let inner = block_inner(rect);
+        TerminalSize { rows: inner.height, cols: inner.width }
+    };
+
+    render_screen(&mut app, width, height);
+    let split = inner_size(app.worker_area.expect("split worker"));
+    assert_eq!(pty_size(&app), split);
+    let full = inner_size(Rect::new(0, 0, width, height));
+
+    // The size is the same every frame, so the child gets one resize per
+    // toggle (`fit_pane` resizes only on a change), on the first frame.
+    app.handle_key(alt('h'));
+    for frame in 0..3 {
+        render_screen(&mut app, width, height);
+        assert_eq!(pty_size(&app), full, "full screen, frame {frame}");
+    }
+    app.handle_key(alt('h'));
+    for frame in 0..3 {
+        render_screen(&mut app, width, height);
+        assert_eq!(pty_size(&app), split, "split again, frame {frame}");
+    }
+    assert_eq!(app.agents[0].terminal_size, Some(split));
 }
 
 #[test]
@@ -23549,27 +23618,29 @@ fn cloud_worker_is_connected_without_exposing_worker_token_to_dashboard() {
 }
 
 #[test]
-fn alt_h_hides_the_worker_from_the_task_pane_too() {
+fn alt_h_goes_full_screen_from_the_task_pane_too() {
     let mut app = App::new();
     app.focus = FocusPane::Task;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
     assert!(
-        app.worker_hidden,
+        app.full_screen.is_some(),
         "Option+h works at the cloud dashboard's initial task focus"
     );
-    assert_eq!(app.focus, FocusPane::Task, "the task input stays and keeps focus");
-
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert!(!app.worker_hidden);
+    assert!(app.full_screen.is_none());
     assert_eq!(app.focus, FocusPane::Task);
 
-    // Option+h typed as ˙ is only a character in the composer; elsewhere it hides.
+    // Option+h typed as ˙ is only a character in the composer; elsewhere it
+    // toggles, and in full screen focus is the worker, so ˙ comes back too.
     app.handle_key(KeyEvent::new(KeyCode::Char('\u{02d9}'), KeyModifiers::NONE));
-    assert!(!app.worker_hidden && app.task_input.contains('\u{02d9}'));
+    assert!(app.full_screen.is_none() && app.task_input.contains('\u{02d9}'));
     app.focus = FocusPane::Agents;
     app.handle_key(KeyEvent::new(KeyCode::Char('\u{02d9}'), KeyModifiers::NONE));
-    assert!(app.worker_hidden);
+    assert!(app.full_screen.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{02d9}'), KeyModifiers::NONE));
+    assert!(app.full_screen.is_none());
+    assert_eq!(app.focus, FocusPane::Agents);
 }
 
 // --- Desktop notifications (notify.rs) -------------------------------------
@@ -25110,39 +25181,38 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
 }
 
 #[test]
-fn alt_h_with_the_diff_open_gives_the_worker_slot_to_the_diff() {
+fn alt_h_with_the_diff_focused_still_full_screens_the_worker() {
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
-    let mut run = test_agent_run("diff-hide", "tighten the parser");
+    let mut run = test_agent_run("diff-full", "tighten the parser");
     run.cwd = app.cwd.clone();
     app.agents.push(run);
     app.selected_agent = 0;
     app.focus = FocusPane::Worker;
     app.handle_key(alt('d'));
     render_screen(&mut app, 200, 30);
-    let (agents, diff) = (app.agents_area, app.diff_area);
-    assert!(app.worker_area.is_some() && diff.is_some());
+    let before = (app.agents_area, app.worker_area, app.diff_area);
+    assert!(before.1.is_some() && before.2.is_some());
 
-    // Focus on the diff stays there; the diff takes the worker's place.
+    // Focus on the diff: full screen is still the worker, never the diff.
+    app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Worker);
+    let screen = render_screen(&mut app, 200, 30);
+    assert_eq!(app.worker_area, Some(Rect::new(0, 0, 200, 30)));
+    assert!(app.diff_area.is_none() && !screen.contains("╭ diff"), "{screen}");
+
+    // ⌥h again: the diff is back beside the worker, with focus.
     app.handle_key(alt('h'));
     assert_eq!(app.focus, FocusPane::Diff);
     render_screen(&mut app, 200, 30);
-    assert!(app.worker_area.is_none());
-    assert_eq!(app.agents_area, agents, "the agent list keeps its place");
-    assert!(app.diff_area.unwrap().width > diff.unwrap().width);
+    assert_eq!((app.agents_area, app.worker_area, app.diff_area), before);
 
-    // Closing the diff while the worker is hidden leaves it hidden and puts
-    // focus on the agent list, which now has the whole band.
-    app.handle_key(alt('d'));
-    assert!(app.worker_hidden);
-    assert_eq!(app.focus, FocusPane::Agents);
-    render_screen(&mut app, 200, 30);
-    assert!(app.worker_area.is_none() && app.diff_area.is_none());
-
+    // ⌥d in full screen asks to see the hidden panel: the panes come back
+    // with it focused, rather than closing it out of sight.
     app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Agents, "focus was not taken from the worker");
-    render_screen(&mut app, 200, 30);
-    assert!(app.worker_area.is_some());
+    app.handle_key(alt('d'));
+    assert!(app.full_screen.is_none() && app.diff_panel.open);
+    assert_eq!(app.focus, FocusPane::Diff);
 }
 
 #[test]
@@ -25187,11 +25257,12 @@ fn alt_4_and_leader_4_focus_the_diff_panel_opening_it_first_and_never_closing_it
         "safe to mash"
     );
 
-    // ⌥4 then ⌥h: the worker goes, the diff and the agent list stay.
+    // ⌥4 then ⌥h: still the worker full screen, and ⌥h puts focus back.
     app.handle_key(alt('h'));
     render_screen(&mut app, 160, 30);
-    assert!(app.worker_area.is_none() && app.diff_area.is_some() && app.agents_area.is_some());
+    assert!(app.worker_area.is_some() && app.diff_area.is_none() && app.agents_area.is_none());
     app.handle_key(alt('h'));
+    assert_eq!(app.focus, FocusPane::Diff);
 
     // Option+4 without an Alt modifier arrives as ¢ on a US layout.
     app.handle_key(alt('d'));

@@ -27,6 +27,24 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    // FULL SCREEN (⌥h): the worker pane alone, whatever had focus; no agent
+    // list, task line, header or footer. The hidden panes keep no rect, so
+    // every click and scroll lands on the worker as it would in the split.
+    if app.full_screen.is_some() {
+        app.agents_area = None;
+        app.worker_area = Some(area);
+        app.diff_area = None;
+        app.task_area = None;
+        render_worker(frame, area, app);
+        render_notice_pill(frame, area, app);
+        render_cloud_prompt(frame, area, app);
+        render_merge_prompt(frame, area, app);
+        render_keys_overlay(frame, area, app);
+        render_mouse_debug(frame, area, app);
+        render_perf_hud(frame, area, app);
+        return;
+    }
+
     let task_height = task_pane_height(app, area.width);
     let layout = split_layout(app, area, task_height);
     app.task_area = Some(layout.task);
@@ -105,25 +123,15 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
     // Narrow (zoomed in, a split, a small window): a 34-column sidebar next to
     // the worker leaves neither readable, so one of them takes the width. The
     // worker normally; the agent list while it has focus (Option-1 / ^W 1).
-    // The same rule the diff panel follows below. A worker hidden with ⌥h
-    // leaves the width to the agent list.
+    // The same rule the diff panel follows below.
     if area.width < NARROW_LAYOUT_WIDTH {
         if app.focus == FocusPane::Agents {
             layout.agents = Some(layout.content);
         } else if app.diff_panel.open && app.focus == FocusPane::Diff {
             layout.diff = Some(layout.content);
-        } else if app.worker_hidden {
-            layout.agents = Some(layout.content);
         } else {
             layout.worker = Some(layout.content);
         }
-        return layout;
-    }
-
-    // ⌥h hid the worker and no diff panel is open: the agent list takes the
-    // whole band.
-    if app.worker_hidden && !app.diff_panel.open {
-        layout.agents = Some(layout.content);
         return layout;
     }
 
@@ -139,9 +147,9 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
     layout.agents_gutter = Some(main[1]);
     if app.diff_panel.open {
         // The diff panel sits beside the worker when there is room for both;
-        // on a narrow screen, or with the worker hidden (⌥h), it takes the
-        // worker's place, never a squeezed pair that nobody can read.
-        if main[2].width >= 100 && !app.worker_hidden {
+        // on a narrow screen it takes the worker's place (⌥d brings the
+        // conversation back), never a squeezed pair that nobody can read.
+        if main[2].width >= 100 {
             let split = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
@@ -4020,7 +4028,7 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // the mapping from the agents-pane highlight.
     // The title is what runs in the pane: backend, model and the run's key.
     // The task itself is on the selected card; only when the card list is
-    // hidden (narrow screens) does the title repeat it.
+    // hidden (narrow screens, ⌥h full screen) does the title repeat it.
     let sidebar_visible = app.agents_area.is_some();
     let identity = app.agents.get(app.selected_agent).map(|run| {
         let id = worker_title_id(app, run);
@@ -7032,7 +7040,7 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("\u{2325}1", "agents"),
             ("\u{2325}3", "prompt"),
             ("\u{2325}d", "diff"),
-            ("\u{2325}h", "hide"),
+            ("\u{2325}h", "full screen"),
             ("^W", "pane keys"),
         ],
         FocusPane::Diff => vec![
@@ -7298,7 +7306,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("\u{2325}[ ]", "previous, next agent"),
             ("\u{2325}j k", "scroll"),
             ("\u{2325}v b", "previous, next message"),
-            ("\u{2325}h", "hide or show worker"),
+            ("\u{2325}h", "full screen worker"),
             ("\u{2325}d", "diff"),
             ("\u{2325}g", "god's view"),
             ("esc", "dismiss notice"),

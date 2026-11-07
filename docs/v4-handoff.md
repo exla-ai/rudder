@@ -402,6 +402,7 @@ the laptop runs a `rudder` release with `src/link-open.ts`.
 Alt+h (2026-11-06, for 4.2.9, not released): ⌥h only hides and shows the
 worker pane; the agent list (and an open diff panel) take its space, and the
 old full-screen solo mode and its animation are removed.
+Alt+h again (2026-11-07, not released): the user wanted full screen back, so ⌥h shows only the worker from any pane, instantly, and ⌥h restores the exact layout and focus; the 4.2.9 hide mode is gone.
 
 ## 8. Disk
 

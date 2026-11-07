@@ -18842,7 +18842,7 @@ fn done_and_closed_always_collapse_and_live_work_never_does() {
     assert!(!Bucket::Todo.always_drawer());
     assert!(!Bucket::OneOff.always_drawer());
 
-    // In-progress work is never hidden behind a chevron, however much of it there is.
+    // In-progress work is never hidden behind a fold, however much of it there is.
     let mut app = App::new();
     for index in 0..40 {
         app.agents.push(test_agent_run(
@@ -19002,21 +19002,49 @@ fn tab_opens_an_agents_subagent_tree_and_j_k_walk_its_rows() {
         now,
     );
 
-    // Closed: one summary line on the parent's card.
-    let screen = render_screen(&mut app, 120, 40);
-    assert!(screen.contains("\u{25b8} 2 subagents (1 running)"), "{screen}");
-    assert!(!screen.contains("Explore auth"), "{screen}");
+    // The cell index of the glyph on the first row holding `needle`.
+    let column_of = |screen: &str, needle: &str, glyph: char| -> usize {
+        let line = screen
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no row with {needle}: {screen}"));
+        line.chars()
+            .position(|c| c == glyph)
+            .unwrap_or_else(|| panic!("no {glyph} on {line}"))
+    };
+    let cell_at = |screen: &str, needle: &str, column: usize| -> Option<char> {
+        let line = screen.lines().find(|line| line.contains(needle))?;
+        line.chars().nth(column)
+    };
 
+    // Closed: one summary line on the parent's card, behind a folded branch.
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("\u{251c}\u{2504} 2 subagents (1 running)"), "{screen}");
+    assert!(!screen.contains("Explore auth"), "{screen}");
+    let closed_at = column_of(&screen, "2 subagents", '\u{251c}');
+
+    // Open: the summary row is the trunk of the drawn tree. Its `┬` sits in
+    // the column of the `├`/`└` connectors and the selected row's `│` detail
+    // lane, and the summary text lines up with the children's status glyphs.
     app.handle_key(KeyEvent::from(KeyCode::Tab));
     let screen = render_screen(&mut app, 120, 40);
-    assert!(screen.contains("\u{25be} 2 subagents (1 running)"), "{screen}");
+    assert!(screen.contains("\u{252c}\u{2500} 2 subagents (1 running)"), "{screen}");
     assert!(screen.contains("\u{251c}\u{2500}") && screen.contains("Explore auth"), "{screen}");
     assert!(screen.contains("\u{2514}\u{2500}") && screen.contains("Check tests"), "{screen}");
+    let trunk = column_of(&screen, "2 subagents", '\u{252c}');
+    assert_eq!(trunk, closed_at, "opening does not shift the summary row: {screen}");
+    assert_eq!(cell_at(&screen, "Explore auth", trunk), Some('\u{251c}'), "{screen}");
+    assert_eq!(cell_at(&screen, "Check tests", trunk), Some('\u{2514}'), "{screen}");
+    assert_eq!(cell_at(&screen, "2 subagents", trunk + 3), Some('2'), "{screen}");
+    assert_eq!(cell_at(&screen, "Check tests", trunk + 3), Some('\u{2713}'), "{screen}");
 
     // j walks the subagent rows, then moves on to the next agent; k comes back
     // up onto the tree's last row. The worker pane stays on the parent.
     app.handle_key(KeyEvent::from(KeyCode::Char('j')));
     assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (0, Some("a1")));
+    let screen = render_screen(&mut app, 120, 40);
+    assert_eq!(cell_at(&screen, "general-purpose", trunk), Some('\u{2502}'), "{screen}");
+    assert_eq!(cell_at(&screen, "Check tests", trunk), Some('\u{2514}'), "{screen}");
     app.handle_key(KeyEvent::from(KeyCode::Down));
     assert_eq!((app.selected_agent, app.subagent_cursor.as_deref()), (0, Some("a2")));
     let screen = render_screen(&mut app, 120, 40);
@@ -19226,7 +19254,7 @@ fn nest_view_still_lists_every_run_as_its_own_row() {
 }
 
 #[test]
-fn collapsed_drawer_header_renders_a_count_and_chevron() {
+fn collapsed_drawer_header_renders_a_count_and_fold_glyph() {
     let mut app = drawer_fleet();
     app.focus = FocusPane::Agents;
     let area = Rect::new(0, 0, 34, 40);
@@ -19244,11 +19272,11 @@ fn collapsed_drawer_header_renders_a_count_and_chevron() {
         .collect();
 
     assert!(
-        text.contains("done 3  \u{203a}"),
+        text.contains("done 3  \u{251c}\u{2504}"),
         "collapsed done header: {text}"
     );
     assert!(
-        text.contains("closed 1  \u{203a}"),
+        text.contains("closed 1  \u{251c}\u{2504}"),
         "collapsed closed header: {text}"
     );
     assert!(
@@ -19262,7 +19290,7 @@ fn collapsed_drawer_header_renders_a_count_and_chevron() {
 }
 
 #[test]
-fn open_drawer_header_flips_the_chevron() {
+fn open_drawer_header_flips_the_fold_glyph() {
     let mut app = drawer_fleet();
     app.focus = FocusPane::Agents;
     app.drawer_cursor = Some(Bucket::Done);
@@ -19282,7 +19310,7 @@ fn open_drawer_header_flips_the_chevron() {
         .collect();
 
     assert!(
-        text.contains("done 3  \u{2304}"),
+        text.contains("done 3  \u{252c}\u{2500}"),
         "open done header: {text}"
     );
     assert!(

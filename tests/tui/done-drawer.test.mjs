@@ -33,11 +33,11 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     await session.press("Enter");
     // A dashboard worker waits in review when its turn ends; m merges it.
     await mergeFinishedWorker(session);
-    // One collapsed row with a count and a closed chevron — not a per-run row.
+    // One collapsed row with a count and a closed fold glyph — not a per-run row.
     await session.waitForText("done 1", { timeout: 20_000 });
     const screen = await session.screen();
-    if (!screen.includes("›")) {
-      throw new Error(`expected the collapsed chevron on the done header:\n${screen}`);
+    if (!screen.includes("\u251c\u2504")) {
+      throw new Error(`expected the closed fold glyph on the done header:\n${screen}`);
     }
   });
 
@@ -75,8 +75,8 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     if (screen.includes("Tab or Esc to")) {
       throw new Error(`the expanded sidebar should be gone after Esc:\n${screen}`);
     }
-    if (!screen.includes("\u203a")) {
-      throw new Error(`the chevron should read closed after Esc:\n${screen}`);
+    if (!screen.includes("\u251c\u2504")) {
+      throw new Error(`the fold glyph should read closed after Esc:\n${screen}`);
     }
   });
 

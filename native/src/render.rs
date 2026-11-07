@@ -420,10 +420,29 @@ fn clip_to_width(text: &str, width: usize) -> String {
     out
 }
 
+/// The fold glyph on every Tab toggle in the sidebar (subagent trees and the
+/// done/closed drawers), two cells wide. Closed it is a branch folded away,
+/// `├┄`; open it is the top of the drawn tree, `┬─`, so in a subagent tree the
+/// `┬` sits in the same column as the `├─`/`└─` connectors under it.
+pub(crate) fn fold_glyph(open: bool) -> &'static str {
+    if open {
+        "\u{252c}\u{2500}"
+    } else {
+        "\u{251c}\u{2504}"
+    }
+}
+
 /// The subagent rows under an agent's card (subagents.rs), each at most
 /// `width` columns so the sidebar never wraps them: a one-line summary
-/// (`▸ 3 subagents (1 running)`), and when its tree is open (Tab) one row per
-/// subagent, with the details of the one the cursor is on right under it.
+/// (`├┄ 3 subagents (1 running)`), and when its tree is open (Tab) one row per
+/// subagent, with the details of the one the cursor is on right under it:
+///
+/// ```text
+/// ┬─ 3 subagents (1 running)
+/// ├─ ⠋ Explore the auth code   running 1m
+/// └─ ✓ Read the tests          done 40s
+/// ```
+///
 /// The id rides along on each tree row for the click map.
 fn subagent_card_rows(
     app: &App,
@@ -443,12 +462,19 @@ fn subagent_card_rows(
     let running = list
         .iter()
         .any(|sub| sub.status == crate::subagents::SubagentStatus::Running);
-    let summary = crate::subagents::summary_label(list, open);
+    let summary = crate::subagents::summary_label(list);
+    let summary_color = if running { p.running } else { p.muted };
+    // Open, the glyph is the tree's trunk and takes the connectors' color.
+    let fold_color = if open { p.faint } else { summary_color };
     let mut rows = vec![(
-        vec![Span::styled(
-            clip_to_width(&summary, width),
-            Style::default().fg(if running { p.running } else { p.muted }),
-        )],
+        vec![
+            Span::styled(fold_glyph(open), Style::default().fg(fold_color)),
+            Span::raw(" "),
+            Span::styled(
+                clip_to_width(&summary, width.saturating_sub(3)),
+                Style::default().fg(summary_color),
+            ),
+        ],
         None,
     )];
     if !open {
@@ -1463,13 +1489,13 @@ fn render_status_section<'a>(
         lines.push((Line::default()));
     }
     if bucket_is_drawer(&app.agents, bucket) {
-        // One row for the whole section. The chevron is the affordance: `›` closed,
-        // `⌄` open, and the row carries the selection marker when the sidebar cursor
-        // is on it, exactly like an agent row.
+        // One row for the whole section. The fold glyph is the affordance, the
+        // same one a subagent tree uses: `├┄` closed, `┬─` open. The row carries
+        // the selection marker when the sidebar cursor is on it, like an agent row.
         let selected = app.drawer_cursor == Some(bucket);
         let open = app.drawer_open() == Some(bucket);
         let marker = if selected { "▶ " } else { "  " };
-        let chevron = if open { "⌄" } else { "›" };
+        let fold = fold_glyph(open);
         record_drawer_row(lines.len(), bucket);
         lines.push((Line::from(vec![
             Span::styled(
@@ -1482,7 +1508,7 @@ fn render_status_section<'a>(
             ),
             Span::styled(bucket.label(), header_style(focused)),
             Span::styled(format!(" {}", members.len()), muted_style(focused)),
-            Span::styled(format!("  {chevron}"), muted_style(focused)),
+            Span::styled(format!("  {fold}"), muted_style(focused)),
             Span::styled(
                 if open { "  Tab or Esc to collapse" } else { "  Tab or click to expand" },
                 muted_style(focused),

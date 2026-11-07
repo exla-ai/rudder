@@ -5356,8 +5356,18 @@ impl App {
             return false;
         }
         if self.selected_terminal_mut().is_none() {
+            // Full screen with no live agent: a typed key never quits Rudder
+            // (q does in the split) and never vanishes without a word. A
+            // finished worker that takes a resume draft still gets the keys.
+            if self.full_screen.is_some()
+                && matches!(key.code, KeyCode::Char(_))
+                && !self.selected_finished_worker_conversable()
+            {
+                self.notice = Some("no live agent here · ⌥h shows the panes".to_string());
+                return false;
+            }
             match key.code {
-                KeyCode::Char('q') => return self.confirm_or_quit(),
+                KeyCode::Char('q') if self.full_screen.is_none() => return self.confirm_or_quit(),
                 // No process behind this pane: Enter brings the agent back, as
                 // Enter on its row in the agents pane does, and focus stays here
                 // to type into it. A typed resume draft still goes to the regoal
@@ -5395,7 +5405,8 @@ impl App {
         if self.selected_worker_is_finished_cloud_command() {
             match key.code {
                 KeyCode::Char('r') => self.restart_selected_agent(),
-                KeyCode::Char('q') => return self.confirm_or_quit(),
+                // Its PTY is dead too; full screen never quits on a typed key.
+                KeyCode::Char('q') if self.full_screen.is_none() => return self.confirm_or_quit(),
                 _ => {
                     self.notice = Some(
                         "cloud command finished; run /cloud again or press r to rerun".to_string(),

@@ -23627,6 +23627,11 @@ fn alt_h_goes_full_screen_from_the_task_pane_too() {
         app.full_screen.is_some(),
         "Option+h works at the cloud dashboard's initial task focus"
     );
+    // No agent terminal behind the full-screen worker: q is not a quit there
+    // (it is in the split), and the notice says how to get back.
+    assert!(!app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+    assert!(!app.quit_confirm_pending && app.full_screen.is_some());
+    assert!(app.notice.as_deref().unwrap_or_default().contains("⌥h shows the panes"));
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
     assert!(app.full_screen.is_none());
     assert_eq!(app.focus, FocusPane::Task);

@@ -49,6 +49,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 mod usage;
 use crate::usage::*;
 mod timeline;
+mod context_panel;
 mod config;
 use crate::config::*;
 mod gitio;

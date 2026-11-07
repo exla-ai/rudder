@@ -24972,6 +24972,7 @@ fn agent_context_panel_shows_only_the_selected_runs_snapshot() {
     let mut summary = crate::timeline::TimelineSummary::default();
     summary.context = Some(crate::timeline::ContextUsage {
         timestamp_ms: 1, input: 1000, cached: Some(600), cache_write: Some(100), capacity: Some(2000),
+        ..Default::default()
     });
     panel.timeline = Some((run.id.clone(), summary));
     let text = diff_panel_text(&panel, &run, 100).join("\n");
@@ -24980,6 +24981,36 @@ fn agent_context_panel_shows_only_the_selected_runs_snapshot() {
     assert!(text.contains("Latest request"));
     let other = test_agent_run("other", "another agent");
     assert!(!diff_panel_text(&panel, &other, 100).join("\n").contains("Context:"));
+}
+
+#[test]
+fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card() {
+    let mut app = App::new();
+    app.agents.push(test_agent_run("ctx-agent", "inspect the context window"));
+    app.selected_agent = 0;
+    app.diff_panel.timeline = Some(("ctx-agent".into(), crate::timeline::TimelineSummary {
+        context: Some(crate::timeline::ContextUsage {
+            timestamp_ms: 1, input: 142_000, cached: Some(98_000), cache_write: Some(14_000),
+            capacity: Some(200_000), base: Some(38_000), auto_compact_at: Some(167_000),
+            history: (0..44).map(|n: u64| 38_000 + (n % 22) * 6_000).collect(),
+            ..Default::default()
+        }),
+        model_ms: 1_800_000, tool_ms: 900_000, build_ms: 240_000, test_ms: 180_000, wait_ms: 600_000,
+        ..Default::default()
+    }));
+    let tall = render_screen(&mut app, 160, 48);
+    for want in ["142k / 200k · 71%", "cached 98k", "base ~38k", "Growth", "Time"] {
+        assert!(tall.contains(want), "{want} missing:\n{tall}");
+    }
+    assert!(!tall.contains("Context:"), "the card carries no context lines:\n{tall}");
+    // The list (and its click map) ends where the panel starts.
+    let list = app.agents_area.expect("sidebar");
+    assert_eq!(list.height, 48 - 2 - 3 - crate::context_panel::PANEL_HEIGHT);
+    // No room: no panel, and nothing moves onto the card.
+    for (width, height) in [(160, 26), (80, 48)] {
+        let screen = render_screen(&mut app, width, height);
+        assert!(!screen.contains("142k") && !screen.contains("Context"), "{width}x{height}:\n{screen}");
+    }
 }
 
 #[test]

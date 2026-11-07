@@ -459,6 +459,23 @@ file in `<rudder_home>/signals/<run_id>.subagents/`; a background scan every
 500ms reads and deletes them and the loop applies typed events. Subagents are
 view state only: never runs, never persisted, never counted for `/sync`,
 scheduling or capacity.
+
+**Context graphs (`native/src/context_panel.rs`).** The selected agent's
+context lives in a 13-row panel at the bottom of the sidebar, never on its
+card. `context_panel::carve` takes the rows off `layout.agents` right after
+`split_layout`, so `agents_area` and the row maps cover only the list and a
+click or wheel on the panel hits nothing. It shows only beside the worker (the
+agents gutter exists) and while the list keeps 10 rows; otherwise nothing
+shows. Rows: window fill (cached, cache write, fresh, free; the scale is the
+reported capacity, a Claude `[1m]` model's 1M, else the last observed auto
+compaction, else the used tokens alone), base versus conversation on the same
+scale, a sparkline of context per request, and the time split. The base is the
+first request since the conversation started or last compacted, so it also
+holds the opening prompt: an estimate. The compaction marker is only ever an
+observed Claude `compact_boundary` with trigger `auto`. All of it comes from
+`ContextUsage` (`base`, `auto_compact_at`, `history`), filled by timeline.rs
+off the App loop; `history` (last 60 requests) is memory only and never written
+to timeline.jsonl. Cloud and opencode agents get a two-row note instead.
 - **Agents**: the run list. Grouped: a `main`-branch agent section first, then
   workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
   focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running

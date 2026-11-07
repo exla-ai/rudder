@@ -50,11 +50,14 @@ PLAN.md section 0 steps 0-8 are merged. Step 9 results:
   stale commit; headless backends ran outside the fork mount; login shells
   inside forks picked stock jj; auto-integration raced the plan scheduler.
 
-Agent context: the selected agent card and diff panel show the latest backend
-request input, cached/fresh/cache-write breakdown, and Codex context capacity
-when reported. This is a request snapshot, separate from cumulative billing;
-Claude capacity and prompt/file/tool categories are not inferred. Usage is
-read off the UI thread and refreshed every ten seconds.
+Agent context: graphs at the bottom of the sidebar (`context_panel.rs`) for
+the selected agent: window fill (cached, cache write, fresh, free), the
+estimated fixed base (first request since start or compaction) against the
+conversation, context per request (last 60), and the time split. The agent
+card shows no context lines; without room (narrow layout, short terminal,
+worker full screen) nothing shows. The diff panel keeps its text lines. Codex
+reports capacity; Claude only for a `[1m]` model, and its compaction marker is
+an observed auto `compact_boundary`. Parsed off the UI thread every ten seconds.
 
 Merge conflicts: a run someone meant to merge no longer waits on a conflict.
 That is a planned node nobody has sent a follow-up to, or a run the user

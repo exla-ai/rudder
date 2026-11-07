@@ -47,7 +47,7 @@ pub(crate) struct TimelineSummary {
     pub(crate) output: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ContextUsage {
     pub(crate) timestamp_ms: u64,
@@ -55,6 +55,61 @@ pub(crate) struct ContextUsage {
     pub(crate) cached: Option<u64>,
     pub(crate) cache_write: Option<u64>,
     pub(crate) capacity: Option<u64>,
+    /// Input of the conversation's first request, or of the first one after
+    /// its last compaction: system prompt, tools, memory files and the opening
+    /// prompt. The context panel shows it as the estimated fixed base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base: Option<u64>,
+    /// Context size when the backend last compacted on its own (Claude Code's
+    /// `compact_boundary` with trigger `auto`). Observed, never assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_compact_at: Option<u64>,
+    /// Context size per request in this conversation, oldest first, at most
+    /// `CONTEXT_HISTORY`. Memory only: timeline.jsonl gets a summary line on
+    /// every change, so the history stays out of the file.
+    #[serde(skip)]
+    pub(crate) history: Vec<u64>,
+}
+
+/// Requests the context growth sparkline keeps.
+pub(crate) const CONTEXT_HISTORY: usize = 60;
+
+/// One conversation's context over time, folded request by request while a
+/// session log is parsed (off the App loop). It is stamped onto that
+/// conversation's latest request, so the newest conversation's track wins.
+#[derive(Default)]
+struct ContextTrack {
+    base: Option<u64>,
+    auto_compact_at: Option<u64>,
+    history: Vec<u64>,
+}
+
+impl ContextTrack {
+    fn request(&mut self, input: u64) {
+        if input == 0 {
+            return;
+        }
+        self.base.get_or_insert(input);
+        self.history.push(input);
+        if self.history.len() > CONTEXT_HISTORY {
+            self.history.remove(0);
+        }
+    }
+
+    fn compacted(&mut self, auto_at: Option<u64>) {
+        self.base = None;
+        if auto_at.is_some() {
+            self.auto_compact_at = auto_at;
+        }
+    }
+
+    fn stamp(self, context: Option<&mut ContextUsage>) {
+        if let Some(c) = context {
+            c.base = self.base;
+            c.auto_compact_at = self.auto_compact_at;
+            c.history = self.history;
+        }
+    }
 }
 
 fn latest_context(summary: &mut TimelineSummary, context: ContextUsage) {
@@ -163,11 +218,22 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
     // message id -> (input, cached, output); streamed blocks repeat usage.
     let mut usage: HashMap<String, (u64, u64, u64)> = HashMap::new();
     let mut anon = 0usize;
+    // The whole conversation's context, from before the run too: its base is
+    // the first request, and a resumed session's first request here is not.
+    let mut track = ContextTrack::default();
+    let mut last_request: Option<String> = None;
+    let mut latest: Option<ContextUsage> = None;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "system" && value.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary") {
+            let meta = value.get("compactMetadata");
+            let auto = meta.and_then(|m| m.get("trigger")).and_then(|v| v.as_str()) == Some("auto");
+            track.compacted(meta.and_then(|m| m.get("preTokens")).and_then(|v| v.as_u64()).filter(|_| auto));
+            continue;
+        }
         if kind != "assistant" && kind != "user" {
             continue;
         }
@@ -177,11 +243,28 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
         let Some(ts) = value.get("timestamp").and_then(|v| v.as_str()).and_then(iso_millis) else {
             continue;
         };
+        let message = value.get("message");
+        let request = message.and_then(|m| m.get("usage")).filter(|_| kind == "assistant").and_then(|u| {
+            let field = |k: &str| u.get(k).and_then(|v| v.as_u64());
+            let (input, cached, write) =
+                (field("input_tokens")?, field("cache_read_input_tokens")?, field("cache_creation_input_tokens")?);
+            Some(ContextUsage {
+                timestamp_ms: ts, input: input.saturating_add(cached).saturating_add(write),
+                cached: Some(cached), cache_write: Some(write), ..Default::default()
+            })
+        });
+        if let Some(request) = &request {
+            // Streamed blocks of one response repeat its usage: one request.
+            let id = message.and_then(|m| m.get("id")).and_then(|v| v.as_str()).map(ToString::to_string);
+            if id.is_none() || id != last_request {
+                track.request(request.input);
+            }
+            last_request = id;
+        }
         if ts < since_ms {
             continue;
         }
         let gap = prev_ts.map(|p| ts.saturating_sub(p)).unwrap_or(0);
-        let message = value.get("message");
         let content_items = message
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_array())
@@ -191,15 +274,10 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
             summary.model_ms += gap;
             if let Some(u) = message.and_then(|m| m.get("usage")) {
                 let get = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                if let (Some(input), Some(cached), Some(write)) = (
-                    u.get("input_tokens").and_then(|v| v.as_u64()),
-                    u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                    u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
-                ) {
-                    latest_context(summary, ContextUsage {
-                        timestamp_ms: ts, input: input.saturating_add(cached).saturating_add(write),
-                        cached: Some(cached), cache_write: Some(write), capacity: None,
-                    });
+                if let Some(request) = request {
+                    if latest.as_ref().is_none_or(|old| request.timestamp_ms >= old.timestamp_ms) {
+                        latest = Some(request);
+                    }
                 }
                 let id = message
                     .and_then(|m| m.get("id"))
@@ -259,6 +337,10 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
         summary.cached += cached;
         summary.output += output;
     }
+    track.stamp(latest.as_mut());
+    if let Some(latest) = latest {
+        latest_context(summary, latest);
+    }
 }
 
 /// Fold one Codex rollout into `summary` when it belongs to `cwd`.
@@ -273,6 +355,9 @@ pub(crate) fn analyze_codex_rollout(
     let mut prev_ts: Option<u64> = None;
     let mut pending: HashMap<String, (u64, Option<String>)> = HashMap::new();
     let mut last_total: Option<(u64, u64, u64)> = None;
+    let mut track = ContextTrack::default();
+    // Codex can report one request twice; an unchanged running total says so.
+    let mut last_request: Option<String> = None;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -290,14 +375,27 @@ pub(crate) fn analyze_codex_rollout(
             prev_ts = ts;
             continue;
         }
+        if kind == "compacted" {
+            track.compacted(None);
+            continue;
+        }
         if kind == "event_msg" && ptype == "token_count" {
             if let Some(info) = payload.and_then(|p| p.get("info")) {
-                if let (Some(ts), Some(input)) = (ts, info.get("last_token_usage").and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64())) {
+                let input = info.get("last_token_usage").and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64());
+                if let Some(input) = input {
+                    let total = info.get("total_token_usage").map(ToString::to_string);
+                    if total.is_none() || total != last_request {
+                        track.request(input);
+                    }
+                    last_request = total;
+                }
+                if let (Some(ts), Some(input)) = (ts, input) {
                     latest_context(&mut local, ContextUsage {
                         timestamp_ms: ts, input,
                         cached: info.get("last_token_usage").and_then(|u| u.get("cached_input_tokens")).and_then(|v| v.as_u64()),
                         cache_write: None,
                         capacity: info.get("model_context_window").and_then(|v| v.as_u64()),
+                        ..Default::default()
                     });
                 }
             }
@@ -368,6 +466,7 @@ pub(crate) fn analyze_codex_rollout(
         local.cached = cached;
         local.output = output;
     }
+    track.stamp(local.context.as_mut());
     merge(summary, &local);
     true
 }
@@ -510,8 +609,13 @@ pub(crate) fn compute_timeline_in(
     let (start, last) = read_timeline_file(&request.repo_root, &request.run_id);
     summary.start_ms = start;
     let has_data = summary.context.is_some() || summary.model_ms + summary.input + summary.output > 0;
-    if has_data && last.as_ref() != Some(&summary) {
-        if let Ok(mut value) = serde_json::to_value(&summary) {
+    // The file never holds the growth history, so compare without it.
+    let mut recorded = summary.clone();
+    if let Some(c) = recorded.context.as_mut() {
+        c.history.clear();
+    }
+    if has_data && last.as_ref() != Some(&recorded) {
+        if let Ok(mut value) = serde_json::to_value(&recorded) {
             if let Some(map) = value.as_object_mut() {
                 map.insert("kind".into(), serde_json::json!("summary"));
             }
@@ -611,6 +715,39 @@ mod tests {
         let mut other = TimelineSummary::default();
         assert!(!analyze_codex_rollout(&content, "/other", 0, &mut other));
         assert!(other.context.is_none());
+    }
+
+    #[test]
+    fn first_request_base_history_and_auto_compaction_come_from_the_transcript() {
+        let t = |s: u64| format!("2026-11-04T00:00:{s:02}.000Z");
+        let request = |s: u64, id: &str, fresh: u64, read: u64, write: u64| {
+            serde_json::json!({"type":"assistant","timestamp":t(s),"message":{"id":id,"usage":{
+                "input_tokens":fresh,"cache_read_input_tokens":read,"cache_creation_input_tokens":write}}}).to_string()
+        };
+        let lines = [
+            request(1, "m1", 10, 0, 30_000),
+            // A second streamed block of the same response: not a new request.
+            request(1, "m1", 10, 0, 30_000),
+            request(2, "m2", 5, 30_010, 2_000),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","timestamp":t(3),
+                "compactMetadata":{"trigger":"auto","preTokens":160_000}}).to_string(),
+            request(4, "m3", 3, 0, 9_000),
+            serde_json::json!({"type":"assistant","isSidechain":true,"timestamp":t(5),"message":{"id":"s1","usage":{
+                "input_tokens":1,"cache_read_input_tokens":90_000,"cache_creation_input_tokens":0}}}).to_string(),
+        ];
+        let mut summary = TimelineSummary::default();
+        // The run started after the first two requests; they still set the
+        // conversation's history, and the compaction reset its base.
+        analyze_claude_transcript(&lines.join("\n"), iso_millis(&t(3)).unwrap(), &mut summary);
+        let c = summary.context.as_ref().unwrap();
+        assert_eq!(c.input, 9_003);
+        assert_eq!(c.base, Some(9_003));
+        assert_eq!(c.history, vec![30_010, 32_015, 9_003]);
+        assert_eq!(c.auto_compact_at, Some(160_000));
+        // timeline.jsonl keeps base and compaction but not the history.
+        let row = serde_json::to_value(c).unwrap();
+        assert_eq!(row["base"], 9_003);
+        assert!(row.get("history").is_none());
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let task_height = task_pane_height(app, area.width);
     let layout = split_layout(app, area, task_height);
+    // The selected agent's context graphs take the bottom of the sidebar when
+    // it has room (context_panel.rs); the list and its hit-testing get the rest.
+    let (layout, context_panel) = crate::context_panel::carve(app, layout);
     app.task_area = Some(layout.task);
     app.agents_area = layout.agents;
     app.worker_area = layout.worker;
@@ -55,6 +58,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_header(frame, layout.header, app);
     if let Some(rect) = layout.agents {
         render_agents(frame, rect, app);
+    }
+    if let Some(rect) = context_panel {
+        crate::context_panel::render(frame, rect, app);
     }
     if let Some(rect) = layout.agents_gutter {
         render_gutter(frame, rect, Gutter::Vertical);
@@ -712,21 +718,9 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         status.push(Span::styled(tag, Style::default().fg(p.accent)));
     }
 
+    // Context usage is not on the card: it is graphed at the bottom of the
+    // sidebar (context_panel.rs) when there is room, and nowhere otherwise.
     let mut extra: Vec<Vec<Span<'a>>> = Vec::new();
-    if selected {
-        let summary = app.diff_panel.timeline.as_ref()
-            .filter(|(id, _)| *id == agent.id)
-            .map(|(_, summary)| summary.clone()).unwrap_or_default();
-        let context = if is_cloud_agent(agent) || agent.backend == Backend::Opencode {
-            vec!["Context: backend usage unavailable here".into()]
-        } else {
-            crate::timeline::context_lines(&summary)
-        };
-        for line in context {
-            extra.push(vec![Span::styled(line, muted_style(focused))]);
-        }
-    }
-
     if let Some(detail) = integration_detail(agent) {
         extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }

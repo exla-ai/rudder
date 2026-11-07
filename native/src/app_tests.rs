@@ -25347,10 +25347,12 @@ fn alt_4_and_leader_4_focus_the_diff_panel_opening_it_first_and_never_closing_it
         "safe to mash"
     );
 
-    // ⌥4 then ⌥h: still the worker full screen, and ⌥h puts focus back.
+    // ⌥4 then ⌥h: worker and focused diff remain, agents and task hide.
     app.handle_key(alt('h'));
     render_screen(&mut app, 160, 30);
-    assert!(app.worker_area.is_some() && app.diff_area.is_none() && app.agents_area.is_none());
+    assert!(app.worker_area.is_some() && app.diff_area.is_some() && app.agents_area.is_none());
+    assert!(app.task_area.is_none());
+    assert_eq!(app.focus, FocusPane::Diff);
     app.handle_key(alt('h'));
     assert_eq!(app.focus, FocusPane::Diff);
 

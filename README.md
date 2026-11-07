@@ -54,9 +54,6 @@ auto-updates itself before running when a newer version is available. Set
 `RUDDER_DISABLE_AUTO_UPDATE=1` to opt out. Run without a global install using
 `npx @exla/rudder@latest`.
 
-Rudder used to be published as `@viraatdas/rudder`. Existing installs move
-themselves to `@exla/rudder` on their next update; nothing to do by hand.
-
 ## Requirements
 
 - Node.js 22 or newer

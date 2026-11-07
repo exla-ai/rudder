@@ -1977,15 +1977,14 @@ linux-x64 runners (`native-artifacts` matrix) and `copy-native` folds all three
 into `dist/native/<platform>-<arch>/`, so one package serves Apple Silicon,
 Intel Macs and Linux x64. Windows and linux-arm64 are not built.
 
-**Two package names (3.4.0).** The project moved from `viraatdas/rudder` to
-`exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from
-`@viraatdas/rudder` to `@exla/rudder`. Every release publishes the SAME build
-under both names (the workflow rewrites `name` and publishes again), so an old
-install auto-updates under its old name to a build whose `moveToRenamedPackage`
-(src/version-check.ts) uninstalls `@viraatdas/rudder` and installs
-`@exla/rudder` (both own the `rudder` bin, so npm refuses EEXIST otherwise),
-putting the old version back if the new one will not install. Keep both
-publishes until old installs have drained; then `npm deprecate` the old name.
+**Old package name retired (4.2.12).** The project moved from `viraatdas/rudder`
+to `exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from
+`@viraatdas/rudder` to `@exla/rudder` in 3.4.0. Releases up to 4.2.11 published
+the same build under both names. From 4.2.12 only `@exla/rudder` is published,
+and the Release workflow deprecates every `@viraatdas/rudder` version (npm
+refuses to unpublish a package with that many downloads). An install still on
+the old name keeps working: `moveToRenamedPackage` (src/version-check.ts)
+uninstalls `@viraatdas/rudder` and installs `@exla/rudder` on its next update.
 The site moved to rudder.exla.ai (Vercel; DNS in Netlify's exla.ai zone);
 rudder.viraat.dev 308-redirects there (site/vercel.json).
 

@@ -422,7 +422,7 @@ jobs:
           console.log(`Publishing ${version} to ${tag}`);
           NODE
 
-      # Both publishes run prepack's TS/board/package work. Native Cargo is
+      # The publish runs prepack's TS/board/package work. Native Cargo is
       # bypassed only after all three source-bound binary pairs verify again;
       # copy-native rehashes while staging the downloaded artifacts.
       - name: Publish to npm
@@ -435,20 +435,17 @@ jobs:
           RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
           RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
 
-      # The same build under the pre-3.4.0 name, so installs of @viraatdas/rudder
-      # auto-update to a version that knows the new name and moves itself over
-      # (src/version-check.ts moveToRenamedPackage). Runs even if the new name
-      # failed, so old installs keep getting fixes; the job still fails below.
-      - name: Publish under the old name
+      # @viraatdas/rudder (the pre-3.4.0 name) is retired: nothing new is
+      # published there and every version carries a deprecation notice that
+      # points at @exla/rudder. Re-running it each release is idempotent.
+      # Existing installs still move themselves over (src/version-check.ts).
+      - name: Deprecate the old package name
         if: github.ref_type == 'tag'
+        continue-on-error: true
         run: |
-          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json"));p.name="@viraatdas/rudder";fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
-          npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
-          git checkout package.json
+          npm deprecate @viraatdas/rudder "Retired. Rudder is @exla/rudder: npm uninstall -g @viraatdas/rudder && npm install -g @exla/rudder"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
-          RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
 
       - name: Fail when the new name did not publish
         if: github.ref_type == 'tag' && steps.publish.outcome != 'success'

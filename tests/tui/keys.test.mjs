@@ -96,14 +96,14 @@ test("j/k move the selection up and down the agents list", { timeout: 60_000 }, 
   await waitSelected(session, "beta worker");
 });
 
-test("Alt+h full screens the worker and never moves the selection", { timeout: 60_000 }, async (t) => {
+test("Alt+h hides agents and task and never moves the selection", { timeout: 60_000 }, async (t) => {
   const { session } = await twoWorkerDashboard(t, "rudder-tui-hlstep-");
   // Stepping between agents is Alt+[ / Alt+] only. Those need the kitty keyboard
   // protocol to arrive (ESC-[ is the CSI introducer), which this harness does not
   // negotiate, so the steppers are asserted in the unit tests, and what matters
   // on a real screen is that Alt+h does not disturb the selection.
   await waitSelected(session, "beta worker");
-  // Focus is the agents pane here; full screen is still the worker, so the
+  // Focus is the agents pane here; the worker remains visible, while the
   // list and the task line both go.
   await session.press("Alt+h");
   await session.waitForText("shows the panes", { timeout: 10_000 });

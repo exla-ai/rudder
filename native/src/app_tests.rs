@@ -20218,7 +20218,7 @@ fn a_branch_switch_invalidates_the_cached_branch() {
 }
 
 #[test]
-fn alt_h_leaves_only_the_worker_from_any_focus_and_restores_the_exact_layout() {
+fn alt_h_hides_only_agents_and_task_and_restores_the_exact_layout() {
     // Wide and narrow (the 90-column single-pane rule), from the sidebar, the
     // task input with a half-typed task, and the worker itself.
     for (width, height) in [(160_u16, 30_u16), (80, 30)] {
@@ -20244,13 +20244,16 @@ fn alt_h_leaves_only_the_worker_from_any_focus_and_restores_the_exact_layout() {
             let screen = render_screen(&mut app, width, height);
             assert_eq!(
                 app.worker_area,
-                Some(Rect::new(0, 0, width, height)),
-                "{case}: the worker takes the whole screen:\n{screen}"
+                Some(Rect::new(0, 1, width, height - 2)),
+                "{case}: the worker expands between the header and footer:\n{screen}"
             );
             assert!(
                 app.agents_area.is_none() && app.task_area.is_none() && app.diff_area.is_none(),
-                "{case}: nothing else is drawn:\n{screen}"
+                "{case}: the agents and task panes are hidden:\n{screen}"
             );
+            let layout = split_layout(&app, Rect::new(0, 0, width, height), 0);
+            assert_eq!(layout.header, Rect::new(0, 0, width, 1));
+            assert_eq!(layout.footer, Rect::new(0, height - 1, width, 1));
             assert!(!screen.contains("half a ta"), "{case}: no task line:\n{screen}");
 
             // A click where the sidebar was lands on the worker, as in the split.
@@ -20375,7 +20378,7 @@ fn alt_h_resizes_the_agent_pty_once_each_way() {
     render_screen(&mut app, width, height);
     let split = inner_size(app.worker_area.expect("split worker"));
     assert_eq!(pty_size(&app), split);
-    let full = inner_size(Rect::new(0, 0, width, height));
+    let full = inner_size(Rect::new(0, 1, width, height - 2));
 
     // The size is the same every frame, so the child gets one resize per
     // toggle (`fit_pane` resizes only on a change), on the first frame.
@@ -25034,8 +25037,19 @@ fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card()
     // The list (and its click map) ends where the panel starts.
     let list = app.agents_area.expect("sidebar");
     assert_eq!(list.height, 48 - 2 - 3 - crate::context_panel::PANEL_HEIGHT);
+    // Ordinary terminals keep a small graph and leave most rows for agents.
+    for (height, panel_rows, growth) in [(26, 6, true), (20, 4, false)] {
+        let screen = render_screen(&mut app, 160, height);
+        assert!(screen.contains("142k / 200k · 71%"), "{height} rows:\n{screen}");
+        assert!(screen.contains("cached 98k"), "{height} rows:\n{screen}");
+        assert_eq!(screen.contains("Growth"), growth, "{height} rows:\n{screen}");
+        assert!(!screen.contains("base ~38k") && !screen.contains("Time"), "{height} rows:\n{screen}");
+        let list = app.agents_area.expect("sidebar");
+        assert_eq!(list.height, height - 2 - 3 - panel_rows);
+        assert!(list.height >= crate::context_panel::MIN_LIST_ROWS);
+    }
     // No room: no panel, and nothing moves onto the card.
-    for (width, height) in [(160, 26), (80, 48)] {
+    for (width, height) in [(160, 18), (80, 48)] {
         let screen = render_screen(&mut app, width, height);
         assert!(!screen.contains("142k") && !screen.contains("Context"), "{width}x{height}:\n{screen}");
     }
@@ -25245,7 +25259,7 @@ fn alt_d_opens_the_diff_panel_beside_the_worker_and_esc_closes_it() {
 }
 
 #[test]
-fn alt_h_with_the_diff_focused_still_full_screens_the_worker() {
+fn alt_h_keeps_the_worker_and_open_diff_visible() {
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
     let mut run = test_agent_run("diff-full", "tighten the parser");
@@ -25258,12 +25272,25 @@ fn alt_h_with_the_diff_focused_still_full_screens_the_worker() {
     let before = (app.agents_area, app.worker_area, app.diff_area);
     assert!(before.1.is_some() && before.2.is_some());
 
-    // Focus on the diff: full screen is still the worker, never the diff.
+    // Hiding the agent/task panels keeps the worker and open diff visible.
     app.handle_key(alt('h'));
-    assert_eq!(app.focus, FocusPane::Worker);
+    assert_eq!(app.focus, FocusPane::Diff, "the visible diff keeps focus");
     let screen = render_screen(&mut app, 200, 30);
-    assert_eq!(app.worker_area, Some(Rect::new(0, 0, 200, 30)));
-    assert!(app.diff_area.is_none() && !screen.contains("╭ diff"), "{screen}");
+    let worker = app.worker_area.expect("the worker stays visible");
+    let diff = app.diff_area.expect("the diff stays visible");
+    assert_eq!(worker.x, 0);
+    assert_eq!(worker.y, 1);
+    assert_eq!(worker.height, 28);
+    assert!(worker.width > before.1.unwrap().width, "{screen}");
+    assert_eq!(diff.right(), 200);
+    assert!(app.agents_area.is_none() && app.task_area.is_none());
+
+    // Switching between visible panes does not bring the hidden panels back.
+    app.handle_key(alt('2'));
+    assert_eq!(app.focus, FocusPane::Worker);
+    app.handle_key(alt('4'));
+    assert_eq!(app.focus, FocusPane::Diff);
+    assert!(app.full_screen.is_some());
 
     // ⌥h again: the diff is back beside the worker, with focus.
     app.handle_key(alt('h'));
@@ -25271,12 +25298,11 @@ fn alt_h_with_the_diff_focused_still_full_screens_the_worker() {
     render_screen(&mut app, 200, 30);
     assert_eq!((app.agents_area, app.worker_area, app.diff_area), before);
 
-    // ⌥d in full screen asks to see the hidden panel: the panes come back
-    // with it focused, rather than closing it out of sight.
+    // ⌥d still closes a visible diff while the agent/task panels stay hidden.
     app.handle_key(alt('h'));
     app.handle_key(alt('d'));
-    assert!(app.full_screen.is_none() && app.diff_panel.open);
-    assert_eq!(app.focus, FocusPane::Diff);
+    assert!(app.full_screen.is_some() && !app.diff_panel.open);
+    assert_eq!(app.focus, FocusPane::Worker);
 }
 
 #[test]

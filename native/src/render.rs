@@ -27,30 +27,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    // FULL SCREEN (⌥h): the worker pane alone, whatever had focus; no agent
-    // list, task line, header or footer. The hidden panes keep no rect, so
-    // every click and scroll lands on the worker as it would in the split.
-    if app.full_screen.is_some() {
-        app.agents_area = None;
-        app.worker_area = Some(area);
-        app.diff_area = None;
-        app.task_area = None;
-        render_worker(frame, area, app);
-        render_notice_pill(frame, area, app);
-        render_cloud_prompt(frame, area, app);
-        render_merge_prompt(frame, area, app);
-        render_keys_overlay(frame, area, app);
-        render_mouse_debug(frame, area, app);
-        render_perf_hud(frame, area, app);
-        return;
-    }
-
-    let task_height = task_pane_height(app, area.width);
+    // ⌥h hides only the agent list and task composer. The worker expands into
+    // their space while the header, footer and an open diff remain visible.
+    let task_height = if app.full_screen.is_some() { 0 } else { task_pane_height(app, area.width) };
     let layout = split_layout(app, area, task_height);
     // The selected agent's context graphs take the bottom of the sidebar when
     // it has room (context_panel.rs); the list and its hit-testing get the rest.
     let (layout, context_panel) = crate::context_panel::carve(app, layout);
-    app.task_area = Some(layout.task);
+    app.task_area = app.full_screen.is_none().then_some(layout.task);
     app.agents_area = layout.agents;
     app.worker_area = layout.worker;
     app.diff_area = layout.diff;
@@ -76,8 +60,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     render_footer(frame, layout.footer, app);
     render_notice_pill(frame, layout.content, app);
-    render_task(frame, layout.task, app);
-    render_suggestions(frame, layout.task, app);
+    if app.full_screen.is_none() {
+        render_task(frame, layout.task, app);
+        render_suggestions(frame, layout.task, app);
+    }
     render_cloud_prompt(frame, area, app);
     render_merge_prompt(frame, area, app);
     render_keys_overlay(frame, area, app);
@@ -125,6 +111,25 @@ pub(crate) fn split_layout(app: &App, area: Rect, task_height: u16) -> SplitLayo
         diff_gutter: None,
         diff: None,
     };
+
+    if app.full_screen.is_some() {
+        if app.diff_panel.open {
+            let split = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(45),
+                    Constraint::Length(1),
+                    Constraint::Percentage(55),
+                ])
+                .split(layout.content);
+            layout.worker = Some(split[0]);
+            layout.diff_gutter = Some(split[1]);
+            layout.diff = Some(split[2]);
+        } else {
+            layout.worker = Some(layout.content);
+        }
+        return layout;
+    }
 
     // Narrow (zoomed in, a split, a small window): a 34-column sidebar next to
     // the worker leaves neither readable, so one of them takes the width. The
@@ -7060,7 +7065,7 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("\u{2325}1", "agents"),
             ("\u{2325}3", "prompt"),
             ("\u{2325}d", "diff"),
-            ("\u{2325}h", "full screen"),
+            ("\u{2325}h", if app.full_screen.is_some() { "show panels" } else { "hide panels" }),
             ("^W", "pane keys"),
         ],
         FocusPane::Diff => vec![
@@ -7326,7 +7331,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("\u{2325}[ ]", "previous, next agent"),
             ("\u{2325}j k", "scroll"),
             ("\u{2325}v b", "previous, next message"),
-            ("\u{2325}h", "full screen worker"),
+            ("\u{2325}h", "hide agents and task"),
             ("\u{2325}d", "diff"),
             ("\u{2325}g", "god's view"),
             ("esc", "dismiss notice"),

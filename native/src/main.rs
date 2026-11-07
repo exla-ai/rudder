@@ -2138,9 +2138,8 @@ struct App {
     /// Where the ⌥d diff panel was drawn this frame (None when hidden).
     diff_area: Option<Rect>,
     diff_panel: DiffPanel,
-    /// ⌥h: the worker pane alone on the whole screen (no agent list, task
-    /// line, header or footer), whatever had focus. Holds the focus to put
-    /// back when ⌥h shows the panes again; focus is on the worker meanwhile.
+    /// ⌥h hides the agent list and task composer so the worker can expand.
+    /// Holds the focus to restore when those panes are shown again.
     full_screen: Option<FocusPane>,
     task_area: Option<Rect>,
     cloud_connected: bool,
@@ -3972,8 +3971,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// ⌥h: the worker pane full screen, or the panes back. It is always the
-    /// worker, whatever had focus, and keys go to it while it is full screen.
+    /// ⌥h: hide or show the agent list and task composer. The worker expands
+    /// into their space; header, footer and an open diff stay visible.
     /// ⌥h again puts focus back exactly where it was; a half-typed task is
     /// never touched, so it is still there. The switch is instant, and the
     /// agent's PTY takes the new size once, on the next frame (`fit_pane`).
@@ -3981,8 +3980,10 @@ impl App {
         match self.full_screen.take() {
             None => {
                 self.full_screen = Some(self.focus);
-                self.focus = FocusPane::Worker;
-                self.notice = Some("full screen · ⌥h shows the panes".to_string());
+                if matches!(self.focus, FocusPane::Agents | FocusPane::Task) {
+                    self.focus = FocusPane::Worker;
+                }
+                self.notice = Some("agents and task hidden · ⌥h shows the panes".to_string());
             }
             Some(previous) => {
                 // The diff panel may have closed while the worker had the screen.
@@ -3997,13 +3998,14 @@ impl App {
         self.dirty = true;
     }
 
-    /// Full screen draws only the worker. After a key, a click or a tick that
-    /// needs another pane (⌥1, ⌥3, ⌥d, ^W Tab, a rename, a failed launch that
+    /// After a key, a click or a tick that needs a hidden pane (⌥1, ⌥3,
+    /// ^W Tab, a rename, a failed launch that
     /// hands focus to the task line), the panes come back with focus where it
     /// went, so nothing lands in a pane nobody can see.
     fn reconcile_full_screen(&mut self) {
         if self.full_screen.is_some()
-            && (self.focus != FocusPane::Worker || self.rename_input.is_some())
+            && (matches!(self.focus, FocusPane::Agents | FocusPane::Task)
+                || self.rename_input.is_some())
         {
             self.full_screen = None;
             self.dirty = true;
@@ -6246,12 +6248,7 @@ impl App {
     /// reviewed the row (same weak gate as `v`); closing returns focus to the
     /// worker so the next keystroke lands where the conversation is.
     fn toggle_diff_panel(&mut self) {
-        if self.diff_panel.open && self.full_screen.is_some() {
-            // Full screen hides an open panel; ⌥d asks to see it, so it takes
-            // focus and the panes come back (`reconcile_full_screen`).
-            self.focus = FocusPane::Diff;
-            self.dirty = true;
-        } else if self.diff_panel.open {
+        if self.diff_panel.open {
             self.diff_panel.open = false;
             self.diff_area = None;
             if self.focus == FocusPane::Diff {

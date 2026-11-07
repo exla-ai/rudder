@@ -1,5 +1,5 @@
-// Alt+h against the REAL binary: the worker pane alone on the whole screen
-// (no agent list, no task line), from the task input you start in, and Alt+h
+// Alt+h against the REAL binary: hide the agent list and task line while
+// keeping the worker, header and footer visible. From the task input, Alt+h
 // again brings the panes back with the half-typed task intact.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { assertPrerequisites, fakeBackends, launchRudder, scratchRepo } from "./
 
 assertPrerequisites();
 
-test("Alt+h shows only the worker and brings the panes back", { timeout: 90_000 }, async (t) => {
+test("Alt+h hides agents and task while keeping the worker and chrome", { timeout: 90_000 }, async (t) => {
   const repo = await scratchRepo("rudder-full-screen-");
   const { claudeBin } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin });
@@ -25,7 +25,9 @@ test("Alt+h shows only the worker and brings the panes back", { timeout: 90_000 
   await session.waitForGone("no agents yet", { timeout: 10_000 });
   await session.waitForGone("half typed", { timeout: 10_000 });
   const full = await session.screen();
-  assert.ok(full.includes("╭ terminal"), `the worker fills the screen:\n${full}`);
+  assert.ok(full.includes("╭ terminal"), `the worker expands:\n${full}`);
+  assert.ok(full.includes("\u2387"), `the header stays visible:\n${full}`);
+  assert.ok(full.includes("show panels"), `the footer stays visible:\n${full}`);
 
   await session.press("Alt+h");
   await session.waitForText("panes shown", { timeout: 10_000 });

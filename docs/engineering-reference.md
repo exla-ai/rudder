@@ -422,19 +422,13 @@ line when the pane cannot fit it and the agents. Below `NARROW_LAYOUT_WIDTH`
 (90 columns) one pane takes the width beside the task bar: the worker, or the
 agent list while it has focus.
 
-**Full screen (⌥h).** ⌥h (or `˙` outside the task composer) toggles
-`full_screen`, which holds the focus to restore. Full screen is always the
-worker pane, whatever had focus: render draws only `render_worker` over the
-whole frame (no sidebar, task line, diff, header or footer) and gives the
-hidden panes no rect, so clicks and scrolls land on the worker. Focus is the
-worker while it lasts; ⌥h again puts focus back exactly where it was (the task
-draft is untouched). The switch is instant, and the PTY is resized once each
-way by `fit_pane`, which only resizes on a change. `reconcile_full_screen`
-runs after every key, click and tick: anything that moves focus off the worker
-(⌥1, ⌥3, ⌥d/⌥4, ^W Tab, a failed launch) or opens a rename brings the panes
-back with focus where it went. Esc does not collapse a sidebar drawer while
-full screen; it goes to the agent. Notices, prompts and the keys overlay draw
-on top.
+**Hide panels (⌥h).** ⌥h (or `˙` outside the task composer) hides or
+shows the agent list on the left and the task composer at the bottom. The
+worker stays visible and expands into their space. The header, footer and an
+open diff panel stay visible. Toggling back restores focus and the task draft.
+Moving focus to a hidden agent list or task composer shows the panels again;
+the diff remains usable with the panels hidden. The switch is instant, and
+`fit_pane` resizes the PTY only when its dimensions change.
 
 **Subagents under an agent's row (`native/src/subagents.rs`).** A card whose
 agent spawned subagents gets a summary line (`▸ 3 subagents (1 running)`).
@@ -461,12 +455,14 @@ view state only: never runs, never persisted, never counted for `/sync`,
 scheduling or capacity.
 
 **Context graphs (`native/src/context_panel.rs`).** The selected agent's
-context lives in a 13-row panel at the bottom of the sidebar, never on its
-card. `context_panel::carve` takes the rows off `layout.agents` right after
+context lives at the bottom of the sidebar, never on its card. Charts use
+at most a third of its height: four rows for usage and cache counts, six
+with request growth, or thirteen with base and timing detail on tall screens.
+Waiting and unsupported backends take only two rows. `context_panel::carve` takes the rows off `layout.agents` right after
 `split_layout`, so `agents_area` and the row maps cover only the list and a
 click or wheel on the panel hits nothing. It shows only beside the worker (the
-agents gutter exists) and while the list keeps 10 rows; otherwise nothing
-shows. Rows: window fill (cached, cache write, fresh, free; the scale is the
+agents gutter exists), at least 24 columns wide and while the list keeps
+10 rows; otherwise nothing shows. Rows: window fill (cached, cache write, fresh, free; the scale is the
 reported capacity, a Claude `[1m]` model's 1M, else the last observed auto
 compaction, else the used tokens alone), base versus conversation on the same
 scale, a sparkline of context per request, and the time split. The base is the

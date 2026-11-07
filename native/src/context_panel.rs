@@ -16,6 +16,8 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) const PANEL_HEIGHT: u16 = 13;
 /// A backend without usage gets a header and one line instead.
 const NOTE_HEIGHT: u16 = 2;
+const COMPACT_HEIGHT: u16 = 4;
+const GROWTH_HEIGHT: u16 = 6;
 /// The agent list keeps at least this many rows, or the panel stays hidden.
 pub(crate) const MIN_LIST_ROWS: u16 = 10;
 
@@ -64,16 +66,29 @@ pub(crate) fn carve(app: &App, mut layout: SplitLayout) -> (SplitLayout, Option<
     let Some(panel) = panel_for(app) else {
         return (layout, None);
     };
-    let height = match panel {
-        Panel::Note(_) => NOTE_HEIGHT,
-        Panel::Usage { .. } => PANEL_HEIGHT,
-    };
-    if sidebar.height < height + MIN_LIST_ROWS {
+    let Some(height) = panel_height(&panel, sidebar) else {
         return (layout, None);
-    }
+    };
     let list = Rect { height: sidebar.height - height, ..sidebar };
     layout.agents = Some(list);
     (layout, Some(Rect { y: list.bottom(), height, ..sidebar }))
+}
+
+/// Charts take at most a third of the sidebar, leaving the agent list useful
+/// on ordinary terminals. Waiting and unsupported panes need only two rows.
+fn panel_height(panel: &Panel<'_>, sidebar: Rect) -> Option<u16> {
+    if sidebar.width < 24 {
+        return None;
+    }
+    let has_context = matches!(panel, Panel::Usage { summary: Some(summary), .. }
+        if summary.context.as_ref().is_some_and(|c| c.input > 0));
+    let height = if !has_context {
+        NOTE_HEIGHT
+    } else {
+        let budget = (sidebar.height / 3).min(sidebar.height.saturating_sub(MIN_LIST_ROWS));
+        [PANEL_HEIGHT, GROWTH_HEIGHT, COMPACT_HEIGHT].into_iter().find(|height| *height <= budget)?
+    };
+    (sidebar.height >= MIN_LIST_ROWS + height).then_some(height)
 }
 
 pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -83,7 +98,18 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     // The same one-column inset as the list above it.
     let inner = Rect { x: area.x.saturating_add(1), width: area.width.saturating_sub(2), ..area };
     frame.render_widget(Block::default().style(app_style()), area);
-    frame.render_widget(Paragraph::new(panel_lines(&panel, inner.width as usize)).style(app_style()), inner);
+    frame.render_widget(Paragraph::new(lines_for_height(&panel, inner.width as usize, inner.height)).style(app_style()), inner);
+}
+
+fn lines_for_height(panel: &Panel<'_>, width: usize, height: u16) -> Vec<Line<'static>> {
+    let mut lines = panel_lines(panel, width);
+    if height == GROWTH_HEIGHT && lines.len() >= 9 {
+        // Keep the fill and its cache legend, followed by request growth.
+        // The base estimate and timing graphs belong to the expanded panel.
+        lines.drain(4..7);
+    }
+    lines.truncate(height as usize);
+    lines
 }
 
 pub(crate) fn panel_lines(panel: &Panel<'_>, width: usize) -> Vec<Line<'static>> {
@@ -433,6 +459,60 @@ mod tests {
 
     fn text(lines: &[Line<'_>]) -> Vec<String> {
         lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+    }
+
+    #[test]
+    fn panel_adapts_to_sidebar_space_and_keeps_the_list() {
+        let summary = TimelineSummary {
+            context: Some(ContextUsage { input: 90_000, ..Default::default() }),
+            ..Default::default()
+        };
+        let usage = Panel::Usage { summary: Some(&summary), window: None };
+        for (height, expected) in [(11, None), (13, None), (14, Some(4)), (17, Some(4)), (18, Some(6)), (38, Some(6)), (39, Some(13))] {
+            let chosen = panel_height(&usage, Rect::new(0, 0, 34, height));
+            assert_eq!(chosen, expected, "sidebar height {height}");
+            if let Some(rows) = chosen {
+                assert!(height - rows >= MIN_LIST_ROWS);
+                assert!(rows * 3 <= height);
+            }
+        }
+        assert_eq!(panel_height(&usage, Rect::new(0, 0, 23, 48)), None);
+        for panel in [Panel::Note("usage unavailable"), Panel::Usage { summary: None, window: None }] {
+            assert_eq!(panel_height(&panel, Rect::new(0, 0, 34, 48)), Some(2));
+            assert_eq!(panel_height(&panel, Rect::new(0, 0, 34, 12)), Some(2));
+            assert_eq!(panel_height(&panel, Rect::new(0, 0, 34, 11)), None);
+        }
+    }
+
+    #[test]
+    fn compact_panel_keeps_context_cache_and_growth_without_inventing_capacity() {
+        let summary = TimelineSummary {
+            context: Some(ContextUsage {
+                input: 90_000,
+                cached: Some(60_000),
+                base: Some(20_000),
+                history: vec![20_000, 50_000, 90_000],
+                ..Default::default()
+            }),
+            model_ms: 10_000,
+            ..Default::default()
+        };
+        let panel = Panel::Usage { summary: Some(&summary), window: None };
+        let compact = lines_for_height(&panel, 32, COMPACT_HEIGHT);
+        assert_eq!(compact.len(), 4);
+        assert_eq!(compact[1].width(), 32);
+        let shown = text(&compact).join("\n");
+        for want in ["Context", "90k", "cached 60k", "fresh 30k", "window size unknown"] {
+            assert!(shown.contains(want), "{want} missing:\n{shown}");
+        }
+        assert!(!shown.contains('%'), "unknown capacity has no fill percentage");
+        let growth = lines_for_height(&panel, 32, GROWTH_HEIGHT);
+        assert_eq!(growth.len(), 6);
+        let shown = text(&growth).join("\n");
+        assert!(shown.contains("Growth"));
+        assert!(shown.contains("3 requests"));
+        assert!(!shown.contains("base ~"));
+        assert!(!shown.contains("Time"));
     }
 
     #[test]

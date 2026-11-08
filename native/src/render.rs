@@ -438,12 +438,12 @@ pub(crate) fn fold_glyph(open: bool) -> &'static str {
 }
 
 /// The subagent rows under an agent's card (subagents.rs), each at most
-/// `width` columns so the sidebar never wraps them: a one-line summary
-/// (`├┄ 3 subagents (1 running)`), and when its tree is open (Tab) one row per
+/// `width` columns so the sidebar never wraps them: a small fold glyph,
+/// and when its tree is open (Tab) one row per
 /// subagent, with the details of the one the cursor is on right under it:
 ///
 /// ```text
-/// ┬─ 3 subagents (1 running)
+/// ┬─
 /// ├─ ⠋ Explore the auth code   running 1m
 /// └─ ✓ Read the tests          done 40s
 /// ```
@@ -467,19 +467,11 @@ fn subagent_card_rows(
     let running = list
         .iter()
         .any(|sub| sub.status == crate::subagents::SubagentStatus::Running);
-    let summary = crate::subagents::summary_label(list);
     let summary_color = if running { p.running } else { p.muted };
     // Open, the glyph is the tree's trunk and takes the connectors' color.
     let fold_color = if open { p.faint } else { summary_color };
     let mut rows = vec![(
-        vec![
-            Span::styled(fold_glyph(open), Style::default().fg(fold_color)),
-            Span::raw(" "),
-            Span::styled(
-                clip_to_width(&summary, width.saturating_sub(3)),
-                Style::default().fg(summary_color),
-            ),
-        ],
+        vec![Span::styled(fold_glyph(open), Style::default().fg(fold_color))],
         None,
     )];
     if !open {
@@ -1514,10 +1506,6 @@ fn render_status_section<'a>(
             Span::styled(bucket.label(), header_style(focused)),
             Span::styled(format!(" {}", members.len()), muted_style(focused)),
             Span::styled(format!("  {fold}"), muted_style(focused)),
-            Span::styled(
-                if open { "  Tab or Esc to collapse" } else { "  Tab or click to expand" },
-                muted_style(focused),
-            ),
         ])));
         if !open {
             return true;

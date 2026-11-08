@@ -19017,25 +19017,24 @@ fn tab_opens_an_agents_subagent_tree_and_j_k_walk_its_rows() {
         line.chars().nth(column)
     };
 
-    // Closed: one summary line on the parent's card, behind a folded branch.
+    // Closed: only the folded branch appears on the parent's card.
     let screen = render_screen(&mut app, 120, 40);
-    assert!(screen.contains("\u{251c}\u{2504} 2 subagents (1 running)"), "{screen}");
+    assert!(screen.contains("\u{251c}\u{2504}") && !screen.contains("2 subagents"), "{screen}");
     assert!(!screen.contains("Explore auth"), "{screen}");
-    let closed_at = column_of(&screen, "2 subagents", '\u{251c}');
+    let closed_at = column_of(&screen, "\u{251c}\u{2504}", '\u{251c}');
 
-    // Open: the summary row is the trunk of the drawn tree. Its `┬` sits in
+    // Open: the fold row is the trunk of the drawn tree. Its `┬` sits in
     // the column of the `├`/`└` connectors and the selected row's `│` detail
-    // lane, and the summary text lines up with the children's status glyphs.
+    // lane.
     app.handle_key(KeyEvent::from(KeyCode::Tab));
     let screen = render_screen(&mut app, 120, 40);
-    assert!(screen.contains("\u{252c}\u{2500} 2 subagents (1 running)"), "{screen}");
+    assert!(screen.contains("\u{252c}\u{2500}") && !screen.contains("2 subagents"), "{screen}");
     assert!(screen.contains("\u{251c}\u{2500}") && screen.contains("Explore auth"), "{screen}");
     assert!(screen.contains("\u{2514}\u{2500}") && screen.contains("Check tests"), "{screen}");
-    let trunk = column_of(&screen, "2 subagents", '\u{252c}');
+    let trunk = column_of(&screen, "\u{252c}\u{2500}", '\u{252c}');
     assert_eq!(trunk, closed_at, "opening does not shift the summary row: {screen}");
     assert_eq!(cell_at(&screen, "Explore auth", trunk), Some('\u{251c}'), "{screen}");
     assert_eq!(cell_at(&screen, "Check tests", trunk), Some('\u{2514}'), "{screen}");
-    assert_eq!(cell_at(&screen, "2 subagents", trunk + 3), Some('2'), "{screen}");
     assert_eq!(cell_at(&screen, "Check tests", trunk + 3), Some('\u{2713}'), "{screen}");
 
     // j walks the subagent rows, then moves on to the next agent; k comes back

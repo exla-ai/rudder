@@ -431,7 +431,8 @@ the diff remains usable with the panels hidden. The switch is instant, and
 `fit_pane` resizes the PTY only when its dimensions change.
 
 **Subagents under an agent's row (`native/src/subagents.rs`).** A card whose
-agent spawned subagents gets a summary line (`▸ 3 subagents (1 running)`).
+agent spawned subagents gets a small fold glyph (`├┄` closed, `┬─` open),
+without counts or instruction text.
 Tab in the agent list opens it into a tree (`├─` / `└─` rows: status glyph,
 description, status word when the pane is wide enough, elapsed time) and Tab
 closes it; open trees are kept per run id in `subagent_trees_open`. j/k and

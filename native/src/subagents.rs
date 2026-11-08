@@ -375,23 +375,6 @@ pub(crate) fn elapsed_detail(elapsed: Duration) -> String {
     }
 }
 
-/// `3 subagents (1 running)`: the parent row's one-line summary. The sidebar
-/// draws the tree's fold glyph in front of it (render.rs `fold_glyph`).
-pub(crate) fn summary_label(list: &[Subagent]) -> String {
-    let count = list.len();
-    let running = list.iter().filter(|s| s.status == SubagentStatus::Running).count();
-    let failed = list.iter().filter(|s| s.status == SubagentStatus::Failed).count();
-    let noun = if count == 1 { "subagent" } else { "subagents" };
-    let state = if running > 0 {
-        format!("{running} running")
-    } else if failed > 0 {
-        format!("{failed} failed")
-    } else {
-        "done".to_string()
-    };
-    format!("{count} {noun} ({state})")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,7 +426,6 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].label(), "Say hi");
         assert_eq!(list[0].status, SubagentStatus::Running);
-        assert_eq!(summary_label(&list), "1 subagent (1 running)");
 
         run_hook(
             &command("SubagentStop", 0),

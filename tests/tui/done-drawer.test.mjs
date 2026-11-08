@@ -56,7 +56,7 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     }
     await session.press("Enter");
     // Expansion reveals the member card in the sidebar and keeps its session visible.
-    await session.waitForText("Tab or Esc to", { timeout: 20_000 });
+    await session.waitForText("\u252c\u2500", { timeout: 20_000 });
     await session.waitForText("This agent is not running", { timeout: 20_000 });
     // The status coding survives the collapse: the row inside the drawer still
     // says what state the run ended in.
@@ -67,12 +67,12 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     await session.press("Escape");
     // A lone ESC is held briefly by the input reader while it waits to see whether
     // an escape SEQUENCE follows, so wait for the drawer to go rather than snapshot.
-    await session.waitForGone("Tab or Esc to", { timeout: 20_000 });
+    await session.waitForGone("\u252c\u2500", { timeout: 20_000 });
     const screen = await session.screen();
     if (!screen.includes("done 1")) {
       throw new Error(`the collapsed header survives closing the drawer:\n${screen}`);
     }
-    if (screen.includes("Tab or Esc to")) {
+    if (screen.includes("\u252c\u2500")) {
       throw new Error(`the expanded sidebar should be gone after Esc:\n${screen}`);
     }
     if (!screen.includes("\u251c\u2504")) {

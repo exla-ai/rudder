@@ -20,6 +20,12 @@ sidebar; individual cards have no context text. Active homes adopt the image
 when idle. The root-owned CLI in a home updates with its image, rather than
 through an in-place global npm install.
 
+4.3.2 is published as npm latest and deployed to Cloud (release 200). Both
+Fly worker registries serve the same image; app and health checks passed.
+Release CI passed all qualification checks. The context panel is compact,
+subagent trees show only a fold glyph without counts, and drawer headers
+omit expand/collapse instructions. Active homes adopt the image when idle.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

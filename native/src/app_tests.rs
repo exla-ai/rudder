@@ -25015,7 +25015,7 @@ fn agent_context_panel_shows_only_the_selected_runs_snapshot() {
 }
 
 #[test]
-fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card() {
+fn context_panel_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card() {
     let mut app = App::new();
     app.agents.push(test_agent_run("ctx-agent", "inspect the context window"));
     app.selected_agent = 0;
@@ -25030,7 +25030,7 @@ fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card()
         ..Default::default()
     }));
     let tall = render_screen(&mut app, 160, 48);
-    for want in ["142k / 200k · 71%", "cached 98k", "base ~38k", "Growth", "Time"] {
+    for want in ["142k/200k 71%", "cached 98k", "base ~38k", "Growth", "model"] {
         assert!(tall.contains(want), "{want} missing:\n{tall}");
     }
     assert!(!tall.contains("Context:"), "the card carries no context lines:\n{tall}");
@@ -25038,9 +25038,9 @@ fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card()
     let list = app.agents_area.expect("sidebar");
     assert_eq!(list.height, 48 - 2 - 3 - crate::context_panel::PANEL_HEIGHT);
     // Ordinary terminals keep a small graph and leave most rows for agents.
-    for (height, panel_rows, growth) in [(26, 6, true), (20, 4, false)] {
+    for (height, panel_rows, growth) in [(23, 5, true), (19, 3, false)] {
         let screen = render_screen(&mut app, 160, height);
-        assert!(screen.contains("142k / 200k · 71%"), "{height} rows:\n{screen}");
+        assert!(screen.contains("142k/200k 71%"), "{height} rows:\n{screen}");
         assert!(screen.contains("cached 98k"), "{height} rows:\n{screen}");
         assert_eq!(screen.contains("Growth"), growth, "{height} rows:\n{screen}");
         assert!(!screen.contains("base ~38k") && !screen.contains("Time"), "{height} rows:\n{screen}");
@@ -25049,7 +25049,7 @@ fn context_graphs_sit_under_the_sidebar_when_it_has_room_and_never_on_the_card()
         assert!(list.height >= crate::context_panel::MIN_LIST_ROWS);
     }
     // No room: no panel, and nothing moves onto the card.
-    for (width, height) in [(160, 18), (80, 48)] {
+    for (width, height) in [(160, 17), (80, 48)] {
         let screen = render_screen(&mut app, width, height);
         assert!(!screen.contains("142k") && !screen.contains("Context"), "{width}x{height}:\n{screen}");
     }

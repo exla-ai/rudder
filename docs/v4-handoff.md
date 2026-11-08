@@ -65,8 +65,9 @@ the selected agent: window fill (cached, cache write, fresh, free), the
 estimated fixed base (first request since start or compaction) against the
 conversation, context per request (last 60), and the time split. The agent
 card shows no context lines. Since 4.2.12, the panel uses at most a third
-of the sidebar: 4 rows for usage/cache, 6 with growth, 13 with base and time
-on tall screens. It keeps at least 10 agent-list rows, uses only 2 while
+of the sidebar. The next revision replaces the solid blocks and repeated
+legends with a thin context meter, a small growth trace, and text summaries:
+3 rows for usage/cache, 5 with growth/time, 7 with base and time detail. It keeps at least 10 agent-list rows, uses only 2 while
 waiting, and hides in narrow layouts or when Alt+h hides the agent panel. The diff panel keeps its text lines. Codex
 reports capacity; Claude only for a `[1m]` model, and its compaction marker is
 an observed auto `compact_boundary`. Parsed off the UI thread every ten seconds.

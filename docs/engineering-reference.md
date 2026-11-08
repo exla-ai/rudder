@@ -456,16 +456,18 @@ scheduling or capacity.
 
 **Context graphs (`native/src/context_panel.rs`).** The selected agent's
 context lives at the bottom of the sidebar, never on its card. Charts use
-at most a third of its height: four rows for usage and cache counts, six
-with request growth, or thirteen with base and timing detail on tall screens.
+at most a third of its height: three rows for usage and cache counts, five
+with a small request-growth trace and timing summary, or seven with base
+and timing detail. The meter uses thin lines; tiny shares round naturally
+instead of being inflated to a whole cell.
 Waiting and unsupported backends take only two rows. `context_panel::carve` takes the rows off `layout.agents` right after
 `split_layout`, so `agents_area` and the row maps cover only the list and a
 click or wheel on the panel hits nothing. It shows only beside the worker (the
 agents gutter exists), at least 24 columns wide and while the list keeps
 10 rows; otherwise nothing shows. Rows: window fill (cached, cache write, fresh, free; the scale is the
 reported capacity, a Claude `[1m]` model's 1M, else the last observed auto
-compaction, else the used tokens alone), base versus conversation on the same
-scale, a sparkline of context per request, and the time split. The base is the
+compaction, else the used tokens alone), a small dot trace of context per
+request, and plain text base/conversation and timing counts. The base is the
 first request since the conversation started or last compacted, so it also
 holds the opening prompt: an estimate. The compaction marker is only ever an
 observed Claude `compact_boundary` with trigger `auto`. All of it comes from

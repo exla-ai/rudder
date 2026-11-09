@@ -31,9 +31,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     // their space while the header, footer and an open diff remain visible.
     let task_height = if app.full_screen.is_some() { 0 } else { task_pane_height(app, area.width) };
     let layout = split_layout(app, area, task_height);
-    // The selected agent's context graphs take the bottom of the sidebar when
-    // it has room (context_panel.rs); the list and its hit-testing get the rest.
-    let (layout, context_panel) = crate::context_panel::carve(app, layout);
     app.task_area = app.full_screen.is_none().then_some(layout.task);
     app.agents_area = layout.agents;
     app.worker_area = layout.worker;
@@ -42,9 +39,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_header(frame, layout.header, app);
     if let Some(rect) = layout.agents {
         render_agents(frame, rect, app);
-    }
-    if let Some(rect) = context_panel {
-        crate::context_panel::render(frame, rect, app);
     }
     if let Some(rect) = layout.agents_gutter {
         render_gutter(frame, rect, Gutter::Vertical);
@@ -741,13 +735,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         status.push(Span::styled(tag, Style::default().fg(p.accent)));
     }
 
-    // Context usage is not on the card: it is graphed at the bottom of the
-    // sidebar (context_panel.rs) when there is room, and nowhere otherwise.
     let mut extra: Vec<Vec<Span<'a>>> = Vec::new();
     if let Some(detail) = integration_detail(agent) {
-        extra.push(vec![Span::styled(detail, muted_style(focused))]);
-    }
-    if let Some(detail) = delivery_detail(agent) {
         extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }
 
@@ -6401,13 +6390,6 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         && agent.status == AgentStatus::Running
     {
         "plan mode"
-    } else if agent.status == AgentStatus::Merged
-        && agent.delivery.required
-        && !agent.delivery.is_verified()
-    {
-        // A "deploy/publish" node auto-merges within a tick, and the plain
-        // "merged locally" label silently swallowed its unmet delivery proof.
-        "merged · delivery proof needed"
     } else if agent.merged_through_pr() {
         "PR merged"
     } else if agent.status == AgentStatus::Merged && agent.integration.pushed {
@@ -6440,12 +6422,6 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         "conflict · resolver queued"
     } else if agent.has_merge_conflict() && agent.status == AgentStatus::Done {
         "needs you · conflict"
-    } else if agent.status == AgentStatus::Done && agent.delivery.required {
-        // A deploy/publish task's delivery state (deployed / delivery blocked /
-        // delivery proof needed) outranks the generic merge hint — these labels
-        // were unreachable for workspace runs because the awaits-merge branch
-        // below always won.
-        agent.lifecycle_label()
     } else if agent.swarm_experiment && agent.status == AgentStatus::Done {
         // A swarm experiment is a candidate, not a piece of the goal: it never
         // integrates on its own, so "auto-merging" would be a lie.
@@ -6465,6 +6441,8 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         } else {
             "done · press m to read the diff"
         }
+    } else if agent.status == AgentStatus::Done {
+        "completed"
     } else {
         agent.lifecycle_label()
     }
@@ -6534,35 +6512,6 @@ fn integration_detail(agent: &AgentRun) -> Option<String> {
         "not pushed"
     };
     Some(format!("{bookmark} @ {revision} · {remote}"))
-}
-
-fn delivery_detail(agent: &AgentRun) -> Option<String> {
-    if !agent.delivery.required {
-        return None;
-    }
-    let target = agent
-        .delivery
-        .target
-        .as_deref()
-        .unwrap_or("target not recorded");
-    let revision = agent
-        .delivery
-        .revision
-        .as_deref()
-        .map(short_hash)
-        .unwrap_or_else(|| "revision not recorded".to_string());
-    Some(format!(
-        "delivery {} · {} · {} · {} check{}",
-        agent.delivery.status.as_str(),
-        target,
-        revision,
-        agent.delivery.checks.len(),
-        if agent.delivery.checks.len() == 1 {
-            ""
-        } else {
-            "s"
-        }
-    ))
 }
 
 /// A finished run that still has a workspace to integrate: it sits in the review

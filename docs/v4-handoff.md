@@ -26,6 +26,9 @@ Release CI passed all qualification checks. The context panel is compact,
 subagent trees show only a fold glyph without counts, and drawer headers
 omit expand/collapse instructions. Active homes adopt the image when idle.
 
+Local UI cleanup: removed sidebar context/time charts and delivery proof/status
+clutter from agent cards. Agent list uses the full sidebar height. Not released.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

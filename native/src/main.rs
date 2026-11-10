@@ -2923,9 +2923,10 @@ impl AgentRun {
     }
 
     /// The per-run half of the planned-node rule: a node nobody has sent a
-    /// follow-up to. (App::plan_may_merge adds keys typed without a turn.)
+    /// follow-up to or pinned. (App::plan_may_merge adds keys typed without a turn.)
     pub(crate) fn plan_may_merge(&self) -> bool {
-        self.node_id.is_some()
+        !self.pinned
+            && self.node_id.is_some()
             && self.turns.iter().filter(|turn| turn.source == "user").count() <= 1
     }
 
@@ -16266,6 +16267,9 @@ Address the objection directly. If you disagree, say why inside \
     /// Why a row must not be put to sleep, or `None` when it may.
     fn park_refusal(&self, index: usize) -> Option<String> {
         let run = self.agents.get(index)?;
+        if run.pinned {
+            return Some("pinned agents stay awake".to_string());
+        }
         if is_cloud_owned_agent(run) {
             return Some("not a local agent pane".to_string());
         }
@@ -17835,6 +17839,7 @@ Address the objection directly. If you disagree, say why inside \
         let claimed = self.review_all_claimed_source_ids();
         let candidate = self.agents.iter().position(|run| {
             run.status == AgentStatus::Done
+                && !run.pinned
                 && !run.swarm_experiment
                 && !run.is_main()
                 && !run.merge_resolver
@@ -23257,7 +23262,7 @@ const FINISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A merged, failed or stopped agent with no live terminal whose run record has
 /// not changed for `retention`. Agents waiting for review (Done) are never stale.
 fn finished_agent_is_stale(repo_root: &Path, run: &AgentRun, retention: Duration) -> bool {
-    if run.is_main() || run.is_orchestrator() || run.terminal.is_some() {
+    if run.pinned || run.is_main() || run.is_orchestrator() || run.terminal.is_some() {
         return false;
     }
     if !matches!(run.status, AgentStatus::Merged | AgentStatus::Failed | AgentStatus::Stopped) {

@@ -52,6 +52,14 @@ image, and app and health checks passed. Libra's existing dashboard was still
 running 4.3.0, which had neither change. Active homes adopt the new image when
 idle; live agents were not restarted.
 
+Local pin follow-up: pinned conversations have a named section above main and
+the status sections in both views. Pins prevent idle parking, finished-row
+cleanup, automatic node review and automatic merging. A live pin between replies
+says it is ready for the next message and no longer announces ready for review.
+Cloud cleanup inventory exposes pins and protects their child processes too.
+Checked with the native `agent_pin` filter and `tests/cloud-cleanup.test.mjs`.
+These changes are not included in 4.3.5.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

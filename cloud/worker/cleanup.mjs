@@ -214,6 +214,7 @@ export function readAgentRows({ codeDir, home, rudderHome, alive = pidAlive, now
         pid: live ? pid : null,
         live,
         parked: Boolean(record.parked?.at),
+        pinned: record.pinned === true,
         title: String(record.taskSummary || userTask(record.task) || runId).slice(0, 80),
         status: statusFields(record, { alive }).status,
         mode: record.mode ?? null,
@@ -266,6 +267,7 @@ export function buildInventory({ paths = cleanupPaths(), alive = pidAlive, now =
       mode: row.mode,
       backend: row.backend,
       orchestrator: row.orchestrator || undefined,
+      pinned: row.pinned || undefined,
       asks: row.asks || undefined,
       rssMb: treeRss(row.pid),
       idleMinutes: row.idleMinutes,
@@ -325,10 +327,10 @@ export function stopRefusal(pid, { paths = cleanupPaths(), alive = pidAlive, now
   const rows = readAgentRows({ ...paths, alive, now });
   if (rows.some((row) => row.live && row.pid === pid)) return "that is an agent: put it to sleep with park instead";
   for (const row of rows) {
-    if (!row.live || !(row.active || row.status === "working" || row.status === "waiting")) continue;
+    if (!row.live || !(row.pinned || row.active || row.status === "working" || row.status === "waiting")) continue;
     const parent = /--parent-session-id\s+(\S+)/.exec(proc.cmdline)?.[1];
     if (descendants(processes, row.pid).has(pid) || (parent && parent === row.sessionId)) {
-      return `agent ${row.project}/${row.runId} is still active and owns it`;
+      return `agent ${row.project}/${row.runId} ${row.pinned ? "is pinned" : "is still active"} and owns it`;
     }
   }
   return null;
@@ -604,7 +606,7 @@ Your only tool is this command. Call it exactly like this, one command per call,
 Putting an agent to sleep ends its process but keeps its conversation and workspace; one message from the person wakes it. It is cheap to undo but it does close a chat someone may come back to, so:
 - Put to sleep an agent idle (idleMinutes) for at least 180 minutes.
 - When memory is short (memAvailableMb under a quarter of memTotalMb, or memoryPressure above 10), also put to sleep agents idle for at least 30 minutes, largest rssMb first, until about a third of memory is free.
-- Never an agent whose status is working or waiting, that has asks, or that got a message (lastInputMinutesAgo) in the last 60 minutes.
+- Never a pinned agent, an agent whose status is working or waiting, that has asks, or that got a message (lastInputMinutesAgo) in the last 60 minutes.
 - The dashboard refuses anything that may still be working. If it refuses, accept that and move on.
 
 Stop a process only when it is a leftover: not an agent (agentCli), its owner is null or idle (ownerIdleMinutes) for at least 120 minutes, it has run for at least 120 minutes, and it is the kind of thing an agent starts and forgets: a dev server, a file watcher, a test runner, a build that is not finishing, a headless browser, a member of an agent team (a claude process with --agent-id) whose lead agent is asleep or gone. When unsure, leave it.

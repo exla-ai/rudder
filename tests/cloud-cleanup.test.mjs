@@ -152,6 +152,22 @@ test("only a leftover can be stopped: old, ours, not an agent, not owned by an a
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("pinned idle agents appear in inventory and keep their child processes", () => {
+  const { paths, alive, root } = scenario();
+  try {
+    const recordPath = path.join(paths.codeDir, "libra", ".rudder", "runs", "run-idle", "run.json");
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    record.pinned = true;
+    fs.writeFileSync(recordPath, JSON.stringify(record));
+    const opts = { paths, alive, now: NOW, selfPid: 999_999 };
+    const inventory = buildInventory(opts);
+    assert.equal(inventory.agents.find((agent) => agent.runId === "run-idle").pinned, true);
+    assert.match(stopRefusal(4121, opts), /is pinned/, "an idle pin's child stays alive");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("park goes through the dashboard's steer inbox and reports its answer", async () => {
   const { paths, root } = scenario();
   const repo = path.join(paths.codeDir, "libra");

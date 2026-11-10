@@ -2113,10 +2113,17 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         lines.push((Line::default()));
     }
 
+    let pinned_count = app.agents.iter().filter(|a| a.pinned && !a.is_pinned_planner()).count();
+    if pinned_count > 0 {
+        lines.push(Line::from(Span::styled("pinned", header_style(focused))));
+    }
     for (index, agent) in app.agents.iter().enumerate() {
         if agent.pinned && !agent.is_pinned_planner() {
             push_agent_row(&mut lines, app, index, agent, None, focused, task_width, &[], &[]);
         }
+    }
+    if pinned_count > 0 {
+        lines.push(Line::default());
     }
 
     if app.nest_view {
@@ -6450,6 +6457,8 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         // A swarm experiment is a candidate, not a piece of the goal: it never
         // integrates on its own, so "auto-merging" would be a lie.
         "experiment done \u{b7} m merges it"
+    } else if agent.pinned && agent.status == AgentStatus::Done && agent.terminal.is_some() {
+        "idle · ready for your next message"
     } else if agent.status == AgentStatus::Done && agent_awaits_merge(agent) {
         // Two different futures, one bucket: planned DAG nodes integrate on
         // their own; everything else waits for the user. The old label

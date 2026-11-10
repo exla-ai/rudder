@@ -103,7 +103,8 @@ fn finish_turn(run: &mut AgentRun, announce: bool) {
         // re-enters review — "a new thing" — and rings again, which is intended.
         // Pinned planners (orchestrator / plan-mode front-end) are excluded: their
         // completion is a planning transition, not work awaiting your review.
-        if announce && !run.is_pinned_planner() {
+        // User pins are ongoing conversations, so a reply does not announce review.
+        if announce && !run.pinned && !run.is_pinned_planner() {
             play_completion_sound();
             // Same once-per-transition guarantee as the sound, so an unfocused
             // Ghostty tab surfaces "ready for review" as an OS notification.

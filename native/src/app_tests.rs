@@ -30730,10 +30730,12 @@ fn agent_pin_survives_reload_and_moves_finished_agent_above_drawers() {
     app.selected_agent = 1;
     app.handle_agents_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
     assert!(app.agents[1].pinned);
+    assert!(!finished_agent_is_stale(&dir, &app.agents[1], Duration::ZERO), "cleanup keeps finished pins");
     assert_eq!(app.visible_agent_indices()[0], 1);
     let record: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(".rudder/runs/finished-pin/run.json")).unwrap()).unwrap();
     assert!(agent_from_run_record(&dir, record).unwrap().pinned);
     let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("pinned"), "the pins have their own section: {screen}");
     assert!(screen.lines().any(|line| line.contains("📌") && line.contains("finished task")), "{screen}");
     for nested in [false, true] {
         app.nest_view = nested;
@@ -30787,5 +30789,50 @@ fn agent_pin_commands_work_from_worker_focus() {
     app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
     assert!(!app.agents[0].pinned, "nav mode must handle unpin too");
     assert!(app.nav_mode);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
+fn agent_pin_keeps_a_planned_conversation_awake_and_out_of_automatic_review() {
+    let _env = env_guard();
+    let dir = unique_test_repo("agent-pin-conversation");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.node_review_enabled = true;
+    let mut run = test_agent_run("pin-conversation", "keep investigating");
+    run.cwd = dir.clone();
+    run.node_id = Some("pinned-node".to_string());
+    run.workspace_name = Some("pinned-workspace".to_string());
+    run.pinned = true;
+    run.terminal = Some(TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "cat"])),
+        TerminalPaneOptions::default(),
+    ).unwrap());
+    run.last_output_at = Instant::now() - Duration::from_secs(4 * 60 * 60);
+    app.last_user_activity = run.last_output_at;
+    app.agents.push(run);
+    app.selected_agent = 0;
+
+    mark_run_done(&mut app.agents[0]);
+    assert_eq!(app.agents[0].status, AgentStatus::Done, "the turn still ends honestly");
+    assert!(app.agents[0].terminal.is_some(), "the conversation stays open");
+    assert_eq!(agent_status_label(&app.agents[0]), "idle · ready for your next message");
+    assert!(!app.is_auto_integration_candidate(&app.agents[0]));
+    app.maybe_start_node_review();
+    assert!(app.plan().node_reviewers.is_empty(), "a reply does not start automatic review");
+    assert!(matches!(app.deliver_park_request("pin-conversation", "idle 4h"), SteerDelivery::Failed(reason) if reason.contains("pinned")));
+    assert!(app.agents[0].terminal.is_some(), "cleanup cannot put a pin to sleep");
+    for nested in [false, true] {
+        app.nest_view = nested;
+        let screen = render_screen(&mut app, 120, 40);
+        assert!(screen.contains("pinned"), "{screen}");
+        assert!(!crate::render::bucket_members_for_test(&app.agents, Bucket::Review).contains(&0));
+        assert_eq!(app.visible_agent_indices().first(), Some(&0));
+    }
+    app.record_selected_worker_prompt("continue investigating".to_string());
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(app.agents[0].pinned, "another message keeps the pin");
+    app.agents[0].terminal = None;
     fs::remove_dir_all(dir).unwrap();
 }

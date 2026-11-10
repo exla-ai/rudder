@@ -45,6 +45,11 @@ pub(crate) struct TimelineSummary {
     pub(crate) cached: u64,
     #[serde(default)]
     pub(crate) output: u64,
+    /// The model the session last answered with, and when. The user can
+    /// switch models inside the agent (`/model`), so the launch model goes
+    /// stale; this is what the session log says. Memory only.
+    #[serde(skip)]
+    pub(crate) model: Option<(u64, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -109,6 +114,17 @@ impl ContextTrack {
             c.auto_compact_at = self.auto_compact_at;
             c.history = self.history;
         }
+    }
+}
+
+fn latest_model(summary: &mut TimelineSummary, ts: u64, model: &str) {
+    let model = model.trim();
+    // Claude Code stamps its own error and interrupt notes `<synthetic>`.
+    if model.is_empty() || model.starts_with('<') {
+        return;
+    }
+    if summary.model.as_ref().is_none_or(|(old, _)| ts >= *old) {
+        summary.model = Some((ts, model.to_string()));
     }
 }
 
@@ -272,6 +288,9 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
             .unwrap_or_default();
         if kind == "assistant" {
             summary.model_ms += gap;
+            if let Some(model) = message.and_then(|m| m.get("model")).and_then(|v| v.as_str()) {
+                latest_model(summary, ts, model);
+            }
             if let Some(u) = message.and_then(|m| m.get("usage")) {
                 let get = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
                 if let Some(request) = request {
@@ -379,6 +398,12 @@ pub(crate) fn analyze_codex_rollout(
             track.compacted(None);
             continue;
         }
+        if kind == "turn_context" {
+            if let (Some(ts), Some(model)) = (ts, payload.and_then(|p| p.get("model")).and_then(|v| v.as_str())) {
+                latest_model(&mut local, ts, model);
+            }
+            continue;
+        }
         if kind == "event_msg" && ptype == "token_count" {
             if let Some(info) = payload.and_then(|p| p.get("info")) {
                 let input = info.get("last_token_usage").and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64());
@@ -473,6 +498,7 @@ pub(crate) fn analyze_codex_rollout(
 
 fn merge(into: &mut TimelineSummary, from: &TimelineSummary) {
     if let Some(context) = &from.context { latest_context(into, context.clone()); }
+    if let Some((ts, model)) = &from.model { latest_model(into, *ts, model); }
     into.install_ms += from.install_ms;
     into.build_ms += from.build_ms;
     into.test_ms += from.test_ms;
@@ -577,13 +603,23 @@ pub(crate) fn compute_timeline_in(
         Backend::Claude => {
             if let Some(root) = claude_projects {
                 let dir = root.join(encode_claude_projects_cwd(&request.cwd));
+                // Several agents can share one checkout. When this run's
+                // session is known, only its log says which model it is on.
+                let session = signals::read_claude_session(&request.run_id);
                 for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
                     let path = entry.path();
                     if path.extension().is_some_and(|e| e == "jsonl")
                         && !file_modified_before(&path, &since_iso)
                     {
                         if let Ok(content) = fs::read_to_string(&path) {
+                            let model = summary.model.clone();
                             analyze_claude_transcript(&content, since_ms, &mut summary);
+                            let own = session.as_deref().is_none_or(|id| {
+                                path.file_stem().is_some_and(|stem| stem == id)
+                            });
+                            if !own {
+                                summary.model = model;
+                            }
                         }
                     }
                 }
@@ -611,6 +647,7 @@ pub(crate) fn compute_timeline_in(
     let has_data = summary.context.is_some() || summary.model_ms + summary.input + summary.output > 0;
     // The file never holds the growth history, so compare without it.
     let mut recorded = summary.clone();
+    recorded.model = None;
     if let Some(c) = recorded.context.as_mut() {
         c.history.clear();
     }
@@ -624,6 +661,7 @@ pub(crate) fn compute_timeline_in(
     } else if !has_data {
         if let Some(mut last) = last {
             last.start_ms = start;
+            last.model = summary.model;
             return last;
         }
     }

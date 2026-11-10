@@ -56,10 +56,12 @@ function claudeLine({ ts, id, requestId, model, cwd, session, input, output, cw,
 }
 
 test("pricing covers every family the CLIs launch and refuses to price the unknown", () => {
-  assert.deepEqual(priceFor("claude-fable-5-1"), { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 });
-  assert.deepEqual(priceFor("claude-opus-5"), priceFor("claude-fable-5-1"));
-  assert.equal(priceFor("claude-sonnet-5").input, 3);
-  assert.equal(priceFor("claude-haiku-4-5-20251001").output, 4);
+  assert.deepEqual(priceFor("claude-fable-5-2"), { input: 8, output: 40, cacheWrite: 10, cacheRead: 0.2 });
+  assert.equal(priceFor("claude-fable-5-1").input, 10);
+  assert.equal(priceFor("claude-opus-5-5").output, 20);
+  assert.equal(priceFor("claude-opus-4-1-20250805").input, 15);
+  assert.equal(priceFor("claude-sonnet-5").input, 2);
+  assert.equal(priceFor("claude-haiku-4-5-20251001").output, 5);
   assert.equal(priceFor("gpt-5.6-sol").input, 10);
   assert.equal(priceFor("gpt-6-astra").output, 30);
   assert.equal(priceFor("mystery-model"), null, "unknown models cost nothing rather than a made-up rate");
@@ -173,23 +175,24 @@ test("the scan buckets by local day, prices at list rates, and maps cwd onto reg
   assert.equal(report.range, "7d");
   assert.equal(report.days.length, 7, "one bucket per day in range, including empty ones");
   assert.equal(report.days[report.days.length - 1].day, localDay(new Date()));
-  // 1M opus input = $15; 1M opus cache read = $1.50; 1M gpt input = $10. The
+  // 1M Opus 5 input = $5; 1M Opus 5 cache read = $0.50; 1M gpt input = $10. The
   // 20-day-old message is outside the range and must not count.
-  assert.ok(Math.abs(report.providers.claude.cost - 16.5) < 1e-9, `claude cost ${report.providers.claude.cost}`);
+  assert.ok(Math.abs(report.providers.claude.cost - 5.5) < 1e-9, `claude cost ${report.providers.claude.cost}`);
   assert.ok(Math.abs(report.providers.codex.cost - 10) < 1e-9, `codex cost ${report.providers.codex.cost}`);
-  assert.ok(Math.abs(report.total.cacheSavings - 13.5) < 1e-9, "cache read saved (15 − 1.5) per M");
+  assert.ok(Math.abs(report.total.cacheSavings - 4.5) < 1e-9, "cache read saved (5 − 0.5) per M");
   assert.equal(report.total.calls, 3);
 
   const today = report.days.find((d) => d.day === localDay(recent));
-  assert.ok(today && Math.abs(today.claude.cost - 15) < 1e-9, "today's bucket has today's message only");
+  assert.ok(today && Math.abs(today.claude.cost - 5) < 1e-9, "today's bucket has today's message only");
 
   assert.equal(report.models.length, 2);
-  assert.equal(report.models[0].model, "claude-opus-5", "sorted by cost");
-  assert.equal(report.models[0].sessions, 1);
+  assert.equal(report.models[0].model, "gpt-5.6-sol", "sorted by cost");
+  assert.equal(report.models[1].model, "claude-opus-5");
+  assert.equal(report.models[1].sessions, 1);
 
   const repo = report.projects.find((p) => p.slug === "repo");
   assert.ok(repo, "cwd under the repo root maps to the registered project");
-  assert.ok(Math.abs(repo.totals.cost - 16.5) < 1e-9);
+  assert.ok(Math.abs(repo.totals.cost - 5.5) < 1e-9);
   assert.equal(repo.sessions.length, 1);
   assert.equal(repo.sessions[0].id, "s-a");
   const other = report.projects.find((p) => p.slug === null);

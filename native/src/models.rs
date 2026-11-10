@@ -108,7 +108,45 @@ pub(crate) fn agent_model_label(
     match (openrouter_model(backend, model), effort) {
         (Some(routed), None) => routed.alias().to_string(),
         (Some(routed), Some(effort)) => format!("{}({})", routed.alias(), effort.as_str()),
-        (None, _) => format!("{} {model}({})", backend.as_str(), effort_label(effort)),
+        (None, _) => {
+            // An explicit id already says the vendor: `claude fable-5-2(high)`.
+            let model = match backend {
+                Backend::Claude => model.strip_prefix("claude-").unwrap_or(model),
+                _ => model,
+            };
+            format!("{} {model}({})", backend.as_str(), effort_label(effort))
+        }
+    }
+}
+
+/// The model a run should now be labelled (and resumed) with, given the model
+/// its session log last answered with. None when the launch model still
+/// describes it: an alias of the same family (`opus` on `claude-opus-5-5`),
+/// the same id, an OpenRouter route, or an alias Rudder cannot place.
+pub(crate) fn observed_model_update(backend: Backend, current: &str, observed: &str) -> Option<String> {
+    let observed = observed.trim();
+    let current = current.trim();
+    if observed.is_empty() || current.is_empty() || openrouter_model(backend, current).is_some() {
+        return None;
+    }
+    match backend {
+        Backend::Opencode => None,
+        Backend::Codex => (observed != current && live_codex_model(current) != observed)
+            .then(|| observed.to_string()),
+        Backend::Claude => {
+            if !observed.starts_with("claude-") {
+                return None;
+            }
+            let base = current.split('[').next().unwrap_or(current);
+            let same = if base.starts_with("claude-") {
+                observed == base || dated_duplicate_base(observed).as_deref() == Some(base)
+            } else if matches!(base, "fable" | "opus" | "sonnet" | "haiku") {
+                observed.contains(base)
+            } else {
+                true
+            };
+            (!same).then(|| dated_duplicate_base(observed).unwrap_or_else(|| observed.to_string()))
+        }
     }
 }
 
@@ -1704,5 +1742,26 @@ pub(crate) fn backend_for_model(model: &str) -> Backend {
         Backend::Codex
     } else {
         Backend::Claude
+    }
+}
+
+#[cfg(test)]
+mod observed_model_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_switched_inside_the_agent_replaces_the_launch_model() {
+        let update = |current, observed| observed_model_update(Backend::Claude, current, observed);
+        assert_eq!(update("opus", "claude-fable-5-2"), Some("claude-fable-5-2".into()));
+        assert_eq!(update("opus[1m]", "claude-opus-5-5"), None);
+        assert_eq!(update("claude-opus-5-5", "claude-opus-5-5-20260801"), None);
+        assert_eq!(update("sonnet", "claude-haiku-4-5-20251001"), Some("claude-haiku-4-5".into()));
+        assert_eq!(update("kimi", "claude-fable-5-2"), None);
+        assert_eq!(update("opusplan", "claude-fable-5-2"), None);
+        assert_eq!(
+            observed_model_update(Backend::Codex, "gpt-6.1-sol", "gpt-6-astra"),
+            Some("gpt-6-astra".into())
+        );
+        assert_eq!(agent_model_label(Backend::Claude, "claude-fable-5-2", None), "claude fable-5-2(auto)");
     }
 }

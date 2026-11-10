@@ -436,28 +436,45 @@ pub(crate) fn codex_model_pricing(model: &str) -> Option<(f64, f64, f64, f64)> {
 /// cache_creation, cache_read). Used to surface a rough cost estimate, not
 /// billing-grade numbers.
 pub(crate) fn claude_model_pricing(model: &str) -> Option<(f64, f64, f64, f64)> {
+    // Mirrors `claudeRate` in src/usage.ts: each family is priced at its
+    // current release unless the id names an older one that cost more.
     let m = model.to_ascii_lowercase();
-    // Fable is the current flagship family; price it at the flagship tier so it
-    // does not silently bill at $0.00 in /usage.
-    if m.contains("fable") {
-        return Some((15.0, 75.0, 18.75, 1.50));
-    }
-    if m.contains("opus") {
-        return Some((15.0, 75.0, 18.75, 1.50));
-    }
-    if m.contains("sonnet") {
-        return Some((3.0, 15.0, 3.75, 0.30));
-    }
-    if m.contains("haiku") {
-        return Some((0.80, 4.0, 1.00, 0.08));
-    }
-    // Any other Claude family (e.g. a newly launched model id surfaced from the
-    // dynamic model list before its pricing is known): fall back to a
-    // mid-tier (sonnet) estimate rather than reporting it as free.
-    if m.contains("claude") {
-        return Some((3.0, 15.0, 3.75, 0.30));
-    }
-    None
+    let has = |parts: &[&str]| parts.iter().any(|part| m.contains(part));
+    // A bare alias ("opus", "fable[1m]") runs the family's current release.
+    let alias = !m.contains("claude-");
+    let (input, output, cache_read) = if has(&["fable", "mythos"]) {
+        if alias || has(&["-5-2"]) { (8.0, 40.0, 0.2) } else { (10.0, 50.0, 1.0) }
+    } else if has(&["opus"]) {
+        if has(&["opus-4-1", "opus-4-0", "opus-4-2025", "3-opus"]) {
+            (15.0, 75.0, 1.5)
+        } else if alias || has(&["opus-5-5"]) {
+            (4.0, 20.0, 0.2)
+        } else {
+            (5.0, 25.0, 0.5)
+        }
+    } else if has(&["sonnet"]) {
+        if alias || has(&["sonnet-5-5"]) {
+            (2.0, 10.0, 0.1)
+        } else if has(&["sonnet-5"]) {
+            (2.0, 10.0, 0.2)
+        } else {
+            (3.0, 15.0, 0.3)
+        }
+    } else if has(&["haiku"]) {
+        if alias || has(&["haiku-5"]) {
+            (0.1, 0.5, 0.01)
+        } else if has(&["haiku-4"]) {
+            (1.0, 5.0, 0.1)
+        } else {
+            (0.8, 4.0, 0.08)
+        }
+    } else if has(&["claude"]) {
+        // A Claude family Rudder has not seen: a mid-tier estimate, not free.
+        (2.0, 10.0, 0.2)
+    } else {
+        return None;
+    };
+    Some((input, output, input * 1.25, cache_read))
 }
 
 pub(crate) fn format_token_count(n: u64) -> String {

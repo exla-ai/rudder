@@ -25061,8 +25061,8 @@ fn the_diff_panel_header_carries_stats_tokens_and_an_api_rate_cost() {
     assert!(text[0].contains("tighten the parser"));
     assert!(joined.contains("+4 −2"), "totals across files: {joined}");
     assert!(joined.contains("5 files"));
-    // 2M opus input at $15/M + 100k output at $75/M = $30 + $7.50.
-    assert!(joined.contains("≈ $37.50 at API rates"), "{joined}");
+    // 2M Opus 5 input at $5/M + 100k output at $25/M = $10 + $2.50.
+    assert!(joined.contains("≈ $12.50 at API rates"), "{joined}");
     assert!(joined.contains("tokens in 2.00M · out 100.0k"), "{joined}");
     assert!(
         joined.contains(" M src/lib.rs") && joined.contains("+2 −1"),

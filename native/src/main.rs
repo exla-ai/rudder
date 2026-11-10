@@ -319,7 +319,8 @@ const SLOW_LINE_RENDER_THRESHOLD: Duration = Duration::from_millis(5);
 // runs on ChatGPT auth (check `codex exec -m <id>` before trusting a name).
 const REVIEW_ALL_MODEL: &str = CODEX_DEFAULT_MODEL;
 const REVIEW_ALL_EFFORT: EffortLevel = EffortLevel::High;
-const TASK_SUMMARY_MODEL: &str = "claude-haiku-4-5-20251001";
+// The alias, so it follows Claude Code to each new Haiku without a release.
+const TASK_SUMMARY_MODEL: &str = "haiku";
 /// Default cap on how many plan-launched agents may run at once. Overridable via
 /// `orchestrator.maxParallel` in ~/.rudder/config.json. This is what makes nodes
 /// visibly wait in Todo and move to In Progress as slots free.
@@ -6296,6 +6297,17 @@ impl App {
         };
         let run_id = run.id.clone();
         self.diff_panel.track(&run_id);
+        // `/model` inside the agent switches models without Rudder launching
+        // anything; follow what the session log says it now answers with.
+        let observed = self
+            .diff_panel
+            .observed_model(&run_id, &run.model)
+            .and_then(|observed| observed_model_update(run.backend, &run.model, &observed));
+        if let Some(model) = observed {
+            run.model = model;
+            let _ = save_native_run_record(&self.cwd, run);
+            self.dirty = true;
+        }
         // Token totals come from the backend's session log; refresh them
         // while the panel is open so the header's cost keeps up with the turn.
         let tokens_due = self

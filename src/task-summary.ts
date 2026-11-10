@@ -197,8 +197,11 @@ async function summarizeViaApiKey(task: string, apiKey: string): Promise<string 
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 50,
+        model: "claude-haiku-5-5",
+        // Thinking is on by default on Haiku 5.5 and would spend the title's
+        // few tokens before any text.
+        thinking: { type: "disabled" },
+        max_tokens: 100,
         system:
           "Summarize coding tasks for compact sidebar labels. Return exactly one JSON object with a title string and no markdown.",
         messages: [{ role: "user", content: task }],
@@ -231,7 +234,7 @@ async function summarizeViaClaudeCli(task: string): Promise<string | null> {
     try {
       child = spawn(
         "claude",
-        ["-p", "--model", "claude-haiku-4-5-20251001"],
+        ["-p", "--model", "haiku"],
         { stdio: ["pipe", "pipe", "ignore"] },
       );
     } catch {

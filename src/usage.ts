@@ -92,19 +92,37 @@ export type TokenUsageReport = {
 // agree; approximate list rates, not billing-grade.
 // ---------------------------------------------------------------------------
 
+// [input, output, cache read] per million tokens. Each family is priced at
+// its current release unless the id names an older one that cost more.
+function claudeRate(m: string): [number, number, number] | null {
+  const has = (...parts: string[]) => parts.some((part) => m.includes(part));
+  // A bare alias ("opus", "fable[1m]") runs the family's current release.
+  const alias = !m.includes("claude-");
+  if (has("fable", "mythos")) {
+    return alias || has("-5-2") ? [8, 40, 0.2] : [10, 50, 1];
+  }
+  if (has("opus")) {
+    if (has("opus-4-1", "opus-4-0", "opus-4-2025", "3-opus")) return [15, 75, 1.5];
+    return alias || has("opus-5-5") ? [4, 20, 0.2] : [5, 25, 0.5];
+  }
+  if (has("sonnet")) {
+    if (alias || has("sonnet-5-5")) return [2, 10, 0.1];
+    return has("sonnet-5") ? [2, 10, 0.2] : [3, 15, 0.3];
+  }
+  if (has("haiku")) {
+    if (alias || has("haiku-5")) return [0.1, 0.5, 0.01];
+    return has("haiku-4") ? [1, 5, 0.1] : [0.8, 4, 0.08];
+  }
+  // A Claude family Rudder has not seen: a mid-tier estimate, not free.
+  return has("claude") ? [2, 10, 0.2] : null;
+}
+
 export function priceFor(model: string): ModelPrice | null {
   const m = model.toLowerCase();
-  if (m.includes("fable") || m.includes("opus")) {
-    return { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 };
-  }
-  if (m.includes("sonnet")) {
-    return { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
-  }
-  if (m.includes("haiku")) {
-    return { input: 0.8, output: 4, cacheWrite: 1, cacheRead: 0.08 };
-  }
-  if (m.includes("claude")) {
-    return { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 };
+  const claude = claudeRate(m);
+  if (claude) {
+    const [input, output, cacheRead] = claude;
+    return { input, output, cacheWrite: input * 1.25, cacheRead };
   }
   if (m.startsWith("gpt-5") || m.startsWith("gpt-6") || m.startsWith("o3")) {
     return { input: 10, output: 30, cacheWrite: 0, cacheRead: 1 };

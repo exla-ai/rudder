@@ -363,6 +363,8 @@ pub(crate) struct DiffPanel {
     pub(crate) timeline: Option<(String, crate::timeline::TimelineSummary)>,
     pub(crate) timeline_tx: Sender<crate::timeline::TimelineJob>,
     timeline_rx: Receiver<crate::timeline::TimelineJob>,
+    /// (run, the model Rudder had on it, newest answer seen then).
+    model_baseline: Option<(String, String, u64)>,
     /// (revision, width, focused) → rendered lines and the line index of each file.
     cache: Option<(u64, u16, bool, Vec<Line<'static>>, Vec<usize>)>,
 }
@@ -375,6 +377,7 @@ impl DiffPanel {
             timeline: None,
             timeline_tx,
             timeline_rx,
+            model_baseline: None,
             open: false,
             run_id: None,
             files: Vec::new(),
@@ -476,6 +479,24 @@ impl DiffPanel {
                     self.revision += 1;
                     self.cache = None;
                 }
+            }
+        }
+    }
+
+    /// The model `run_id`'s session answered with AFTER Rudder last set
+    /// `current` on it, when the log has one. The first answer seen under
+    /// `current` is only a baseline: a row Rudder just retargeted still has
+    /// the old model's answers at the end of its log.
+    pub(crate) fn observed_model(&mut self, run_id: &str, current: &str) -> Option<String> {
+        let (id, summary) = self.timeline.as_ref()?;
+        let (ts, observed) = summary.model.as_ref().filter(|_| id == run_id)?;
+        match &self.model_baseline {
+            Some((run, model, seen)) if run == run_id && model == current => {
+                (ts > seen).then(|| observed.clone())
+            }
+            _ => {
+                self.model_baseline = Some((run_id.to_string(), current.to_string(), *ts));
+                None
             }
         }
     }

@@ -7253,6 +7253,51 @@ fn click_on_agent_row_selects_that_agent() {
     assert!(app.delete_pending.is_none());
 }
 
+/// Clicking a row leaves focus in the task box, and the worker pane then says
+/// "Press Enter to resume it". Enter in the empty task box must do that rather
+/// than nothing (a pinned conversation looked dead after a home update).
+#[cfg(not(windows))]
+#[test]
+fn empty_task_enter_resumes_the_clicked_paneless_agent() {
+    let _env = env_guard();
+    let dir = unique_test_repo("task-enter-resume");
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 5\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.focus = FocusPane::Task;
+    let mut run = test_agent_run("pinned-done", "pinned conversation");
+    run.cwd = dir.clone();
+    run.status = AgentStatus::Done;
+    run.pinned = true;
+    run.session_id = Some("pinned-session".to_string());
+    app.agents = vec![test_agent_run("other", "other task"), run];
+    app.selected_agent = 0;
+    render_screen(&mut app, 120, 40);
+    let &(row, col, _) = app.agent_pin_hits.iter().find(|hit| hit.2 == 1).unwrap();
+    let area = app.agents_area.unwrap();
+    let inner = block_inner(area);
+    // A click on the title, past the pin marker, selects without moving focus.
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x + col as u16 + 4,
+        row: inner.y + row.saturating_sub(app.agents_scroll) as u16,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert_eq!((app.selected_agent, app.focus), (1, FocusPane::Task));
+    assert!(app.agents[1].pinned, "clicking the title does not unpin");
+    assert!(render_screen(&mut app, 120, 40).contains("Press Enter to resume it"));
+
+    app.handle_task_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.agents[1].terminal.is_some(), "Enter reopened the conversation");
+    assert_eq!(app.agents[1].status, AgentStatus::Done, "a reopened reply is not a new turn");
+    assert_eq!(app.focus, FocusPane::Worker);
+    app.agents[1].terminal = None;
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn mouse_over_worker_and_task_does_not_change_focus() {
     let mut app = App::new();

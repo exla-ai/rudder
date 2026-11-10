@@ -775,6 +775,7 @@ L="$(readlink -f "$(cat "$W/lower")")"
 # A stacked warm snapshot lists all its layers next to its top layer.
 if [ -f "$L.lowerdir" ]; then L="$(cat "$L.lowerdir")"; fi
 mount -t overlay overlay -o "lowerdir=$L,upperdir=$W/upper,workdir=$W/work,userxattr" "$M"
+[ -d "$M/.jj" ] || mkdir "$M/.jj"
 mount --bind "$F/jjmnt" "$M/.jj"
 # Build output can name the path the snapshot was built at; show this fork there.
 A="$(cat "$F/alias" 2>/dev/null || true)"

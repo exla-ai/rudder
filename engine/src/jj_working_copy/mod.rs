@@ -263,6 +263,8 @@ pub fn link_lower(lowers_root: &Path, tree: &MergedTree, dir: &Path) -> anyhow::
 pub async fn ensure_lower(lowers_root: &Path, tree: &MergedTree) -> anyhow::Result<(PathBuf, bool)> {
     let dir = lowers_root.join(tree_key(tree));
     if dir.is_dir() {
+        // Lowers written before the mount point existed get it now.
+        let _ = fs::create_dir(dir.join(".jj"));
         return Ok((dir, false));
     }
     fs::create_dir_all(lowers_root)?;
@@ -300,6 +302,9 @@ pub async fn ensure_lower(lowers_root: &Path, tree: &MergedTree) -> anyhow::Resu
         anyhow::Ok(())
     }
     .await;
+    // The fork's enter script binds the workspace's real `.jj` over this
+    // path; without it the mount fails and the agent can never relaunch.
+    let result = result.and_then(|()| Ok(fs::create_dir(tmp.join(".jj"))?));
     if let Err(err) = result {
         let _ = fs::remove_dir_all(&tmp);
         return Err(err);

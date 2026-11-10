@@ -75,6 +75,13 @@ those changed), pushed to rudder-worker-images:4.4.0 and copied to
 rudder-workers-exla:4.4.0 (digest 843d727b). The control plane was redeployed
 on its 4.3.6 image with the new RUDDER_WORKER_IMAGE. The home offers the update.
 
+4.4.1 fork relaunch fix: a lower materialized by `ensure_lower` (engine
+jj_working_copy) had no `.jj`, so once a snapshot repointed a fork at one, the
+fork's enter script failed `mount --bind ... $M/.jj` (exit 32) and the agent
+closed the moment it reopened (cedar in libra after the 4.4.0 restart). Lowers
+now get an empty `.jj` (existing ones on reuse) and the enter script creates the
+mount point if missing. The home's 19 existing lowers were fixed by hand.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

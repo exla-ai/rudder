@@ -27,13 +27,18 @@ subagent trees show only a fold glyph without counts, and drawer headers
 omit expand/collapse instructions. Active homes adopt the image when idle.
 
 Local UI cleanup: removed sidebar context/time charts and delivery proof/status
-clutter from agent cards. Agent list uses the full sidebar height. Not released.
+clutter from agent cards. Agent list uses the full sidebar height.
 
 Local model tracking: an agent's title and card follow the model its session
 log last answered with, so `/model` inside Claude Code or Codex shows up after
 the next reply and is kept on resume. Prices cover Fable 5.2, Opus 5.5, Sonnet
 5.5 and Haiku 5.5; titles use the `haiku` alias and planning uses
-`claude-sonnet-5-5`. Not released.
+`claude-sonnet-5-5`.
+
+4.3.3 is published as npm latest and deployed to Cloud (release 201,
+2026-11-10 03:42Z) with this and the sidebar cleanup above. Both Fly worker
+registries and ghcr serve the 4.3.3 image; health checks passed. Active homes
+adopt the image when idle.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

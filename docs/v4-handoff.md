@@ -64,6 +64,12 @@ worker registries serve the same 4.3.6 image, the ghcr workflow passed, and
 app and health checks returned 200. Libra's live home still runs 4.3.0 but now
 offers the 4.3.6 image; it will adopt when idle. Live agents were not restarted.
 
+4.4.0 pin and resume fixes: unpinned rows no longer show a literal `p` before
+the title (only pinned rows show the pin icon, which unpins on click). Enter in an
+empty task box now resumes the selected agent when its pane says "Press Enter
+to resume it"; clicks keep focus in the task box, so that Enter used to do
+nothing and a pinned conversation looked dead after a home update.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

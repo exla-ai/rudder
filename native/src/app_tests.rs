@@ -7253,12 +7253,12 @@ fn click_on_agent_row_selects_that_agent() {
     assert!(app.delete_pending.is_none());
 }
 
-/// Clicking a row leaves focus in the task box, and the worker pane then says
-/// "Press Enter to resume it". Enter in the empty task box must do that rather
-/// than nothing (a pinned conversation looked dead after a home update).
+/// Clicking a row leaves focus in the task box. Enter in the empty task box opens
+/// that agent: it resumes a stopped one (its pane says "Press Enter to resume it")
+/// and focuses a live one. It used to do nothing, so agents looked unreachable.
 #[cfg(not(windows))]
 #[test]
-fn empty_task_enter_resumes_the_clicked_paneless_agent() {
+fn empty_task_enter_opens_the_clicked_agent() {
     let _env = env_guard();
     let dir = unique_test_repo("task-enter-resume");
     let fake = dir.join("fake-claude.sh");
@@ -7293,6 +7293,11 @@ fn empty_task_enter_resumes_the_clicked_paneless_agent() {
     app.handle_task_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.agents[1].terminal.is_some(), "Enter reopened the conversation");
     assert_eq!(app.agents[1].status, AgentStatus::Done, "a reopened reply is not a new turn");
+    assert_eq!(app.focus, FocusPane::Worker);
+
+    // A live agent: the same Enter hands it the keys.
+    app.focus = FocusPane::Task;
+    app.handle_task_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.focus, FocusPane::Worker);
     app.agents[1].terminal = None;
     let _ = fs::remove_dir_all(dir);

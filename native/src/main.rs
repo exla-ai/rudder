@@ -8233,9 +8233,10 @@ impl App {
             // the task pane the single plan-mode surface: type to refine, Enter to go.
             if self.plan().awaiting_approval {
                 self.approve_planned_queue();
-            } else if self.enter_resumes_paneless_agent(self.selected_agent) {
-                // The worker pane says "Press Enter to resume it". Clicking a row
-                // keeps focus here, so this Enter has to keep that promise.
+            } else if self.agents.get(self.selected_agent).is_some() {
+                // Clicking a row keeps focus here, so an empty Enter opens the
+                // selected agent like Enter in the list: a live pane takes the
+                // keys and a stopped one resumes ("Press Enter to resume it").
                 self.open_selected_agent_session();
             }
             return;

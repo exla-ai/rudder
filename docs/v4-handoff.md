@@ -69,6 +69,11 @@ the title (only pinned rows show the pin icon, which unpins on click). Enter in 
 empty task box now opens the selected agent like Enter in the list: a live pane
 takes the keys and a stopped one resumes. Clicks keep focus in the task box, so
 that Enter used to do nothing and agents looked unreachable after a home update.
+4.4.0 Cloud (2026-11-10 23:00Z): the worker image was built on the home host
+as 4.3.6 plus the locally built 4.4.0 `rudder-native` and package version (only
+those changed), pushed to rudder-worker-images:4.4.0 and copied to
+rudder-workers-exla:4.4.0 (digest 843d727b). The control plane was redeployed
+on its 4.3.6 image with the new RUDDER_WORKER_IMAGE. The home offers the update.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

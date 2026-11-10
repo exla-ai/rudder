@@ -30737,6 +30737,8 @@ fn agent_pin_survives_reload_and_moves_finished_agent_above_drawers() {
     let screen = render_screen(&mut app, 120, 40);
     assert!(screen.contains("pinned"), "the pins have their own section: {screen}");
     assert!(screen.lines().any(|line| line.contains("📌") && line.contains("finished task")), "{screen}");
+    assert!(!screen.contains("p active task"), "unpinned rows carry no pin marker: {screen}");
+    assert!(app.agent_pin_hits.iter().all(|hit| hit.2 == 1), "only the pinned row has a pin control");
     for nested in [false, true] {
         app.nest_view = nested;
         render_screen(&mut app, 120, 40);

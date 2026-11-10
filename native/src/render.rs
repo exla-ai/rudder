@@ -659,7 +659,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         task_label
     };
 
-    let task_label = format!("{} {task_label}", if agent.pinned { "📌" } else { "p" });
+    // Only a pinned row carries a marker; `p` pins, and clicking 📌 unpins.
+    let task_label = if agent.pinned { format!("📌 {task_label}") } else { task_label };
 
     // Line 2: status glyph, status, elapsed, diff, and a tag for anything that
     // is not a plain run (main, plan, cloud, a plan node id).
@@ -768,7 +769,9 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         };
         lines.push(Line::from(edge("╭", "╮")));
         let title_style = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
-        AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
+        if agent.pinned {
+            AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
+        }
         let title_rows = wrap_title(&task_label, body_w, 2);
         let last = title_rows.len().saturating_sub(1);
         for (row_index, row) in title_rows.into_iter().enumerate() {
@@ -814,7 +817,9 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
                 kind => card_kind_color(kind),
             }),
         );
-        AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
+        if agent.pinned {
+            AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
+        }
         let title_rows = wrap_title(&task_label, body_w, 2);
         let last = title_rows.len().saturating_sub(1);
         for (row_index, row) in title_rows.into_iter().enumerate() {

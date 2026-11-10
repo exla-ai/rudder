@@ -7475,10 +7475,12 @@ impl App {
         let inner = block_inner(area);
         let row = mouse.row.saturating_sub(inner.y) as usize + self.agents_scroll;
         let col = mouse.column.saturating_sub(inner.x) as usize;
-        if let Some(index) = self.agent_pin_hits.iter().find_map(|&(r, c, i)| {
-            let width = if self.agents.get(i).is_some_and(|run| run.pinned) { 3 } else { 2 };
-            (r == row && col >= c && col < c + width).then_some(i)
-        }) {
+        // Only pinned rows record a hit: the two cells of their 📌 marker.
+        if let Some(index) = self
+            .agent_pin_hits
+            .iter()
+            .find_map(|&(r, c, i)| (r == row && col >= c && col < c + 2).then_some(i))
+        {
             self.selected_agent = index;
             self.subagent_cursor = None;
             self.drawer_cursor = None;

@@ -42,6 +42,8 @@ adopt the image when idle.
 
 Agent pins: `p` or clicking the title pin control toggles a persistent pin.
 Pinned agents stay above the regular list in both views, including finished runs.
+Pinning also works from the worker pane with `Ctrl+W`, then `p`, or `p` in
+`Ctrl+G` navigation mode. These command routes previously ignored the pin key.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

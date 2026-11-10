@@ -4899,6 +4899,7 @@ impl App {
 
     fn handle_nav_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
+            KeyCode::Char('p') => self.toggle_selected_pin(),
             KeyCode::Esc => {
                 self.nav_mode = false;
                 self.delete_pending = None;
@@ -4976,6 +4977,7 @@ impl App {
     fn handle_leader_key(&mut self, key: KeyEvent) -> bool {
         self.leader_pending = false;
         match key.code {
+            KeyCode::Char('p') => self.toggle_selected_pin(),
             KeyCode::Esc => {
                 self.delete_pending = None;
                 self.notice = Some("leader cancelled".to_string());

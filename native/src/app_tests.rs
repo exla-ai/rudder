@@ -30761,5 +30761,31 @@ fn agent_pin_survives_reload_and_moves_finished_agent_above_drawers() {
         modifiers: KeyModifiers::NONE,
     }, area);
     assert!(!app.agents[1].pinned);
+    app.agents.truncate(1);
+    app.agents[0].mode = AgentMode::Main;
+    app.agents[0].pinned = true;
+    app.selected_agent = 0;
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(!screen.contains("no agents yet"), "{screen}");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn agent_pin_commands_work_from_worker_focus() {
+    let _env = env_guard();
+    let dir = unique_test_repo("agent-pin-commands");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.agents = vec![test_agent_run("pin-command", "pin this agent")];
+    app.selected_agent = 0;
+    app.focus = FocusPane::Worker;
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert!(app.agents[0].pinned, "the leader must handle pin from the worker pane");
+    assert!(!app.leader_pending);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert!(!app.agents[0].pinned, "nav mode must handle unpin too");
+    assert!(app.nav_mode);
     fs::remove_dir_all(dir).unwrap();
 }

@@ -2123,7 +2123,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // Alternate full-DAG view (toggled with `g`): one topological tree across
         // every agent, ignoring status sections.
         render_agents_nest_into(&mut lines, app, focused, task_width, &diff_summaries);
-        if main_count == 0 && run_total == 0 {
+        if main_count == 0 && run_total == 0 && !app.agents.iter().any(|a| a.pinned) {
             push_empty_state(&mut lines, focused);
         }
     } else {
@@ -2233,6 +2233,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
         if main_count == 0
             && run_total == 0
+            && !app.agents.iter().any(|a| a.pinned)
             && app.plans.iter().all(|plan| plan.planned_nodes.is_empty())
         {
             push_empty_state(&mut lines, focused);

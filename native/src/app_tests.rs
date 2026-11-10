@@ -8053,6 +8053,7 @@ fn nest_view_first_child_line_carries_connector_prefix_span() {
 
 fn test_agent_run(id: &str, task: &str) -> AgentRun {
     AgentRun {
+        pinned: false,
         id: id.to_string(),
         created_at: "1".to_string(),
         mode: AgentMode::Execute,
@@ -10202,6 +10203,7 @@ fn delete_prompt_for_workspace_requires_second_d_without_merge_offer() {
 fn delete_agent_requires_second_d() {
     let mut app = App::new();
     app.agents.push(AgentRun {
+        pinned: false,
         id: "run-1".to_string(),
         created_at: "1".to_string(),
         mode: AgentMode::Execute,
@@ -30714,4 +30716,50 @@ fn expanded_drawer_lists_agents_in_sidebar_and_preserves_worker_panel() {
     for index in members {
         assert!(!app.agent_row_map.contains(&Some(index)), "collapsed member is hidden again");
     }
+}
+
+#[test]
+fn agent_pin_survives_reload_and_moves_finished_agent_above_drawers() {
+    let _env = env_guard();
+    let dir = unique_test_repo("agent-pin");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut finished = test_agent_run("finished-pin", "finished task");
+    finished.status = AgentStatus::Merged;
+    app.agents = vec![test_agent_run("active-pin", "active task"), finished];
+    app.selected_agent = 1;
+    app.handle_agents_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert!(app.agents[1].pinned);
+    assert_eq!(app.visible_agent_indices()[0], 1);
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(".rudder/runs/finished-pin/run.json")).unwrap()).unwrap();
+    assert!(agent_from_run_record(&dir, record).unwrap().pinned);
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.lines().any(|line| line.contains("📌") && line.contains("finished task")), "{screen}");
+    for nested in [false, true] {
+        app.nest_view = nested;
+        render_screen(&mut app, 120, 40);
+        assert_eq!(app.visible_agent_indices()[0], 1);
+        let &(row, col, index) = app.agent_pin_hits.iter().find(|hit| hit.2 == 1).unwrap();
+        assert_eq!(index, 1);
+        let area = app.agents_area.unwrap();
+        let inner = block_inner(area);
+        let mouse = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: inner.x + col as u16, row: inner.y + row.saturating_sub(app.agents_scroll) as u16, modifiers: KeyModifiers::NONE };
+        app.handle_agents_mouse(mouse, area);
+        assert!(!app.agents[1].pinned);
+        app.toggle_selected_pin();
+    }
+    app.nest_view = false;
+    app.selected_agent = 0;
+    render_screen(&mut app, 120, 40);
+    let &(row, col, _) = app.agent_pin_hits.iter().find(|hit| hit.2 == 1).unwrap();
+    let area = app.agents_area.unwrap();
+    let inner = block_inner(area);
+    app.handle_agents_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x + col as u16,
+        row: inner.y + row.saturating_sub(app.agents_scroll) as u16,
+        modifiers: KeyModifiers::NONE,
+    }, area);
+    assert!(!app.agents[1].pinned);
+    fs::remove_dir_all(dir).unwrap();
 }

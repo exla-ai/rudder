@@ -366,6 +366,8 @@ pub(crate) fn render_perf_hud(frame: &mut Frame<'_>, area: Rect, app: &mut App) 
 // a hardcoded "agents start at row 12" offset that silently broke whenever the pane
 // header grew and never accounted for section headers or blank separator rows.
 thread_local! {
+    static AGENT_PIN_HITS: std::cell::RefCell<Vec<(usize, usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static AGENT_ROW_SPANS: std::cell::RefCell<Vec<(usize, usize, usize)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -657,6 +659,8 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         task_label
     };
 
+    let task_label = format!("{} {task_label}", if agent.pinned { "📌" } else { "p" });
+
     // Line 2: status glyph, status, elapsed, diff, and a tag for anything that
     // is not a plain run (main, plan, cloud, a plan node id).
     let (status_label, status_style): (String, Style) =
@@ -764,6 +768,7 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         };
         lines.push(Line::from(edge("╭", "╮")));
         let title_style = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
+        AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
         let title_rows = wrap_title(&task_label, body_w, 2);
         let last = title_rows.len().saturating_sub(1);
         for (row_index, row) in title_rows.into_iter().enumerate() {
@@ -809,6 +814,7 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
                 kind => card_kind_color(kind),
             }),
         );
+        AGENT_PIN_HITS.with(|hits| hits.borrow_mut().push((lines.len(), spans_width(prefix) + 2, index)));
         let title_rows = wrap_title(&task_label, body_w, 2);
         let last = title_rows.len().saturating_sub(1);
         for (row_index, row) in title_rows.into_iter().enumerate() {
@@ -1090,6 +1096,7 @@ pub(crate) fn drawer_members(agents: &[AgentRun], bucket: Bucket) -> Vec<usize> 
 /// Is this run tucked inside a collapsed drawer (and so not its own sidebar row)?
 pub(crate) fn in_drawer(agents: &[AgentRun], agent: &AgentRun) -> bool {
     !agent.is_main()
+        && !agent.pinned
         && !agent.is_pinned_planner()
         && bucket_is_drawer(agents, status_bucket_in(agents, agent))
 }
@@ -1293,6 +1300,7 @@ fn bucket_members(agents: &[AgentRun], bucket: Bucket) -> Vec<usize> {
         .enumerate()
         .filter(|(_, agent)| {
             !agent.is_main()
+                && !agent.pinned
                 && !agent.is_pinned_planner()
                 && status_bucket_in(agents, agent) == bucket
         })
@@ -1347,11 +1355,12 @@ pub(crate) fn sectioned_agent_order(agents: &[AgentRun]) -> Vec<usize> {
         .filter(|(_, agent)| agent.is_pinned_planner())
         .map(|(index, _)| index)
         .collect();
+    order.extend(agents.iter().enumerate().filter(|(_, a)| a.pinned && !a.is_pinned_planner()).map(|(i, _)| i));
     order.extend(
         agents
             .iter()
             .enumerate()
-            .filter(|(_, agent)| agent.is_main() && !agent.is_pinned_planner())
+            .filter(|(_, agent)| agent.is_main() && !agent.pinned && !agent.is_pinned_planner())
             .map(|(index, _)| index),
     );
     for bucket in Bucket::ORDER {
@@ -2007,6 +2016,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let focused = app.focus == FocusPane::Agents;
     // Fresh row-span recording for this frame; harvested into app.agent_row_map below.
     AGENT_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
+    AGENT_PIN_HITS.with(|hits| hits.borrow_mut().clear());
     DRAWER_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     SUBAGENT_ROW_SPANS.with(|spans| spans.borrow_mut().clear());
     app.normalize_drawer_state();
@@ -2080,7 +2090,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         .agents
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.is_main() && !a.is_pinned_planner())
+        .filter(|(_, a)| a.is_main() && !a.pinned && !a.is_pinned_planner())
         .map(|(index, _)| index)
         .collect();
     let main_count = main_indices.len();
@@ -2101,6 +2111,12 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             }
         }
         lines.push((Line::default()));
+    }
+
+    for (index, agent) in app.agents.iter().enumerate() {
+        if agent.pinned && !agent.is_pinned_planner() {
+            push_agent_row(&mut lines, app, index, agent, None, focused, task_width, &[], &[]);
+        }
     }
 
     if app.nest_view {
@@ -2246,6 +2262,9 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
         starts.push(wrapped.len());
         let moved = |row: usize| starts.get(row).copied().unwrap_or(wrapped.len());
+        AGENT_PIN_HITS.with(|hits| {
+            for hit in hits.borrow_mut().iter_mut() { hit.0 = moved(hit.0); }
+        });
         AGENT_ROW_SPANS.with(|spans| {
             for span in spans.borrow_mut().iter_mut() {
                 *span = (moved(span.0), moved(span.1), span.2);
@@ -2276,6 +2295,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
     });
     app.agent_row_map = row_map;
+    app.agent_pin_hits = AGENT_PIN_HITS.with(|hits| hits.borrow().clone());
     let mut drawer_map: Vec<Option<Bucket>> = vec![None; lines.len()];
     DRAWER_ROW_SPANS.with(|spans| {
         for &(row, bucket) in spans.borrow().iter() {
@@ -2609,7 +2629,7 @@ fn render_agents_nest_into<'a>(
     // Pinned planners are drawn as a dedicated row above this tree, so mark them
     // visited to keep the nest walk (and its orphan sweep) from re-drawing them.
     for index in 0..app.agents.len() {
-        if app.agents[index].is_pinned_planner() {
+        if app.agents[index].is_pinned_planner() || app.agents[index].pinned {
             visited[index] = true;
         }
     }
@@ -2704,6 +2724,9 @@ pub(crate) fn nest_agent_order(agents: &[AgentRun]) -> Vec<usize> {
             order.push(index);
             visited[index] = true;
         }
+    }
+    for index in 0..agents.len() {
+        if agents[index].pinned && !visited[index] { order.push(index); visited[index] = true; }
     }
     let mut roots: Vec<usize> = (0..agents.len())
         .filter(|&i| agents[i].is_main() && !agents[i].is_pinned_planner())
@@ -7043,6 +7066,7 @@ fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("enter", "open"),
             ("x", "stop"),
             ("b", "branch"),
+            ("p", "pin"),
             ("r", "rename"),
             ("?", "keys"),
         ],
@@ -7248,6 +7272,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("b", "branch"),
             ("x", "stop"),
             ("dd", "delete"),
+            ("p", "pin"),
             ("r", "rename"),
             ("u", "undo merge"),
             ("cc", "clear merged"),

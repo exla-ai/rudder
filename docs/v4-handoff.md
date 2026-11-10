@@ -40,6 +40,9 @@ the next reply and is kept on resume. Prices cover Fable 5.2, Opus 5.5, Sonnet
 registries and ghcr serve the 4.3.3 image; health checks passed. Active homes
 adopt the image when idle.
 
+Agent pins: `p` or clicking the title pin control toggles a persistent pin.
+Pinned agents stay above the regular list in both views, including finished runs.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

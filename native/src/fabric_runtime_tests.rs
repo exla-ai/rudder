@@ -90,6 +90,7 @@ fn requested_sdk_binding_allows_only_first_idle_input_before_qualification() {
 
 fn test_agent_run(id: &str, task: &str) -> AgentRun {
     AgentRun {
+        pinned: false,
         id: id.to_string(),
         created_at: "1".to_string(),
         mode: AgentMode::Execute,

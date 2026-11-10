@@ -2068,6 +2068,8 @@ struct App {
     /// (render_agents). Mouse clicks resolve through this so hit-testing always
     /// matches what is actually drawn (headers, hints, sections, wrapped rows).
     agent_row_map: Vec<Option<usize>>,
+    /// Rendered (row, column, agent index) pin controls, before scroll offset.
+    agent_pin_hits: Vec<(usize, usize, usize)>,
     /// Agents-pane row -> collapsed drawer header (done/closed), same harvest as
     /// `agent_row_map`, so a click on "done 27" resolves to that bucket.
     drawer_row_map: Vec<Option<Bucket>>,
@@ -2633,6 +2635,7 @@ impl ParkedNote {
 }
 
 struct AgentRun {
+    pinned: bool,
     id: String,
     created_at: String,
     mode: AgentMode,
@@ -3517,6 +3520,7 @@ impl App {
             orch_selection: None,
             orch_visible_rows: Vec::new(),
             agent_row_map: Vec::new(),
+            agent_pin_hits: Vec::new(),
             attach_server: None,
             attach_server_failed: false,
             attach_clients: Vec::new(),
@@ -5042,6 +5046,24 @@ impl App {
         false
     }
 
+    fn toggle_selected_pin(&mut self) {
+        if self.subagent_cursor.is_some()
+            || self.drawer_cursor.is_some_and(|bucket| self.drawer_open() != Some(bucket))
+            || self.selected_is_orchestrator()
+        {
+            return;
+        }
+        let Some(run) = self.agents.get_mut(self.selected_agent) else { return; };
+        run.pinned = !run.pinned;
+        if let Err(error) = save_native_run_record(&self.cwd, run) {
+            run.pinned = !run.pinned;
+            self.notice = Some(format!("could not save pin: {error}"));
+        }
+        self.drawer_cursor = None;
+        self.close_drawer();
+        self.dirty = true;
+    }
+
     fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
         // On a subagent row the agent's row keys would act on its parent, which
         // the cursor is not on. A subagent is not a run: nothing to merge,
@@ -5058,6 +5080,7 @@ impl App {
             return false;
         }
         match key.code {
+            KeyCode::Char('p') => self.toggle_selected_pin(),
             KeyCode::Char('q') => return self.confirm_or_quit(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
@@ -7446,6 +7469,19 @@ impl App {
             return;
         }
 
+        let inner = block_inner(area);
+        let row = mouse.row.saturating_sub(inner.y) as usize + self.agents_scroll;
+        let col = mouse.column.saturating_sub(inner.x) as usize;
+        if let Some(index) = self.agent_pin_hits.iter().find_map(|&(r, c, i)| {
+            let width = if self.agents.get(i).is_some_and(|run| run.pinned) { 3 } else { 2 };
+            (r == row && col >= c && col < c + width).then_some(i)
+        }) {
+            self.selected_agent = index;
+            self.subagent_cursor = None;
+            self.drawer_cursor = None;
+            self.toggle_selected_pin();
+            return;
+        }
         self.delete_pending = None;
         // A click on a collapsed drawer header toggles it, mirroring Enter on that row.
         if let Some(bucket) = drawer_bucket_from_mouse(self, mouse, area) {
@@ -9077,6 +9113,7 @@ impl App {
 
         let created_at = now_stamp();
         let mut run = AgentRun {
+            pinned: false,
             id: new_run_id(input),
             created_at: created_at.clone(),
             mode: AgentMode::RudderPlan,
@@ -9237,6 +9274,7 @@ impl App {
         // session and no process; finish_task_launch fills those in.
         let created_at = now_stamp();
         let run = AgentRun {
+            pinned: false,
             id: run_id.clone(),
             created_at: created_at.clone(),
             mode: AgentMode::Execute,
@@ -9717,6 +9755,7 @@ Until the first packet arrives, reply only: \"standing by\"."
 
         let created_at = now_stamp();
         let mut run = AgentRun {
+            pinned: false,
             id: generator_id.clone(),
             created_at: created_at.clone(),
             mode: AgentMode::Execute,
@@ -9816,6 +9855,7 @@ Until the first packet arrives, reply only: \"standing by\"."
         // under discussion. It records no workspace identity of its own, so it can
         // never be merged, synced, or mistaken for mergeable work.
         let mut adversarial_run = AgentRun {
+            pinned: false,
             id: adversarial_id.clone(),
             created_at: now_stamp(),
             mode: AgentMode::GamAdversarial,
@@ -11030,6 +11070,7 @@ Address the objection directly. If you disagree, say why inside \
 
         let created_at = now_stamp();
         let mut run = AgentRun {
+            pinned: false,
             id: new_run_id(input),
             created_at: created_at.clone(),
             mode: AgentMode::RudderPlan,
@@ -14240,6 +14281,7 @@ Address the objection directly. If you disagree, say why inside \
         let created_at = now_stamp();
         let task = label.to_string();
         let mut run = AgentRun {
+            pinned: false,
             id,
             created_at: created_at.clone(),
             mode: AgentMode::Execute,
@@ -19311,6 +19353,7 @@ Address the objection directly. If you disagree, say why inside \
         // no process; finish_fork_launch fills those in and records the seed.
         let created_at = now_stamp();
         let run = AgentRun {
+            pinned: false,
             id: run_id.clone(),
             created_at: created_at.clone(),
             mode: AgentMode::Execute,

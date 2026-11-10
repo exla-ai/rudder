@@ -297,6 +297,7 @@ pub(crate) fn create_main_agent(
     };
     let now = now_stamp();
     AgentRun {
+        pinned: false,
         id: new_run_id("main branch"),
         created_at: now.clone(),
         mode: AgentMode::Main,
@@ -879,6 +880,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
     if record.get("managedLocal").is_some() { return None; }
     let parked = ParkedNote::from_record(&record);
     let mut run = AgentRun {
+        pinned: record.get("pinned").and_then(serde_json::Value::as_bool).unwrap_or(false),
         plain_process: false,
         id,
         created_at,
@@ -1362,6 +1364,7 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         "swarmExperiment": run.swarm_experiment,
         "interactiveOrchestrator": run.interactive_orchestrator,
         "task": run.task,
+        "pinned": run.pinned,
         "taskSummary": run.task_summary,
         "backend": run.backend.as_str(),
         "executionProfile": run.terminal.as_ref().and_then(TerminalPane::execution_profile).or(run.execution_profile.as_deref()).unwrap_or("native"),

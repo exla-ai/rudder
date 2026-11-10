@@ -81,6 +81,10 @@ fork's enter script failed `mount --bind ... $M/.jj` (exit 32) and the agent
 closed the moment it reopened (cedar in libra after the 4.4.0 restart). Lowers
 now get an empty `.jj` (existing ones on reuse) and the enter script creates the
 mount point if missing. The home's 19 existing lowers were fixed by hand.
+4.4.1 Cloud (23:39Z): same overlay build on the host (4.4.0 plus the new
+rudder-native, rudder-jj and dist/warm-snapshot.js), rudder-worker-images and
+rudder-workers-exla:4.4.1 (digest 902a3630), control plane redeployed with the
+new RUDDER_WORKER_IMAGE. The home offers 4.4.1; npm comes from the v4.4.1 tag run.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

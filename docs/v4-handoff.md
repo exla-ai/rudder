@@ -52,13 +52,17 @@ image, and app and health checks passed. Libra's existing dashboard was still
 running 4.3.0, which had neither change. Active homes adopt the new image when
 idle; live agents were not restarted.
 
-Local pin follow-up: pinned conversations have a named section above main and
+4.3.6 pin follow-up: pinned conversations have a named section above main and
 the status sections in both views. Pins prevent idle parking, finished-row
 cleanup, automatic node review and automatic merging. A live pin between replies
 says it is ready for the next message and no longer announces ready for review.
 Cloud cleanup inventory exposes pins and protects their child processes too.
 Checked with the native `agent_pin` filter and `tests/cloud-cleanup.test.mjs`.
-These changes are not included in 4.3.5.
+4.3.6 is published as npm latest and deployed to Cloud (release 203,
+2026-11-10 10:12Z). Full local release checks and release CI passed. Both Fly
+worker registries serve the same 4.3.6 image, the ghcr workflow passed, and
+app and health checks returned 200. Libra's live home still runs 4.3.0 but now
+offers the 4.3.6 image; it will adopt when idle. Live agents were not restarted.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

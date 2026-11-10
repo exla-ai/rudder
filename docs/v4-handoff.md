@@ -45,6 +45,13 @@ Pinned agents stay above the regular list in both views, including finished runs
 Pinning also works from the worker pane with `Ctrl+W`, then `p`, or `p` in
 `Ctrl+G` navigation mode. These command routes previously ignored the pin key.
 
+4.3.5 is published as npm latest and deployed to Cloud (release 202,
+2026-11-10 05:22Z). It includes persistent agent pins and removes the old
+expansion hint. Release CI passed; both Fly worker registries serve the same
+image, and app and health checks passed. Libra's existing dashboard was still
+running 4.3.0, which had neither change. Active homes adopt the new image when
+idle; live agents were not restarted.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

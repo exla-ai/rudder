@@ -354,6 +354,7 @@ class Project {
         socket.close();
         return;
       }
+      watchRelayLink(socket, this.name);
       try { socket._socket?.setNoDelay?.(true); } catch { /* ignore */ }
       socket.send(JSON.stringify({ type: "hello", cols: this.cols, rows: this.rows, sessionKind: "workspace", sessionId: this.workspaceId }));
       this.io.attach(socket);
@@ -428,6 +429,37 @@ class Project {
   }
 }
 
+// A link to Cloud can die inside the proxy without a close ever reaching the
+// home: the socket stays "open" here while Cloud has no worker, so laptops sit
+// on "Reconnecting" for good (19 of 23 links on home-53c2, 2026-11-13, dead
+// for up to 47 hours). Ping every 15 s; a link that has answered nothing for
+// 45 s is dropped, and its close handler reconnects it.
+const RELAY_PING_MS = 15_000;
+const RELAY_SILENCE_MS = 45_000;
+
+function watchRelayLink(socket, label) {
+  let heard = Date.now();
+  const seen = () => { heard = Date.now(); };
+  socket.on("pong", seen);
+  socket.on("ping", seen);
+  socket.on("message", seen);
+  const timer = setInterval(() => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      clearInterval(timer);
+      return;
+    }
+    if (Date.now() - heard > RELAY_SILENCE_MS) {
+      clearInterval(timer);
+      log(`${label}: no answer from Cloud in ${Math.round((Date.now() - heard) / 1000)}s; reconnecting`);
+      try { socket.terminate(); } catch { /* ignore */ }
+      return;
+    }
+    try { socket.ping(); } catch { /* ignore */ }
+  }, RELAY_PING_MS);
+  timer.unref?.();
+  socket.once("close", () => clearInterval(timer));
+}
+
 // The dashboard is the PTY's session leader; its process group is the
 // rudder launcher and rudder-native (agents run in PTYs of their own).
 function signalRepaint(pid) {
@@ -478,6 +510,7 @@ function connectControl() {
   const url = `${cloudUrl.replace(/^http/, "ws")}/api/rudder/home/${encodeURIComponent(homeId)}/control`;
   const socket = new WebSocket(url, { headers: { authorization: `Bearer ${workerToken}` } });
   socket.on("open", () => {
+    watchRelayLink(socket, "control");
     if (controlEverConnected) telemetry.recordReconnect();
     controlEverConnected = true;
     controlSocket = socket;

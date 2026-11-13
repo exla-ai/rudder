@@ -6712,7 +6712,7 @@ pub(crate) fn render_gods_view(frame: &mut Frame<'_>, area: Rect, app: &mut App)
     if pages > 1 {
         header.push_str(&format!(" · page {}/{}", page + 1, pages));
     }
-    header.push_str(" · arrows or h/j/k/l move · Enter or click focuses · Esc or ⌥g closes");
+    header.push_str(" · ⌥Tab, ⌥1-9 or arrows move · Enter or click focuses · Esc or ⌥g closes");
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(header, accent_style(true)))).style(app_style()),
         header_area,
@@ -6750,8 +6750,11 @@ pub(crate) fn render_gods_view(frame: &mut Frame<'_>, area: Rect, app: &mut App)
         let Some(&tile) = col_rects.get(col) else {
             break;
         };
-        let highlighted = page * per_page + slot == app.gods_view_cursor;
-        render_gods_view_tile(frame, tile, app, agent_index, highlighted);
+        let position = page * per_page + slot;
+        let highlighted = position == app.gods_view_cursor;
+        // Tiles 1-9 carry the number ⌥1..⌥9 jumps to.
+        let number = (position < 9).then_some(position + 1);
+        render_gods_view_tile(frame, tile, app, agent_index, number, highlighted);
         app.gods_view_tile_map.push((tile, agent_index));
     }
 }
@@ -6761,12 +6764,16 @@ fn render_gods_view_tile(
     tile: Rect,
     app: &mut App,
     index: usize,
+    number: Option<usize>,
     highlighted: bool,
 ) {
     let Some(run) = app.agents.get(index) else {
         return;
     };
-    let id = worker_title_id(app, run);
+    let id = match number {
+        Some(number) => format!("{number} {}", worker_title_id(app, run)),
+        None => worker_title_id(app, run),
+    };
     let label = if run.task_summary.trim().is_empty() {
         summarize_task(&run.task)
     } else {

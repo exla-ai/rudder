@@ -28476,6 +28476,36 @@ fn enter_on_a_gods_view_tile_focuses_that_agent() {
 }
 
 #[test]
+fn alt_tab_and_alt_digits_switch_gods_view_tiles() {
+    let mut app = gods_view_app(4);
+    app.selected_agent = 0;
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    let screen = render_screen(&mut app, 160, 48);
+    for number in 1..=4 {
+        let key = run_short_key(&format!("run-{}", number - 1));
+        let label = format!(" {number} {key} · tile task {}", number - 1);
+        assert!(screen.contains(&label), "tile {number} numbered:\n{screen}");
+    }
+    let alt = KeyModifiers::ALT;
+    app.handle_key(KeyEvent::new(KeyCode::Tab, alt));
+    assert_eq!(app.gods_view_cursor, 1, "Alt+Tab steps forward");
+    // Kitty reports Alt+Shift+Tab as BackTab; it wraps at the start.
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, alt | KeyModifiers::SHIFT));
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, alt | KeyModifiers::SHIFT));
+    assert_eq!(app.gods_view_cursor, 3, "Alt+Shift+Tab wraps backwards");
+    app.handle_key(KeyEvent::new(KeyCode::Tab, alt));
+    assert_eq!(app.gods_view_cursor, 0, "Alt+Tab wraps forwards");
+    app.handle_key(KeyEvent::new(KeyCode::Char('3'), alt));
+    assert_eq!(app.gods_view_cursor, 2, "Alt+3 picks tile 3");
+    // Option+2 without option-as-meta types ™.
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{2122}'), KeyModifiers::NONE));
+    assert_eq!(app.gods_view_cursor, 1, "Option+2 picks tile 2");
+    app.handle_key(KeyEvent::new(KeyCode::Char('9'), alt));
+    assert_eq!(app.gods_view_cursor, 1, "a number past the last tile does nothing");
+    assert!(app.gods_view, "switching tiles keeps god's view open");
+}
+
+#[test]
 fn clicking_a_gods_view_tile_focuses_that_agent() {
     let mut app = gods_view_app(3);
     app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));

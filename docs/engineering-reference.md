@@ -549,7 +549,9 @@ that pane's styled cells (`styled_tail_window_snapshot`, ending at the last
 non-blank or cursor row) cropped to the tile, NEVER a resize of the PTY: resizing
 repaints the agent and drops scrollback. Titles carry id, task summary,
 backend/model and working / needs you / done / paused in the agents-list colors.
-Arrows or h/j/k/l move the highlight, Enter or a click focuses that agent in the
+Tiles 1-9 are numbered. ⌥Tab / ⌥Shift+Tab (bare Tab too) cycle the highlight with
+wraparound, ⌥1..⌥9 (bare digits and the Option+digit characters ¡ ™ £ ... too) jump
+to that tile, arrows or h/j/k/l move it, and Enter or a click focuses that agent in the
 worker pane, and Esc or ⌥g closes it. While open it owns the keyboard and mouse
 (Ctrl+C still quits). All its state is in `view_state!`.
 

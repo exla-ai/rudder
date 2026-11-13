@@ -198,8 +198,9 @@ same panel.
 
 Press `⌥g` (also `^W g`) to see every running agent at once: the screen turns
 into a grid with one tile per agent showing the bottom of its terminal, titled
-with its id, task, model and whether it is working, needs you, or is done.
-Arrows or `h`/`j`/`k`/`l` move the highlight, `Enter` or a click opens that
+with its number, id, task, model and whether it is working, needs you, or is
+done. `⌥Tab` / `⌥Shift-Tab` cycle the highlight, `⌥1` to `⌥9` jump to that
+tile, arrows or `h`/`j`/`k`/`l` move it, and `Enter` or a click opens that
 agent in the worker pane, and `⌥g` or `Esc` closes the grid. Agents are never
 resized for it, so their scrollback is untouched. With more agents than fit,
 the grid pages.

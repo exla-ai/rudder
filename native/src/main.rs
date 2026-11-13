@@ -5277,15 +5277,64 @@ impl App {
         self.dirty = true;
     }
 
+    /// ⌥Tab / ⌥Shift+Tab: step the highlight to the next or previous tile,
+    /// wrapping at the ends (arrows stop at the edges instead).
+    fn cycle_gods_view_cursor(&mut self, forward: bool) {
+        let count = self.gods_view_agents().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.gods_view_cursor.min(count - 1);
+        self.gods_view_cursor = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        self.dirty = true;
+    }
+
+    /// ⌥1..⌥9: highlight tile `slot` (0-based, counted across pages, the
+    /// number in its title). A number past the last tile does nothing.
+    fn jump_gods_view_cursor(&mut self, slot: usize) {
+        if slot < self.gods_view_agents().len() {
+            self.gods_view_cursor = slot;
+            self.dirty = true;
+        }
+    }
+
     fn handle_gods_view_key(&mut self, key: KeyEvent) {
         let alt_like = key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::META);
         let cols = self.gods_view_cols.max(1) as isize;
         let page = self.gods_view_per_page.max(1) as isize;
+        // ⌥1..⌥9 pick a tile by number. God's view has no text input, so the
+        // bare digits and what Option+digit types on a US layout without
+        // option-as-meta (¡ ™ £ ¢ ∞ § ¶ • ª) are claimed too.
+        const OPTION_DIGITS: [char; 9] = [
+            '\u{00a1}', '\u{2122}', '\u{00a3}', '\u{00a2}', '\u{221e}', '\u{00a7}', '\u{00b6}',
+            '\u{2022}', '\u{00aa}',
+        ];
+        if let KeyCode::Char(c) = key.code {
+            let slot = match c {
+                '1'..='9' => Some(c as usize - '1' as usize),
+                _ => OPTION_DIGITS.iter().position(|&option| option == c),
+            };
+            if let Some(slot) = slot {
+                self.jump_gods_view_cursor(slot);
+                return;
+            }
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('\u{00a9}') => self.close_gods_view(),
             KeyCode::Char('g') | KeyCode::Char('G') if alt_like => self.close_gods_view(),
+            // ⌥Tab / ⌥Shift+Tab cycle tiles (bare Tab too: Option+Tab arrives
+            // as plain Tab where Option is not Meta). The kitty protocol
+            // reports Shift+Tab as BackTab; some terminals send Tab+SHIFT.
+            KeyCode::BackTab => self.cycle_gods_view_cursor(false),
+            KeyCode::Tab => {
+                self.cycle_gods_view_cursor(!key.modifiers.contains(KeyModifiers::SHIFT))
+            }
             KeyCode::Left | KeyCode::Char('h') => self.move_gods_view_cursor(-1),
             KeyCode::Right | KeyCode::Char('l') => self.move_gods_view_cursor(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_gods_view_cursor(-cols),

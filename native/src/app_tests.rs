@@ -2030,7 +2030,7 @@ fn a_kimi_or_glm_agent_is_claude_code_on_openrouter_and_a_claude_agent_is_not() 
     let mut kimi = agent_command(Backend::Claude, "kimi", None, "fix it", AgentMode::Execute, session);
     let mut claude = agent_command(Backend::Claude, "opus", None, "fix it", AgentMode::Execute, session);
     for command in [&mut kimi, &mut claude] {
-        attach_credentials_with(command, || Some(key.to_string())).expect("key resolved");
+        attach_credentials_with(command, |_| Some(key.to_string())).expect("key resolved");
     }
     let env = |command: &TerminalCommand, name: &str| {
         command.env.iter().rev().find(|(key, _)| key == name).map(|(_, value)| value.clone())

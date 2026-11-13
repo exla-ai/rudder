@@ -150,13 +150,14 @@ pub(crate) fn observed_model_update(backend: Backend, current: &str, observed: &
     }
 }
 
-/// A Kimi or GLM launch with no OpenRouter key is refused with this one
-/// notice before any work starts. The spawn refuses it too, for every path.
+/// A routed launch (Kimi, GLM, Morph) with no key for its provider is refused
+/// with this one notice before any work starts. The spawn refuses it too, for
+/// every path.
 pub(crate) fn openrouter_key_refusal(backend: Backend, model: &str) -> Option<&'static str> {
-    openrouter_model(backend, model)?;
-    rudder_native::openrouter::resolve_key()
+    let provider = openrouter_model(backend, model)?.provider();
+    rudder_native::openrouter::resolve_key(provider)
         .is_none()
-        .then_some(rudder_native::openrouter::MISSING_KEY)
+        .then_some(provider.missing_key())
 }
 
 pub(crate) fn provider_backend(provider: &str) -> Option<Backend> {
@@ -851,7 +852,11 @@ pub(crate) fn provider_suggestions(query: &str) -> Vec<Suggestion> {
             .into_iter()
             .map(|routed| Suggestion {
                 label: routed.alias().to_string(),
-                detail: format!("Claude Code on {} via OpenRouter", routed.display_name()),
+                detail: format!(
+                    "Claude Code on {} via {}",
+                    routed.display_name(),
+                    routed.provider().name()
+                ),
                 action: SuggestionAction::SetModel {
                     backend: Backend::Claude,
                     model: routed.alias().to_string(),
@@ -1318,6 +1323,8 @@ pub(crate) fn fallback_model_rows() -> Vec<(Backend, &'static str, &'static str)
         // Claude Code on OpenRouter models (rudder_native::openrouter).
         (Backend::Claude, "kimi", "Kimi K3.1 Pro via OpenRouter"),
         (Backend::Claude, "glm", "GLM 5.3 via OpenRouter"),
+        (Backend::Claude, "morph/kimi", "Kimi K3.1 via Morph"),
+        (Backend::Claude, "morph/deepseek", "DeepSeek V4.1 Flash via Morph"),
         (Backend::Claude, "claude-sonnet-5", "explicit id"),
         // Codex rows mirror the ChatGPT-auth account cache (2026-10): the 5.6
         // family ships as capability tiers (sol > terra > luna, by price);
@@ -1733,6 +1740,10 @@ pub(crate) fn models_dev_cache_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn backend_for_model(model: &str) -> Backend {
+    // Routed aliases (`morph/kimi`) are Claude Code even with a slash.
+    if rudder_native::openrouter::OpenRouterModel::parse(model).is_some() {
+        return Backend::Claude;
+    }
     // A provider-qualified id ("anthropic/claude-sonnet-4-5") is opencode's shape;
     // neither claude nor codex names a model with a slash.
     if model.contains('/') {

@@ -1,17 +1,19 @@
-//! Claude Code on OpenRouter models: Kimi and GLM agents.
+//! Claude Code on routed models: Kimi and GLM on OpenRouter, Kimi and
+//! DeepSeek on Morph.
 //!
-//! A Kimi or GLM agent IS a Claude Code agent (`Backend::Claude`) whose model
-//! is the alias `kimi` or `glm`. Hooks, signals, the subagent tree, compaction
+//! A routed agent IS a Claude Code agent (`Backend::Claude`) whose model is
+//! one of the aliases `kimi`, `glm`, `morph/kimi` or `morph/deepseek`. Hooks, signals, the subagent tree, compaction
 //! status, resume and the `--settings` file all take the Claude path
 //! unchanged; only that one process's environment differs. Two steps:
 //!
 //! - [`route_claude_command`], when a Claude command is built: `--model kimi`
 //!   becomes the Claude Code model slot it rides on (`opus`, `sonnet` for
-//!   GLM), and every slot names an OpenRouter model, so nothing in the
-//!   session ever falls back to a real Claude model. No secrets yet.
+//!   GLM and DeepSeek), and every slot names a model of the same provider, so
+//!   nothing in the session ever falls back to a real Claude model. No
+//!   secrets yet.
 //! - [`attach_credentials`], at PTY spawn, which every agent launch passes
 //!   through (the managed `__claude-sdk` path too, which inherits the env):
-//!   resolves the OpenRouter key and points the process at OpenRouter.
+//!   resolves the provider's key and points the process at the provider.
 //!
 //! The key travels only in the child's environment: never argv (visible in
 //! `ps`), run records, RUDDER.md, logs or completion output. Nothing global
@@ -30,12 +32,66 @@ pub const GLM_5_3: &str = "z-ai/glm-5.3";
 /// is). Once it is, put its id here and it takes the Fable slot.
 pub const KIMI_K3_1: &str = "";
 
+/// Morph's model ids. Morph serves the Anthropic Messages API at
+/// `/v1/messages` for both (checked 2026-11-13).
+pub const MORPH_KIMI_K3_1: &str = "morph-kimik31";
+pub const MORPH_DEEPSEEK_V4_1_FLASH: &str = "morph-dsv41flash";
+
 /// OpenRouter's Anthropic-compatible endpoint (Claude Code appends `/v1/...`).
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
+/// Morph's, likewise.
+pub const MORPH_BASE_URL: &str = "https://api.morphllm.com";
 
 /// The one notice a Kimi or GLM launch gives when no key is found.
 pub const MISSING_KEY: &str =
     "No OpenRouter key: run opencode auth login or set OPENROUTER_API_KEY";
+/// The same for a Morph launch.
+pub const MORPH_MISSING_KEY: &str = "No Morph key: run opencode auth login or set MORPH_API_KEY";
+
+/// Who serves a routed model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Provider {
+    OpenRouter,
+    Morph,
+}
+
+impl Provider {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OpenRouter",
+            Self::Morph => "Morph",
+        }
+    }
+
+    pub fn base_url(self) -> &'static str {
+        match self {
+            Self::OpenRouter => OPENROUTER_BASE_URL,
+            Self::Morph => MORPH_BASE_URL,
+        }
+    }
+
+    pub fn missing_key(self) -> &'static str {
+        match self {
+            Self::OpenRouter => MISSING_KEY,
+            Self::Morph => MORPH_MISSING_KEY,
+        }
+    }
+
+    fn env_var(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OPENROUTER_API_KEY",
+            Self::Morph => "MORPH_API_KEY",
+        }
+    }
+
+    /// The provider's id in opencode's auth.json and in Rudder's profiles.
+    fn key_id(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "openrouter",
+            Self::Morph => "morph",
+        }
+    }
+}
 
 /// Set by [`route_claude_command`] on a routed command; [`attach_credentials`]
 /// acts only on commands that carry it.
@@ -45,16 +101,27 @@ pub const ROUTE_ENV: &str = "RUDDER_OPENROUTER_MODEL";
 pub enum OpenRouterModel {
     Kimi,
     Glm,
+    MorphKimi,
+    MorphDeepseek,
 }
 
 impl OpenRouterModel {
-    pub const ALL: [Self; 2] = [Self::Kimi, Self::Glm];
+    pub const ALL: [Self; 4] = [Self::Kimi, Self::Glm, Self::MorphKimi, Self::MorphDeepseek];
 
     /// The model alias a run stores and the dashboard shows.
     pub fn alias(self) -> &'static str {
         match self {
             Self::Kimi => "kimi",
             Self::Glm => "glm",
+            Self::MorphKimi => "morph/kimi",
+            Self::MorphDeepseek => "morph/deepseek",
+        }
+    }
+
+    pub fn provider(self) -> Provider {
+        match self {
+            Self::Kimi | Self::Glm => Provider::OpenRouter,
+            Self::MorphKimi | Self::MorphDeepseek => Provider::Morph,
         }
     }
 
@@ -65,10 +132,13 @@ impl OpenRouterModel {
             .find(|candidate| candidate.alias().eq_ignore_ascii_case(model))
     }
 
-    pub fn openrouter_id(self) -> &'static str {
+    /// The provider's id for the model.
+    pub fn model_id(self) -> &'static str {
         match self {
             Self::Kimi => KIMI_K3_1_PRO,
             Self::Glm => GLM_5_3,
+            Self::MorphKimi => MORPH_KIMI_K3_1,
+            Self::MorphDeepseek => MORPH_DEEPSEEK_V4_1_FLASH,
         }
     }
 
@@ -76,6 +146,8 @@ impl OpenRouterModel {
         match self {
             Self::Kimi => "Kimi K3.1 Pro",
             Self::Glm => "GLM 5.3",
+            Self::MorphKimi => "Kimi K3.1",
+            Self::MorphDeepseek => "DeepSeek V4.1 Flash",
         }
     }
 
@@ -83,48 +155,75 @@ impl OpenRouterModel {
     /// the raw id) keeps Claude Code's own `/model` picker marking the right row.
     pub fn claude_slot(self) -> &'static str {
         match self {
-            Self::Kimi => "opus",
-            Self::Glm => "sonnet",
+            Self::Kimi | Self::MorphKimi => "opus",
+            Self::Glm | Self::MorphDeepseek => "sonnet",
         }
     }
 }
 
-/// Every Claude Code model slot, relabelled to an OpenRouter model. An unset
-/// slot would fall back to the real Claude model (billed through OpenRouter),
-/// so all of them are set, plus the small/fast model background tasks use.
+/// Every Claude Code model slot, relabelled to a model of the routed
+/// model's provider. An unset slot would fall back to the real Claude model
+/// (billed through the provider), so all of them are set, plus the
+/// small/fast model background tasks use.
 ///
-///   Opus slot   -> Kimi K3.1 Pro
-///   Fable slot  -> Kimi K3.1 once OpenRouter lists it; Kimi K3.1 Pro until then
-///   Sonnet slot -> GLM 5.3
-///   Haiku slot  -> GLM 5.3, the slot Claude Code runs its background tasks on
+///   OpenRouter: Opus -> Kimi K3.1 Pro, Fable -> Kimi K3.1 once OpenRouter
+///   lists it (Kimi K3.1 Pro until then), Sonnet and Haiku -> GLM 5.3
+///   Morph: Opus and Fable -> Kimi K3.1, Sonnet and Haiku -> DeepSeek V4.1 Flash
+///
+/// Haiku is the slot Claude Code runs its background tasks on.
 pub fn slot_env(model: OpenRouterModel) -> Vec<(String, String)> {
-    let via = |id: &str| format!("{id} via OpenRouter");
-    let (fable, fable_name, fable_desc) = if KIMI_K3_1.is_empty() {
-        (
+    let provider = model.provider();
+    let via = |id: &str| format!("{id} via {}", provider.name());
+    // (big id, big name, fable id, fable name, fable description, small id, small name)
+    let (big, big_name, fable, fable_name, fable_desc, small, small_name) = match provider {
+        Provider::OpenRouter if KIMI_K3_1.is_empty() => (
+            KIMI_K3_1_PRO,
+            "Kimi K3.1 Pro",
             KIMI_K3_1_PRO,
             "Kimi K3.1 Pro",
             "same as above; plain Kimi K3.1 isn't on OpenRouter yet".to_string(),
-        )
-    } else {
-        (KIMI_K3_1, "Kimi K3.1", via(KIMI_K3_1))
+            GLM_5_3,
+            "GLM 5.3",
+        ),
+        Provider::OpenRouter => (
+            KIMI_K3_1_PRO,
+            "Kimi K3.1 Pro",
+            KIMI_K3_1,
+            "Kimi K3.1",
+            via(KIMI_K3_1),
+            GLM_5_3,
+            "GLM 5.3",
+        ),
+        Provider::Morph => (
+            MORPH_KIMI_K3_1,
+            "Kimi K3.1",
+            MORPH_KIMI_K3_1,
+            "Kimi K3.1",
+            "same as above".to_string(),
+            MORPH_DEEPSEEK_V4_1_FLASH,
+            "DeepSeek V4.1 Flash",
+        ),
     };
     [
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL", KIMI_K3_1_PRO.to_string()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "Kimi K3.1 Pro".to_string()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", via(KIMI_K3_1_PRO)),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", big.to_string()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", big_name.to_string()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION", via(big)),
         ("ANTHROPIC_DEFAULT_FABLE_MODEL", fable.to_string()),
         ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", fable_name.to_string()),
         ("ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION", fable_desc),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL", GLM_5_3.to_string()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "GLM 5.3".to_string()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", via(GLM_5_3)),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", GLM_5_3.to_string()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "GLM 5.3".to_string()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", small.to_string()),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            small_name.to_string(),
+        ),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION", via(small)),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", small.to_string()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", small_name.to_string()),
         (
             "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
             "same as above; Claude Code runs background tasks on this slot".to_string(),
         ),
-        ("ANTHROPIC_SMALL_FAST_MODEL", GLM_5_3.to_string()),
+        ("ANTHROPIC_SMALL_FAST_MODEL", small.to_string()),
         // `--model` on the command line already names the slot; this covers a
         // launch path that omits it, so the global default model never applies.
         ("ANTHROPIC_MODEL", model.claude_slot().to_string()),
@@ -134,7 +233,7 @@ pub fn slot_env(model: OpenRouterModel) -> Vec<(String, String)> {
     .collect()
 }
 
-/// Route a Claude command whose `--model` is `kimi` or `glm` to OpenRouter.
+/// Route a Claude command whose `--model` is a routed alias to its provider.
 /// Returns the model when it did; any other command is left untouched.
 pub fn route_claude_command(command: &mut TerminalCommand) -> Option<OpenRouterModel> {
     let at = command.args.iter().position(|arg| arg == "--model")?;
@@ -147,22 +246,38 @@ pub fn route_claude_command(command: &mut TerminalCommand) -> Option<OpenRouterM
     Some(model)
 }
 
-/// Point a routed command at OpenRouter with the resolved key. A command that
-/// was not routed is left alone. Without a key the launch is refused with
-/// [`MISSING_KEY`] rather than started against Anthropic.
+/// Point a routed command at its provider with the resolved key. A command
+/// that was not routed is left alone. Without a key the launch is refused
+/// with the provider's missing-key notice rather than started against
+/// Anthropic.
 pub fn attach_credentials(command: &mut TerminalCommand) -> Result<()> {
     attach_credentials_with(command, resolve_key)
 }
 
 pub fn attach_credentials_with(
     command: &mut TerminalCommand,
-    resolve: impl FnOnce() -> Option<String>,
+    resolve: impl FnOnce(Provider) -> Option<String>,
 ) -> Result<()> {
-    if !command.env.iter().any(|(key, _)| key == ROUTE_ENV) {
+    let Some(route) = command
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == ROUTE_ENV)
+        .map(|(_, value)| value.clone())
+    else {
         return Ok(());
-    }
-    let key = resolve().ok_or_else(|| anyhow!(MISSING_KEY))?;
-    set_env(command, "ANTHROPIC_BASE_URL", OPENROUTER_BASE_URL.to_string());
+    };
+    // Only aliases are written there; an unknown one is refused, never sent
+    // to a provider it may not belong to.
+    let provider = OpenRouterModel::parse(&route)
+        .ok_or_else(|| anyhow!("unknown routed model {route}"))?
+        .provider();
+    let key = resolve(provider).ok_or_else(|| anyhow!(provider.missing_key()))?;
+    set_env(
+        command,
+        "ANTHROPIC_BASE_URL",
+        provider.base_url().to_string(),
+    );
     set_env(command, "ANTHROPIC_AUTH_TOKEN", key);
     // The token must be the only credential: an inherited Anthropic key or
     // Claude OAuth token would otherwise be sent to OpenRouter, or win.
@@ -171,18 +286,21 @@ pub fn attach_credentials_with(
     Ok(())
 }
 
-/// The OpenRouter key: `$OPENROUTER_API_KEY`, then opencode's login
-/// (`opencode auth login` writes `~/.local/share/opencode/auth.json`), then an
-/// `openrouter` api-key profile in Rudder's own `~/.rudder/auth-profiles.json`.
-pub fn resolve_key() -> Option<String> {
+/// The provider's key: `$OPENROUTER_API_KEY` / `$MORPH_API_KEY`, then
+/// opencode's login (`opencode auth login` writes
+/// `~/.local/share/opencode/auth.json`), then an `openrouter` / `morph`
+/// api-key profile in Rudder's own `~/.rudder/auth-profiles.json`.
+pub fn resolve_key(provider: Provider) -> Option<String> {
     resolve_key_from(
-        std::env::var("OPENROUTER_API_KEY").ok(),
+        provider,
+        std::env::var(provider.env_var()).ok(),
         opencode_auth_path().as_deref(),
         rudder_auth_profiles_path().as_deref(),
     )
 }
 
 pub fn resolve_key_from(
+    provider: Provider,
     env: Option<String>,
     opencode_auth: Option<&Path>,
     rudder_profiles: Option<&Path>,
@@ -199,7 +317,7 @@ pub fn resolve_key_from(
     };
     if let Some(key) = read(opencode_auth)
         .as_ref()
-        .and_then(|auth| auth.pointer("/openrouter/key")?.as_str())
+        .and_then(|auth| auth.get(provider.key_id())?.get("key")?.as_str())
         .and_then(nonempty)
     {
         return Some(key);
@@ -208,12 +326,12 @@ pub fn resolve_key_from(
     let profiles = store.get("profiles")?.as_object()?;
     let api_key = |profile: &serde_json::Value| {
         (profile.get("type")?.as_str()? == "api_key"
-            && profile.get("provider")?.as_str()? == "openrouter")
-            .then(|| profile.get("key")?.as_str().and_then(nonempty))
-            .flatten()
+            && profile.get("provider")?.as_str()? == provider.key_id())
+        .then(|| profile.get("key")?.as_str().and_then(nonempty))
+        .flatten()
     };
     profiles
-        .get("openrouter:default")
+        .get(&format!("{}:default", provider.key_id()))
         .and_then(api_key)
         .or_else(|| profiles.values().find_map(api_key))
 }
@@ -260,10 +378,30 @@ mod tests {
 
     #[test]
     fn kimi_routes_to_the_opus_slot_and_every_slot_names_an_openrouter_model() {
-        let mut command =
-            TerminalCommand::with_args("claude", ["--permission-mode", "bypassPermissions", "--model", "kimi", "task"]);
-        assert_eq!(route_claude_command(&mut command), Some(OpenRouterModel::Kimi));
-        assert_eq!(command.args, ["--permission-mode", "bypassPermissions", "--model", "opus", "task"]);
+        let mut command = TerminalCommand::with_args(
+            "claude",
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "kimi",
+                "task",
+            ],
+        );
+        assert_eq!(
+            route_claude_command(&mut command),
+            Some(OpenRouterModel::Kimi)
+        );
+        assert_eq!(
+            command.args,
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "opus",
+                "task"
+            ]
+        );
         assert_eq!(env(&command, ROUTE_ENV), Some("kimi"));
         assert_eq!(env(&command, "ANTHROPIC_MODEL"), Some("opus"));
         for slot in ["OPUS", "FABLE", "SONNET", "HAIKU"] {
@@ -281,11 +419,50 @@ mod tests {
     }
 
     #[test]
+    fn morph_models_route_to_morph_with_a_morph_key() {
+        let mut command =
+            TerminalCommand::with_args("claude", ["--model", "morph/deepseek", "task"]);
+        assert_eq!(
+            route_claude_command(&mut command),
+            Some(OpenRouterModel::MorphDeepseek)
+        );
+        assert_eq!(command.args, ["--model", "sonnet", "task"]);
+        for slot in ["OPUS", "FABLE", "SONNET", "HAIKU"] {
+            let id = env(&command, &format!("ANTHROPIC_DEFAULT_{slot}_MODEL")).unwrap();
+            assert!(
+                id == MORPH_KIMI_K3_1 || id == MORPH_DEEPSEEK_V4_1_FLASH,
+                "{slot} -> {id}"
+            );
+        }
+        attach_credentials_with(&mut command, |provider| {
+            assert_eq!(provider, Provider::Morph);
+            Some("morph-key".into())
+        })
+        .unwrap();
+        assert_eq!(env(&command, "ANTHROPIC_BASE_URL"), Some(MORPH_BASE_URL));
+        assert_eq!(env(&command, "ANTHROPIC_AUTH_TOKEN"), Some("morph-key"));
+
+        let mut kimi = TerminalCommand::with_args("claude", ["--model", "morph/kimi"]);
+        assert_eq!(
+            route_claude_command(&mut kimi),
+            Some(OpenRouterModel::MorphKimi)
+        );
+        assert_eq!(kimi.args, ["--model", "opus"]);
+        let error = attach_credentials_with(&mut kimi, |_| None).unwrap_err();
+        assert_eq!(error.to_string(), MORPH_MISSING_KEY);
+    }
+
+    #[test]
     fn claude_models_are_not_routed_and_get_no_credentials() {
-        for model in ["opus", "sonnet", "claude-sonnet-5", "moonshotai/kimi-k3.1-pro"] {
+        for model in [
+            "opus",
+            "sonnet",
+            "claude-sonnet-5",
+            "moonshotai/kimi-k3.1-pro",
+        ] {
             let mut command = TerminalCommand::with_args("claude", ["--model", model]);
             assert_eq!(route_claude_command(&mut command), None, "{model}");
-            attach_credentials_with(&mut command, || panic!("no key lookup for {model}")).unwrap();
+            attach_credentials_with(&mut command, |_| panic!("no key lookup for {model}")).unwrap();
             assert!(command.env.is_empty(), "{model}: {:?}", command.env);
             assert_eq!(command.args, ["--model", model]);
         }
@@ -296,8 +473,11 @@ mod tests {
         let key = "sk-or-test-0123456789";
         let mut command = TerminalCommand::with_args("claude", ["--model", "glm", "say hi"]);
         route_claude_command(&mut command);
-        attach_credentials_with(&mut command, || Some(key.to_string())).unwrap();
-        assert_eq!(env(&command, "ANTHROPIC_BASE_URL"), Some(OPENROUTER_BASE_URL));
+        attach_credentials_with(&mut command, |_| Some(key.to_string())).unwrap();
+        assert_eq!(
+            env(&command, "ANTHROPIC_BASE_URL"),
+            Some(OPENROUTER_BASE_URL)
+        );
         assert_eq!(env(&command, "ANTHROPIC_AUTH_TOKEN"), Some(key));
         assert_eq!(env(&command, "ANTHROPIC_API_KEY"), Some(""));
         assert_eq!(env(&command, "CLAUDE_CODE_OAUTH_TOKEN"), Some(""));
@@ -306,25 +486,64 @@ mod tests {
 
         let mut keyless = TerminalCommand::with_args("claude", ["--model", "kimi"]);
         route_claude_command(&mut keyless);
-        let error = attach_credentials_with(&mut keyless, || None).unwrap_err();
+        let error = attach_credentials_with(&mut keyless, |_| None).unwrap_err();
         assert_eq!(error.to_string(), MISSING_KEY);
         assert_eq!(env(&keyless, "ANTHROPIC_BASE_URL"), None);
     }
 
     #[test]
     fn key_comes_from_env_then_opencode_then_rudder_profiles() {
-        let dir = std::env::temp_dir().join(format!("rudder-openrouter-key-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rudder-openrouter-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let opencode = dir.join("auth.json");
         let profiles = dir.join("auth-profiles.json");
         std::fs::write(&opencode, r#"{"baseten":{"type":"api","key":"b"},"openrouter":{"type":"api","key":"from-opencode"}}"#).unwrap();
         std::fs::write(&profiles, r#"{"version":1,"profiles":{"anthropic:x":{"type":"api_key","provider":"anthropic","key":"no"},"or":{"type":"api_key","provider":"openrouter","key":"from-rudder"}}}"#).unwrap();
 
-        assert_eq!(resolve_key_from(Some(" from-env ".into()), Some(&opencode), Some(&profiles)).as_deref(), Some("from-env"));
-        assert_eq!(resolve_key_from(Some("  ".into()), Some(&opencode), Some(&profiles)).as_deref(), Some("from-opencode"));
-        assert_eq!(resolve_key_from(None, Some(&dir.join("missing.json")), Some(&profiles)).as_deref(), Some("from-rudder"));
-        std::fs::write(&opencode, r#"{"baseten":{"type":"api","key":"b"}}"#).unwrap();
-        assert_eq!(resolve_key_from(None, Some(&opencode), None), None);
+        assert_eq!(
+            resolve_key_from(
+                Provider::OpenRouter,
+                Some(" from-env ".into()),
+                Some(&opencode),
+                Some(&profiles)
+            )
+            .as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            resolve_key_from(
+                Provider::OpenRouter,
+                Some("  ".into()),
+                Some(&opencode),
+                Some(&profiles)
+            )
+            .as_deref(),
+            Some("from-opencode")
+        );
+        assert_eq!(
+            resolve_key_from(
+                Provider::OpenRouter,
+                None,
+                Some(&dir.join("missing.json")),
+                Some(&profiles)
+            )
+            .as_deref(),
+            Some("from-rudder")
+        );
+        std::fs::write(
+            &opencode,
+            r#"{"baseten":{"type":"api","key":"b"},"morph":{"type":"api","key":"morph-key"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_key_from(Provider::OpenRouter, None, Some(&opencode), None),
+            None
+        );
+        assert_eq!(
+            resolve_key_from(Provider::Morph, None, Some(&opencode), None).as_deref(),
+            Some("morph-key")
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

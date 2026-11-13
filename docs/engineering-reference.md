@@ -1844,6 +1844,14 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   Claude Code's explicit "set as default" key in a worker's `/model` still
   writes its slot alias to `~/.claude/settings.json` (plain Enter is session
   only); Rudder's own title/summary helpers stay on Claude.
+  **Morph (2026-11-13)** works the same way with its own `Provider`:
+  `morph/kimi` (Kimi K3.1, `morph-kimik31`, on the `opus` slot) and
+  `morph/deepseek` (DeepSeek V4.1 Flash, `morph-dsv41flash`, on `sonnet`), every
+  slot a Morph model, base URL `https://api.morphllm.com` (Morph serves
+  `/v1/messages`). Key: `$MORPH_API_KEY`, then opencode's `auth.json` `morph`
+  entry, then a `morph` api-key profile. The marker env holds the alias, which
+  picks the provider at spawn. `backend_for_model` checks routed aliases before
+  its slash-means-opencode rule.
 - **`/fast` (v2.5.0, decided):** the fast preset is the FLAGSHIP model at LOW
   effort — claude `opus(low)`, codex `gpt-6.1-sol(low)` (`fast_model_for`,
   `native/src/models.rs`) — never a downgrade to haiku/spark. This mirrors

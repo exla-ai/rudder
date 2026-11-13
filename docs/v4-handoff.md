@@ -86,6 +86,17 @@ rudder-native, rudder-jj and dist/warm-snapshot.js), rudder-worker-images and
 rudder-workers-exla:4.4.1 (digest 902a3630), control plane redeployed with the
 new RUDDER_WORKER_IMAGE. The home offers 4.4.1; npm comes from the v4.4.1 tag run.
 
+4.4.2: god's view switches tiles with Alt+Tab / Alt+Shift+Tab and Alt+1-9
+(tiles are numbered); `morph/kimi` and `morph/deepseek` run Claude Code on
+Morph like kimi/glm on OpenRouter; the home pings its Cloud links and redials
+any silent for 45 s. Before that, 19 of home-53c2's 23 links had died inside
+the proxy without a close (silent up to 47 hours), so laptops sat on
+"Reconnecting cloud input"; those sockets were killed by hand on 2026-11-13
+and redialed. 4.4.2 Cloud (23:39Z): overlay of 4.4.1 plus the new
+rudder-native and home.mjs, rudder-worker-images and rudder-workers-exla:4.4.2
+(digest 3da31bc7), control plane redeployed. The home offers 4.4.2; npm comes
+from the v4.4.2 tag run.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

@@ -8,7 +8,7 @@
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
 // /app/__mock/invite (prints a join link), /app/__mock/files/agent-edit (an agent rewrites README.md
-// in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack/Linear and a plan are mocked too,
+// in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack and a plan are mocked too,
 // and so is the team view (two teammates in Exla, one asleep; uses cloud/dist/team.js).
 // The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
@@ -314,20 +314,12 @@ let integMode = "on"; // on: configured | off: configured, nothing connected | u
 const integStore = new Map();
 function integ(scope) {
   if (!integStore.has(scope)) integStore.set(scope, scope === "org_exla"
-    ? { slack: { connected: true, team: { id: "T1", name: "Exla" }, channel: { id: "C2", name: "agents" } }, linear: { connected: true, workspace: { name: "Exla" } } }
-    : { slack: { connected: false, team: null, channel: null }, linear: { connected: false, workspace: null } });
+    ? { slack: { connected: true, team: { id: "T1", name: "Exla" }, channel: { id: "C2", name: "agents" } } }
+    : { slack: { connected: false, team: null, channel: null } });
   return integStore.get(scope);
 }
 const mine = (o) => o.members.find((m) => m.accountId === ME);
 const orgList = () => [...orgs.values()].filter(mine).map((o) => ({ id: o.id, name: o.name, role: mine(o).role, memberCount: o.members.length, createdAt: o.createdAt }));
-const LINEAR_TEAMS = [{ id: "team_eng", key: "EXL", name: "Exla" }];
-const LINEAR_PROJECTS = ["Libra", "Offstage", "Rudder"].map((name) => ({ id: `lp_${name.toLowerCase()}`, name, teams: LINEAR_TEAMS }));
-const linearLinks = new Map();
-const ISSUES = [
-  { id: "lin_1", identifier: "EXL-142", title: "Preview links should open in the phone app", url: "https://linear.app/exla/issue/EXL-142", state: "In Progress", priority: 2, team: "Rudder" },
-  { id: "lin_2", identifier: "EXL-139", title: "Digest misses agents merged after midnight", url: "https://linear.app/exla/issue/EXL-139", state: "Todo", priority: 1, team: "Rudder" },
-  { id: "lin_3", identifier: "EXL-120", title: "Settle bets when a market resolves", url: "https://linear.app/exla/issue/EXL-120", state: "Backlog", priority: 3, team: "Wager" },
-];
 
 /** Returns true when it answered the request, undefined otherwise. */
 function orgRoutes(req, res, p, url, body) {
@@ -412,7 +404,7 @@ function orgRoutes(req, res, p, url, body) {
   const scope = url.searchParams.get("org") || body.org || "personal";
   const orgOk = scope === "personal" || (orgs.get(scope) && mine(orgs.get(scope)));
   const canManage = scope === "personal" || mine(orgs.get(scope) || { members: [] })?.role === "admin";
-  if (p.startsWith("/api/app/integrations") || p.startsWith("/api/app/linear/")) {
+  if (p.startsWith("/api/app/integrations")) {
     if (!orgOk) return send(404, { error: "Organization not found" });
   }
   const configured = integMode !== "unset";
@@ -421,20 +413,18 @@ function orgRoutes(req, res, p, url, body) {
     const on = integMode === "on";
     return send(200, {
       slack: { configured, connected: configured && on && it.slack.connected, team: on ? it.slack.team : null, channel: on ? it.slack.channel : null },
-      linear: { configured, connected: configured && on && it.linear.connected, workspace: on ? it.linear.workspace : null },
       canManage,
     });
   }
-  if ((r = p.match(/^\/api\/app\/integrations\/(slack|linear)\/start$/)) && m === "POST") {
-    if (!configured) return send(503, { error: `${r[1] === "slack" ? "Slack" : "Linear"} is not set up on this server yet.` });
+  if ((r = p.match(/^\/api\/app\/integrations\/(slack)\/start$/)) && m === "POST") {
+    if (!configured) return send(503, { error: "Slack is not set up on this server yet." });
     if (!canManage) return send(403, { error: "Only admins can do that." });
     integMode = "on";
     return send(200, { url: `/app/__mock/oauth/${r[1]}${scope !== "personal" ? `?org=${encodeURIComponent(scope)}` : ""}` });
   }
-  if ((r = p.match(/^\/api\/app\/integrations\/(slack|linear)$/)) && m === "DELETE") {
+  if (p === "/api/app/integrations/slack" && m === "DELETE") {
     if (!canManage) return send(403, { error: "Only admins can do that." });
-    const it = integ(scope);
-    if (r[1] === "slack") it.slack = { connected: false, team: null, channel: null }; else it.linear = { connected: false, workspace: null };
+    integ(scope).slack = { connected: false, team: null, channel: null };
     return send(200, { ok: true });
   }
   const CHANNELS = [{ id: "C1", name: "general" }, { id: "C2", name: "agents" }, { id: "C3", name: "eng-alerts" }];
@@ -444,53 +434,6 @@ function orgRoutes(req, res, p, url, body) {
     if (!ch) return send(400, { error: "Pick a channel." });
     integ(scope).slack.channel = ch;
     return send(200, { channel: ch });
-  }
-  if (p === "/api/app/linear/issues" && m === "GET") {
-    if (!(integMode === "on" && integ(scope).linear.connected)) return send(409, { error: "Linear is not connected." });
-    const q = (url.searchParams.get("q") || "").toLowerCase();
-    return send(200, { issues: ISSUES.filter((i) => !q || `${i.identifier} ${i.title}`.toLowerCase().includes(q)) });
-  }
-  if (p === "/api/app/linear/start" && m === "POST") {
-    const issue = ISSUES.find((i) => i.id === body.issueId);
-    if (!issue) return send(404, { error: "Issue not found" });
-    const list = freshProjects ?? projects;
-    const proj = list.find((x) => x.workspaceId === body.workspace);
-    const text = `${issue.identifier}: ${issue.title}\n\n${issue.url}`;
-    if (proj) proj.agents.unshift(agent({ id: `run_l${Date.now() % 1e6}`, title: issue.title, task: text, status: "working", backend: "claude", model: "opus", createdAt: now(), updatedAt: now(), fresh: true, lastMessage: "Starting on the Linear issue." }));
-    return send(200, { ok: true, text });
-  }
-  if (p === "/api/app/linear/setup" && m === "GET") {
-    const list = (freshProjects ?? projects).map((x) => ({ workspaceId: x.workspaceId, name: x.name, repo: x.repo ?? null }));
-    const pick = (name) => list.find((x) => x.name.toLowerCase().endsWith(name.toLowerCase()));
-    const view = (kind, item) => {
-      const link = linearLinks.get(`${scope}:${kind}:${item.id}`) || null;
-      const s = link ? null : pick(item.name);
-      return { ...item, link, suggestion: s ? { workspaceId: s.workspaceId, name: s.name } : null };
-    };
-    return send(200, {
-      linearProjects: LINEAR_PROJECTS.map((x) => view("project", x)),
-      teams: LINEAR_TEAMS.map((x) => view("team", x)),
-      projects: list,
-      canManage,
-      generate: true,
-      autoStart: true,
-    });
-  }
-  if (p === "/api/app/linear/mapping" && m === "POST") {
-    if (!canManage) return send(403, { error: "only an org admin can change its integrations" });
-    const key = `${scope}:${body.kind || "project"}:${body.linearId}`;
-    if (!body.workspace) { linearLinks.delete(key); return send(200, { link: null }); }
-    const proj = (freshProjects ?? projects).find((x) => x.workspaceId === body.workspace);
-    if (!proj) return send(404, { error: "project not found" });
-    const link = { workspaceId: proj.workspaceId, projectName: proj.name, teamId: "team_eng", mine: true };
-    linearLinks.set(key, link);
-    return send(200, { link });
-  }
-  if (p === "/api/app/linear/generate" && m === "POST") {
-    if (!String(body.goal || "").trim()) return send(400, { error: "goal is required" });
-    const titles = ["Add retry to the upload client", "Show upload progress", "Log upload failures"];
-    const issues = titles.map((title, i) => ({ id: `gen_${i}`, identifier: `EXL-${200 + i}`, title, url: `https://linear.app/exla/issue/EXL-${200 + i}` }));
-    return send(200, { issues, provider: "openai", model: "gpt-6-luna", link: null });
   }
   if ((r = p.match(/^\/api\/app\/link\/slack\/([^/]+)$/)) && m === "POST") {
     if (r[1] === "expired") return send(410, { error: "This link has expired. Run /rudder link in Slack again." });
@@ -728,7 +671,6 @@ const server = http.createServer(async (req, res) => {
     const scope = url.searchParams.get("org") || "personal";
     const it = integ(scope);
     if (provider === "slack") it.slack = { ...it.slack, connected: true, team: { id: "T1", name: "Exla" }, channel: null };
-    if (provider === "linear") it.linear = { ...it.linear, connected: true, workspace: { name: "Exla" } };
     res.writeHead(302, { Location: `/app/settings?connected=${provider}` });
     return res.end();
   }

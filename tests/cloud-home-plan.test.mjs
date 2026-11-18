@@ -66,15 +66,14 @@ test("malformed graphs read as no plan", () => {
 });
 
 test("plan-queue.json gives each plan's approval gate, old single-plan files too", () => {
-  const none = { summary: null, pending: 0, launched: 0, merged: 0 };
+  const none = { summary: null };
   assert.deepEqual(plansFromQueue({ plans: [{ id: "plan-1", awaiting_approval: true, plan_request: "build it" }, { id: "plan-2" }] }), [
     { id: "plan-1", awaitingApproval: true, request: "build it", ...none },
     { id: "plan-2", awaitingApproval: false, request: null, ...none },
   ]);
   assert.deepEqual(plansFromQueue({ awaiting_approval: true, planned_nodes: [] }), [{ id: "", awaitingApproval: true, request: null, ...none }]);
-  // Progress counts, for closing a plan's Linear issue when its last worker merges.
-  assert.deepEqual(plansFromQueue({ plans: [{ id: "p", plan_summary: "Ship billing", planned_nodes: [{ id: "n3" }], launched_node_ids: ["n0", "n1", "n2"], merged_node_ids: ["n0"] }] }), [
-    { id: "p", awaitingApproval: false, request: null, summary: "Ship billing", pending: 1, launched: 3, merged: 1 },
+  assert.deepEqual(plansFromQueue({ plans: [{ id: "p", plan_summary: "Ship billing" }] }), [
+    { id: "p", awaitingApproval: false, request: null, summary: "Ship billing" },
   ]);
   assert.deepEqual(plansFromQueue({ plans: [] }), []);
   assert.deepEqual(plansFromQueue("nope"), []);
@@ -93,7 +92,7 @@ test("readProjectPlan combines both files, re-reads on change, and never throws"
     write(dir, "plan-queue.json", { plans: [{ id: "plan-1", awaiting_approval: true }] });
     const gated = readProjectPlan(dir);
     assert.equal(gated.awaitingApproval, true);
-    assert.deepEqual(gated.plans, [{ id: "plan-1", awaitingApproval: true, request: null, summary: null, pending: 0, launched: 0, merged: 0 }]);
+    assert.deepEqual(gated.plans, [{ id: "plan-1", awaitingApproval: true, request: null, summary: null }]);
 
     write(dir, "graph.json", "{ not json");
     const broken = readProjectPlan(dir);

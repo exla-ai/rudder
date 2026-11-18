@@ -32,7 +32,6 @@ export const PRODUCT_EVENTS = [
   "download_mac_clicked",
   "install_cli_copied",
   "phone_link_opened",
-  "linear_issue_started",
   // Captured by the server itself (server.ts), whichever client acted:
   "app_active",
   "app_error",

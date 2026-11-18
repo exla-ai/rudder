@@ -1,4 +1,4 @@
-// Orgs: a named group of accounts that share integrations (Slack, Linear).
+// Orgs: a named group of accounts that share integrations (Slack).
 // Two roles: admins add and remove people and change roles, members just
 // belong. People join through invite links (no email is ever sent): a link is
 // single use, lasts 7 days, and may be locked to one email address. The token

@@ -17,7 +17,6 @@ const test = ready
 const { createIntegrations, verifyState } = ready ? await import(moduleUrl.href) : {};
 const Database = ready ? createRequire(fileURLToPath(sqlitePath))("better-sqlite3") : null;
 const { matchProject, parseSlashCommand } = ready ? await import(new URL("../cloud/dist/slack-app.js", import.meta.url).href) : {};
-const { linearTaskText } = ready ? await import(new URL("../cloud/dist/linear.js", import.meta.url).href) : {};
 
 const SIGNING = "slack-signing-secret";
 const ENV = {
@@ -25,8 +24,6 @@ const ENV = {
   RUDDER_SLACK_CLIENT_ID: "slack-client",
   RUDDER_SLACK_CLIENT_SECRET: "slack-secret",
   RUDDER_SLACK_SIGNING_SECRET: SIGNING,
-  RUDDER_LINEAR_CLIENT_ID: "linear-client",
-  RUDDER_LINEAR_CLIENT_SECRET: "linear-secret",
 };
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -50,25 +47,6 @@ function fakeUpstream() {
     if (url.startsWith("https://slack.com/api/chat.postMessage")) return json({ ok: true, ts: "1.1" });
     if (url.startsWith("https://slack.com/api/auth.revoke")) return json({ ok: true });
     if (url.startsWith("https://hooks.slack.com/")) return new Response("ok");
-    if (url === "https://api.linear.app/oauth/token") {
-      return json({ access_token: "lin_SECRET_ACCESS", refresh_token: "lin_refresh", expires_in: 86400, scope: "read,write" });
-    }
-    if (url === "https://api.linear.app/graphql") {
-      const { query, variables } = JSON.parse(body);
-      if (query.includes("organization")) return json({ data: { organization: { name: "Acme Linear", urlKey: "acme" } } });
-      if (query.includes("commentCreate")) return json({ data: { commentCreate: { success: true } } });
-      if (query.includes("issue(id")) {
-        assert.equal(variables.id, "iss-1");
-        return json({ data: { issue: { id: "iss-1", identifier: "ENG-7", title: "Fix login", url: "https://linear.app/acme/issue/ENG-7", priority: 2, description: "It breaks on Safari.", state: { name: "Todo", type: "unstarted" }, team: { key: "ENG" } } } });
-      }
-      const node = (id, identifier, title) => ({ id, identifier, title, url: `https://linear.app/x/${identifier}`, priority: 1, state: { name: "Todo", type: "unstarted" }, team: { key: "ENG" } });
-      return json({ data: {
-        viewer: { assignedIssues: { nodes: [node("iss-1", "ENG-7", "Fix login")] } },
-        issues: { nodes: [node("iss-2", "ENG-8", "Docs"), node("iss-1", "ENG-7", "Fix login")] },
-        searchIssues: { nodes: [node("iss-3", "ENG-9", "Login copy")] },
-      } });
-    }
-    if (url === "https://api.linear.app/oauth/revoke") return new Response("", { status: 200 });
     throw new Error(`unexpected fetch ${url}`);
   };
   return { calls, fetchImpl };
@@ -158,7 +136,6 @@ test("slack oauth round trip stores an encrypted token and lists channels", asyn
 
     const summary = await ctx.call("GET", "/api/app/integrations", { account: "alice" });
     assert.deepEqual(summary.data.slack, { configured: true, connected: true, team: { id: "T1", name: "Acme" }, channel: null });
-    assert.equal(summary.data.linear.connected, false);
     assert.equal(summary.data.canManage, true);
 
     const channels = await ctx.call("GET", "/api/app/integrations/slack/channels", { account: "alice" });
@@ -192,8 +169,6 @@ test("bad, tampered, expired and cancelled oauth states are refused", async () =
     const tampered = `${body}.${"A".repeat(43)}`;
     let res = await ctx.call("GET", `/api/integrations/slack/callback?code=good&state=${encodeURIComponent(tampered)}`);
     assert.equal(res.location, "/app/settings?error=bad_state&provider=slack");
-    res = await ctx.call("GET", `/api/integrations/linear/callback?code=good&state=${encodeURIComponent(state)}`);
-    assert.equal(res.location, "/app/settings?error=bad_state&provider=linear", "a slack state cannot finish a linear connect");
     res = await ctx.call("GET", "/api/integrations/slack/callback?error=access_denied");
     assert.equal(res.location, "/app/settings?error=cancelled&provider=slack");
     res = await ctx.call("GET", `/api/integrations/slack/callback?code=bad&state=${encodeURIComponent(state)}`);
@@ -221,8 +196,7 @@ test("without RUDDER_SECRETS_KEY or client ids connect is a 503", async () => {
   try {
     const summary = await unconfigured.call("GET", "/api/app/integrations", { account: "alice" });
     assert.equal(summary.data.slack.configured, false);
-    assert.equal(summary.data.linear.configured, false);
-    assert.equal((await unconfigured.call("POST", "/api/app/integrations/linear/start", { account: "alice", body: {} })).status, 503);
+    assert.equal((await unconfigured.call("POST", "/api/app/integrations/slack/start", { account: "alice", body: {} })).status, 503);
   } finally {
     await unconfigured.close();
   }
@@ -246,55 +220,6 @@ test("org integrations: admins connect, members read, outsiders get 404", async 
   } finally {
     await ctx.close();
   }
-});
-
-test("linear: connect, list issues assigned first, start one as a task and comment", async () => {
-  const ctx = await setup();
-  try {
-    const start = await ctx.call("POST", "/api/app/integrations/linear/start", { account: "alice", body: {} });
-    const authorize = new URL(start.data.url);
-    assert.equal(authorize.origin + authorize.pathname, "https://linear.app/oauth/authorize");
-    assert.equal(authorize.searchParams.get("scope"), "read,write,issues:create,comments:create");
-    const state = authorize.searchParams.get("state");
-    const cb = await ctx.call("GET", `/api/integrations/linear/callback?code=c&state=${encodeURIComponent(state)}`);
-    assert.equal(cb.location, "/app/settings?connected=linear");
-    const dump = JSON.stringify(ctx.database.prepare("select * from rudder_integrations").all());
-    assert.ok(!dump.includes("lin_SECRET_ACCESS") && !dump.includes("lin_refresh"));
-    assert.deepEqual((await ctx.call("GET", "/api/app/integrations", { account: "alice" })).data.linear, {
-      configured: true, connected: true, workspace: { name: "Acme Linear" },
-    });
-
-    const issues = await ctx.call("GET", "/api/app/linear/issues", { account: "alice" });
-    assert.deepEqual(issues.data.issues.map((i) => i.identifier), ["ENG-7", "ENG-8"]);
-    assert.deepEqual(issues.data.issues[0], { id: "iss-1", identifier: "ENG-7", title: "Fix login", url: "https://linear.app/x/ENG-7", state: "Todo", priority: 1, team: "ENG" });
-    const searched = await ctx.call("GET", "/api/app/linear/issues?q=login", { account: "alice" });
-    assert.deepEqual(searched.data.issues.map((i) => i.identifier), ["ENG-7", "ENG-9"]);
-
-    assert.equal((await ctx.call("POST", "/api/app/linear/start", { account: "alice", body: { issueId: "iss-1", workspace: "nope" } })).status, 404);
-    const started = await ctx.call("POST", "/api/app/linear/start", { account: "alice", body: { issueId: "iss-1", workspace: "ws1" } });
-    assert.equal(started.status, 200, JSON.stringify(started.data));
-    assert.equal(started.data.text, "Linear ENG-7: Fix login\n\nIt breaks on Safari.\n\nhttps://linear.app/acme/issue/ENG-7");
-    assert.deepEqual(ctx.delivered, [{ accountId: "alice", workspaceId: "ws1", text: started.data.text }]);
-    const comment = ctx.upstream.calls.find((c) => c.body.includes("commentCreate"));
-    assert.deepEqual(JSON.parse(comment.body).variables.input, { issueId: "iss-1", body: "Rudder started an agent on this in rudder." });
-    assert.ok(ctx.events.some((e) => e.name === "linear_issue_started"));
-
-    // A token past its expiry is refreshed before use.
-    ctx.clock.t += 2 * 86400 * 1000;
-    await ctx.call("GET", "/api/app/linear/issues", { account: "alice" });
-    const refresh = ctx.upstream.calls.filter((c) => c.url === "https://api.linear.app/oauth/token").pop();
-    assert.equal(new URLSearchParams(refresh.body).get("grant_type"), "refresh_token");
-  } finally {
-    await ctx.close();
-  }
-});
-
-test("linear task text trims a long description", () => {
-  const text = linearTaskText({ identifier: "A-1", title: "T", url: "https://u", description: "x".repeat(5000) });
-  assert.ok(text.startsWith("Linear A-1: T\n\n"));
-  assert.ok(text.includes("[description truncated]"));
-  assert.ok(text.endsWith("\n\nhttps://u"));
-  assert.ok(text.length < 4100);
 });
 
 test("slash command: signature, link, membership, status and start", async () => {

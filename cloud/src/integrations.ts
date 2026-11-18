@@ -1,4 +1,4 @@
-// Slack and Linear connections for an org or a single account.
+// Slack connections for an org or a single account.
 //
 // A connection belongs to an owner: an org (any member reads it, admins connect
 // and disconnect) or an account (personal). Tokens are sealed with AES-256-GCM
@@ -8,30 +8,14 @@
 // another account or org.
 //
 // The server wires three entry points: handleAppApi (signed-in routes),
-// handlePublicApi (OAuth callbacks, the Slack slash command and the Linear
-// webhook) and onHomeState (agent status changes, posted to Slack and synced
-// back to Linear issues). Everything it needs from the rest of the control
-// plane is injected.
-//
-// Linear flow: a Linear project (or team) maps to a Rudder project on
-// someone's home.
-// - Tracking (Rudder -> Linear): each new agent in a linked project is decided
-//   once (linear-track.ts: attach to an open issue, create one, or skip), and
-//   the decision is kept per run (rudder_linear_tracked_runs). A tracked issue
-//   moves to started, gets one "Merged:" comment when the agent merges, and
-//   moves to completed only if Rudder created it. Created issues never carry
-//   the `rudder` label, so they never start an agent.
-// - Starting (Linear -> Rudder): an issue the user labels `rudder` reaches the
-//   webhook, and the mapped project starts an agent on it (once per issue,
-//   rudder_linear_issue_runs). As that run starts, needs you, and merges, the
-//   issue moves to started, gets a comment, and moves to completed.
-// - "Generate tasks" asks a model for small tasks and adds them as unlabeled
-//   issues; labeling one starts an agent through the webhook.
+// handlePublicApi (the OAuth callback and the Slack slash command) and
+// onHomeState (agent status changes, posted to Slack). Everything it needs
+// from the rest of the control plane is injected.
 
 import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Database } from "better-sqlite3";
-import { agentNeeds, normalizedStatus, type StatusAgent } from "./agent-status.js";
+import { agentNeeds, type StatusAgent } from "./agent-status.js";
 import { verifySlackSignature } from "./slack.js";
 import {
   exchangeSlackCode,
@@ -46,48 +30,8 @@ import {
   slackLink,
   type SlackInstall,
 } from "./slack-app.js";
-import {
-  commentOnLinearIssue,
-  createLinearIssue,
-  exchangeLinearCode,
-  firstStateOfType,
-  getLinearIssue,
-  linearAuthorizeUrl,
-  linearIssueLabelNames,
-  linearIssueWorkflow,
-  linearTaskText,
-  linearWebhookFresh,
-  linearWorkspace,
-  listLinearIssues,
-  listLinearProjects,
-  listOpenLinearIssues,
-  listLinearTeams,
-  refreshLinearToken,
-  revokeLinearToken,
-  RUDDER_LABEL,
-  setLinearIssueState,
-  suggestRudderProject,
-  verifyLinearSignature,
-  type CreatedLinearIssue,
-  type LinearIssue,
-  type LinearToken,
-} from "./linear.js";
-import { generateTasks, GOAL_LIMIT, linearIssueDescription, TaskgenError, taskgenConfigured } from "./linear-tasks.js";
-import {
-  branchSourceTask,
-  classifyWork,
-  findBranchParent,
-  mergeLine,
-  planContext,
-  trackedIssueDescription,
-  trivialTask,
-  untrackedReason,
-  userTask,
-  type PlanContext,
-  type TrackDecision,
-} from "./linear-track.js";
 
-export type Provider = "slack" | "linear";
+export type Provider = "slack";
 export type OrgRole = "admin" | "member";
 
 export type IntegrationAgent = {
@@ -104,35 +48,6 @@ export type IntegrationAgent = {
   pr?: unknown;
   /** "private" (team.ts): an org channel gets no title for it. */
   visibility?: string | null;
-  /** The task text the agent was started with (a Linear task starts "Linear ENG-7: ..."). */
-  task?: string | null;
-  /** execute, plan, main, rudder-plan, ... (native AgentMode). */
-  mode?: string | null;
-  /** A /swarm experiment: one of many competing attempts, never tracked. */
-  swarmExperiment?: boolean | null;
-  /** The agent's done summary and its last message, for the merge comment. */
-  summary?: string | null;
-  lastMessage?: string | null;
-  /** The plan this run belongs to (its orchestrator row and every worker), and the worker's node. */
-  planId?: string | null;
-  nodeId?: string | null;
-  /** Main rows only (home.mjs lastUserTurn): how many prompts the user typed, and the newest. */
-  userTurns?: number | null;
-  lastUserPrompt?: string | null;
-  lastUserAt?: number | null;
-  createdAt?: number | null;
-  /** A task typed a moment ago that has no run yet; its id is not the run's. */
-  pending?: boolean | null;
-};
-
-export type IntegrationPlanEntry = {
-  id?: string | null;
-  request?: string | null;
-  summary?: string | null;
-  /** Nodes still queued, launched, merged (worker plan.mjs; absent from older homes). */
-  pending?: number | null;
-  launched?: number | null;
-  merged?: number | null;
 };
 
 export type IntegrationProject = {
@@ -140,11 +55,6 @@ export type IntegrationProject = {
   name: string;
   repo?: string | null;
   agents?: IntegrationAgent[] | null;
-  /** The project's plans as the home publishes them (worker plan.mjs). */
-  plan?: {
-    plans?: IntegrationPlanEntry[] | null;
-    nodes?: Array<{ id?: string | null; title?: string | null; status?: string | null; runId?: string | null }> | null;
-  } | null;
 };
 
 export type IntegrationsDeps = {
@@ -175,28 +85,6 @@ const NOTIFY_REPEAT_MS = 60 * 1000;
 // or two, and that blip is not news.
 const NEEDS_DEBOUNCE_MS = 2500;
 const MAX_BODY_BYTES = 256 * 1024;
-// A webhook claim whose delivery never finished (a restart mid-start) can be
-// retried after this long.
-const LINEAR_CLAIM_STALE_MS = 10 * 60 * 1000;
-// Issue runs are synced back to Linear for this long after they start.
-const LINEAR_SYNC_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
-// A run started before the issue was handed over is some earlier attempt.
-const LINEAR_RUN_MATCH_SLACK_MS = 2 * 60 * 1000;
-// A linked project's open issues are read again after this long.
-const TRACK_ISSUE_CACHE_MS = 5 * 60 * 1000;
-// A tracking decision that never finished (a restart mid-call) is retried after this long.
-const TRACK_CLAIM_STALE_MS = 10 * 60 * 1000;
-// Agents tracked this recently are shown to the classifier, so a follow-up is recognized.
-const TRACK_RECENT_MS = 24 * 60 * 60 * 1000;
-const TRACK_TITLE_LIMIT = 200;
-// A long session (a main row) asks the model at most this often.
-const TRACK_TURN_INTERVAL_MS = 60 * 1000;
-// When session tracking starts (or a project is linked), a running main row's
-// newest prompt is decided once if it is seen within this long.
-const TRACK_TURN_BACKFILL_MS = 12 * 60 * 60 * 1000;
-// "Merged:" comments on one issue stop here (a plan of many workers shares one).
-const TRACK_MERGE_COMMENTS_PER_ISSUE = 10;
-const LIVE_AGENT_STATUSES = new Set(["working", "waiting", "starting"]);
 
 class HttpError extends Error {
   status: number;
@@ -217,7 +105,6 @@ type Install = {
   token: Record<string, unknown>;
   teamId: string | null;
   teamName: string | null;
-  workspaceName: string | null;
   channelId: string | null;
   channelName: string | null;
 };
@@ -275,7 +162,7 @@ export function verifyState(key: Buffer, state: string, now: number): StatePaylo
   }
   try {
     const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as StatePayload;
-    if (typeof payload.a !== "string" || (payload.p !== "slack" && payload.p !== "linear") || !(payload.e > now)) {
+    if (typeof payload.a !== "string" || payload.p !== "slack" ||!(payload.e > now)) {
       return null;
     }
     return payload;
@@ -404,14 +291,8 @@ export function createIntegrations(deps: IntegrationsDeps) {
     clientSecret: str(deps.env.RUDDER_SLACK_CLIENT_SECRET),
     signingSecret: str(deps.env.RUDDER_SLACK_SIGNING_SECRET),
   };
-  const linearConfig = {
-    clientId: str(deps.env.RUDDER_LINEAR_CLIENT_ID),
-    clientSecret: str(deps.env.RUDDER_LINEAR_CLIENT_SECRET),
-    webhookSecret: str(deps.env.RUDDER_LINEAR_WEBHOOK_SECRET),
-  };
   const configured = {
     slack: Boolean(slackConfig.clientId && slackConfig.clientSecret),
-    linear: Boolean(linearConfig.clientId && linearConfig.clientSecret),
   };
   const redirectUri = (provider: Provider) => `${baseURL}/api/integrations/${provider}/callback`;
   const pending = new Set<Promise<unknown>>();
@@ -426,7 +307,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
       token_ciphertext text not null,
       team_id text,
       team_name text,
-      workspace_name text,
       channel_id text,
       channel_name text,
       installed_by text,
@@ -450,146 +330,15 @@ export function createIntegrations(deps: IntegrationsDeps) {
       user_name text,
       expires_at integer not null
     );
-    -- A Linear project or team -> the Rudder project its issues run in, per
-    -- install. account_id is whose home holds that project.
-    create table if not exists rudder_linear_links (
-      owner_kind text not null,
-      owner_id text not null,
-      linear_kind text not null,
-      linear_id text not null,
-      linear_name text,
-      team_id text,
-      workspace_id text not null,
-      project_name text,
-      account_id text not null,
-      updated_at text not null,
-      primary key (owner_kind, owner_id, linear_kind, linear_id)
-    );
-    -- One row per Linear issue Rudder started: the dedupe for webhooks, and
-    -- the issue -> run mapping that status sync reads. phase: starting,
-    -- delivered (task handed over, run not seen yet), running, merged.
-    create table if not exists rudder_linear_issue_runs (
-      issue_id text primary key,
-      identifier text,
-      owner_kind text not null,
-      owner_id text not null,
-      account_id text not null,
-      workspace_id text not null,
-      project_name text,
-      source text not null,
-      phase text not null,
-      run_id text,
-      start_commented integer not null default 0,
-      needs_commented integer not null default 0,
-      created_at integer not null,
-      updated_at integer not null
-    );
-    create index if not exists rudder_linear_issue_runs_account on rudder_linear_issue_runs (account_id, phase);
-    create index if not exists rudder_linear_issue_runs_run on rudder_linear_issue_runs (run_id);
-    create index if not exists rudder_linear_links_account on rudder_linear_links (account_id, workspace_id);
-    -- One row per agent run Rudder decided to track (or not) in Linear, skips
-    -- included, so a run is classified once. action: deciding (model call in
-    -- flight), attach, create, skip. created_issue: this run created the issue
-    -- (only then does its merge complete it). started_synced / merged_synced:
-    -- the progress steps already sent to Linear. plan_id: a plan worker (its
-    -- plan's decision is in rudder_linear_tracked_plans). merge_commented: this
-    -- run's "Merged:" comment was posted (capped per issue).
-    create table if not exists rudder_linear_tracked_runs (
-      workspace_id text not null,
-      run_id text not null,
-      account_id text not null,
-      owner_kind text not null,
-      owner_id text not null,
-      action text not null,
-      issue_id text,
-      identifier text,
-      created_issue integer not null default 0,
-      started_synced integer not null default 0,
-      merged_synced integer not null default 0,
-      agent_title text,
-      reason text,
-      created_at integer not null,
-      updated_at integer not null,
-      plan_id text,
-      merge_commented integer not null default 0,
-      primary key (workspace_id, run_id)
-    );
-    create index if not exists rudder_linear_tracked_runs_account on rudder_linear_tracked_runs (account_id, action);
-    -- One decision per plan: every worker of the plan attaches to its issue. A
-    -- plan issue Rudder created is completed (closed = 1) once the plan's last
-    -- worker merged.
-    create table if not exists rudder_linear_tracked_plans (
-      workspace_id text not null,
-      plan_id text not null,
-      account_id text not null,
-      owner_kind text not null,
-      owner_id text not null,
-      action text not null,
-      issue_id text,
-      identifier text,
-      created_issue integer not null default 0,
-      started_synced integer not null default 0,
-      closed integer not null default 0,
-      goal text,
-      reason text,
-      created_at integer not null,
-      updated_at integer not null,
-      primary key (workspace_id, plan_id)
-    );
-    create index if not exists rudder_linear_tracked_plans_account on rudder_linear_tracked_plans (account_id, action, closed);
-    -- One decision per user turn of a long session (a main row), keyed by the
-    -- turn's index. These issues only move to started; the user closes them.
-    create table if not exists rudder_linear_tracked_turns (
-      workspace_id text not null,
-      run_id text not null,
-      turn integer not null,
-      account_id text not null,
-      owner_kind text not null,
-      owner_id text not null,
-      action text not null,
-      issue_id text,
-      identifier text,
-      created_issue integer not null default 0,
-      started_synced integer not null default 0,
-      prompt text,
-      reason text,
-      created_at integer not null,
-      updated_at integer not null,
-      primary key (workspace_id, run_id, turn)
-    );
-    create table if not exists rudder_linear_meta (
-      key text primary key,
-      value text not null
-    );
   `);
-  // The first tracking release made rudder_linear_tracked_runs without these.
-  const trackedRunColumns = new Set((database.prepare("pragma table_info(rudder_linear_tracked_runs)").all() as Row[]).map((column) => String(column.name)));
-  if (!trackedRunColumns.has("plan_id")) {
-    database.exec("alter table rudder_linear_tracked_runs add column plan_id text");
-  }
-  if (!trackedRunColumns.has("merge_commented")) {
-    database.exec("alter table rudder_linear_tracked_runs add column merge_commented integer not null default 0");
-  }
-  database.exec(`
-    create index if not exists rudder_linear_tracked_runs_plan on rudder_linear_tracked_runs (workspace_id, plan_id);
-    create index if not exists rudder_linear_tracked_runs_issue on rudder_linear_tracked_runs (issue_id, merge_commented);
-  `);
-  // Tracking starts for runs created after this, so existing runs are never
-  // backfilled. Sessions (main rows) count turns from their own start.
-  const metaTime = (key: string): number => {
-    database.prepare("insert or ignore into rudder_linear_meta (key, value) values (?, ?)").run(key, String(now()));
-    return Number((database.prepare("select value from rudder_linear_meta where key = ?").get(key) as Row | undefined)?.value) || now();
-  };
-  const trackStartedAt = metaTime("track_started_at");
-  const turnTrackStartedAt = metaTime("turn_track_started_at");
 
   const findInstallRow = database.prepare(
     "select * from rudder_integrations where owner_kind = ? and owner_id = ? and provider = ?",
   );
   const upsertInstall = database.prepare(`
     insert into rudder_integrations (id, owner_kind, owner_id, provider, token_ciphertext, team_id, team_name,
-      workspace_name, channel_id, channel_name, installed_by, created_at, updated_at)
-    values (@id, @ownerKind, @ownerId, @provider, @token, @teamId, @teamName, @workspaceName, null, null,
+      channel_id, channel_name, installed_by, created_at, updated_at)
+    values (@id, @ownerKind, @ownerId, @provider, @token, @teamId, @teamName, null, null,
       @installedBy, @now, @now)
     on conflict (owner_kind, owner_id, provider) do update set
       token_ciphertext = excluded.token_ciphertext,
@@ -597,13 +346,9 @@ export function createIntegrations(deps: IntegrationsDeps) {
       channel_name = case when team_id is excluded.team_id then channel_name else null end,
       team_id = excluded.team_id,
       team_name = excluded.team_name,
-      workspace_name = excluded.workspace_name,
       installed_by = excluded.installed_by,
       updated_at = excluded.updated_at
   `);
-  const updateToken = database.prepare(
-    "update rudder_integrations set token_ciphertext = ?, updated_at = ? where owner_kind = ? and owner_id = ? and provider = ?",
-  );
   const updateChannel = database.prepare(
     "update rudder_integrations set channel_id = ?, channel_name = ?, updated_at = ? where owner_kind = ? and owner_id = ? and provider = 'slack'",
   );
@@ -622,171 +367,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
   const findLinkCode = database.prepare("select * from rudder_slack_link_codes where code_hash = ?");
   const deleteLinkCode = database.prepare("delete from rudder_slack_link_codes where code_hash = ?");
   const pruneLinkCodes = database.prepare("delete from rudder_slack_link_codes where expires_at < ?");
-  const setLinearOrg = database.prepare(
-    "update rudder_integrations set team_id = ?, team_name = ?, updated_at = ? where owner_kind = ? and owner_id = ? and provider = 'linear'",
-  );
-  // Org installs first: an org and a person can both connect one Linear workspace.
-  const linearInstallsForOrg = database.prepare(
-    "select * from rudder_integrations where provider = 'linear' and team_id = ? order by owner_kind desc, updated_at desc",
-  );
-  const linksForOwner = database.prepare(
-    "select * from rudder_linear_links where owner_kind = ? and owner_id = ? order by linear_kind, linear_name",
-  );
-  const findLinearLink = database.prepare(
-    "select * from rudder_linear_links where owner_kind = ? and owner_id = ? and linear_kind = ? and linear_id = ?",
-  );
-  const upsertLinearLink = database.prepare(`
-    insert into rudder_linear_links (owner_kind, owner_id, linear_kind, linear_id, linear_name, team_id, workspace_id,
-      project_name, account_id, updated_at)
-    values (@ownerKind, @ownerId, @kind, @linearId, @linearName, @teamId, @workspaceId, @projectName, @accountId, @now)
-    on conflict (owner_kind, owner_id, linear_kind, linear_id) do update set
-      linear_name = excluded.linear_name,
-      team_id = excluded.team_id,
-      workspace_id = excluded.workspace_id,
-      project_name = excluded.project_name,
-      account_id = excluded.account_id,
-      updated_at = excluded.updated_at
-  `);
-  const deleteLinearLink = database.prepare(
-    "delete from rudder_linear_links where owner_kind = ? and owner_id = ? and linear_kind = ? and linear_id = ?",
-  );
-  const findIssueRun = database.prepare("select * from rudder_linear_issue_runs where issue_id = ?");
-  const dropStaleClaim = database.prepare(
-    "delete from rudder_linear_issue_runs where issue_id = ? and phase = 'starting' and updated_at < ?",
-  );
-  const claimIssueRun = database.prepare(`
-    insert or ignore into rudder_linear_issue_runs (issue_id, identifier, owner_kind, owner_id, account_id, workspace_id,
-      project_name, source, phase, run_id, start_commented, needs_commented, created_at, updated_at)
-    values (@issueId, null, @ownerKind, @ownerId, @accountId, @workspaceId, @projectName, 'webhook', 'starting', null, 0, 0, @now, @now)
-  `);
-  const markIssueDelivered = database.prepare(
-    "update rudder_linear_issue_runs set phase = 'delivered', identifier = ?, project_name = ?, updated_at = ? where issue_id = ?",
-  );
-  // A start from the app always hands the issue over (it may be a second try),
-  // so it replaces any earlier row for the issue.
-  const recordAppStart = database.prepare(`
-    insert into rudder_linear_issue_runs (issue_id, identifier, owner_kind, owner_id, account_id, workspace_id,
-      project_name, source, phase, run_id, start_commented, needs_commented, created_at, updated_at)
-    values (@issueId, @identifier, @ownerKind, @ownerId, @accountId, @workspaceId, @projectName, 'app', 'delivered', null, 1, 0, @now, @now)
-    on conflict (issue_id) do update set
-      identifier = excluded.identifier, owner_kind = excluded.owner_kind, owner_id = excluded.owner_id,
-      account_id = excluded.account_id, workspace_id = excluded.workspace_id, project_name = excluded.project_name,
-      source = excluded.source, phase = excluded.phase, run_id = null, start_commented = 1, needs_commented = 0,
-      created_at = excluded.created_at, updated_at = excluded.updated_at
-  `);
-  const deleteIssueRun = database.prepare("delete from rudder_linear_issue_runs where issue_id = ?");
-  const activeIssueRuns = database.prepare(
-    "select * from rudder_linear_issue_runs where account_id = ? and phase in ('delivered', 'running') and created_at > ?",
-  );
-  const setIssueRunId = database.prepare(
-    "update rudder_linear_issue_runs set run_id = ?, phase = 'running', updated_at = ? where issue_id = ? and run_id is null",
-  );
-  const markIssueMerged = database.prepare(
-    "update rudder_linear_issue_runs set phase = 'merged', updated_at = ? where issue_id = ? and phase != 'merged'",
-  );
-  const claimStartComment = database.prepare(
-    "update rudder_linear_issue_runs set start_commented = 1, updated_at = ? where issue_id = ? and start_commented = 0",
-  );
-  const claimNeedsComment = database.prepare(
-    "update rudder_linear_issue_runs set needs_commented = 1, updated_at = ? where issue_id = ? and needs_commented = 0",
-  );
-  const issueRunForRun = database.prepare("select 1 from rudder_linear_issue_runs where run_id = ? limit 1");
-  // Org links first, then a Linear project before a team (the webhook's order).
-  const linksForAccount = database.prepare(
-    "select * from rudder_linear_links where account_id = ? order by owner_kind desc, linear_kind, updated_at desc",
-  );
-  const findTracked = database.prepare("select * from rudder_linear_tracked_runs where workspace_id = ? and run_id = ?");
-  const dropStaleTrackClaim = database.prepare(
-    "delete from rudder_linear_tracked_runs where workspace_id = ? and run_id = ? and action = 'deciding' and updated_at < ?",
-  );
-  // action is 'deciding' for a claim, or 'skip' for a run decided on the spot.
-  const claimTracked = database.prepare(`
-    insert or ignore into rudder_linear_tracked_runs (workspace_id, run_id, account_id, owner_kind, owner_id, action,
-      agent_title, reason, plan_id, created_at, updated_at)
-    values (@workspaceId, @runId, @accountId, @ownerKind, @ownerId, @action, @title, @reason, @planId, @now, @now)
-  `);
-  const decideTracked = database.prepare(`
-    update rudder_linear_tracked_runs set action = @action, issue_id = @issueId, identifier = @identifier,
-      created_issue = @created, reason = @reason, updated_at = @now
-    where workspace_id = @workspaceId and run_id = @runId and action = 'deciding'
-  `);
-  const activeTrackedRuns = database.prepare(
-    "select * from rudder_linear_tracked_runs where account_id = ? and action in ('attach', 'create') and merged_synced = 0 and created_at > ?",
-  );
-  // Everything tracked lately in one project (runs, plans, session turns), newest first.
-  const recentTracked = database.prepare(`
-    select title, identifier from (
-      select agent_title as title, identifier, created_at from rudder_linear_tracked_runs
-        where workspace_id = @workspaceId and action in ('attach', 'create') and created_at > @since
-      union all
-      select goal as title, identifier, created_at from rudder_linear_tracked_plans
-        where workspace_id = @workspaceId and action in ('attach', 'create') and created_at > @since
-      union all
-      select prompt as title, identifier, created_at from rudder_linear_tracked_turns
-        where workspace_id = @workspaceId and action in ('attach', 'create') and created_at > @since
-    ) order by created_at desc limit 24
-  `);
-  const claimTrackStarted = database.prepare(
-    "update rudder_linear_tracked_runs set started_synced = 1, updated_at = ? where workspace_id = ? and run_id = ? and started_synced = 0",
-  );
-  const claimTrackMerged = database.prepare(
-    "update rudder_linear_tracked_runs set merged_synced = 1, updated_at = ? where workspace_id = ? and run_id = ? and merged_synced = 0",
-  );
-  // One "Merged:" comment per run, and at most TRACK_MERGE_COMMENTS_PER_ISSUE per issue.
-  const claimMergeComment = database.prepare(`
-    update rudder_linear_tracked_runs set merge_commented = 1, updated_at = @now
-    where workspace_id = @workspaceId and run_id = @runId and merge_commented = 0
-      and (select count(*) from rudder_linear_tracked_runs where issue_id = @issueId and merge_commented = 1) < @cap
-  `);
-  const findTrackedPlan = database.prepare("select * from rudder_linear_tracked_plans where workspace_id = ? and plan_id = ?");
-  const dropStalePlanClaim = database.prepare(
-    "delete from rudder_linear_tracked_plans where workspace_id = ? and plan_id = ? and action = 'deciding' and updated_at < ?",
-  );
-  const claimTrackedPlan = database.prepare(`
-    insert or ignore into rudder_linear_tracked_plans (workspace_id, plan_id, account_id, owner_kind, owner_id, action, goal,
-      created_at, updated_at)
-    values (@workspaceId, @planId, @accountId, @ownerKind, @ownerId, 'deciding', @goal, @now, @now)
-  `);
-  const decideTrackedPlan = database.prepare(`
-    update rudder_linear_tracked_plans set action = @action, issue_id = @issueId, identifier = @identifier,
-      created_issue = @created, reason = @reason, updated_at = @now
-    where workspace_id = @workspaceId and plan_id = @planId and action = 'deciding'
-  `);
-  const claimPlanStarted = database.prepare(
-    "update rudder_linear_tracked_plans set started_synced = 1, updated_at = ? where workspace_id = ? and plan_id = ? and started_synced = 0",
-  );
-  const openCreatedPlans = database.prepare(
-    "select * from rudder_linear_tracked_plans where account_id = ? and action = 'create' and closed = 0 and created_at > ?",
-  );
-  const claimPlanClosed = database.prepare(
-    "update rudder_linear_tracked_plans set closed = 1, updated_at = ? where workspace_id = ? and plan_id = ? and closed = 0",
-  );
-  const planWorkerRows = database.prepare(
-    "select action, merged_synced from rudder_linear_tracked_runs where workspace_id = ? and plan_id = ?",
-  );
-  const lastTrackedTurn = database.prepare(
-    "select * from rudder_linear_tracked_turns where workspace_id = ? and run_id = ? order by turn desc limit 1",
-  );
-  const dropStaleTurnClaim = database.prepare(
-    "delete from rudder_linear_tracked_turns where workspace_id = ? and run_id = ? and turn = ? and action = 'deciding' and updated_at < ?",
-  );
-  // action is 'deciding' for a claim, or 'skip' for a prompt decided on the spot.
-  const claimTrackedTurn = database.prepare(`
-    insert or ignore into rudder_linear_tracked_turns (workspace_id, run_id, turn, account_id, owner_kind, owner_id, action,
-      prompt, reason, created_at, updated_at)
-    values (@workspaceId, @runId, @turn, @accountId, @ownerKind, @ownerId, @action, @prompt, @reason, @now, @now)
-  `);
-  const decideTrackedTurn = database.prepare(`
-    update rudder_linear_tracked_turns set action = @action, issue_id = @issueId, identifier = @identifier,
-      created_issue = @created, reason = @reason, updated_at = @now
-    where workspace_id = @workspaceId and run_id = @runId and turn = @turn and action = 'deciding'
-  `);
-  const lastIssueTurn = database.prepare(
-    "select * from rudder_linear_tracked_turns where workspace_id = ? and run_id = ? and action in ('attach', 'create') order by turn desc limit 1",
-  );
-  const claimTurnStarted = database.prepare(
-    "update rudder_linear_tracked_turns set started_synced = 1, updated_at = ? where workspace_id = ? and run_id = ? and turn = ? and started_synced = 0",
-  );
 
   function aad(ownerKind: string, ownerId: string, provider: string): string {
     return `${ownerKind}:${ownerId}:${provider}`;
@@ -820,7 +400,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
       token,
       teamId: row.team_id ? String(row.team_id) : null,
       teamName: row.team_name ? String(row.team_name) : null,
-      workspaceName: row.workspace_name ? String(row.workspace_name) : null,
       channelId: row.channel_id ? String(row.channel_id) : null,
       channelName: row.channel_name ? String(row.channel_name) : null,
     };
@@ -836,7 +415,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
     token: unknown;
     teamId?: string | null;
     teamName?: string | null;
-    workspaceName?: string | null;
     installedBy: string;
   }): void {
     const key = requireKey();
@@ -848,7 +426,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
       token: sealJson(key, params.token, aad(params.owner.kind, params.owner.id, params.provider)),
       teamId: params.teamId ?? null,
       teamName: params.teamName ?? null,
-      workspaceName: params.workspaceName ?? null,
       installedBy: params.installedBy,
       now: new Date(now()).toISOString(),
     });
@@ -882,37 +459,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
     }
   }
 
-  // Linear access tokens may expire; refresh a minute early and store the new pair.
-  async function linearAccessToken(install: Install): Promise<string> {
-    const token = install.token as unknown as LinearToken;
-    if (!token.expiresAt || token.expiresAt - 60_000 > now()) {
-      return token.accessToken;
-    }
-    const fresh = await refreshLinearToken(deps.fetch, {
-      clientId: linearConfig.clientId,
-      clientSecret: linearConfig.clientSecret,
-      token,
-      now: now(),
-    });
-    const key = requireKey();
-    updateToken.run(
-      sealJson(key, fresh, aad(install.ownerKind, install.ownerId, "linear")),
-      new Date(now()).toISOString(),
-      install.ownerKind,
-      install.ownerId,
-      "linear",
-    );
-    return fresh.accessToken;
-  }
-
-  function requireLinear(owner: Owner): Install {
-    const install = getInstall(owner, "linear");
-    if (!install) {
-      throw new HttpError(404, "Linear is not connected");
-    }
-    return install;
-  }
-
   function requireSlack(owner: Owner): Install {
     const install = getInstall(owner, "slack");
     if (!install) {
@@ -924,7 +470,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
   function summary(account: Account, orgId: string) {
     const owner = resolveOwner(account, orgId, "read");
     const slack = getInstall(owner, "slack");
-    const linear = getInstall(owner, "linear");
     return {
       slack: {
         configured: configured.slack,
@@ -932,18 +477,13 @@ export function createIntegrations(deps: IntegrationsDeps) {
         team: slack?.teamId ? { id: slack.teamId, name: slack.teamName ?? "Slack" } : null,
         channel: slack?.channelId ? { id: slack.channelId, name: slack.channelName ?? slack.channelId } : null,
       },
-      linear: {
-        configured: configured.linear,
-        connected: Boolean(linear),
-        workspace: linear ? { name: linear.workspaceName ?? "Linear" } : null,
-      },
       canManage: owner.canManage,
     };
   }
 
   function startOAuth(account: Account, orgId: string, provider: Provider): string {
     if (!configured[provider]) {
-      throw new HttpError(503, `${provider === "slack" ? "Slack" : "Linear"} is not set up on this server`);
+      throw new HttpError(503, "Slack is not set up on this server");
     }
     requireKey();
     const owner = resolveOwner(account, orgId, "manage");
@@ -954,9 +494,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
       e: now() + STATE_TTL_MS,
       n: randomBytes(8).toString("base64url"),
     });
-    const config = provider === "slack" ? slackConfig : linearConfig;
-    const authorize = provider === "slack" ? slackAuthorizeUrl : linearAuthorizeUrl;
-    return authorize({ clientId: config.clientId, redirectUri: redirectUri(provider), state });
+    return slackAuthorizeUrl({ clientId: slackConfig.clientId, redirectUri: redirectUri(provider), state });
   }
 
   async function finishOAuth(provider: Provider, url: URL): Promise<string> {
@@ -984,41 +522,20 @@ export function createIntegrations(deps: IntegrationsDeps) {
       return failed("forbidden");
     }
     try {
-      if (provider === "slack") {
-        const install: SlackInstall = await exchangeSlackCode(deps.fetch, {
-          clientId: slackConfig.clientId,
-          clientSecret: slackConfig.clientSecret,
-          code,
-          redirectUri: redirectUri("slack"),
-        });
-        storeInstall({
-          owner,
-          provider,
-          token: { accessToken: install.accessToken, botUserId: install.botUserId, scope: install.scope },
-          teamId: install.teamId,
-          teamName: install.teamName,
-          installedBy: state.a,
-        });
-      } else {
-        const token = await exchangeLinearCode(deps.fetch, {
-          clientId: linearConfig.clientId,
-          clientSecret: linearConfig.clientSecret,
-          code,
-          redirectUri: redirectUri("linear"),
-          now: now(),
-        });
-        const workspace = await linearWorkspace(deps.fetch, token.accessToken).catch(() => ({ id: null, name: "Linear", urlKey: null }));
-        // team_id holds the Linear workspace id: webhooks name it as organizationId.
-        storeInstall({
-          owner,
-          provider,
-          token,
-          teamId: workspace.id,
-          teamName: workspace.id ? workspace.name : null,
-          workspaceName: workspace.name,
-          installedBy: state.a,
-        });
-      }
+      const install: SlackInstall = await exchangeSlackCode(deps.fetch, {
+        clientId: slackConfig.clientId,
+        clientSecret: slackConfig.clientSecret,
+        code,
+        redirectUri: redirectUri(provider),
+      });
+      storeInstall({
+        owner,
+        provider,
+        token: { accessToken: install.accessToken, botUserId: install.botUserId, scope: install.scope },
+        teamId: install.teamId,
+        teamName: install.teamName,
+        installedBy: state.a,
+      });
     } catch (error) {
       log(`integrations: ${provider} oauth exchange failed: ${error instanceof Error ? error.message : String(error)}`);
       return failed("exchange_failed");
@@ -1035,1204 +552,9 @@ export function createIntegrations(deps: IntegrationsDeps) {
     if (accessToken) {
       // Best effort: the row is already gone, so a failed revoke only leaves
       // a token nobody here can read.
-      const revoke = provider === "slack" ? revokeSlackToken : revokeLinearToken;
-      await revoke(deps.fetch, accessToken).catch(() => undefined);
+      await revokeSlackToken(deps.fetch, accessToken).catch(() => undefined);
     }
     capture(account.accountId, "integration_disconnected", { provider, scope: owner.kind });
-  }
-
-  function errorText(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  function findProject(accountId: string, workspaceId: string): IntegrationProject | undefined {
-    return deps.listProjects(accountId).find((candidate) => candidate.workspaceId === workspaceId);
-  }
-
-  // Hands a Linear issue to an agent in a project on `accountId`'s home.
-  async function deliverLinearIssue(params: { accountId: string; install: Install; issueId: string; workspaceId: string }): Promise<{
-    issue: LinearIssue;
-    project: IntegrationProject;
-    text: string;
-    token: string;
-  }> {
-    const project = findProject(params.accountId, params.workspaceId);
-    if (!project) {
-      throw new HttpError(404, "project not found");
-    }
-    const token = await linearAccessToken(params.install);
-    const issue = await getLinearIssue(deps.fetch, token, params.issueId);
-    if (!issue) {
-      throw new HttpError(404, "Linear issue not found");
-    }
-    const text = linearTaskText(issue);
-    await deps.deliverTask(params.accountId, params.workspaceId, text);
-    return { issue, project, text, token };
-  }
-
-  async function startLinearIssue(account: Account, body: Record<string, unknown>) {
-    const owner = resolveOwner(account, str(body.org), "read");
-    const issueId = str(body.issueId);
-    const workspaceId = str(body.workspace);
-    if (!issueId || !workspaceId) {
-      throw new HttpError(400, "issueId and workspace are required");
-    }
-    if (!findProject(account.accountId, workspaceId)) {
-      throw new HttpError(404, "project not found");
-    }
-    const install = requireLinear(owner);
-    const { issue, project, text, token } = await deliverLinearIssue({ accountId: account.accountId, install, issueId, workspaceId });
-    try {
-      await commentOnLinearIssue(deps.fetch, token, issue.id, `Rudder started an agent on this in ${project.name}.`);
-    } catch (error) {
-      log(`integrations: linear comment failed: ${errorText(error)}`);
-    }
-    // Remembered so its status syncs back, and so the webhook does not start it again.
-    recordAppStart.run({
-      issueId: issue.id,
-      identifier: issue.identifier,
-      ownerKind: owner.kind,
-      ownerId: owner.id,
-      accountId: account.accountId,
-      workspaceId,
-      projectName: project.name,
-      now: now(),
-    });
-    capture(account.accountId, "linear_issue_started", { scope: owner.kind });
-    return { ok: true, text };
-  }
-
-  // ---- Linear: projects and teams mapped to Rudder projects ----
-
-  type LinearKind = "project" | "team";
-
-  // Installs connected before webhooks existed have no workspace id yet.
-  async function ensureLinearOrg(install: Install, token: string): Promise<void> {
-    if (install.teamId) {
-      return;
-    }
-    try {
-      const workspace = await linearWorkspace(deps.fetch, token);
-      if (workspace.id) {
-        setLinearOrg.run(workspace.id, workspace.name, new Date(now()).toISOString(), install.ownerKind, install.ownerId);
-        install.teamId = workspace.id;
-      }
-    } catch (error) {
-      log(`integrations: linear workspace lookup failed: ${errorText(error)}`);
-    }
-  }
-
-  function linkView(row: Row | undefined, account: Account) {
-    if (!row) {
-      return null;
-    }
-    return {
-      workspaceId: String(row.workspace_id),
-      projectName: row.project_name ? String(row.project_name) : null,
-      teamId: row.team_id ? String(row.team_id) : null,
-      mine: String(row.account_id) === account.accountId,
-    };
-  }
-
-  async function linearSetup(account: Account, orgId: string) {
-    const owner = resolveOwner(account, orgId, "read");
-    const install = requireLinear(owner);
-    const token = await linearAccessToken(install);
-    await ensureLinearOrg(install, token);
-    const [linearProjects, teams] = await Promise.all([listLinearProjects(deps.fetch, token), listLinearTeams(deps.fetch, token)]);
-    const projects = deps.listProjects(account.accountId).map((project) => ({
-      workspaceId: project.workspaceId,
-      name: project.name,
-      repo: project.repo ?? null,
-    }));
-    const links = linksForOwner.all(owner.kind, owner.id) as Row[];
-    const linkOf = (kind: LinearKind, id: string) =>
-      links.find((row) => row.linear_kind === kind && String(row.linear_id) === id);
-    const suggestion = (name: string) => {
-      const match = suggestRudderProject(name, projects);
-      return match ? { workspaceId: match.workspaceId, name: match.name } : null;
-    };
-    return {
-      linearProjects: linearProjects.map((project) => {
-        const link = linkOf("project", project.id);
-        return { ...project, link: linkView(link, account), suggestion: link ? null : suggestion(project.name) };
-      }),
-      teams: teams.map((team) => {
-        const link = linkOf("team", team.id);
-        return { ...team, link: linkView(link, account), suggestion: link ? null : suggestion(team.name) };
-      }),
-      projects,
-      canManage: owner.canManage,
-      generate: taskgenConfigured(deps.env),
-      autoStart: Boolean(linearConfig.webhookSecret),
-    };
-  }
-
-  // The Linear project or team by id, and the team its new issues go to.
-  async function resolveLinearTarget(token: string, kind: LinearKind, linearId: string, teamHint: string) {
-    if (kind === "team") {
-      const team = (await listLinearTeams(deps.fetch, token)).find((candidate) => candidate.id === linearId);
-      if (!team) {
-        throw new HttpError(404, "Linear team not found");
-      }
-      return { name: team.name, teamId: team.id };
-    }
-    const project = (await listLinearProjects(deps.fetch, token)).find((candidate) => candidate.id === linearId);
-    if (!project) {
-      throw new HttpError(404, "Linear project not found");
-    }
-    const team = project.teams.find((candidate) => candidate.id === teamHint) ?? project.teams[0];
-    if (!team) {
-      throw new HttpError(400, "That Linear project has no team to create issues in");
-    }
-    return { name: project.name, teamId: team.id };
-  }
-
-  function linearKind(value: unknown): LinearKind {
-    const kind = str(value) || "project";
-    if (kind !== "project" && kind !== "team") {
-      throw new HttpError(400, "kind is project or team");
-    }
-    return kind;
-  }
-
-  async function setLinearLink(account: Account, body: Record<string, unknown>, orgParam: string) {
-    const owner = resolveOwner(account, str(body.org) || orgParam, "manage");
-    const kind = linearKind(body.kind);
-    const linearId = str(body.linearId);
-    if (!linearId) {
-      throw new HttpError(400, "linearId is required");
-    }
-    const install = requireLinear(owner);
-    const workspaceId = str(body.workspace);
-    if (!workspaceId) {
-      deleteLinearLink.run(owner.kind, owner.id, kind, linearId);
-      return { link: null };
-    }
-    const project = findProject(account.accountId, workspaceId);
-    if (!project) {
-      throw new HttpError(404, "project not found");
-    }
-    const token = await linearAccessToken(install);
-    await ensureLinearOrg(install, token);
-    const target = await resolveLinearTarget(token, kind, linearId, str(body.teamId));
-    upsertLinearLink.run({
-      ownerKind: owner.kind,
-      ownerId: owner.id,
-      kind,
-      linearId,
-      linearName: target.name,
-      teamId: target.teamId,
-      workspaceId,
-      projectName: project.name,
-      accountId: account.accountId,
-      now: new Date(now()).toISOString(),
-    });
-    capture(account.accountId, "linear_project_linked", { kind, scope: owner.kind });
-    return { link: linkView(findLinearLink.get(owner.kind, owner.id, kind, linearId) as Row, account) };
-  }
-
-  // POST /api/app/linear/generate: a goal becomes 1 to 10 issues in a Linear
-  // project (or team). They are not labeled `rudder`, so nothing starts until
-  // the user labels one. Naming a Rudder project links the two first, so a
-  // labeled issue knows where to start and agents there are tracked.
-  async function generateLinearTasks(account: Account, body: Record<string, unknown>) {
-    const goal = str(body.goal);
-    if (!goal) {
-      throw new HttpError(400, "goal is required");
-    }
-    if (goal.length > GOAL_LIMIT) {
-      throw new HttpError(400, `goal is longer than ${GOAL_LIMIT} characters`);
-    }
-    const linearProjectId = str(body.linearProjectId);
-    const teamParam = str(body.teamId);
-    if (!linearProjectId && !teamParam) {
-      throw new HttpError(400, "Choose a Linear project or team");
-    }
-    const kind: LinearKind = linearProjectId ? "project" : "team";
-    const linearId = linearProjectId || teamParam;
-    const owner = resolveOwner(account, str(body.org), "read");
-    const existing = findLinearLink.get(owner.kind, owner.id, kind, linearId) as Row | undefined;
-    const workspaceId = str(body.projectId) || str(body.workspace);
-    let rudderProject: IntegrationProject | null = null;
-    if (workspaceId) {
-      rudderProject = findProject(account.accountId, workspaceId) ?? null;
-      if (!rudderProject) {
-        throw new HttpError(404, "project not found");
-      }
-      if (!owner.canManage && String(existing?.workspace_id ?? "") !== workspaceId) {
-        throw new HttpError(403, "only an org admin can link a Linear project to a Rudder project");
-      }
-    } else if (existing) {
-      rudderProject = findProject(String(existing.account_id), String(existing.workspace_id)) ?? {
-        workspaceId: String(existing.workspace_id),
-        name: String(existing.project_name ?? "project"),
-      };
-    }
-    if (!taskgenConfigured(deps.env)) {
-      throw new HttpError(503, "Task generation is not set up on this server (OPENAI_API_KEY is missing)");
-    }
-    const install = requireLinear(owner);
-    const token = await linearAccessToken(install);
-    await ensureLinearOrg(install, token);
-    const target = existing && (!teamParam || teamParam === existing.team_id) && existing.team_id
-      ? { name: String(existing.linear_name ?? ""), teamId: String(existing.team_id) }
-      : await resolveLinearTarget(token, kind, linearId, teamParam);
-
-    let generated: Awaited<ReturnType<typeof generateTasks>>;
-    try {
-      generated = await generateTasks({
-        env: deps.env,
-        fetch: deps.fetch,
-        goal,
-        project: rudderProject ? { name: rudderProject.name, repo: rudderProject.repo ?? null } : null,
-        log,
-      });
-    } catch (error) {
-      if (error instanceof TaskgenError) {
-        throw new HttpError(error.status, error.message);
-      }
-      throw error;
-    }
-    if (workspaceId && rudderProject && String(existing?.workspace_id ?? "") !== workspaceId) {
-      upsertLinearLink.run({
-        ownerKind: owner.kind,
-        ownerId: owner.id,
-        kind,
-        linearId,
-        linearName: target.name || null,
-        teamId: target.teamId,
-        workspaceId,
-        projectName: rudderProject.name,
-        accountId: account.accountId,
-        now: new Date(now()).toISOString(),
-      });
-    }
-    const issues: CreatedLinearIssue[] = [];
-    let failure: string | null = null;
-    for (const task of generated.tasks) {
-      try {
-        issues.push(
-          await createLinearIssue(deps.fetch, token, {
-            teamId: target.teamId,
-            ...(kind === "project" ? { projectId: linearId } : {}),
-            title: task.title,
-            description: linearIssueDescription(task),
-          }),
-        );
-      } catch (error) {
-        failure = errorText(error);
-        log(`integrations: linear issueCreate failed: ${failure}`);
-        break;
-      }
-    }
-    if (issues.length === 0) {
-      throw new HttpError(502, failure ?? "no issues were created");
-    }
-    capture(account.accountId, "linear_tasks_generated", { count: issues.length, provider: generated.provider, scope: owner.kind });
-    const link = findLinearLink.get(owner.kind, owner.id, kind, linearId) as Row | undefined;
-    if (link) {
-      // The next tracking decision in this project sees the new issues.
-      issueCache.delete(linkKey(link));
-    }
-    return {
-      issues,
-      provider: generated.provider,
-      model: generated.model,
-      link: linkView(link, account),
-      ...(failure ? { error: `Created ${issues.length} of ${generated.tasks.length} issues: ${failure}` } : {}),
-    };
-  }
-
-  // ---- Linear webhook: labeled issues start agents ----
-
-  async function handleLinearWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const raw = await readBody(req);
-    if (!linearConfig.webhookSecret) {
-      sendJson(res, 503, { error: "Linear webhooks are not set up on this server" });
-      return;
-    }
-    if (!verifyLinearSignature(linearConfig.webhookSecret, raw, header(req, "linear-signature"))) {
-      sendJson(res, 401, { error: "invalid linear signature" });
-      return;
-    }
-    let payload: Row;
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      payload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Row) : {};
-    } catch {
-      sendJson(res, 400, { error: "invalid JSON body" });
-      return;
-    }
-    if (!linearWebhookFresh(payload.webhookTimestamp, now())) {
-      sendJson(res, 401, { error: "stale linear webhook" });
-      return;
-    }
-    // Linear wants an answer in seconds; the start happens after it.
-    sendJson(res, 200, { ok: true });
-    track(onLinearEvent(payload).catch((error: unknown) => log(`integrations: linear webhook failed: ${errorText(error)}`)));
-  }
-
-  const labelNames = (value: unknown): string[] | null =>
-    Array.isArray(value) ? value.map((label) => str((label as Row | null)?.name)) : null;
-
-  async function onLinearEvent(payload: Row): Promise<void> {
-    const action = str(payload.action);
-    if (str(payload.type) !== "Issue" || (action !== "create" && action !== "update")) {
-      return;
-    }
-    const data = (payload.data ?? {}) as Row;
-    const issueId = str(data.id);
-    const teamId = str(data.teamId) || str((data.team as Row | null)?.id);
-    const projectId = str(data.projectId) || str((data.project as Row | null)?.id);
-    const stateType = str((data.state as Row | null)?.type);
-    if (!issueId || stateType === "completed" || stateType === "canceled") {
-      return;
-    }
-    let labels = labelNames(data.labels);
-    if (labels && !labels.some((name) => name.toLowerCase() === RUDDER_LABEL)) {
-      return;
-    }
-    dropStaleClaim.run(issueId, now() - LINEAR_CLAIM_STALE_MS);
-    if (findIssueRun.get(issueId)) {
-      return; // started already
-    }
-    const orgId = str(payload.organizationId);
-    const installs = orgId
-      ? (linearInstallsForOrg.all(orgId) as Row[]).map(installFromRow).filter((value): value is Install => Boolean(value))
-      : [];
-    // The issue's Linear project picks the Rudder project; its team is the fallback.
-    let route: { install: Install; link: Row } | null = null;
-    for (const install of installs) {
-      const link = (projectId ? findLinearLink.get(install.ownerKind, install.ownerId, "project", projectId) : undefined)
-        ?? (teamId ? findLinearLink.get(install.ownerKind, install.ownerId, "team", teamId) : undefined);
-      if (link && canUseInstall(String((link as Row).account_id), install)) {
-        route = { install, link: link as Row };
-        break;
-      }
-    }
-    if (!route) {
-      return;
-    }
-    if (!labels) {
-      const ids = Array.isArray(data.labelIds) ? data.labelIds : [];
-      if (ids.length === 0) {
-        return;
-      }
-      labels = await linearIssueLabelNames(deps.fetch, await linearAccessToken(route.install), issueId);
-      if (!labels.some((name) => name.toLowerCase() === RUDDER_LABEL)) {
-        return;
-      }
-    }
-    const accountId = String(route.link.account_id);
-    const workspaceId = String(route.link.workspace_id);
-    const claimed = claimIssueRun.run({
-      issueId,
-      ownerKind: route.install.ownerKind,
-      ownerId: route.install.ownerId,
-      accountId,
-      workspaceId,
-      projectName: route.link.project_name ?? null,
-      now: now(),
-    });
-    if (claimed.changes !== 1) {
-      return; // another delivery of the same event got here first
-    }
-    try {
-      const { issue, project } = await deliverLinearIssue({ accountId, install: route.install, issueId, workspaceId });
-      markIssueDelivered.run(issue.identifier, project.name, now(), issueId);
-      capture(accountId, "linear_issue_started", { scope: route.install.ownerKind, source: "webhook" });
-    } catch (error) {
-      // Not started: a later update to the issue may try again.
-      deleteIssueRun.run(issueId);
-      log(`integrations: linear webhook start failed: ${errorText(error)}`);
-    }
-  }
-
-  // ---- Linear: run status back to the issue ----
-
-  // The latest needs-you view per issue, read when a needs hold runs out.
-  const linearLatest = new Map<string, { category: NotifyCategory; agent: IntegrationAgent }>();
-  const linearHolds = new Set<string>();
-
-  function matchIssueRun(agents: IntegrationAgent[], identifier: string, since: number, claimed: Set<string>): IntegrationAgent | null {
-    const needle = `Linear ${identifier}:`;
-    let best: IntegrationAgent | null = null;
-    for (const agent of agents) {
-      if (!agent?.id || agent.pending === true || claimed.has(agent.id)) {
-        continue;
-      }
-      if (!str(agent.task).includes(needle) && !str(agent.title).includes(needle)) {
-        continue;
-      }
-      const created = typeof agent.createdAt === "number" ? agent.createdAt : null;
-      if (created !== null && created < since - LINEAR_RUN_MATCH_SLACK_MS) {
-        continue;
-      }
-      if (!best || (created ?? 0) > (typeof best.createdAt === "number" ? best.createdAt : 0)) {
-        best = agent;
-      }
-    }
-    return best;
-  }
-
-  async function linearTokenFor(row: Row): Promise<string | null> {
-    const install = getInstall({ kind: String(row.owner_kind) as Owner["kind"], id: String(row.owner_id) }, "linear");
-    return install ? linearAccessToken(install) : null;
-  }
-
-  // Moves an issue forward only: to started from backlog/unstarted/triage, to
-  // completed from anything not already done or canceled.
-  async function moveLinearIssue(token: string, issueId: string, target: "started" | "completed"): Promise<void> {
-    const workflow = await linearIssueWorkflow(deps.fetch, token, issueId);
-    if (!workflow) {
-      return;
-    }
-    const from = workflow.stateType ?? "";
-    if (target === "started" ? !["backlog", "unstarted", "triage"].includes(from) : ["completed", "canceled"].includes(from)) {
-      return;
-    }
-    const state = firstStateOfType(workflow.states, target);
-    if (!state) {
-      log(`integrations: linear team has no ${target} state`);
-      return;
-    }
-    await setLinearIssueState(deps.fetch, token, issueId, state.id);
-  }
-
-  async function step(what: string, run: () => Promise<void>): Promise<void> {
-    try {
-      await run();
-    } catch (error) {
-      log(`integrations: linear ${what} failed: ${errorText(error)}`);
-    }
-  }
-
-  async function linearRunBegan(row: Row, project: IntegrationProject, runId: string): Promise<void> {
-    const issueId = String(row.issue_id);
-    const token = await linearTokenFor(row).catch((error: unknown) => {
-      log(`integrations: linear token failed: ${errorText(error)}`);
-      return null;
-    });
-    if (!token) {
-      return;
-    }
-    await step("move to started", () => moveLinearIssue(token, issueId, "started"));
-    if (claimStartComment.run(now(), issueId).changes === 1) {
-      await step("start comment", () =>
-        commentOnLinearIssue(deps.fetch, token, issueId, `Rudder started an agent on this in ${project.name}.\n\n${agentUrl(project.workspaceId, runId)}`),
-      );
-    }
-  }
-
-  async function linearRunNeedsYou(row: Row, project: IntegrationProject, runId: string): Promise<void> {
-    const issueId = String(row.issue_id);
-    const latest = linearLatest.get(issueId);
-    if (latest?.category !== "needs" || claimNeedsComment.run(now(), issueId).changes !== 1) {
-      return;
-    }
-    const token = await linearTokenFor(row).catch(() => null);
-    if (!token) {
-      return;
-    }
-    const words = NEEDS_WORDS[needsOf(latest.agent).reason ?? ""];
-    await step("needs-you comment", () =>
-      commentOnLinearIssue(
-        deps.fetch,
-        token,
-        issueId,
-        `The Rudder agent on this ${words ? `${words}.` : "needs you."}\n\n${agentUrl(project.workspaceId, runId)}`,
-      ),
-    );
-  }
-
-  async function linearRunMerged(row: Row): Promise<void> {
-    const token = await linearTokenFor(row).catch(() => null);
-    if (token) {
-      await step("move to completed", () => moveLinearIssue(token, String(row.issue_id), "completed"));
-    }
-  }
-
-  // Called with every home state. The DB row is claimed before any Linear
-  // call, so overlapping states never comment or move twice.
-  function syncLinearRuns(accountId: string, projects: IntegrationProject[]): void {
-    const rows = activeIssueRuns.all(accountId, now() - LINEAR_SYNC_WINDOW_MS) as Row[];
-    if (rows.length === 0) {
-      return;
-    }
-    const byWorkspace = new Map((projects ?? []).map((project) => [project.workspaceId, project]));
-    const claimed = new Set(rows.map((row) => (row.run_id ? String(row.run_id) : "")).filter(Boolean));
-    for (const row of rows) {
-      const issueId = String(row.issue_id);
-      const project = byWorkspace.get(String(row.workspace_id));
-      if (!project) {
-        continue;
-      }
-      const agents = project.agents ?? [];
-      const jobs: Array<() => Promise<void>> = [];
-      let runId = row.run_id ? String(row.run_id) : "";
-      if (!runId) {
-        const agent = row.identifier ? matchIssueRun(agents, String(row.identifier), Number(row.created_at), claimed) : null;
-        if (!agent || setIssueRunId.run(agent.id, now(), issueId).changes !== 1) {
-          continue;
-        }
-        runId = agent.id;
-        claimed.add(runId);
-        jobs.push(() => linearRunBegan(row, project, runId));
-      }
-      const agent = agents.find((candidate) => candidate?.id === runId);
-      if (agent) {
-        if (normalizedStatus(agent as StatusAgent) === "merged") {
-          linearLatest.delete(issueId);
-          if (markIssueMerged.run(now(), issueId).changes === 1) {
-            jobs.push(() => linearRunMerged(row));
-          }
-        } else {
-          const category = agentCategory(agent);
-          linearLatest.set(issueId, { category, agent });
-          if (category === "needs" && !Number(row.needs_commented) && !linearHolds.has(issueId)) {
-            // Held like Slack's needs-you: an Esc or a prompt answered in the
-            // terminal reads as needs-you for a moment, and that is not news.
-            if (needsDebounceMs === 0) {
-              jobs.push(() => linearRunNeedsYou(row, project, runId));
-            } else {
-              linearHolds.add(issueId);
-              let release: () => void = () => undefined;
-              const settled = new Promise<void>((resolve) => { release = resolve; });
-              pending.add(settled);
-              const timer = setTimeout(() => {
-                linearHolds.delete(issueId);
-                void linearRunNeedsYou(row, project, runId).finally(() => {
-                  pending.delete(settled);
-                  release();
-                });
-              }, needsDebounceMs);
-              timer.unref?.();
-            }
-          }
-        }
-      }
-      if (jobs.length) {
-        track((async () => {
-          for (const job of jobs) {
-            await job();
-          }
-        })());
-      }
-    }
-  }
-
-  // ---- Linear: Rudder work tracked as Linear issues ----
-  //
-  // Each shape of work is decided once and kept in the database:
-  // - an agent run: one model call (rudder_linear_tracked_runs);
-  // - a plan: one model call on the plan's goal (rudder_linear_tracked_plans),
-  //   and every worker of the plan attaches to the plan's issue;
-  // - a branch: takes its parent run's decision, with no model call;
-  // - a long session (a main row): one call per new user turn, at most one a
-  //   minute per row (rudder_linear_tracked_turns).
-
-  type TrackRoute = { install: Install; link: Row };
-  type TrackView = { project: IntegrationProject; agent: IntegrationAgent };
-  type Decided = { action: TrackDecision["action"]; issueId: string | null; identifier: string | null; created: boolean; reason: string };
-
-  // A linked Linear project's open issues, read at most every TRACK_ISSUE_CACHE_MS.
-  const issueCache = new Map<string, { at: number; issues: LinearIssue[] }>();
-  // Runs, plans and session turns with a decision in flight.
-  const trackInFlight = new Set<string>();
-  // The newest view of a run being decided: a merge that lands while the model
-  // answers is synced as soon as the decision is.
-  const trackLatest = new Map<string, TrackView>();
-  const trackQueues = new Map<string, Promise<void>>();
-  // When each session last asked the model (TRACK_TURN_INTERVAL_MS).
-  const turnModelAt = new Map<string, number>();
-  let trackNoModelLogged = false;
-
-  const runKey = (workspaceId: string, runId: string) => `${workspaceId}\0${runId}`;
-  const planKey = (workspaceId: string, planId: string) => `plan\0${workspaceId}\0${planId}`;
-  const turnKey = (workspaceId: string, runId: string) => `turn\0${workspaceId}\0${runId}`;
-  const linkKey = (link: Row) => `${String(link.owner_kind)}:${String(link.owner_id)}:${String(link.linear_kind)}:${String(link.linear_id)}`;
-  const skipped = (reason: string): Decided => ({ action: "skip", issueId: null, identifier: null, created: false, reason });
-
-  // Tracking work runs one job at a time per Rudder project: each decision
-  // sees the issue the one before it created, a worker or branch follows the
-  // decision it depends on, and an issue never moves to started after it
-  // moved to completed.
-  function enqueueTrack(workspaceId: string, job: () => Promise<void>): void {
-    const previous = trackQueues.get(workspaceId) ?? Promise.resolve();
-    const next = previous.then(job).catch((error: unknown) => log(`integrations: linear tracking failed: ${errorText(error)}`));
-    trackQueues.set(workspaceId, next);
-    track(next.finally(() => {
-      if (trackQueues.get(workspaceId) === next) {
-        trackQueues.delete(workspaceId);
-      }
-    }));
-  }
-
-  function trackRoute(accountId: string, links: Row[]): TrackRoute | null {
-    for (const link of links) {
-      const install = getInstall({ kind: String(link.owner_kind) as Owner["kind"], id: String(link.owner_id) }, "linear");
-      if (install && canUseInstall(accountId, install)) {
-        return { install, link };
-      }
-    }
-    return null;
-  }
-
-  async function openIssuesFor(link: Row, token: string): Promise<LinearIssue[]> {
-    const key = linkKey(link);
-    const cached = issueCache.get(key);
-    if (cached && now() - cached.at < TRACK_ISSUE_CACHE_MS) {
-      return cached.issues;
-    }
-    const scope = link.linear_kind === "project" ? { projectId: String(link.linear_id) } : { teamId: String(link.linear_id) };
-    const issues = await listOpenLinearIssues(deps.fetch, token, scope);
-    issueCache.set(key, { at: now(), issues });
-    return issues;
-  }
-
-  function forgetCachedIssue(issueId: string): void {
-    for (const entry of issueCache.values()) {
-      entry.issues = entry.issues.filter((issue) => issue.id !== issueId);
-    }
-  }
-
-  // What was tracked lately in a project, for the classifier: at most two
-  // lines per issue, so one plan's many workers do not crowd out the rest.
-  function recentWork(workspaceId: string): Array<{ title: string; identifier: string }> {
-    const perIssue = new Map<string, number>();
-    const out: Array<{ title: string; identifier: string }> = [];
-    for (const row of recentTracked.all({ workspaceId, since: now() - TRACK_RECENT_MS }) as Row[]) {
-      const identifier = str(row.identifier);
-      const title = str(row.title);
-      const seen = perIssue.get(identifier) ?? 0;
-      if (!identifier || !title || seen >= 2) {
-        continue;
-      }
-      perIssue.set(identifier, seen + 1);
-      out.push({ title, identifier });
-      if (out.length >= 8) {
-        break;
-      }
-    }
-    return out;
-  }
-
-  // One model call, then the issue a create makes. Never throws: a model or
-  // Linear failure is a skip, logged once for this decision.
-  async function decideWork(params: {
-    route: TrackRoute;
-    project: IntegrationProject;
-    task: string;
-    plan?: PlanContext | null;
-    url: string;
-    source: "agent" | "plan" | "session";
-    what: string;
-  }): Promise<{ decided: Decided; token: string | null }> {
-    const { route, project } = params;
-    let token: string | null = null;
-    try {
-      token = await linearAccessToken(route.install);
-      const issues = await openIssuesFor(route.link, token);
-      let decision: TrackDecision;
-      try {
-        decision = await classifyWork({
-          env: deps.env,
-          fetch: deps.fetch,
-          task: params.task,
-          project: { name: project.name, repo: project.repo ?? null },
-          linearName: route.link.linear_name ? String(route.link.linear_name) : null,
-          issues,
-          tracked: recentWork(project.workspaceId),
-          plan: params.plan ? { pieces: params.plan.pieces } : null,
-          log,
-        });
-      } catch (error) {
-        throw new Error(`the model could not decide: ${errorText(error)}`);
-      }
-      if (decision.action === "attach") {
-        return { decided: { action: "attach", issueId: decision.issue.id, identifier: decision.issue.identifier, created: false, reason: decision.reason }, token };
-      }
-      if (decision.action === "skip") {
-        return { decided: skipped(decision.reason), token };
-      }
-      const teamId = str(route.link.team_id);
-      if (!teamId) {
-        throw new Error("the linked Linear project has no team");
-      }
-      // No labels: only an issue the user labels `rudder` starts an agent.
-      const issue = await createLinearIssue(deps.fetch, token, {
-        teamId,
-        ...(route.link.linear_kind === "project" ? { projectId: String(route.link.linear_id) } : {}),
-        title: decision.title,
-        description: trackedIssueDescription(params.task, project.name, params.url, params.source),
-      });
-      issueCache.get(linkKey(route.link))?.issues.unshift({
-        id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title || decision.title,
-        url: issue.url,
-        state: null,
-        stateType: "started",
-        priority: null,
-        team: null,
-      });
-      return { decided: { action: "create", issueId: issue.id, identifier: issue.identifier, created: true, reason: decision.reason }, token };
-    } catch (error) {
-      log(`integrations: linear tracking skipped ${params.what}: ${errorText(error)}`);
-      return { decided: skipped(errorText(error).slice(0, 300)), token };
-    }
-  }
-
-  function trackingReady(): boolean {
-    if (taskgenConfigured(deps.env)) {
-      return true;
-    }
-    if (!trackNoModelLogged) {
-      trackNoModelLogged = true;
-      log("integrations: linear tracking is off: no OPENAI_API_KEY or ANTHROPIC_API_KEY on this server");
-    }
-    return false;
-  }
-
-  // A private agent's work stays out of an org's shared Linear workspace.
-  const privateHere = (agent: IntegrationAgent, route: TrackRoute) => agent.visibility === "private" && route.install.ownerKind === "org";
-
-  // A run Rudder may decide: new since tracking (or the link) started, a
-  // piece of work by its mode, not decided yet, not started from Linear.
-  function newRunCandidate(agent: IntegrationAgent, workspaceId: string, since: number): boolean {
-    if (typeof agent.createdAt !== "number" || agent.createdAt < since || untrackedReason(agent) || !userTask(agent.task)) {
-      return false;
-    }
-    const decided = findTracked.get(workspaceId, agent.id) as Row | undefined;
-    if (decided && (decided.action !== "deciding" || dropStaleTrackClaim.run(workspaceId, agent.id, now() - TRACK_CLAIM_STALE_MS).changes !== 1)) {
-      return false;
-    }
-    return !issueRunForRun.get(agent.id);
-  }
-
-  function claimRun(accountId: string, project: IntegrationProject, agent: IntegrationAgent, route: TrackRoute, claim: {
-    action: "deciding" | "skip";
-    reason?: string | null;
-    planId?: string | null;
-  }): boolean {
-    return claimTracked.run({
-      workspaceId: project.workspaceId,
-      runId: agent.id,
-      accountId,
-      ownerKind: route.install.ownerKind,
-      ownerId: route.install.ownerId,
-      action: claim.action,
-      title: String(agent.title || userTask(agent.task)).slice(0, TRACK_TITLE_LIMIT),
-      reason: claim.reason ?? null,
-      planId: claim.planId ?? null,
-      now: now(),
-    }).changes === 1;
-  }
-
-  function writeRunDecision(workspaceId: string, runId: string, decided: Decided): void {
-    decideTracked.run({
-      workspaceId,
-      runId,
-      action: decided.action,
-      issueId: decided.issueId,
-      identifier: decided.identifier,
-      created: decided.created ? 1 : 0,
-      reason: decided.reason || null,
-      now: now(),
-    });
-  }
-
-  // After a run's decision: sync it with the newest view of the agent.
-  function finishRun(project: IntegrationProject, agent: IntegrationAgent, decided: Decided): void {
-    const key = runKey(project.workspaceId, agent.id);
-    const latest = trackLatest.get(key) ?? { project, agent };
-    trackLatest.delete(key);
-    if (decided.action !== "skip") {
-      const row = findTracked.get(project.workspaceId, agent.id) as Row | undefined;
-      if (row) {
-        syncTrackedRun(row, latest);
-      }
-    }
-  }
-
-  function inFlight(key: string, view: TrackView): void {
-    trackInFlight.add(key);
-    trackLatest.set(key, view);
-  }
-
-  // Called with every home state; only database reads and claims happen here.
-  // Model and Linear calls run in the background.
-  function syncTrackedRuns(accountId: string, projects: IntegrationProject[]): void {
-    const links = linksForAccount.all(accountId) as Row[];
-    if (links.length === 0) {
-      return;
-    }
-    const linksByWorkspace = new Map<string, Row[]>();
-    for (const link of links) {
-      const workspaceId = String(link.workspace_id);
-      linksByWorkspace.set(workspaceId, [...(linksByWorkspace.get(workspaceId) ?? []), link]);
-    }
-    const active = new Map(
-      (activeTrackedRuns.all(accountId, now() - LINEAR_SYNC_WINDOW_MS) as Row[]).map((row) => [runKey(String(row.workspace_id), String(row.run_id)), row]),
-    );
-    const openPlans = openCreatedPlans.all(accountId, now() - LINEAR_SYNC_WINDOW_MS) as Row[];
-    for (const project of projects ?? []) {
-      const projectLinks = linksByWorkspace.get(project.workspaceId);
-      if (!projectLinks) {
-        continue;
-      }
-      // Nothing from before tracking started, or before this project was linked, is backfilled.
-      const linkedAt = Math.min(...projectLinks.map((link) => Date.parse(String(link.updated_at)) || 0));
-      const since = Math.max(trackStartedAt, linkedAt);
-      const sessionSince = Math.max(turnTrackStartedAt, linkedAt);
-      let route: TrackRoute | null | undefined;
-      const routeOf = (): TrackRoute | null => (route === undefined ? (route = trackRoute(accountId, projectLinks)) : route);
-      const branches: IntegrationAgent[] = [];
-      for (const agent of project.agents ?? []) {
-        if (!agent?.id || agent.pending === true) {
-          continue;
-        }
-        if (agent.mode === "main") {
-          considerTurn(accountId, project, agent, sessionSince, routeOf);
-          continue;
-        }
-        const key = runKey(project.workspaceId, agent.id);
-        const row = active.get(key);
-        if (row) {
-          syncTrackedRun(row, { project, agent });
-          continue;
-        }
-        if (trackInFlight.has(key)) {
-          trackLatest.set(key, { project, agent });
-          continue;
-        }
-        if (!newRunCandidate(agent, project.workspaceId, since) || !trackingReady()) {
-          continue;
-        }
-        const chosen = routeOf();
-        if (!chosen || privateHere(agent, chosen)) {
-          continue;
-        }
-        if (branchSourceTask(agent.task) !== null) {
-          branches.push(agent); // after the rest, so a parent decided in this pass is queued first
-        } else if (agent.planId) {
-          startPlanWorker(accountId, project, agent, chosen);
-        } else {
-          startRun(accountId, project, agent, chosen);
-        }
-      }
-      const chosen = routeOf();
-      if (chosen) {
-        for (const agent of branches) {
-          startBranch(accountId, project, agent, chosen);
-        }
-      }
-      syncTrackedPlans(project, openPlans);
-    }
-  }
-
-  // ---- an agent run: one model call ----
-
-  function startRun(accountId: string, project: IntegrationProject, agent: IntegrationAgent, route: TrackRoute): void {
-    const task = userTask(agent.task);
-    if (trivialTask(task)) {
-      claimRun(accountId, project, agent, route, { action: "skip", reason: "not work: an empty or one-word prompt" });
-      return;
-    }
-    if (!claimRun(accountId, project, agent, route, { action: "deciding" })) {
-      return;
-    }
-    const key = runKey(project.workspaceId, agent.id);
-    inFlight(key, { project, agent });
-    enqueueTrack(project.workspaceId, async () => {
-      let decided = skipped("");
-      try {
-        ({ decided } = await decideWork({ route, project, task, url: agentUrl(project.workspaceId, agent.id), source: "agent", what: agent.id }));
-      } finally {
-        trackInFlight.delete(key);
-        writeRunDecision(project.workspaceId, agent.id, decided);
-      }
-      finishRun(project, agent, decided);
-    });
-  }
-
-  // A plan worker or a branch takes the decision of what it belongs to (its
-  // plan, its parent): the same issue, or a skip. It runs on the project's
-  // queue after that decision, and never calls the model.
-  function followDecision(project: IntegrationProject, agent: IntegrationAgent, source: () => Row | undefined, why: string): () => Promise<void> {
-    return async () => {
-      const from = source();
-      const issueId = from && (from.action === "attach" || from.action === "create") ? str(from.issue_id) : "";
-      const decided: Decided = issueId
-        ? { action: "attach", issueId, identifier: str(from?.identifier) || null, created: false, reason: why }
-        : skipped(from ? `${why}, which is not tracked` : `${why}, which has no decision`);
-      trackInFlight.delete(runKey(project.workspaceId, agent.id));
-      writeRunDecision(project.workspaceId, agent.id, decided);
-      if (issueId) {
-        // What it follows already moved the issue to started.
-        claimTrackStarted.run(now(), project.workspaceId, agent.id);
-      }
-      finishRun(project, agent, decided);
-    };
-  }
-
-  // ---- a plan: one decision on its goal, shared by every worker ----
-
-  function startPlanWorker(accountId: string, project: IntegrationProject, agent: IntegrationAgent, route: TrackRoute): void {
-    const workspaceId = project.workspaceId;
-    const planId = String(agent.planId);
-    if (!claimRun(accountId, project, agent, route, { action: "deciding", planId })) {
-      return;
-    }
-    inFlight(runKey(workspaceId, agent.id), { project, agent });
-    const key = planKey(workspaceId, planId);
-    let plan = findTrackedPlan.get(workspaceId, planId) as Row | undefined;
-    if (plan?.action === "deciding" && !trackInFlight.has(key) && dropStalePlanClaim.run(workspaceId, planId, now() - TRACK_CLAIM_STALE_MS).changes === 1) {
-      plan = undefined;
-    }
-    if (!plan) {
-      const agents = project.agents ?? [];
-      const context = planContext({ planId, agents, plans: project.plan?.plans, nodes: project.plan?.nodes });
-      const claimed = claimTrackedPlan.run({
-        workspaceId,
-        planId,
-        accountId,
-        ownerKind: route.install.ownerKind,
-        ownerId: route.install.ownerId,
-        goal: context.goal.replace(/\s+/g, " ").slice(0, TRACK_TITLE_LIMIT),
-        now: now(),
-      });
-      if (claimed.changes === 1) {
-        trackInFlight.add(key);
-        // The issue links to the plan's orchestrator row when the home shows it.
-        const orchestrator = agents.find((candidate) => candidate?.planId === planId && candidate.mode === "rudder-plan");
-        enqueueTrack(workspaceId, () => decidePlan(project, planId, context, route, agentUrl(workspaceId, orchestrator?.id ?? agent.id)));
-      }
-    }
-    enqueueTrack(workspaceId, followDecision(project, agent, () => findTrackedPlan.get(workspaceId, planId) as Row | undefined, `part of plan ${planId}`));
-  }
-
-  async function decidePlan(project: IntegrationProject, planId: string, context: PlanContext, route: TrackRoute, url: string): Promise<void> {
-    const workspaceId = project.workspaceId;
-    let decided = skipped("the plan has no goal");
-    let token: string | null = null;
-    try {
-      if (!trivialTask(context.goal)) {
-        ({ decided, token } = await decideWork({ route, project, task: context.goal, plan: context, url, source: "plan", what: `plan ${planId}` }));
-      }
-    } finally {
-      trackInFlight.delete(planKey(workspaceId, planId));
-      decideTrackedPlan.run({
-        workspaceId,
-        planId,
-        action: decided.action,
-        issueId: decided.issueId,
-        identifier: decided.identifier,
-        created: decided.created ? 1 : 0,
-        reason: decided.reason || null,
-        now: now(),
-      });
-    }
-    const issueId = decided.issueId;
-    if (issueId && token && claimPlanStarted.run(now(), workspaceId, planId).changes === 1) {
-      const access = token;
-      await step("move to started", () => moveLinearIssue(access, issueId, "started"));
-    }
-  }
-
-  // A plan is finished when the home says nothing is queued and every
-  // launched node merged, and no worker is still running. Older homes publish
-  // no counts: then every tracked worker merged, every worker shown merged,
-  // and no node of the project's plan graph is still waiting to launch.
-  function planFinished(project: IntegrationProject, planId: string): boolean {
-    const workers = (project.agents ?? []).filter((agent) => agent?.id && agent.planId === planId && agent.mode !== "rudder-plan" && agent.pending !== true);
-    const entry = (project.plan?.plans ?? []).find((plan) => plan?.id === planId);
-    if (entry && typeof entry.pending === "number" && typeof entry.launched === "number" && typeof entry.merged === "number") {
-      return entry.launched > 0 && entry.pending === 0 && entry.merged >= entry.launched
-        && !workers.some((agent) => LIVE_AGENT_STATUSES.has(normalizedStatus(agent as StatusAgent)));
-    }
-    const rows = planWorkerRows.all(project.workspaceId, planId) as Row[];
-    if (rows.length === 0 || rows.some((row) => !Number(row.merged_synced))) {
-      return false;
-    }
-    if (workers.some((agent) => normalizedStatus(agent as StatusAgent) !== "merged")) {
-      return false;
-    }
-    return !(project.plan?.nodes ?? []).some((node) => !node?.runId && node?.status !== "merged" && node?.status !== "failed");
-  }
-
-  // A plan issue Rudder created is completed once, when the plan finishes.
-  function syncTrackedPlans(project: IntegrationProject, plans: Row[]): void {
-    for (const plan of plans) {
-      const planId = String(plan.plan_id);
-      const issueId = str(plan.issue_id);
-      if (String(plan.workspace_id) !== project.workspaceId || !issueId || !planFinished(project, planId)) {
-        continue;
-      }
-      if (claimPlanClosed.run(now(), project.workspaceId, planId).changes !== 1) {
-        continue;
-      }
-      enqueueTrack(project.workspaceId, async () => {
-        const token = await linearTokenFor(plan).catch((error: unknown) => {
-          log(`integrations: linear token failed: ${errorText(error)}`);
-          return null;
-        });
-        if (token) {
-          await step("move to completed", () => moveLinearIssue(token, issueId, "completed"));
-          forgetCachedIssue(issueId);
-        }
-      });
-    }
-  }
-
-  // ---- a branch: its parent's decision ----
-
-  function startBranch(accountId: string, project: IntegrationProject, agent: IntegrationAgent, route: TrackRoute): void {
-    const workspaceId = project.workspaceId;
-    const parent = findBranchParent(agent, project.agents ?? []);
-    if (!parent) {
-      claimRun(accountId, project, agent, route, { action: "skip", reason: "a branch whose parent run is not shown" });
-      return;
-    }
-    if (!claimRun(accountId, project, agent, route, { action: "deciding" })) {
-      return;
-    }
-    inFlight(runKey(workspaceId, agent.id), { project, agent });
-    // A branch of a session follows the session's newest tracked prompt.
-    const source = () => (parent.mode === "main"
-      ? lastIssueTurn.get(workspaceId, parent.id)
-      : findTracked.get(workspaceId, parent.id)) as Row | undefined;
-    enqueueTrack(workspaceId, followDecision(project, agent, source, `branch of ${parent.id}`));
-  }
-
-  // ---- a long session: one decision per new user turn ----
-
-  function considerTurn(accountId: string, project: IntegrationProject, agent: IntegrationAgent, since: number, routeOf: () => TrackRoute | null): void {
-    const turn = agent.userTurns;
-    if (typeof turn !== "number" || turn < 1 || typeof agent.lastUserPrompt !== "string") {
-      return; // a home older than lastUserTurn
-    }
-    const workspaceId = project.workspaceId;
-    const key = turnKey(workspaceId, agent.id);
-    if (trackInFlight.has(key)) {
-      return;
-    }
-    let last = lastTrackedTurn.get(workspaceId, agent.id) as Row | undefined;
-    if (last?.action === "deciding" && dropStaleTurnClaim.run(workspaceId, agent.id, Number(last.turn), now() - TRACK_CLAIM_STALE_MS).changes === 1) {
-      last = lastTrackedTurn.get(workspaceId, agent.id) as Row | undefined;
-    }
-    if (last && Number(last.turn) >= turn) {
-      return;
-    }
-    const fresh = typeof agent.lastUserAt === "number" && agent.lastUserAt >= since;
-    // Backfill once: a session already running when tracking starts gets its
-    // newest prompt decided, if seen soon after; nothing older ever is.
-    if (!fresh && (last || !LIVE_AGENT_STATUSES.has(normalizedStatus(agent as StatusAgent)) || now() - since > TRACK_TURN_BACKFILL_MS)) {
-      return;
-    }
-    if (!trackingReady()) {
-      return;
-    }
-    const route = routeOf();
-    if (!route || privateHere(agent, route)) {
-      return;
-    }
-    const prompt = userTask(agent.lastUserPrompt);
-    const claim = (action: "deciding" | "skip", reason: string | null) => claimTrackedTurn.run({
-      workspaceId,
-      runId: agent.id,
-      turn,
-      accountId,
-      ownerKind: route.install.ownerKind,
-      ownerId: route.install.ownerId,
-      action,
-      prompt: prompt.replace(/\s+/g, " ").slice(0, TRACK_TITLE_LIMIT),
-      reason,
-      now: now(),
-    }).changes === 1;
-    if (trivialTask(prompt)) {
-      claim("skip", "not work: an empty or one-word prompt");
-      return;
-    }
-    if (now() - (turnModelAt.get(key) ?? -Infinity) < TRACK_TURN_INTERVAL_MS) {
-      return; // asked a moment ago: the newest prompt is decided on a later state
-    }
-    if (!claim("deciding", null)) {
-      return;
-    }
-    turnModelAt.set(key, now());
-    trackInFlight.add(key);
-    enqueueTrack(workspaceId, async () => {
-      let decided = skipped("");
-      let token: string | null = null;
-      try {
-        ({ decided, token } = await decideWork({ route, project, task: prompt, url: agentUrl(workspaceId, agent.id), source: "session", what: `${agent.id} turn ${turn}` }));
-      } finally {
-        trackInFlight.delete(key);
-        decideTrackedTurn.run({
-          workspaceId,
-          runId: agent.id,
-          turn,
-          action: decided.action,
-          issueId: decided.issueId,
-          identifier: decided.identifier,
-          created: decided.created ? 1 : 0,
-          reason: decided.reason || null,
-          now: now(),
-        });
-      }
-      // A session has no merge: its issue moves to started, and the user closes it.
-      const issueId = decided.issueId;
-      if (issueId && token && claimTurnStarted.run(now(), workspaceId, agent.id, turn).changes === 1) {
-        const access = token;
-        await step("move to started", () => moveLinearIssue(access, issueId, "started"));
-      }
-    });
-  }
-
-  // ---- progress of a tracked run ----
-
-  // Started when tracking begins (no comment); one "Merged:" comment when the
-  // agent merges (at most TRACK_MERGE_COMMENTS_PER_ISSUE per issue), and
-  // completed only for an issue this run created. Each step is claimed in the
-  // row before Linear is called; failures are only logged.
-  function syncTrackedRun(row: Row, view: TrackView): void {
-    const workspaceId = String(row.workspace_id);
-    const runId = String(row.run_id);
-    const issueId = str(row.issue_id);
-    if (!issueId) {
-      return;
-    }
-    const start = !Number(row.started_synced) && claimTrackStarted.run(now(), workspaceId, runId).changes === 1;
-    const merged = normalizedStatus(view.agent as StatusAgent) === "merged" && claimTrackMerged.run(now(), workspaceId, runId).changes === 1;
-    const comment = merged
-      && claimMergeComment.run({ now: now(), workspaceId, runId, issueId, cap: TRACK_MERGE_COMMENTS_PER_ISSUE }).changes === 1;
-    const complete = merged && Number(row.created_issue) === 1;
-    if (!start && !comment && !complete) {
-      return;
-    }
-    enqueueTrack(workspaceId, async () => {
-      const token = await linearTokenFor(row).catch((error: unknown) => {
-        log(`integrations: linear token failed: ${errorText(error)}`);
-        return null;
-      });
-      if (!token) {
-        return;
-      }
-      if (start) {
-        await step("move to started", () => moveLinearIssue(token, issueId, "started"));
-      }
-      if (comment) {
-        await step("merge comment", () =>
-          commentOnLinearIssue(deps.fetch, token, issueId, `Merged: ${mergeLine(view.agent)}\n\n${agentUrl(workspaceId, runId)}`),
-        );
-      }
-      if (complete) {
-        await step("move to completed", () => moveLinearIssue(token, issueId, "completed"));
-        forgetCachedIssue(issueId);
-      }
-    });
   }
 
   async function routeApp(req: IncomingMessage, res: ServerResponse, url: URL, account: Account): Promise<boolean> {
@@ -2244,13 +566,13 @@ export function createIntegrations(deps: IntegrationsDeps) {
       sendJson(res, 200, summary(account, orgParam));
       return true;
     }
-    const startMatch = /^\/api\/app\/integrations\/(slack|linear)\/start$/.exec(path);
+    const startMatch = /^\/api\/app\/integrations\/(slack)\/start$/.exec(path);
     if (startMatch && method === "POST") {
       const body = await readJson(req);
       sendJson(res, 200, { url: startOAuth(account, str(body.org) || orgParam, startMatch[1] as Provider) });
       return true;
     }
-    const providerMatch = /^\/api\/app\/integrations\/(slack|linear)$/.exec(path);
+    const providerMatch = /^\/api\/app\/integrations\/(slack)$/.exec(path);
     if (providerMatch && method === "DELETE") {
       await disconnect(account, orgParam, providerMatch[1] as Provider);
       sendJson(res, 200, { ok: true });
@@ -2283,44 +605,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
       sendJson(res, 200, { channel });
       return true;
     }
-    if (method === "GET" && path === "/api/app/linear/issues") {
-      const install = requireLinear(resolveOwner(account, orgParam, "read"));
-      const token = await linearAccessToken(install);
-      const issues = await listLinearIssues(deps.fetch, token, url.searchParams.get("q") ?? "");
-      sendJson(res, 200, {
-        issues: issues.map(({ id, identifier, title, url: issueUrl, state, priority, team }) => ({
-          id,
-          identifier,
-          title,
-          url: issueUrl,
-          state,
-          priority,
-          team,
-        })),
-      });
-      return true;
-    }
-    if (method === "POST" && path === "/api/app/linear/start") {
-      sendJson(res, 200, await startLinearIssue(account, await readJson(req)));
-      return true;
-    }
-    if (method === "GET" && path === "/api/app/linear/setup") {
-      sendJson(res, 200, await linearSetup(account, orgParam));
-      return true;
-    }
-    if (method === "GET" && path === "/api/app/linear/teams") {
-      const setup = await linearSetup(account, orgParam);
-      sendJson(res, 200, { teams: setup.teams, canManage: setup.canManage });
-      return true;
-    }
-    if (method === "POST" && path === "/api/app/linear/mapping") {
-      sendJson(res, 200, await setLinearLink(account, await readJson(req), orgParam));
-      return true;
-    }
-    if (method === "POST" && path === "/api/app/linear/generate") {
-      sendJson(res, 200, await generateLinearTasks(account, await readJson(req)));
-      return true;
-    }
     const linkMatch = /^\/api\/app\/link\/slack\/([A-Za-z0-9_-]{8,128})$/.exec(path);
     if (linkMatch && (method === "GET" || method === "POST")) {
       const codeHash = sha256(linkMatch[1]);
@@ -2347,7 +631,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
 
   async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL, account: Account): Promise<boolean> {
     const path = url.pathname;
-    if (!path.startsWith("/api/app/integrations") && !path.startsWith("/api/app/linear/") && !path.startsWith("/api/app/link/slack/")) {
+    if (!path.startsWith("/api/app/integrations") && !path.startsWith("/api/app/link/slack/")) {
       return false;
     }
     try {
@@ -2514,21 +798,14 @@ export function createIntegrations(deps: IntegrationsDeps) {
   }
 
   async function handlePublicApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
-    const callback = /^\/api\/integrations\/(slack|linear)\/callback$/.exec(url.pathname);
+    const callback = /^\/api\/integrations\/(slack)\/callback$/.exec(url.pathname);
     if (callback && req.method === "GET") {
       redirect(res, await finishOAuth(callback[1] as Provider, url));
       return true;
     }
-    const handler = req.method === "POST"
-      ? url.pathname === "/api/integrations/slack/commands"
-        ? handleSlackCommand
-        : url.pathname === "/api/integrations/linear/webhook"
-          ? handleLinearWebhook
-          : null
-      : null;
-    if (handler) {
+    if (req.method === "POST" && url.pathname === "/api/integrations/slack/commands") {
       try {
-        await handler(req, res);
+        await handleSlackCommand(req, res);
       } catch (error) {
         const status = error instanceof HttpError ? error.status : 500;
         sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
@@ -2563,16 +840,6 @@ export function createIntegrations(deps: IntegrationsDeps) {
   }
 
   async function onHomeState(accountId: string, projects: IntegrationProject[]): Promise<void> {
-    try {
-      syncLinearRuns(accountId, projects);
-    } catch (error) {
-      log(`integrations: linear sync failed: ${errorText(error)}`);
-    }
-    try {
-      syncTrackedRuns(accountId, projects);
-    } catch (error) {
-      log(`integrations: linear tracking failed: ${errorText(error)}`);
-    }
     try {
       const first = !memory.has(accountId);
       const known = memory.get(accountId) ?? new Map<string, AgentMemory>();

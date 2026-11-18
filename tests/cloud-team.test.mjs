@@ -123,7 +123,6 @@ function startServer({ port, dataDir, dbPath }) {
       RUDDER_S3_BUCKET: "",
       RUDDER_SECRETS_KEY: "",
       RUDDER_SLACK_CLIENT_ID: "",
-      RUDDER_LINEAR_CLIENT_ID: "",
       SLACK_BOT_TOKEN: "",
       FLY_API_TOKEN: "",
       RUDDER_DIGEST: "0",

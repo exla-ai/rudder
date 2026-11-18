@@ -1,12 +1,11 @@
 // Settings, organizations and integrations.
 // - Settings is a screen (/app/settings): account facts, the org switcher
 //   (personal or an org), that org's members and invite links, and the Slack
-//   and Linear connections for whichever is selected.
+//   connection for whichever is selected.
 // - /app/join/<token> previews and accepts an org invite.
 // - /app/link/slack/<code> binds a Slack user (from `/rudder link`) to this account.
-// - "From Linear" in a project's task box starts an agent on a Linear issue.
 import { h, icon, setText, copyText } from "/app/render.js";
-import { app, api, ls, NATIVE, PLATFORM, rel, confirmDialog, openSheet, openExternal, showError, toast, track } from "/app/core.js";
+import { app, api, ls, PLATFORM, rel, confirmDialog, openSheet, openExternal, showError, toast, track } from "/app/core.js";
 import { DOWNLOAD_MAC_URL } from "/app/onboarding.js";
 import { dropdown } from "/app/select.js";
 
@@ -15,7 +14,6 @@ const SCOPE_KEY = "rudder.org";
 const PENDING_KEY = "rudder.pendingLink";
 
 const SLACK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M9 3.5v7M15 13.5v7M3.5 15h7M13.5 9h7"/><path d="M9 14.5v6M15 3.5v6M3.5 9h6M14.5 15h6"/></svg>';
-const LINEAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M5 14.5l4.5 4.5M4 10.5L13.5 20M6 7.5L16.5 18M8.5 5L19 15.5"/></svg>';
 
 /** The selected owner scope: an org id, or "" for personal. */
 export function currentScope() {
@@ -38,7 +36,7 @@ export function takePendingLink() {
   return p && Date.now() - p.at < 60 * 60_000 ? p.path : null;
 }
 
-/* Integrations cache (also used by the task box) --------------------- */
+/* Integrations cache ------------------------------------------------- */
 
 const integrationsCache = new Map(); // scope -> { at, data }
 async function loadIntegrations(org, force = false) {
@@ -47,10 +45,6 @@ async function loadIntegrations(org, force = false) {
   const data = await api(`/api/app/integrations${scopeQuery(org)}`);
   integrationsCache.set(org, { at: Date.now(), data });
   return data;
-}
-/** Resolves true when Linear is connected for the selected scope. Never throws. */
-export async function linearAvailable() {
-  try { return !!(await loadIntegrations(currentScope()))?.linear?.connected; } catch { return false; }
 }
 
 /* Shared bits -------------------------------------------------------- */
@@ -93,7 +87,7 @@ export function note(text, cls = "") {
 
 /* Settings ----------------------------------------------------------- */
 
-const PROVIDER_NAME = { slack: "Slack", linear: "Linear" };
+const PROVIDER_NAME = { slack: "Slack" };
 // What the OAuth callbacks put in ?error= (with &provider=).
 function oauthErrorText(code, provider) {
   const p = PROVIDER_NAME[provider] || "The integration";
@@ -392,7 +386,7 @@ export function SettingsScreen() {
     if (admin) {
       const del = h(`<button type="button" class="btn danger">Delete organization</button>`);
       del.addEventListener("click", async () => {
-        const ok = await confirmDialog({ title: `Delete ${org.name}?`, body: "Everyone loses access to it, and its Slack and Linear connections are removed. This cannot be undone.", confirm: "Delete", danger: true });
+        const ok = await confirmDialog({ title: `Delete ${org.name}?`, body: "Everyone loses access to it, and its Slack connection is removed. This cannot be undone.", confirm: "Delete", danger: true });
         if (!ok) return;
         try {
           await api(`/api/app/orgs/${encodeURIComponent(scope)}`, { method: "DELETE" });
@@ -421,14 +415,14 @@ export function SettingsScreen() {
     } catch (err) { showError(err); }
   }
 
-  // Integrations: Slack and Linear for the selected scope.
+  // Integrations: Slack for the selected scope.
   let intFor = null;
   async function paintIntegrations(force = false, quiet = false) {
     const org = scope;
     intSec.el.querySelector("h2").textContent = org ? `Integrations · ${orgs?.find((o) => o.id === org)?.name || "Organization"}` : "Integrations · Personal";
     if (intFor !== org || (force && !quiet)) {
       intFor = org;
-      intSec.body.replaceChildren(h(`<div class="sk sk-card" style="height:76px"></div>`), h(`<div class="sk sk-card" style="height:76px"></div>`));
+      intSec.body.replaceChildren(h(`<div class="sk sk-card" style="height:76px"></div>`));
     }
     let data;
     try { data = await loadIntegrations(org, force); }
@@ -441,7 +435,7 @@ export function SettingsScreen() {
     const key = JSON.stringify(data);
     if (quiet && key === intShown) return; // nothing moved: keep the cards (and any open select)
     intShown = key;
-    intSec.body.replaceChildren(slackCard(org, data), linearCard(org, data));
+    intSec.body.replaceChildren(slackCard(org, data));
   }
   let intShown = "";
 
@@ -468,7 +462,7 @@ export function SettingsScreen() {
   const disconnectBtn = (provider, label, org) => {
     const b = h(`<button type="button" class="btn small">Disconnect</button>`);
     b.addEventListener("click", async () => {
-      const ok = await confirmDialog({ title: `Disconnect ${label}?`, body: provider === "slack" ? "Rudder stops posting agent updates to Slack, and /rudder stops working there." : "Rudder stops tracking agents in Linear, and starting agents from Linear issues stops working.", confirm: "Disconnect", danger: true });
+      const ok = await confirmDialog({ title: `Disconnect ${label}?`, body: "Rudder stops posting agent updates to Slack, and /rudder stops working there.", confirm: "Disconnect", danger: true });
       if (!ok) return;
       try {
         await api(`/api/app/integrations/${provider}${scopeQuery(org)}`, { method: "DELETE" });
@@ -527,22 +521,6 @@ export function SettingsScreen() {
     return card;
   }
 
-  function linearCard(org, data) {
-    const l = data?.linear || {};
-    const card = integrationCard({ svg: LINEAR_SVG, name: "Linear", blurb: "Track the work your agents do in Linear, and start agents from issues." });
-    const act = card.querySelector(".in-act");
-    const sub = card.querySelector(".in-sub");
-    if (!l.configured) { setText(sub, "Not set up on this server yet"); card.classList.add("off"); return card; }
-    if (!l.connected) { act.appendChild(data.canManage ? connectBtn("linear", org) : noAdmin("Linear")); return card; }
-    setText(sub, `Connected to ${l.workspace?.name || "your workspace"}`);
-    card.classList.add("on");
-    if (data.canManage) act.appendChild(disconnectBtn("linear", "Linear", org));
-    const extra = card.querySelector(".in-extra");
-    extra.hidden = false;
-    extra.appendChild(linearPanel(org));
-    return card;
-  }
-
   function update() {
     paintAccount();
     const fresh = app.store?.state?.orgs;
@@ -563,192 +541,12 @@ export function SettingsScreen() {
   return { el, update, destroy() { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); } };
 }
 
-/* Linear: projects linked to Rudder projects, and Generate tasks ----- */
-
-// Each Linear project (or team) links to one Rudder project: agents started in
-// that project show up in Linear as progress, issues labeled rudder there
-// start an agent, and "Generate tasks" adds unlabeled issues for a goal.
-// Suggested links (Libra -> libra) only need a Confirm.
-function linearPanel(org) {
-  const wrap = h(`<div class="lmap"><div class="sk sk-card" style="height:120px"></div></div>`);
-  let setup = null;
-  let lastResult = null;
-
-  async function load() {
-    try {
-      setup = await api(`/api/app/linear/setup${scopeQuery(org)}`);
-      paint();
-    } catch (err) {
-      wrap.replaceChildren(note(err.status === 404 ? "Linear projects are not available on this server yet." : err.message, err.status === 404 ? "" : "err"));
-    }
-  }
-
-  const projectName = (workspaceId) => setup.projects.find((p) => p.workspaceId === workspaceId)?.name;
-  const itemLabel = (item, kind) => (kind === "team" ? `${item.key} · ${item.name}` : item.name);
-
-  async function saveLink(kind, item, workspace) {
-    const res = await api("/api/app/linear/mapping", { method: "POST", body: { ...scopeBody(org), kind, linearId: item.id, workspace: workspace || null } });
-    item.link = res?.link || null;
-    item.suggestion = null;
-    track("linear_project_linked", { kind, linked: !!item.link });
-  }
-
-  function mapRow(item, kind) {
-    const row = h(`<div class="lmap-row"><span class="lmap-name"></span><span class="lmap-pick"></span><span class="lmap-act"></span></div>`);
-    setText(row.querySelector(".lmap-name"), itemLabel(item, kind));
-    const sel = h(`<select class="role-select"></select>`);
-    sel.setAttribute("aria-label", `Rudder project for ${itemLabel(item, kind)}`);
-    sel.appendChild(new Option("Not linked", ""));
-    for (const p of setup.projects) sel.appendChild(new Option(p.name, p.workspaceId));
-    if (item.link && !projectName(item.link.workspaceId)) {
-      sel.appendChild(new Option(`${item.link.projectName || "Project"} (another member's machine)`, item.link.workspaceId));
-    }
-    // A suggestion is preselected only for someone who can confirm it.
-    sel.value = item.link?.workspaceId || (setup.canManage ? item.suggestion?.workspaceId : "") || "";
-    sel.disabled = !setup.canManage;
-    row.querySelector(".lmap-pick").appendChild(dropdown(sel));
-    const act = row.querySelector(".lmap-act");
-    if (!item.link && item.suggestion && setup.canManage) {
-      const ok = h(`<button type="button" class="btn small accent">Confirm</button>`);
-      ok.title = `Link ${item.name} to ${item.suggestion.name}`;
-      ok.addEventListener("click", async () => {
-        ok.disabled = true;
-        try { await saveLink(kind, item, sel.value); toast(sel.value ? `${item.name} is linked to ${projectName(sel.value) || "the project"}` : `${item.name} is not linked`); paint(); }
-        catch (err) { showError(err); ok.disabled = false; }
-      });
-      act.appendChild(ok);
-    }
-    sel.addEventListener("change", async () => {
-      if (!item.link && item.suggestion) return; // Confirm saves it
-      try {
-        await saveLink(kind, item, sel.value);
-        toast(sel.value ? `${item.name} is linked to ${projectName(sel.value) || "the project"}` : `${item.name} is no longer linked`);
-        paint();
-      } catch (err) { showError(err); paint(); }
-    });
-    return row;
-  }
-
-  function generateBox() {
-    const box = h(`<div class="lmap-gen">
-      <label class="field-label">Generate tasks</label>
-      <textarea class="input lmap-goal" rows="3" maxlength="4000" placeholder="What should get done? For example: make uploads reliable on slow networks" aria-label="Goal for the new tasks"></textarea>
-      <div class="lmap-gen-row"><select class="role-select" aria-label="Linear project for the new tasks"></select><button type="button" class="btn accent">Create issues</button></div>
-      <div class="hint lmap-gen-hint"></div>
-      <div class="lmap-out" role="list"></div>
-    </div>`);
-    const goal = box.querySelector("textarea");
-    const sel = box.querySelector("select");
-    dropdown(sel);
-    const btn = box.querySelector("button");
-    const hint = box.querySelector(".lmap-gen-hint");
-    const out = box.querySelector(".lmap-out");
-    const targets = [
-      // The Linear project or team, with the Rudder project it feeds under it.
-      ...setup.linearProjects.filter((p) => p.link).map((p) => ({ value: `project:${p.id}`, label: p.name, sub: p.link.projectName || "project" })),
-      ...setup.teams.filter((t) => t.link).map((t) => ({ value: `team:${t.id}`, label: `${t.key} team`, sub: t.link.projectName || "project" })),
-    ];
-    if (!targets.length) {
-      box.querySelector(".lmap-gen-row").hidden = true;
-      goal.hidden = true;
-      setText(hint, "Link a Linear project to a Rudder project above, then describe a goal here.");
-      return box;
-    }
-    for (const t of targets) {
-      const o = new Option(t.label, t.value);
-      o.dataset.sub = t.sub;
-      sel.appendChild(o);
-    }
-    setText(hint, setup.autoStart
-      ? "Adds up to 10 small issues to Linear. Adding the rudder label to one starts an agent on it."
-      : "Adds up to 10 small issues to Linear.");
-    const sync = () => { btn.disabled = !goal.value.trim(); };
-    goal.addEventListener("input", sync);
-    sync();
-    const showResult = (res) => {
-      out.replaceChildren();
-      if (!res) return;
-      for (const issue of res.issues || []) {
-        const a = h(`<a class="lmap-issue" role="listitem" target="_blank" rel="noopener noreferrer"><span class="lmap-id"></span><span class="lmap-title"></span></a>`);
-        a.href = issue.url;
-        setText(a.querySelector(".lmap-id"), issue.identifier);
-        setText(a.querySelector(".lmap-title"), issue.title);
-        a.addEventListener("click", (e) => { if (NATIVE) { e.preventDefault(); openExternal(issue.url); } });
-        out.appendChild(a);
-      }
-      if (res.error) out.appendChild(note(res.error, "err"));
-    };
-    showResult(lastResult);
-    btn.addEventListener("click", async () => {
-      const text = goal.value.trim();
-      if (!text) return;
-      const [kind, id] = sel.value.split(":");
-      btn.disabled = true;
-      setText(btn, "Creating…");
-      try {
-        const res = await api("/api/app/linear/generate", {
-          method: "POST",
-          body: { ...scopeBody(org), goal: text, ...(kind === "project" ? { linearProjectId: id } : { teamId: id }) },
-        });
-        lastResult = res;
-        track("linear_tasks_generated", { count: res?.issues?.length || 0 });
-        toast(`Added ${res?.issues?.length || 0} issues to Linear`);
-        goal.value = "";
-        showResult(res);
-      } catch (err) { showError(err); }
-      setText(btn, "Create issues");
-      sync();
-    });
-    return box;
-  }
-
-  function paint() {
-    const parts = [];
-    const pending = setup.linearProjects.filter((p) => !p.link && p.suggestion);
-    const head = h(`<div class="lmap-head"><label class="field-label">Linear projects</label></div>`);
-    if (pending.length > 1 && setup.canManage) {
-      const all = h(`<button type="button" class="btn small">Confirm all</button>`);
-      all.title = "Link every suggested project";
-      all.addEventListener("click", async () => {
-        all.disabled = true;
-        try {
-          for (const item of pending) await saveLink("project", item, item.suggestion.workspaceId);
-          toast(`Linked ${pending.length} projects`);
-        } catch (err) { showError(err); }
-        paint();
-      });
-      head.appendChild(all);
-    }
-    parts.push(head);
-    if (setup.linearProjects.length) {
-      const list = h(`<div class="lmap-list"></div>`);
-      list.append(...setup.linearProjects.map((p) => mapRow(p, "project")));
-      parts.push(list);
-    } else {
-      parts.push(note("No projects in this Linear workspace yet."));
-    }
-    parts.push(h(`<div class="hint">Agents you start in a linked project show up in its Linear project: a new piece of work gets an issue, related work moves an open issue forward, and small tasks stay out. Issues labeled <code>rudder</code> start an agent in the Rudder project.${setup.autoStart ? "" : " Linear webhooks are not set up on this server yet, so labeled issues do not start agents."}</div>`));
-    if (setup.teams.length) {
-      const details = h(`<details class="lmap-teams"><summary>Link a whole team instead</summary><div class="lmap-list"></div></details>`);
-      if (setup.teams.some((t) => t.link)) details.open = true;
-      details.querySelector(".lmap-list").append(...setup.teams.map((t) => mapRow(t, "team")));
-      parts.push(details);
-    }
-    if (setup.generate) parts.push(generateBox());
-    else parts.push(h(`<div class="hint">Generating tasks is not set up on this server yet.</div>`));
-    wrap.replaceChildren(...parts);
-  }
-
-  load();
-  return wrap;
-}
-
 function openCreateOrg(onCreated) {
   const { body, close } = openSheet({ title: "Create organization", className: "org-sheet" });
   body.append(h(`<form class="org-form" novalidate>
     <label class="field-label" for="org-name">Name</label>
     <input id="org-name" class="input" name="name" placeholder="Acme" maxlength="80" autocomplete="organization" enterkeyhint="go">
-    <p class="hint">You'll be its admin. Invite people with a link next; they share its Slack and Linear connections.</p>
+    <p class="hint">You'll be its admin. Invite people with a link next; they share its Slack connection.</p>
     <button type="submit" class="btn accent block" disabled>Create</button>
   </form>`));
   const form = body.querySelector("form");
@@ -897,55 +695,4 @@ export function SlackLinkScreen(code) {
     setText(box.querySelector("p"), err.message);
   });
   return { el };
-}
-
-/* Linear issues in the task box -------------------------------------- */
-
-export function openLinearIssues(ws, { onStarted } = {}) {
-  const { dlg, body, close } = openSheet({ title: "Start from Linear", className: "linear-sheet" });
-  body.append(h(`<label class="search-wrap">${icon("search")}<input class="input repo-search" type="search" placeholder="Search issues" aria-label="Search Linear issues" autocapitalize="off" spellcheck="false"></label>`),
-    h(`<div class="repo-list" role="list"><div class="repo-note">Loading your Linear issues…</div></div>`));
-  const input = body.querySelector("input");
-  const list = body.querySelector(".repo-list");
-  const org = currentScope();
-  let seq = 0;
-  let timer = null;
-  async function load(q = "") {
-    const mine = ++seq;
-    try {
-      const qs = new URLSearchParams();
-      if (org) qs.set("org", org);
-      if (q) qs.set("q", q);
-      const res = await api(`/api/app/linear/issues${qs.toString() ? `?${qs}` : ""}`);
-      if (mine !== seq || !dlg.open) return;
-      const issues = res?.issues || [];
-      list.replaceChildren(...issues.map((i) => {
-        const b = h(`<button type="button" class="repo-row lin-row" role="listitem"><span class="lin-id"></span><span class="r-text"><span class="rn"></span><span class="rd"></span></span><span class="r-go">Start</span></button>`);
-        setText(b.querySelector(".lin-id"), i.identifier || "");
-        setText(b.querySelector(".rn"), i.title || "Untitled issue");
-        setText(b.querySelector(".rd"), [i.state, i.team, i.priority ? `P${i.priority}` : null].filter(Boolean).join(" · "));
-        b.setAttribute("aria-label", `${i.identifier} ${i.title}. Start an agent on it`);
-        b.addEventListener("click", async () => {
-          b.disabled = true;
-          setText(b.querySelector(".r-go"), "Starting…");
-          try {
-            await api("/api/app/linear/start", { method: "POST", body: { ...scopeBody(org), issueId: i.id, workspace: ws } });
-            track("linear_issue_started", { scope: org ? "org" : "personal" });
-            track("task_started", { source: "linear" });
-            close();
-            toast(`Started an agent on ${i.identifier || "the issue"}`);
-            onStarted?.();
-          } catch (err) { showError(err); b.disabled = false; setText(b.querySelector(".r-go"), "Start"); }
-        });
-        return b;
-      }));
-      if (!issues.length) list.appendChild(note(q ? "No matching issues." : "No open issues assigned to you."));
-    } catch (err) {
-      if (mine !== seq) return;
-      list.replaceChildren(note(err.status === 401 ? "Signed out." : err.message, "err"));
-    }
-  }
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => load(input.value.trim()), 250); });
-  load();
-  if (!NATIVE) setTimeout(() => input.focus(), 50);
 }

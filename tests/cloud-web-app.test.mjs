@@ -1,5 +1,5 @@
 // The web app's new control-plane routes, through the REAL server: the surface
-// picker, orgs and invites, analytics, the Slack/Linear surface without
+// picker, orgs and invites, analytics, the Slack surface without
 // credentials, and the pull route without a cloud machine. The modules have
 // their own unit tests; this one proves server.ts wires them and that two
 // accounts see what they should of each other.
@@ -87,7 +87,6 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
       RUDDER_S3_BUCKET: "",
       RUDDER_SECRETS_KEY: "",
       RUDDER_SLACK_CLIENT_ID: "",
-      RUDDER_LINEAR_CLIENT_ID: "",
       SLACK_BOT_TOKEN: "",
       RUDDER_DIGEST: "0",
       RUDDER_ANALYTICS_URL: `http://127.0.0.1:${sink.address().port}`,
@@ -198,7 +197,6 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
   // Integrations without server credentials: readable, not connectable.
   const integ = await ok("bob", "GET", `/api/app/integrations?org=${org.id}`);
   assert.equal(integ.slack.configured, false);
-  assert.equal(integ.linear.configured, false);
   assert.equal(integ.canManage, true);
   assert.equal((await call("bob", "POST", "/api/app/integrations/slack/start", { org: org.id })).status, 503);
   assert.equal((await call("alice", "GET", `/api/app/integrations?org=${org.id}`)).status, 404);

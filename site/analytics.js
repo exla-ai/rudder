@@ -7,9 +7,8 @@
  *
  * What is sent: page views (path, referrer domain, utm tags, screen width),
  * clicks on the links that matter (Get started, Download for Mac, TestFlight,
- * docs, GitHub, npm), install-line copies, which sections were seen, and which
- * Slack / Linear demo tab was picked. Never query strings other than utm_*,
- * never anything typed. */
+ * docs, GitHub, npm), install-line copies, and which sections were seen.
+ * Never query strings other than utm_*, never anything typed. */
 (function () {
   if (navigator.doNotTrack === "1" || window.doNotTrack === "1" || navigator.globalPrivacyControl) return;
 
@@ -68,11 +67,6 @@
     var t = target(el.getAttribute("href"));
     if (t) send("site_click", { target: t, section: sectionOf(el), label: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40) });
   }, true);
-
-  // The Slack / Linear demo: which tab people pick.
-  document.querySelectorAll(".intg-input").forEach(function (r) {
-    r.addEventListener("change", function () { if (r.checked) send("site_demo_tab", { tab: r.id.replace(/^intg-/, "") }); });
-  });
 
   // Sections seen, once each per page load: how far people actually read.
   if ("IntersectionObserver" in window) {

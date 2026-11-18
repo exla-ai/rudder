@@ -146,17 +146,16 @@ export function askDecision(request, answer) {
 // `request_user_input` (the pane waits on it) and, after a plan, the
 // "Implement this plan?" menu. No hook covers any of them, so they are read from
 // the rollout. Answered in the terminal, the rollout moves on and the card goes.
-// Leaving Plan mode ends the plan's card; Esc on the menu, "No, stay in Plan
-// mode" and a resumed session (which does not show the menu again) write
-// nothing, so the card stays for those.
+// Leaving Plan mode ends the plan's card. Esc on the menu, "No, stay in Plan
+// mode", a resumed session (which does not show the menu again) and "Yes, clear
+// context and implement" (a new thread) write nothing to the rollout, so a plan
+// is a card only while the dashboard sees its menu on the pane's screen (run.json
+// `codexPlanMenu`).
 // The phone answers with keys in the pane.
 // ---------------------------------------------------------------------------
 
 const CODEX_TAIL_BYTES = 512 * 1024;
-const CODEX_HEAD_BYTES = 16 * 1024;
 const codexCache = new Map(); // rollout -> { size, mtimeMs, asks }
-const codexHeads = new Map(); // rollout -> { startMs, cwd }, from its first line
-const codexNewer = new Map(); // rollout -> { since, ruledOut, newer }
 
 function codexAskId(ts, key) {
   return `${Math.max(0, Math.trunc(ts))}-${createHash("sha256").update(key).digest("hex").slice(0, 8)}`;
@@ -170,24 +169,19 @@ function parseJson(text) {
   }
 }
 
-function readSlice(file, fromEnd, bytes) {
+function tailLines(file, bytes) {
   const fd = fs.openSync(file, "r");
   try {
     const size = fs.fstatSync(fd).size;
-    const start = fromEnd ? Math.max(0, size - bytes) : 0;
-    const buffer = Buffer.alloc(Math.min(bytes, size - start));
+    const start = Math.max(0, size - bytes);
+    const buffer = Buffer.alloc(size - start);
     fs.readSync(fd, buffer, 0, buffer.length, start);
-    return { text: buffer.toString("utf8"), cut: start > 0 };
+    const lines = buffer.toString("utf8").split("\n");
+    if (start > 0) lines.shift(); // cut mid-line
+    return lines;
   } finally {
     fs.closeSync(fd);
   }
-}
-
-function tailLines(file, bytes) {
-  const { text, cut } = readSlice(file, true, bytes);
-  const lines = text.split("\n");
-  if (cut) lines.shift();
-  return lines;
 }
 
 // The answers in a `request_user_input_async` reply, which Codex sends as a user
@@ -321,78 +315,10 @@ export function pendingCodexAsks(lines) {
   return asks;
 }
 
-// When a rollout's session began and in which folder, from its first line
-// (`{"timestamp":…,"type":"session_meta","payload":{…,"cwd":…`). Never changes.
-function codexHead(file) {
-  if (codexHeads.has(file)) {
-    return codexHeads.get(file);
-  }
-  let text = "";
-  try {
-    text = readSlice(file, false, CODEX_HEAD_BYTES).text;
-  } catch {
-    return null;
-  }
-  const startMs = Date.parse(/^\{"timestamp":"([^"]+)"/.exec(text)?.[1] ?? "");
-  const cwd = parseJson(/"type":"session_meta","payload":\{.*?"cwd":("(?:[^"\\]|\\.)*")/.exec(text)?.[1] ?? "");
-  if (!Number.isFinite(startMs) || typeof cwd !== "string") {
-    return null; // not written yet: look again next time
-  }
-  codexHeads.set(file, { startMs, cwd });
-  return codexHeads.get(file);
-}
-
-const pad2 = (n) => String(n).padStart(2, "0");
-
-/**
- * Whether Codex moved on from `rollout` to a newer thread in the same folder
- * after `since`. "Yes, clear context and implement" (and /new) does that and
- * writes nothing more to the old thread, so a plan waiting there is over.
- * Rollouts sit under sessions/YYYY/MM/DD (local time).
- */
-function newerCodexThread(rollout, since) {
-  let state = codexNewer.get(rollout);
-  if (!state || state.since !== since) {
-    state = { since, ruledOut: new Set(), newer: false };
-    codexNewer.set(rollout, state);
-  }
-  const own = codexHead(rollout);
-  if (state.newer || !own) {
-    return state.newer;
-  }
-  const root = path.resolve(path.dirname(rollout), "..", "..", "..");
-  const today = new Date();
-  for (const dir of new Set([path.dirname(rollout), path.join(root, String(today.getFullYear()), pad2(today.getMonth() + 1), pad2(today.getDate()))])) {
-    let names = [];
-    try {
-      names = fs.readdirSync(dir);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const file = path.join(dir, name);
-      if (file === rollout || state.ruledOut.has(file) || !name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
-      let mtimeMs = 0;
-      try {
-        mtimeMs = fs.statSync(file).mtimeMs;
-      } catch {
-        continue;
-      }
-      const head = mtimeMs > since ? codexHead(file) : null;
-      if (mtimeMs > since && !head) continue; // its first line is not written yet
-      if (head && head.startMs > since && head.cwd === own.cwd) {
-        state.newer = true;
-        return true;
-      }
-      state.ruledOut.add(file);
-    }
-  }
-  return false;
-}
-
 /**
  * A Codex run's waiting prompts, from its rollout. None once its process is
- * gone: a Codex killed mid-question leaves the call open in the rollout.
+ * gone: a Codex killed mid-question leaves the call open in the rollout. A plan
+ * only while the dashboard sees its menu on the pane's screen (`codexPlanMenu`).
  */
 export function codexAsks(record, rollout, { isAlive = alive } = {}) {
   const pid = record?.process?.pid;
@@ -417,7 +343,7 @@ export function codexAsks(record, rollout, { isAlive = alive } = {}) {
     }
     codexCache.set(rollout, { size: stat.size, mtimeMs: stat.mtimeMs, asks });
   }
-  return asks.filter((ask) => ask.kind !== "plan" || !newerCodexThread(rollout, ask.ts));
+  return asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true);
 }
 
 // Text for the pane goes as a paste (native `remote_input_bytes`), hex so

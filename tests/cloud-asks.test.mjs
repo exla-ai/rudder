@@ -162,7 +162,6 @@ test("a plain deny carries a reason Claude can act on", () => {
 
 // Codex 0.170 rollout records, trimmed from real sessions.
 const codexLine = (type, payload, timestamp = "2026-11-18T10:19:53.125Z") => `${JSON.stringify({ timestamp, type, payload })}\n`;
-const sessionMeta = (cwd, timestamp) => codexLine("session_meta", { session_id: "s", id: "s", timestamp, cwd, originator: "codex-tui" }, timestamp);
 const turnStarted = (turn) => codexLine("event_msg", { type: "task_started", turn_id: turn });
 const turnComplete = (turn) => codexLine("event_msg", { type: "task_complete", turn_id: turn });
 const askCall = (callId, questions) => codexLine("response_item", { type: "function_call", name: "request_user_input", arguments: JSON.stringify({ questions }), call_id: callId });
@@ -192,17 +191,21 @@ test("a Codex question waits in the rollout until its call has an output", () =>
   assert.deepEqual(codexAsks(live, rollout), []);
 });
 
-test("a Codex plan waits for its Implement menu until the next turn starts", () => {
+test("a Codex plan is a card only while the dashboard sees its Implement menu", () => {
   const dir = tmpdir();
   const rollout = path.join(dir, "rollout.jsonl");
+  const menu = { ...live, codexPlanMenu: true };
   fs.writeFileSync(rollout, turnStarted("t1") + planItem("t1", "1. Add README.md\n"));
-  assert.deepEqual(codexAsks(live, rollout), [], "the menu opens when the turn ends");
+  assert.deepEqual(codexAsks(menu, rollout), [], "the menu opens when the turn ends");
   fs.appendFileSync(rollout, turnComplete("t1"));
-  const [ask] = codexAsks(live, rollout);
+  const [ask] = codexAsks(menu, rollout);
   assert.equal(ask.kind, "plan");
   assert.equal(ask.input.plan, "1. Add README.md\n");
-  fs.appendFileSync(rollout, turnStarted("t2"));
+  // Esc on the menu writes nothing to the rollout; the pane no longer shows it.
+  assert.deepEqual(codexAsks({ ...live, codexPlanMenu: false }, rollout), []);
   assert.deepEqual(codexAsks(live, rollout), []);
+  fs.appendFileSync(rollout, turnStarted("t2"));
+  assert.deepEqual(codexAsks(menu, rollout), []);
 });
 
 test("an async Codex question waits until each of its questions has a reply or the turn ends", () => {
@@ -229,21 +232,6 @@ test("an async Codex question waits until each of its questions has a reply or t
   assert.deepEqual(codexAsks(live, rollout).map((a) => a.input.questions[0].question), ["Later?"]);
   // The pane closes with the turn.
   fs.appendFileSync(rollout, turnComplete("t1"));
-  assert.deepEqual(codexAsks(live, rollout), []);
-});
-
-test("a Codex plan is over once Codex moves to a newer thread in the same folder", () => {
-  const day = path.join(tmpdir(), "sessions", "2026", "11", "18");
-  fs.mkdirSync(day, { recursive: true });
-  const rollout = path.join(day, "rollout-a.jsonl");
-  fs.writeFileSync(rollout, sessionMeta("/w/p", "2026-11-18T10:00:00.000Z") + turnStarted("t1") + planItem("t1", "1. Do it\n") + turnComplete("t1"));
-  assert.equal(codexAsks(live, rollout)[0].kind, "plan");
-  // Another agent's thread in another folder, or an older one here, is not it.
-  fs.writeFileSync(path.join(day, "rollout-b.jsonl"), sessionMeta("/w/other", "2026-11-18T10:30:00.000Z"));
-  fs.writeFileSync(path.join(day, "rollout-c.jsonl"), sessionMeta("/w/p", "2026-11-18T09:00:00.000Z"));
-  assert.equal(codexAsks(live, rollout)[0].kind, "plan");
-  // "Yes, clear context and implement" starts one and leaves this thread as it was.
-  fs.writeFileSync(path.join(day, "rollout-d.jsonl"), sessionMeta("/w/p", "2026-11-18T10:30:00.000Z"));
   assert.deepEqual(codexAsks(live, rollout), []);
 });
 

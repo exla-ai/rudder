@@ -8279,6 +8279,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         interactive_orchestrator: false,
         needs_permission: false,
         needs_user_input: false,
+        codex_plan_menu: false,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -10498,6 +10499,7 @@ fn delete_agent_requires_second_d() {
         interactive_orchestrator: false,
         needs_permission: false,
         needs_user_input: false,
+        codex_plan_menu: false,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -31620,6 +31622,11 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     let menu_up = |app: &mut App| {
         app.agents[0].terminal.as_mut().unwrap().live_screen_contains(codex_rollout::PLAN_MENU)
     };
+    // What the phone's plan card reads (asks.mjs `codexAsks`).
+    let recorded_menu = |repo: &Path| {
+        let raw = fs::read_to_string(native_run_dir(repo, "codex-1").join("run.json")).expect("run.json");
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap()["codexPlanMenu"].clone()
+    };
     let deadline = Instant::now() + Duration::from_secs(5);
     while !menu_up(&mut app) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -31633,6 +31640,8 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     assert_eq!(app.agents[0].status, AgentStatus::Done);
     assert!(app.agents[0].needs_user_input);
     assert_eq!(agent_status_label(&app.agents[0]), "needs input");
+    assert!(app.agents[0].codex_plan_menu);
+    assert_eq!(recorded_menu(&repo), serde_json::json!(true));
     // The menu dismissed: the rollout still ends with the plan, the screen
     // no longer shows it, and the row stops asking for input.
     app.agents[0].terminal.as_mut().unwrap().write_input(b"\r").unwrap();
@@ -31644,6 +31653,8 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     assert_eq!(app.agents[0].status, AgentStatus::Done);
     assert!(!app.agents[0].needs_user_input);
     assert_ne!(agent_status_label(&app.agents[0]), "needs input");
+    assert!(!app.agents[0].codex_plan_menu);
+    assert_eq!(recorded_menu(&repo), serde_json::json!(false));
     // A new turn read after it finished reopens it.
     deliver(&mut app, Instant::now(), true, Vec::new());
     assert_eq!(app.agents[0].status, AgentStatus::Running);

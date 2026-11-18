@@ -8,12 +8,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { codexAsks, pendingCodexAsks } from "../cloud/worker/asks.mjs";
+import { pendingCodexAsks } from "../cloud/worker/asks.mjs";
 
 const fixture = (name) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
-const lines = fixture("codex-0.170-rollout.jsonl").split("\n").filter(Boolean);
 
 for (const name of ["codex-0.170-rollout", "codex-0.170-rollout-plan-left"]) {
   test(`real Codex 0.170 rollout ${name} gives the shared expectations at every line`, () => {
@@ -26,18 +23,3 @@ for (const name of ["codex-0.170-rollout", "codex-0.170-rollout-plan-left"]) {
     }
   });
 }
-
-test("its plan is over once the cleared thread's rollout starts in the same folder", () => {
-  const day = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-fixture-")), "2026", "11", "18");
-  fs.mkdirSync(day, { recursive: true });
-  try {
-    const rollout = path.join(day, "rollout-2026-11-18T11-26-51-01a1ee68-da13-7822-a7de-75c3368eeed4.jsonl");
-    fs.writeFileSync(rollout, lines.join("\n") + "\n");
-    const live = { process: { pid: process.pid } };
-    assert.deepEqual(codexAsks(live, rollout).map((ask) => ask.tool), ["Plan"]);
-    fs.writeFileSync(path.join(day, "rollout-2026-11-18T11-31-28-01a1ee6d-12ce-7b62-adf4-508197eeb930.jsonl"), fixture("codex-0.170-rollout-cleared.jsonl"));
-    assert.deepEqual(codexAsks(live, rollout), []);
-  } finally {
-    fs.rmSync(path.resolve(day, "..", "..", ".."), { recursive: true, force: true });
-  }
-});

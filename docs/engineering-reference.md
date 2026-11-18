@@ -1378,9 +1378,11 @@ brain lives in the cloud, and the phone is a first-class client.
   whose `questionItemId` names the call and question) or the turn ends, which closes
   the pane. In Plan mode, `request_user_input` blocks the pane until its
   `function_call_output` or a turn end, and a plan (`item_completed` of type Plan,
-  then `task_complete`) waits on "Implement this plan?" until the next `task_started`,
-  or until a newer rollout in the same folder starts ("Yes, clear context and
-  implement" or `/new` writes nothing more to the old one). None survive the process.
+  then `task_complete`) waits on "Implement this plan?" until the next `task_started`
+  or a mode change. Esc on that menu, "No, stay in Plan mode", a resume and "Yes,
+  clear context and implement" write nothing to the rollout, so the plan is a card
+  only while run.json `codexPlanMenu` is true: the dashboard sets it while the
+  pane's live screen shows the menu (`poll_codex_rollouts`). None survive the process.
   The answer is keys in the pane (`codexAskSteps`): Down to the option and Enter per
   question; text of your own is a `paste:<hex>` key (a bracketed paste,
   `remote_input_bytes`) on the entry after the options ("None of the above" in Plan
@@ -1389,10 +1391,9 @@ brain lives in the cloud, and the phone is a first-class client.
   the answers in one more write; keys in the same write as that Shift+Left move the
   highlight but Enter does nothing, and each answer wakes the model, so the answers
   go together. Approve is `1`; revise is Esc, then the text as a normal message (in
-  one write, Esc and the paste read as Esc plus a literal `[200~`). Known gaps: a
-  plan menu dismissed in the terminal without a message keeps its card until the next
-  turn (approving it then types `1` into the prompt), and an async question skipped in
-  the terminal (Ctrl+]) writes nothing, so its card stays until the turn ends.
+  one write, Esc and the paste read as Esc plus a literal `[200~`). Known gap: an
+  async question skipped in the terminal (Ctrl+]) writes nothing, so its card stays
+  until the turn ends.
 - **A remote message is never typed into a menu.** The phone once "delivered" two
   messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
   reads a menu's or permission prompt's key hints off the bottom rows, and the steer

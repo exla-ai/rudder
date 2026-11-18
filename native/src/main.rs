@@ -2716,6 +2716,12 @@ struct AgentRun {
     interactive_orchestrator: bool,
     needs_permission: bool,
     needs_user_input: bool,
+    /// Codex's "Implement this plan?" menu is on this pane's live screen for a
+    /// plan its rollout leaves waiting (`poll_codex_rollouts`). Esc on the menu,
+    /// "No, stay in Plan mode" and a resume write nothing to the rollout, so the
+    /// screen decides. Persisted as run.json `codexPlanMenu`: the phone shows the
+    /// plan's card only while it is set.
+    codex_plan_menu: bool,
     /// A wait the BACKEND reported through its own hook, latched until something
     /// deterministic lifts it: the human answering, the agent visibly resuming,
     /// or the turn ending.
@@ -3102,6 +3108,7 @@ fn fork_row(
         interactive_orchestrator: false,
         needs_permission: false,
         needs_user_input: false,
+        codex_plan_menu: false,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -6226,10 +6233,11 @@ impl App {
                             let _ = save_native_run_record(&self.cwd, run);
                             self.dirty = true;
                         }
-                        // Esc on "Implement this plan?", "No, stay in Plan mode"
-                        // and a resume (the menu is not shown again) leave the
-                        // rollout as it was, so a plan waits only while its menu
-                        // is on the pane's live screen.
+                        // Esc on "Implement this plan?", "No, stay in Plan mode",
+                        // a resume (the menu is not shown again) and "Yes, clear
+                        // context and implement" (a new thread) leave the rollout
+                        // as it was, so a plan waits only while its menu is on the
+                        // pane's live screen.
                         let mut waits = result.waits;
                         if waits.contains(&codex_rollout::CodexWait::Plan)
                             && !run.terminal.as_mut().is_some_and(|terminal| {
@@ -6259,11 +6267,18 @@ impl App {
                 .iter()
                 .any(|run| &run.id == id && run.terminal.is_some())
         });
-        for run in self
-            .agents
-            .iter_mut()
-            .filter(|run| run.backend == Backend::Codex && run.status == AgentStatus::Done)
-        {
+        for run in self.agents.iter_mut().filter(|run| run.backend == Backend::Codex) {
+            let plan_menu = self
+                .codex_waits
+                .get(&run.id)
+                .is_some_and(|waits| waits.contains(&codex_rollout::CodexWait::Plan));
+            if run.codex_plan_menu != plan_menu {
+                run.codex_plan_menu = plan_menu;
+                let _ = save_native_run_record(&self.cwd, run);
+            }
+            if run.status != AgentStatus::Done {
+                continue;
+            }
             let waiting = !run.needs_permission && self.codex_waits.contains_key(&run.id);
             if run.needs_user_input != waiting {
                 run.needs_user_input = waiting;
@@ -9460,6 +9475,7 @@ impl App {
             interactive_orchestrator: false,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -9619,6 +9635,7 @@ impl App {
             interactive_orchestrator: false,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10116,6 +10133,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             interactive_orchestrator: false,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10214,6 +10232,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             interactive_orchestrator: false,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -11430,6 +11449,7 @@ Address the objection directly. If you disagree, say why inside \
             interactive_orchestrator: interactive_planner,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -14599,6 +14619,7 @@ Address the objection directly. If you disagree, say why inside \
             interactive_orchestrator: false,
             needs_permission: false,
             needs_user_input: false,
+            codex_plan_menu: false,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,

@@ -8,17 +8,18 @@
 //!   including the ones no prompt starts (a goal continuing, a plan approved).
 //! - **What waits on the user.** `request_user_input`, an accepted
 //!   `request_user_input_async` with unanswered questions, and a finished plan
-//!   on "Implement this plan?". These rules mirror `pendingCodexAsks` and
-//!   `newerCodexThread` in cloud/worker/asks.mjs (the phone's cards). Both are
-//!   pinned to the same real rollouts and expectations,
+//!   on "Implement this plan?". These rules mirror `pendingCodexAsks` in
+//!   cloud/worker/asks.mjs (the phone's cards). Both are pinned to the same
+//!   real rollouts and expectations,
 //!   tests/fixtures/codex-0.170-rollout*.{jsonl,json}: a rule changed on one
 //!   side fails the other side's test until it is mirrored.
 //! - **When a plan stops waiting.** That menu belongs to Plan mode, and leaving
 //!   Plan mode (Shift+Tab, a `/model` pick) writes `thread_settings_applied`
-//!   with the new mode. Esc on the menu, "No, stay in Plan mode" and a resumed
-//!   session (it does not show the menu again) write nothing at all, so the
-//!   dashboard also asks the pane's screen (`PLAN_MENU`, see
-//!   `App::poll_codex_rollouts`).
+//!   with the new mode. Esc on the menu, "No, stay in Plan mode", a resumed
+//!   session (it does not show the menu again) and "Yes, clear context and
+//!   implement" (a new thread) write nothing more here, so the dashboard also
+//!   asks the pane's screen (`PLAN_MENU`, see `App::poll_codex_rollouts`) and
+//!   records the answer as run.json `codexPlanMenu` for the phone.
 //!
 //! The scan runs on its own thread and returns typed results; the App loop
 //! only applies them (AGENTS.md: no file IO in the loop).
@@ -69,8 +70,6 @@ pub(crate) struct RolloutFacts {
     pub(crate) open_turn: Option<String>,
     /// Oldest first, in asks.mjs's order: question, async question, plan.
     pub(crate) waits: Vec<CodexWait>,
-    /// When the waiting plan finished (epoch ms), for the newer-thread rule.
-    pub(crate) plan_at_ms: Option<i64>,
 }
 
 struct AsyncCall {
@@ -82,7 +81,6 @@ struct AsyncCall {
 
 struct Plan {
     turn_id: Option<String>,
-    at_ms: i64,
     has_text: bool,
     done: bool,
 }
@@ -159,9 +157,6 @@ pub(crate) fn rollout_facts<'a>(lines: impl IntoIterator<Item = &'a str>) -> Rol
         };
         let payload = entry.get("payload").cloned().unwrap_or(serde_json::Value::Null);
         let kind = str_at(&payload, "type");
-        let at_ms = str_at(&entry, "timestamp")
-            .and_then(crate::cloudio::parse_iso8601_millis)
-            .unwrap_or(0);
         match str_at(&entry, "type") {
             Some("response_item") => match kind {
                 Some("function_call") => {
@@ -244,7 +239,6 @@ pub(crate) fn rollout_facts<'a>(lines: impl IntoIterator<Item = &'a str>) -> Rol
                         if let Some(text) = text {
                             plan = Some(Plan {
                                 turn_id: str_at(&payload, "turn_id").map(str::to_string),
-                                at_ms,
                                 has_text: !text.trim().is_empty(),
                                 done: false,
                             });
@@ -266,11 +260,10 @@ pub(crate) fn rollout_facts<'a>(lines: impl IntoIterator<Item = &'a str>) -> Rol
     {
         waits.push(CodexWait::AsyncQuestion);
     }
-    let plan_at_ms = plan.filter(|plan| plan.done && plan.has_text).map(|plan| plan.at_ms);
-    if plan_at_ms.is_some() {
+    if plan.is_some_and(|plan| plan.done && plan.has_text) {
         waits.push(CodexWait::Plan);
     }
-    RolloutFacts { open_turn, waits, plan_at_ms }
+    RolloutFacts { open_turn, waits }
 }
 
 /// One live Codex worker to scan.
@@ -330,17 +323,7 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
                 }
                 (_, pinned, _) => (pinned, None),
             };
-            let facts = read
-                .map(|rollout| {
-                    let mut facts = read_facts(&rollout);
-                    if let Some(since) = facts.plan_at_ms {
-                        if newer_thread(&rollout, since) {
-                            facts.waits.retain(|wait| *wait != CodexWait::Plan);
-                        }
-                    }
-                    facts
-                })
-                .unwrap_or_default();
+            let facts = read.map(|rollout| read_facts(&rollout)).unwrap_or_default();
             // Read after the rollout, so a turn that ended in between is seen
             // ended here.
             let done_turn = sidecar("turn");
@@ -472,76 +455,6 @@ fn parse_head(first_line: &str) -> Option<(i64, String)> {
     Some((started, cwd))
 }
 
-/// asks.mjs `newerCodexThread`: whether Codex moved on from `rollout` to a
-/// newer thread in the same folder after `since_ms`. "Yes, clear context and
-/// implement" (and `/new`) does that and writes nothing more to the old
-/// thread, so a plan waiting there is over. Looks in the rollout's own day and
-/// today's (local time, as Codex files them).
-fn newer_thread(rollout: &Path, since_ms: i64) -> bool {
-    let Some((_, own_cwd)) = rollout_head(rollout) else {
-        return false;
-    };
-    let mut dirs: Vec<PathBuf> = rollout.parent().map(Path::to_path_buf).into_iter().collect();
-    if let Some(today) = rollout
-        .ancestors()
-        .nth(4)
-        .and_then(local_day_dir)
-        .filter(|today| !dirs.contains(today))
-    {
-        dirs.push(today);
-    }
-    for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if path == rollout || !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
-                continue;
-            }
-            let modified_ms = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |at| at.as_millis() as i64);
-            if modified_ms <= since_ms {
-                continue;
-            }
-            if let Some((started, cwd)) = rollout_head(&path) {
-                if started > since_ms && cwd == own_cwd {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// `<sessions>/YYYY/MM/DD` for today in local time.
-#[cfg(unix)]
-fn local_day_dir(sessions: &Path) -> Option<PathBuf> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
-    // SAFETY: localtime_r writes only into `tm`, which outlives the call.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
-        return None;
-    }
-    Some(
-        sessions
-            .join(format!("{:04}", tm.tm_year + 1900))
-            .join(format!("{:02}", tm.tm_mon + 1))
-            .join(format!("{:02}", tm.tm_mday)),
-    )
-}
-
-#[cfg(not(unix))]
-fn local_day_dir(_sessions: &Path) -> Option<PathBuf> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn a_waiting_plan_is_over_once_a_newer_thread_starts_in_the_same_folder() {
+    fn a_row_follows_a_cleared_thread_that_began_later_in_the_same_folder() {
         // Real `session_meta` lines carry the base instructions (26 KiB on
         // 0.170), past the head that is read; the fixtures were trimmed.
         let full_size = |rollout: &str| {
@@ -589,14 +502,10 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let rollout = day.join("rollout-2026-11-18T11-26-51-01a1ee68-da13-7822-a7de-75c3368eeed4.jsonl");
         std::fs::write(&rollout, full_size(ROLLOUT)).unwrap();
-        let facts = read_facts(&rollout);
-        assert_eq!(facts.waits, vec![CodexWait::Plan]);
-        let since = facts.plan_at_ms.unwrap();
-        assert!(!newer_thread(&rollout, since));
+        assert_eq!(read_facts(&rollout).waits, vec![CodexWait::Plan]);
         // "Yes, clear context and implement": the new thread's rollout.
         let cleared = day.join("rollout-2026-11-18T11-31-28-01a1ee6d-12ce-7b62-adf4-508197eeb930.jsonl");
         std::fs::write(&cleared, full_size(CLEARED)).unwrap();
-        assert!(newer_thread(&rollout, since));
         // The row follows it there, and never back.
         assert!(started_after(&rollout, &cleared));
         assert!(!started_after(&cleared, &rollout));

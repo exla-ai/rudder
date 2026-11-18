@@ -451,8 +451,10 @@ row reopens only for a turn the rollout shows running (`task_started` with no
 reported done, or for the UserPromptSubmit hook; Esc, F2, `/` and Backspace no
 longer leave it "working". Questions (`request_user_input`, accepted
 `request_user_input_async`) and a finished plan on "Implement this plan?" show
-"needs input". The rules mirror `pendingCodexAsks` in cloud/worker/asks.mjs;
-both sides are pinned to `tests/fixtures/codex-0.170-rollout*` (Rust
+"needs input"; the plan only while the pane's screen shows that menu, saved as
+run.json `codexPlanMenu`, which also gates the phone's plan card (Esc on the
+menu writes nothing to the rollout). The rules mirror `pendingCodexAsks` in
+cloud/worker/asks.mjs; both sides are pinned to `tests/fixtures/codex-0.170-rollout*` (Rust
 `codex_rollout::tests`, JS `tests/codex-rollout-fixture.test.mjs`), so change
 them together. After `/new`, `/clear` or "clear context and implement" the row
 moves to the new thread: the worker's SessionStart hook names it (measured on

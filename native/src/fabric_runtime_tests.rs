@@ -127,6 +127,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         interactive_orchestrator: false,
         needs_permission: false,
         needs_user_input: false,
+        codex_plan_menu: false,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,

@@ -25,7 +25,7 @@ const { deriveLesson, ScopedLessonStore } = await import("../src/agent-efficienc
 const { traceFindings, deriveTraceLessons } = await import("../src/agent-efficiency/trace-lessons.ts");
 const { BoundedWaitRegistry } = await import("../src/agent-efficiency/waits.ts");
 const { redact } = await import("../src/agent-efficiency/privacy.ts");
-const { CODEX_RUDDER_COMMON_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, CODEX_RUDDER_PLANNER_CONFIG_ARGS } = await import("../src/codex-binary.ts");
+const { CODEX_RUDDER_COMMON_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, CODEX_RUDDER_PLANNER_CONFIG_ARGS } = await import("../src/codex-config.ts");
 const { codexEffortConfigArgs, DEFAULT_EFFORT } = await import("../src/effort.ts");
 
 async function temp(t) {

@@ -1,6 +1,5 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { RUDDER_CODEX_RELEASE } from "./codex-binary.js";
 import { findRepoRoot } from "./git.js";
 import { LOG_KEEP_ROTATED, LOG_MAX_BYTES, logsDir } from "./logger.js";
 import { AGENT_WORKSPACES_DIR, LEGACY_AGENT_WORKSPACES_DIR, loadRunRecord, runsDir } from "./state.js";
@@ -27,7 +26,6 @@ export async function runGc(options: { dryRun?: boolean } = {}): Promise<void> {
     ...await perfLogCandidates(home),
     ...await signalCandidates(home),
     ...await daemonLogCandidates(home),
-    ...await oldBinaryCandidates(home),
     ...await finishedRunCandidates(repoRoot),
     ...await nestedWorkspaceRunCandidates(repoRoot),
   ];
@@ -109,25 +107,6 @@ async function daemonLogCandidates(home: string): Promise<GcCandidate[]> {
         bytes: entry.bytes,
         reason: entry.bytes > LOG_MAX_BYTES ? "oversize" : "excess",
       });
-    });
-  }
-  return candidates;
-}
-
-async function oldBinaryCandidates(home: string): Promise<GcCandidate[]> {
-  const root = path.join(home, "bin", "codex");
-  const entries = await fsp.readdir(root, { withFileTypes: true }).catch(() => []);
-  const candidates: GcCandidate[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === RUDDER_CODEX_RELEASE) {
-      continue;
-    }
-    const fullPath = path.join(root, entry.name);
-    candidates.push({
-      category: "old binaries",
-      path: fullPath,
-      bytes: await pathSize(fullPath),
-      reason: "superseded",
     });
   }
   return candidates;

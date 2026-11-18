@@ -7,7 +7,6 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createSpec, renderContract, verifyRun } from "./brain.js";
-import { ensureRudderCodexBinary } from "./codex-binary.js";
 import { getBackend } from "./backends.js";
 import { efficiencyContext, learnIntegratedRun } from "./agent-efficiency/production.js";
 import { nativeAgentCommand } from "./native-agents.js";

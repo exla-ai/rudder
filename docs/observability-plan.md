@@ -153,7 +153,6 @@ rudder gc
   perf logs      keep ≤ 2 files × 5 MB, TTL 3 d      (~/.rudder)
   signals        TTL 7 d                              (~/.rudder/signals)
   daemon logs    keep ≤ 2 × 5 MB                      (~/.rudder/logs)
-  old binaries   keep current version only            (~/.rudder/bin)
   finished runs  respect canCleanupRun, TTL 30 d      (<repo>/.rudder/runs)
   worktree runs  nested <worktree>/.rudder/runs from merged/abandoned
                  workspaces (see §1.4 duplication finding)

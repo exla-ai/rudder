@@ -1219,7 +1219,7 @@ Make efficiency part of the engine and adapter contract:
 
 - Launch settings come from one shared policy for native and TS callers
   (`CODEX_COMMON_CONFIG` in `native/src/launch.rs`, mirrored and tested in
-  `src/codex-binary.ts`). Every Codex CLI launch (native panes and TS workers)
+  `src/codex-config.ts`). Every Codex CLI launch (native panes and TS workers)
   compacts at 150K tokens, caps tool output at 6K tokens and runs reasoning
   effort `high` unless the user chose one; an unset effort never falls through
   to the user's global Codex config. Codex 0.166 accepts these keys. The acpx

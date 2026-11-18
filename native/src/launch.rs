@@ -246,7 +246,7 @@ pub(crate) fn codex_fork_command(
     if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
         args.push(prompt.to_string());
     }
-    TerminalCommand::with_args(codex_program(), args).with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
+    TerminalCommand::with_args(codex_program(), args)
 }
 
 pub(crate) fn codex_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
@@ -285,7 +285,7 @@ pub(crate) fn codex_resume_command(run: &AgentRun, session_id: &str) -> Terminal
     }
     args.push("resume".to_string());
     args.push(session_id.to_string());
-    TerminalCommand::with_args(codex_program(), args).with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
+    TerminalCommand::with_args(codex_program(), args)
 }
 
 /// Build the REFINE follow-up command for the orchestrator: RESUME the planner's
@@ -351,7 +351,6 @@ pub(crate) fn rudder_plan_refine_command(
             args.push(session_id.to_string());
             args.push(feedback_prompt.to_string());
             TerminalCommand::with_args(codex_program(), args)
-                .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
         }
         // opencode resumes the planner session in its TUI and takes the feedback as
         // the next turn; there is no headless streaming mode to parse, so the
@@ -601,8 +600,7 @@ fn build_agent_command(
                 if let Some(prompt) = prompt {
                     args.push(prompt);
                 }
-                return TerminalCommand::with_args(codex_program(), args)
-                    .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1");
+                return TerminalCommand::with_args(codex_program(), args);
             }
             if mode == AgentMode::RudderPlan {
                 let mut args = vec![
@@ -621,8 +619,7 @@ fn build_agent_command(
                 if let Some(prompt) = prompt {
                     args.push(prompt);
                 }
-                return TerminalCommand::with_args(codex_program(), args)
-                    .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1");
+                return TerminalCommand::with_args(codex_program(), args);
             }
             let mut args = vec!["--no-alt-screen".to_string()];
             args.push("--enable".to_string());
@@ -667,7 +664,6 @@ fn build_agent_command(
                 }
             }
             TerminalCommand::with_args(codex_program(), args)
-                .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
         }
         Backend::Opencode => opencode_command(model, prompt.as_deref(), mode),
     }
@@ -801,7 +797,6 @@ pub(crate) fn rudder_orchestrator_resume_command(
                 args.push(continuation.to_string());
             }
             TerminalCommand::with_args(codex_program(), args)
-                .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
         }
         Backend::Opencode => {
             let mut args = vec!["--session".to_string(), session_id.to_string()];
@@ -844,7 +839,7 @@ pub(crate) fn push_codex_interactive_orchestrator_args(
 
 /// Config every Rudder Codex CLI launch carries (acpx has no passthrough and
 /// gets only the effort default). Must match
-/// `CODEX_RUDDER_COMMON_CONFIG_ARGS` in `src/codex-binary.ts`; a TS test compares
+/// `CODEX_RUDDER_COMMON_CONFIG_ARGS` in `src/codex-config.ts`; a TS test compares
 /// the two. Rudder workers run Codex as a child process, so they do not inherit
 /// desktop-app notification hooks that expect the official signed launch chain.
 /// Compaction and the output cap come from the v4 session measurement (PLAN.md
@@ -881,7 +876,7 @@ fn push_codex_common_config_overrides(args: &mut Vec<String>, effort: Option<Eff
 /// `RUDDER_AGENT_TOOL_ENV`) set inside Codex's shell policy. Codex builds its
 /// own environment for the commands it runs, and a policy such as
 /// `inherit = "core"` drops every other variable, so the PTY env alone does
-/// not reach them (src/codex-binary.ts `codexShellEnvConfigArgs` does the same
+/// not reach them (src/codex-config.ts `codexShellEnvConfigArgs` does the same
 /// for TS launches). Claude passes its environment through unchanged.
 fn push_codex_tool_cache_env(args: &mut Vec<String>) {
     let Some(vars) = env::var("RUDDER_AGENT_TOOL_ENV")
@@ -939,6 +934,9 @@ pub(crate) fn opencode_program() -> String {
         .unwrap_or_else(|| "opencode".to_string())
 }
 
+/// The Codex executable: the `codex` on PATH. RUDDER_CODEX_BIN only points
+/// tests at a fake. A missing `codex` fails the launch at spawn
+/// (`require_codex_on_path` in pty_terminal.rs).
 pub(crate) fn codex_program() -> String {
     env::var("RUDDER_CODEX_BIN")
         .ok()

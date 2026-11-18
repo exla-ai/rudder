@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { pruneToolCache, toolCacheEnv, toolCacheRoot } from "../dist/tool-cache.js";
-import { codexShellEnvConfigArgs } from "../dist/codex-binary.js";
+import { codexShellEnvConfigArgs } from "../dist/codex-config.js";
 import { nativeAgentCommand } from "../dist/native-agents.js";
 
 function tempDir(t) {

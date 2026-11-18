@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { inFork } from "./warm-snapshot.js";
 import { BackendTelemetryObserver } from "./agent-efficiency/backend-observer.js";
 import type { BackendAdapter, BackendId, RunRequest, RudderEvent, AuthProfileStore, EffortLevel } from "./types.js";
-import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, codexShellEnvConfigArgs, ensureRudderCodexBinary } from "./codex-binary.js";
+import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-config.js";
 import { toolCacheEnv } from "./tool-cache.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel, loadAuthStore, loadConfig, saveRunRecord } from "./state.js";
 import { codexEffortConfigArgs, DEFAULT_EFFORT, normalizeEffortForBackend } from "./effort.js";
@@ -166,17 +166,13 @@ function codexBackend(): BackendAdapter {
   return {
     id: "codex",
     async verify() {
-      try {
-        const binary = await ensureRudderCodexBinary();
-        return { ok: true, message: `rudder-codex found at ${binary}` };
-      } catch (error) {
-        return { ok: false, message: error instanceof Error ? error.message : String(error) };
-      }
+      return commandExists("codex")
+        ? { ok: true, message: "codex found" }
+        : { ok: false, message: formatMissingToolMessage("codex") };
     },
     async run(request, emit) {
       const prompt = stripRudderPromptWrappers(request.prompt);
-      const command = await ensureRudderCodexBinary();
-      const env = await codexLaunchEnv(await backendEnv("openai"));
+      const env = await backendEnv("openai");
       const sessionId = request.run.session?.nativeSessionId;
       const isFollowUp = (request.run.turns?.length ?? 0) > 1 && Boolean(sessionId);
       const args = compact(isFollowUp
@@ -211,7 +207,7 @@ function codexBackend(): BackendAdapter {
             `${request.contract}\n\n${prompt}`,
           ]);
       return await spawnAndStream({
-        command,
+        command: "codex",
         args,
         cwd: request.run.workspace.path,
         env,

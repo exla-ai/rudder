@@ -6,7 +6,7 @@ import {
   CODEX_RUDDER_COMMON_CONFIG_ARGS,
   CODEX_RUDDER_PLANNER_CONFIG_ARGS,
   CODEX_RUDDER_WORKER_CONFIG_ARGS,
-} from "../dist/codex-binary.js";
+} from "../dist/codex-config.js";
 import { codexEffortConfigArgs, DEFAULT_EFFORT } from "../dist/effort.js";
 import { columnForRun, hasVerifiedDelivery } from "../dist/board/daemon.js";
 import { parseCompletionNoteArg } from "../dist/surfaces.js";

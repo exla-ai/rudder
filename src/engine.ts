@@ -3,7 +3,6 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { codexLaunchEnv } from "./codex-binary.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import { projectEngineAuthority } from "./engine-authority.js";
 
@@ -108,7 +107,7 @@ export async function ensureEngineRunning(repo: string, options: EngineOptions =
   }
   const fd = fs.openSync(logFile, "a", 0o600);
   let startupError: Error | undefined;
-  const env = options.env ?? await codexLaunchEnv(process.env);
+  const env = options.env ?? process.env;
   try {
     const child = spawn(binaryPath(options), ["engine", "--repo", root], {
       cwd: root,

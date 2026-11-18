@@ -104,10 +104,8 @@ if (Object.keys(capturedEnv).length > 0) {
 }
 
 // Cloud task sails run Claude Code by default: claude-code is installed in the
-// worker image and the snapshot carries its auth. Codex is NOT usable here —
-// Rudder's pinned Codex fork has no managed linux/x64 binary, so `rudder codex`
-// exits 1 on boot. Override with RUDDER_CLOUD_BACKEND only if a working codex
-// binary is provided via RUDDER_CODEX_BIN.
+// worker image and the snapshot carries its auth. RUDDER_CLOUD_BACKEND=codex
+// runs the image's `codex` instead.
 const cloudBackend = (process.env.RUDDER_CLOUD_BACKEND || "claude").trim() || "claude";
 
 // Build the agent's environment from a COPY with the control-plane secrets removed.
@@ -129,11 +127,6 @@ const childEnv = {
   RUDDER_DISABLE_AUTO_UPDATE: "1",
   RUDDER_DISABLE_UPDATE_CHECK: "1",
   RUDDER_DISABLE_ONBOARD_INSTALL: "1",
-  // Rudder's pinned Codex fork has no linux/x64 binary, so any codex-binary
-  // resolution (e.g. when the snapshot carries codex auth) would otherwise crash
-  // even a claude run. Point it at the stock @openai/codex installed in the image
-  // so resolution always succeeds; the default backend is still claude.
-  RUDDER_CODEX_BIN: process.env.RUDDER_CODEX_BIN || "codex",
 };
 for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN"]) {
   delete childEnv[secret];

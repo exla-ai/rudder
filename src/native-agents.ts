@@ -1,5 +1,5 @@
 import type { RunRecord } from "./types.js";
-import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-binary.js";
+import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-config.js";
 import { codexEffortConfigArgs, normalizeEffortForBackend } from "./effort.js";
 import { PLAN_MODE_CONTRACT } from "./plan-mode.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel } from "./state.js";
@@ -70,8 +70,6 @@ function opencodeArgs(run: RunRecord, prompt: string, contract: string): string[
 function codexArgs(run: RunRecord, prompt: string, contract: string, codexCommand = "codex"): string[] {
   const model = liveCodexModel(run.model) || lastUsedCodexModelSync() || CODEX_DEFAULT_MODEL;
   return [
-    "env",
-    "CODEX_RUDDER_SCROLLBACK_SAFE=1",
     codexCommand,
     "--no-alt-screen",
     "--model",
@@ -124,8 +122,6 @@ function claudePlanArgs(run: RunRecord, prompt: string): string[] {
 function codexPlanArgs(run: RunRecord, prompt: string, codexCommand = "codex"): string[] {
   const model = liveCodexModel(run.model) || lastUsedCodexModelSync() || CODEX_DEFAULT_MODEL;
   return compact([
-    "env",
-    "CODEX_RUDDER_SCROLLBACK_SAFE=1",
     codexCommand,
     "--no-alt-screen",
     "--model",

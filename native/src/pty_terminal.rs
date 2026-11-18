@@ -1075,6 +1075,7 @@ impl TerminalPane {
         let mut command = command;
         if let Some(command) = command.as_mut() {
             crate::openrouter::attach_credentials(command)?;
+            require_codex_on_path(command)?;
         }
         // Reserve ownership and start the reaper before a fallible spawn can
         // leave a real child behind. Teardown never needs to spawn a thread.
@@ -2247,6 +2248,29 @@ fn enter_fork(command: Option<TerminalCommand>, cwd: Option<&std::path::Path>) -
     })
 }
 
+/// A Codex agent runs the `codex` on PATH (`codex_program()` in launch.rs);
+/// Rudder never installs or downloads one. Without it the launch fails here
+/// with the install command. Claude agents and shells never look for Codex.
+fn require_codex_on_path(command: &TerminalCommand) -> Result<()> {
+    if command.program != "codex" {
+        return Ok(());
+    }
+    let path = command
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    if std::env::split_paths(&path).any(|dir| dir.join("codex").is_file()) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "codex is not installed or not on PATH. Install it with `npm install -g @openai/codex`."
+    ))
+}
+
 fn command_builder(command: Option<TerminalCommand>, term: &str) -> Result<CommandBuilder> {
     match command {
         Some(command) => {
@@ -2310,6 +2334,27 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_codex_launch_without_codex_on_path_names_the_install_command() {
+        let empty = std::env::temp_dir().join(format!("rudder-no-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let path = empty.display().to_string();
+        let codex = TerminalCommand::with_args("codex", ["--no-alt-screen"]).with_env("PATH", &path);
+        let error = TerminalPane::spawn_shell_or_command(Some(codex), TerminalPaneOptions::default())
+            .err()
+            .expect("codex is missing");
+        assert_eq!(
+            error.to_string(),
+            "codex is not installed or not on PATH. Install it with `npm install -g @openai/codex`."
+        );
+        std::fs::write(empty.join("codex"), "#!/bin/sh\n").unwrap();
+        let codex = TerminalCommand::new("codex").with_env("PATH", &path);
+        assert!(require_codex_on_path(&codex).is_ok());
+        let claude = TerminalCommand::new("claude").with_env("PATH", &path);
+        assert!(require_codex_on_path(&claude).is_ok());
+        std::fs::remove_dir_all(&empty).unwrap();
+    }
 
     #[test]
     fn agent_commands_get_the_shared_tool_cache_env() {

@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { authStoreExists, runDoctor, runOnboard } from "./auth.js";
-import { codexLaunchEnv } from "./codex-binary.js";
 import { runCloudCommand } from "./cloud.js";
 import { printContextAudit } from "./context-audit.js";
 import { currentBranch, findRepoRoot } from "./git.js";
@@ -892,7 +891,7 @@ async function runNativeDashboard(): Promise<boolean> {
     return false;
   }
   const update = await getUpdateAvailable().catch(() => null);
-  const env = await codexLaunchEnv(process.env);
+  const env = { ...process.env };
   const previousNativeTui = process.env.RUDDER_NATIVE_TUI;
   process.env.RUDDER_NATIVE_TUI = "1";
   env.RUDDER_NATIVE_TUI = "1";

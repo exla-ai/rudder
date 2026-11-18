@@ -9,7 +9,7 @@ Shipped in 4.0.0-alpha.17 as Rudder's only Codex launch policy, for every
 Codex CLI launch: reasoning effort `high` unless one is chosen,
 `model_auto_compact_token_limit=150000` and `tool_output_token_limit=6000`
 (`CODEX_COMMON_CONFIG` in `native/src/launch.rs`, mirrored in
-`src/codex-binary.ts`). The acpx adapter has no Codex config passthrough and
+`src/codex-config.ts`). The acpx adapter has no Codex config passthrough and
 gets only the effort default. Verification checks status instead of building a
 patch. These values shipped before E14 and are unproven; E14 decides whether
 each one stays.

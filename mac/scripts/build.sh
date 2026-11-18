@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds Rudder.app for Developer ID distribution: XcodeGen, tests, archive,
-# notarize + staple the app, then a signed, notarized, stapled Rudder.dmg.
+# notarize + staple the app, then a signed, notarized, stapled Rudder.dmg
+# (laid out by make-dmg.sh).
 #
 #   mac/scripts/build.sh                 # everything (needs notary credentials)
 #   RUDDER_SKIP_NOTARIZE=1 mac/scripts/build.sh   # signed but not notarized
@@ -100,12 +101,7 @@ rm -f "$ZIP"
 staple "$APP"
 
 say "Building Rudder.dmg"
-STAGE="$OUT/dmg"
-mkdir -p "$STAGE"
-ditto "$APP" "$STAGE/Rudder.app"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "Rudder" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-rm -rf "$STAGE"
+"$MAC_DIR/scripts/make-dmg.sh" "$APP" "$DMG"
 codesign --sign "$IDENTITY" --timestamp "$DMG"
 notarize "$DMG"
 staple "$DMG"

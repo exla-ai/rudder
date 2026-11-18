@@ -144,8 +144,7 @@ jobs:
           notarize Rudder-notarize.zip
           xcrun stapler staple export/Rudder.app
           spctl --assess --type execute --verbose=2 export/Rudder.app
-          mkdir dmg && ditto export/Rudder.app dmg/Rudder.app && ln -s /Applications dmg/Applications
-          hdiutil create -volname Rudder -srcfolder dmg -ov -format UDZO Rudder.dmg
+          ../scripts/make-dmg.sh export/Rudder.app Rudder.dmg
           notarize Rudder.dmg
           xcrun stapler staple Rudder.dmg
           shasum -a 256 Rudder.dmg

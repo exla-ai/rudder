@@ -20,9 +20,10 @@
 // Codex. Its "/" popup lists built-ins in a fixed order, gated by features,
 // the sign-in type and the platform, plus one row per service tier of the
 // current model (/fast). It has no custom prompts and no skills (skills are
-// `$name` mentions). CODEX_BUILTINS is codex-rs/tui/src/slash_command.rs at
-// rust-v0.169.0 with the gates of bottom_pane/slash_commands.rs and
-// command_popup.rs; another Codex version is refused rather than guessed.
+// `$name` mentions). CODEX_BUILTINS is codex-rs/tui/src/slash_command.rs with
+// the gates of bottom_pane/slash_commands.rs and command_popup.rs. Those three
+// files are identical at rust-v0.169.0 and rust-v0.170.0 (diffed), so both are
+// in CODEX_VERSIONS; any other Codex version is refused rather than guessed.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -388,7 +389,11 @@ const aliasesOf = (variants) => [...new Set(variants.flatMap((v) => v.aliases))]
 // Codex
 // ---------------------------------------------------------------------------
 
+// The Codex the worker image installs (cloud/worker/Dockerfile pins it).
 export const CODEX_VERSION = "0.170.0";
+// Every Codex release whose "/" popup source matches CODEX_BUILTINS. Add a
+// release only after diffing the three files named at the top of this file.
+export const CODEX_VERSIONS = Object.freeze(["0.169.0", CODEX_VERSION]);
 
 // Popup order. args: takes inline arguments. opens: "model" (the chat's model
 // sheet) or "terminal" (a picker, panel or TUI-only output), when "bare" (only
@@ -497,8 +502,8 @@ function codexGate(gate, state) {
  * model catalog; `model`: the agent's model.
  */
 export function buildCodexCommands({ version, features, chatgpt, models, model, platform = process.platform }) {
-  if (version !== CODEX_VERSION) {
-    throw new Error(`Rudder knows the commands of Codex ${CODEX_VERSION}; this machine has Codex ${version}`);
+  if (!CODEX_VERSIONS.includes(version)) {
+    throw new Error(`Rudder knows the commands of Codex ${CODEX_VERSIONS.join(" and ")}; this machine has Codex ${version}. Install ${CODEX_VERSION} with: npm install -g @openai/codex@${CODEX_VERSION}`);
   }
   const state = { features, chatgpt, models, platform };
   const commands = [];

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  CLAUDE_CLASSIFIED_FOR, CODEX_VERSION, buildClaudeCommands, buildCodexCommands, claudeInitialize,
+  CLAUDE_CLASSIFIED_FOR, CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, claudeInitialize,
   readClaudeBinaryCommands, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
 
@@ -96,7 +96,7 @@ test("Claude and Codex '/' lists from synthetic config folders", async () => {
     }
 
     const state = await readCodexState({ bin: onPath("codex"), cwd, env, plugins: true });
-    assert.equal(state.version, CODEX_VERSION, "CODEX_BUILTINS is checked against this Codex");
+    assert.ok(CODEX_VERSIONS.includes(state.version), `CODEX_BUILTINS is checked against Codex ${CODEX_VERSIONS.join(", ")}, not ${state.version}`);
     assert.equal(state.chatgpt, false);
     const models = JSON.parse(fs.readFileSync(path.join(env.CODEX_HOME, "models_cache.json"), "utf8")).models;
     const codex = buildCodexCommands({ ...state, models, model: "test-model", platform: "linux" });
@@ -109,7 +109,7 @@ test("Claude and Codex '/' lists from synthetic config folders", async () => {
       assert.equal(names.includes(absent), false, `/${absent} is not in this popup`);
     }
     assert.equal(codex.find((c) => c.name === "btw")?.alias, true);
-    assert.throws(() => buildCodexCommands({ ...state, version: "0.0.1", models, model: "test-model" }), new RegExp(`Codex ${CODEX_VERSION.replaceAll(".", "\\.")}; this machine has Codex 0\\.0\\.1`));
+    assert.throws(() => buildCodexCommands({ ...state, version: "0.0.1", models, model: "test-model" }), /this machine has Codex 0\.0\.1\. Install /);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

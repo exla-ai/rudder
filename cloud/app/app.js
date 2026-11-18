@@ -17,9 +17,9 @@ import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-pi
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
-import { applyAgentEdits, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
+import { applyAgentEdits, branchAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending } from "/app/pending.js";
-import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
+import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
@@ -498,8 +498,8 @@ function openAddProject() {
   });
 }
 
-// Settings is a screen (/app/settings) so the Slack and Linear OAuth
-// round trips can land back on it.
+// Settings is a screen (/app/settings) so the Slack OAuth round trip can
+// land back on it.
 function openSettings() { navigate("/app/settings"); }
 
 // Everything this app keeps in localStorage belongs to the signed-in account
@@ -1094,6 +1094,7 @@ function DesktopShell() {
       items: [
         { label: "Rename", icon: "edit", run: () => renameRow(row) },
         { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pinAgent({ ws: t.ws, run: t.run, find, pinned: !pinned, repaint: updateScreen }) },
+        { label: "Branch", icon: "branch", run: () => branchAgent({ ws: t.ws, run: t.run, title: (find() || a).title }) },
         { label: "Open beside", icon: "split", disabled: !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, t)), run: () => openIn(1, t) },
         "divider",
         { label: "Close", icon: "trash", danger: true, run: () => deleteAgent(t.ws, find() || a, { after: () => leaveClosed(t) }) },
@@ -3056,16 +3057,11 @@ function ProjectScreen(ws) {
     },
   });
   el.appendChild(composer.el);
-  // Above the task box: the model new agents start on, and Linear issues
-  // when Linear is connected.
+  // Above the task box: the model new agents start on.
   const tools = h(`<div class="c-tools"></div>`);
   const taskModel = modelChip(ws);
   const syncModel = () => { taskModel.refresh(); headModel.refresh(); };
   tools.appendChild(taskModel.el);
-  const linearBtn = h(`<button type="button" class="tool-chip" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M5 14.5l4.5 4.5M4 10.5L13.5 20M6 7.5L16.5 18M8.5 5L19 15.5"/></svg><span>From Linear</span></button>`);
-  linearBtn.addEventListener("click", () => openLinearIssues(ws, { onStarted: () => refreshState() }));
-  tools.appendChild(linearBtn);
-  linearAvailable().then((ok) => { linearBtn.hidden = !ok; });
   // "New agents here are private" (team.ts): only once you have a team.
   const privBtn = h(`<button type="button" class="tool-chip priv-chip" hidden aria-pressed="false"></button>`);
   let privOverride = null; // what this device just set, until the state agrees

@@ -792,6 +792,13 @@ async function handleRpc(method, params) {
     // Name an agent (native deliver_rename_request): the instruction is the name.
     return await steer(project, { kind: "rename", taskId: String(params.runId || ""), instruction: String(params.title || "") });
   }
+  if (method === "agentBranch") {
+    // Branch an agent (native branch.rs): a new agent next to it with a copy
+    // of its conversation and files. The instruction is `branch`, then the
+    // branch's first prompt on the next line when there is one.
+    const text = String(params.text || "").trim();
+    return await steer(project, { kind: "branch", taskId: String(params.runId || ""), instruction: text ? `branch\n${text}` : "branch" });
+  }
   if (method === "agentEdit") {
     // Edit the chat's latest prompt (native chat_edit.rs): the conversation
     // goes back to just before it and the new text runs in its place.
@@ -1404,28 +1411,8 @@ function agentSummary(record, options = {}) {
     summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
-    // A /swarm experiment: the control plane never tracks it in Linear.
-    ...(record.swarmExperiment === true ? { swarmExperiment: true } : {}),
-    // A main row is one long session: Linear tracking reads each new user turn.
-    ...(record.mode === "main" ? lastUserTurn(record) : {}),
     remoteUrl,
     asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
-  };
-}
-
-// The newest prompt the user typed in a run (turns from Rudder itself, such as
-// the bootstrap or a regoal, are not the user's), and how many they typed. A
-// record without turns started from its task, as the dashboard reads it.
-function lastUserTurn(record) {
-  const turns = Array.isArray(record?.turns) && record.turns.length
-    ? record.turns
-    : [{ prompt: record?.task, ts: record?.createdAt, source: "user" }];
-  const typed = turns.filter((turn) => turn && typeof turn.prompt === "string" && (turn.source ?? "user") === "user");
-  const last = typed.at(-1);
-  return {
-    userTurns: typed.length,
-    lastUserPrompt: last ? userTask(last.prompt).slice(0, 2000) : null,
-    lastUserAt: last ? toMillis(last.ts) : null,
   };
 }
 

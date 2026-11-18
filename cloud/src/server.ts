@@ -420,7 +420,7 @@ function noteAppActive(accountId: string, platform: string): void {
   appActiveSeen.set(key, day);
   captureProductEvent(accountId, "app_active", { platform });
 }
-// Slack and Linear, per org or per person. Its dependencies are functions
+// Slack, per org or per person. Its dependencies are functions
 // declared further down (hoisted), so the module never imports server.ts.
 const integrations = createIntegrations({
   database,
@@ -7685,6 +7685,22 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw badRequest("a name is at most 200 characters");
     }
     sendJson(res, 200, await homeRpc(home.id, "agentRename", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", title }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-branch") {
+    // Branch an agent: the dashboard starts a new agent next to it with a
+    // copy of its conversation and files, and leaves it running untouched
+    // (native branch.rs). `text`, when given, is the branch's first prompt.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const text = (stringField(body, "text") ?? "").trim();
+    const branched = await homeRpc(home.id, "agentBranch", {
+      workspaceId: repo.id,
+      runId: stringField(body, "run") ?? "",
+      text: text.slice(0, 16_000),
+    });
+    captureProductEvent(account.accountId, "agent_branched", { platform: requestPlatform(req), prompted: !!text });
+    sendJson(res, 200, branched);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/agent-edit") {

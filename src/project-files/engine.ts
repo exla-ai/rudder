@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { parseEngineStatus } from "../engine.js";
 import { resolveNativeBinaryPath } from "../native-binary.js";
-import { ProjectFileError, validateFileScope, type FileGrant } from "./service.js";
+import { ProjectFileError, validateFileAccess, validateFileScope, type FileGrant } from "./service.js";
 import type { FileScope } from "./types.js";
 
 export function sameFileScope(a: FileScope, b: FileScope): boolean {
@@ -27,7 +27,7 @@ export async function engineFileGrants(repo: string, signal: AbortSignal, native
       || typeof grant.root !== "string" || !path.isAbsolute(grant.root) || grant.root.length > 4096) {
       throw new ProjectFileError("denied", "Project file binding changed");
     }
-    return { scope, root: grant.root };
+    return { scope, root: grant.root, access: validateFileAccess(grant.access) };
   });
   signal.throwIfAborted();
   return result;

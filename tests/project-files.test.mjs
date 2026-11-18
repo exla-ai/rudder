@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm, truncate, rename, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, chmod, symlink, rm, truncate, rename, realpath } from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
 import { build } from "esbuild";
@@ -35,9 +35,9 @@ async function fixture(t, authorize) {
   await writeFile(path.join(root, "binary.bin"), Buffer.from([0, 255, 2, 3]));
   await writeFile(path.join(base, "outside.txt"), "outside-private-data");
   const service = new ProjectFileService(async (identity, signal) => {
-    if (authorize) return authorize(identity, root, signal);
+    if (authorize) return { access: { kind: "host" }, ...await authorize(identity, root, signal) };
     assert.deepEqual(identity, scope);
-    return { scope, root };
+    return { scope, root, access: { kind: "host" } };
   });
   t.after(() => rm(base, { recursive: true, force: true }));
   return { base, root, service };
@@ -246,4 +246,55 @@ test("changing the authoritative root alias during authorization invalidates the
   alias = path.join(base, "active-project");
   await symlink(root, alias);
   await assert.rejects(service.dispatch(req("read", "README.md")), { code: "denied" });
+});
+
+test("saves replace a file only while it still holds the revision the editor read", async (t) => {
+  let onSecondCheck = null, checks = 0;
+  const { root, service } = await fixture(t, async (_identity, root) => {
+    if (++checks === 2 && onSecondCheck) await onSecondCheck(root);
+    return { scope, root };
+  });
+  const write = (relative, baseRevision, text) => service.dispatch({ version: 1, operation: "write", scope, path: relative, baseRevision, text });
+  const readme = path.join(root, "README.md");
+  await chmod(readme, 0o755);
+  const first = await service.dispatch(req("read", "README.md"));
+  checks = 0;
+  const unchanged = await service.dispatch({ ...req("read", "README.md"), knownRevision: first.revision });
+  assert.equal(unchanged.unchanged, true);
+  assert.equal(unchanged.text, undefined);
+
+  checks = 0;
+  const saved = await write("README.md", first.revision, "# Project\n\nEdited in the panel\n");
+  assert.equal(saved.outcome, "saved");
+  assert.equal(await readFile(readme, "utf8"), "# Project\n\nEdited in the panel\n");
+  assert.equal((await service.dispatch(req("read", "README.md"))).revision, saved.revision);
+  assert.equal((await stat(readme)).mode & 0o777, 0o755);
+
+  // The editor's revision is stale: nothing is written.
+  checks = 0;
+  assert.deepEqual(await write("README.md", first.revision, "mine"), { path: "README.md", outcome: "conflict" });
+  assert.equal(await readFile(readme, "utf8"), "# Project\n\nEdited in the panel\n");
+
+  // An agent writes after the comparison, just before the rename.
+  checks = 0;
+  onSecondCheck = (root) => writeFile(path.join(root, "README.md"), "agent edit");
+  assert.equal((await write("README.md", saved.revision, "mine")).outcome, "conflict");
+  assert.equal(await readFile(readme, "utf8"), "agent edit");
+  onSecondCheck = null;
+  assert.deepEqual((await readdir(root)).filter((name) => name.startsWith(".rudder-save-")), []);
+
+  const current = (await service.dispatch(req("read", "README.md"))).revision;
+  for (const [relative, text, code] of [["binary.bin", "x", "unsupported"], ["image.png", "x", "unsupported"], ["missing.md", "x", "missing"],
+    [".env", "x", "denied"], ["README.md", "x".repeat(FILE_LIMITS.writeBytes + 1), "large"], ["README.md", "nul\u0000", "invalid"]]) {
+    checks = 0;
+    await assert.rejects(write(relative, current, text), { code }, relative);
+  }
+
+  // The Cloud relay carries the same save and its outcome.
+  const relay = new CloudProjectFiles({ authorize: async (_actor, identity) => ({ scope: identity, homeId: "home-a" }),
+    rpc: async (_homeId, _operation, request, signal) => { checks = 0; return service.dispatch(request, signal); } });
+  const relayed = await relay.save("account-a", { version: 1, operation: "write", scope, path: "README.md", baseRevision: current, text: "relayed" });
+  assert.equal(relayed.outcome, "saved");
+  assert.equal(await readFile(readme, "utf8"), "relayed");
+  await assert.rejects(relay.save("account-a", { version: 1, operation: "write", scope, path: "README.md", baseRevision: "bad", text: "x" }), { status: 400 });
 });

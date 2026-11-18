@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { CloudProjectFiles, CloudProjectFileError, type CloudFileScope } from "./relay.js";
+import { CloudProjectFiles, CloudProjectFileError, WRITE_TEXT_BYTES, type CloudFileScope } from "./relay.js";
 
 type Dependencies = {
   workspace(accountId: string, workspaceId: string): { homeId: string };
@@ -11,6 +11,23 @@ function validScope(value: unknown): value is CloudFileScope {
   const scope = value as CloudFileScope;
   return Boolean(scope && [scope.projectId, scope.workspaceId, scope.attemptId].every(value => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value))
     && Number.isSafeInteger(scope.ownerEpoch) && scope.ownerEpoch >= 0);
+}
+
+/** A save is one file's text (WRITE_TEXT_BYTES of UTF-8) as JSON; escaping at
+ * most doubles it. */
+const SAVE_BODY_BYTES = 2 * WRITE_TEXT_BYTES + 64 * 1024;
+async function saveBody(req: IncomingMessage, signal: AbortSignal): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    signal.throwIfAborted();
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += bytes.length;
+    if (total > SAVE_BODY_BYTES) { req.destroy(); throw new CloudProjectFileError(413, "Files over 1 MiB cannot be edited here"); }
+    chunks.push(bytes);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw new CloudProjectFileError(400, "Send the save as JSON"); }
 }
 
 /** The Cloud repository id routes RPC; FileScope.workspaceId remains the actual
@@ -54,10 +71,14 @@ export class ProjectFileRoutes {
     const cancel = () => controller.abort();
     req.once("aborted", cancel); res.once("close", cancel);
     try {
-      if (req.method !== "GET") throw new CloudProjectFileError(405, "Use GET for project files");
+      const save = req.method === "POST" && url.pathname === "/api/app/project-files";
+      if (req.method !== "GET" && !save) throw new CloudProjectFileError(405, "Use GET to read project files and POST to save one");
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
       let result: unknown;
-      if (url.pathname.endsWith("project-file-scopes")) {
+      if (save) {
+        if (url.search || !/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? "")) throw new CloudProjectFileError(400, "Send the save as JSON");
+        result = await this.#relay.save(accountId, await saveBody(req, signal), signal);
+      } else if (url.pathname.endsWith("project-file-scopes")) {
         if (this.#listing >= 8) throw new CloudProjectFileError(429, "Too many projects are open");
         const workspaceId = url.searchParams.get("workspaceId") ?? "";
         if (!workspaceId || workspaceId.length > 256 || [...url.searchParams.keys()].some(key => key !== "workspaceId")

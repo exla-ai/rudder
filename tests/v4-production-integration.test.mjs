@@ -54,7 +54,7 @@ test('production composer preserves absolute paths and backend slash ownership',
 test('project-files developer command resolves current workspace identity before opening its private board', async()=>{
   const parsed=applyCommandSurface({command:'project-files',args:['execution-workspace','docs/'],flags:{}});
   assert.equal(parsed.command,'project-files');assert.deepEqual(parsed.args,['execution-workspace','docs/']);
-  const opened=[];const dependencies={grants:async(repo,signal)=>{assert.equal(repo,'/repo');signal.throwIfAborted();return [{scope,root:'/repo/task'}];},open:async(...args)=>{opened.push(args);}};
+  const opened=[];const dependencies={grants:async(repo,signal)=>{assert.equal(repo,'/repo');signal.throwIfAborted();return [{scope,root:'/repo/task',access:{kind:'host'}}];},open:async(...args)=>{opened.push(args);}};
   await runProjectFilesCommand('/repo',parsed.args,dependencies);
   assert.deepEqual(opened,[['/repo',{scope,path:'docs',kind:'folder'}]]);
   await assert.rejects(runProjectFilesCommand('/repo',['old-attempt'],dependencies),/Choose a current workspace/);
@@ -79,7 +79,7 @@ test('Cloud ACL routing retains execution scope and home rechecks custody after 
   const home = new HomeProjectFiles(async (repo,signal) => {
     assert.equal(repo,root);signal.throwIfAborted();calls++;
     if (afterRead && calls > 1) custody = false;
-    return custody ? [{scope,root}] : [];
+    return custody ? [{scope,root,access:{kind:'host'}}] : [];
   });
   const routes = new ProjectFileRoutes({workspace(account, workspace) {
     assert.equal(account,'account');assert.equal(workspace,'cloud-repository');
@@ -103,7 +103,7 @@ test('Cloud ACL routing retains execution scope and home rechecks custody after 
 test('board file routes bind the authenticated session and refuse old owner epochs', async t => {
   const root=await temp(t);await fs.writeFile(path.join(root,'README.md'),'board file');
   let valid=true;
-  const session={};const board = new BoardProjectFiles(async()=>[{scope,root}]);
+  const session={};const board = new BoardProjectFiles(async()=>[{scope,root,access:{kind:'host'}}]);
   const base=await serve(t,(req,res,url)=>board.handle(req,res,url,root,{valid:()=>valid},session));
   let response=await fetch(base+'/file-scopes');assert.deepEqual(await response.json(),{scopes:[scope]});
   response=await fetch(base+query('/files'));assert.equal(response.status,200);
@@ -114,7 +114,7 @@ test('Cloud file routing keeps simultaneous account bindings separate', async t 
   const roots = {alice:await temp(t), bob:await temp(t)};
   for (const [actor,root] of Object.entries(roots)) await fs.writeFile(path.join(root,'README.md'),actor);
   const homes = Object.fromEntries(Object.keys(roots).map(actor => [actor,
-    new HomeProjectFiles(async()=>[{scope,root:roots[actor]}])]));
+    new HomeProjectFiles(async()=>[{scope,root:roots[actor],access:{kind:'host'}}])]));
   const routes = new ProjectFileRoutes({
     workspace(actor, repository) {
       assert.ok(Object.hasOwn(roots,actor));assert.equal(repository,'repository');return {homeId:actor};

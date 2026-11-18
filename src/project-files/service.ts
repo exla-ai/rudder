@@ -1,28 +1,36 @@
 import { constants } from "node:fs";
-import { lstat, open, opendir, realpath } from "node:fs/promises";
+import { lstat, open, opendir, readlink, realpath, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import type { FileDocument, FileEntry, FileListing, FileScope, ProjectFileRequest, ProjectFileResult } from "./types.js";
+import { createHash, randomUUID } from "node:crypto";
+import type { FileAccess, FileDocument, FileEntry, FileListing, FileScope, FileWriteResult, ProjectFileRequest, ProjectFileResult } from "./types.js";
 
 export class ProjectFileError extends Error {
   constructor(readonly code: "denied" | "invalid" | "missing" | "changed" | "large" | "busy" | "unsupported", message: string) {
     super(message); this.name = "ProjectFileError";
   }
 }
-export type FileGrant = { scope: FileScope; root: string };
+export type FileGrant = { scope: FileScope; root: string; access: FileAccess };
 /** Resolve from CURRENT trusted project/run state, never from a client-supplied root.
  * Check session/account ACL, project/workspace/attempt membership and owner epoch.
  * Called again before publication, so revocation or ownership changes fail closed.
  */
 export type AuthorizeProjectFiles = (scope: FileScope, signal: AbortSignal) => Promise<FileGrant>;
-export const FILE_LIMITS = { entries: 500, textBytes: 4 * 1024 * 1024, mediaBytes: 16 * 1024 * 1024, active: 8, timeoutMs: 10_000 } as const;
+export const FILE_LIMITS = { entries: 500, textBytes: 4 * 1024 * 1024, mediaBytes: 16 * 1024 * 1024, writeBytes: 1024 * 1024, active: 8, timeoutMs: 10_000 } as const;
+const REVISION = /^[a-f0-9]{64}$/;
+const BINARY_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
 
 export function validateFileScope(value: unknown): FileScope {
   const scope = value as FileScope | undefined;
   if (!scope || ![scope.projectId, scope.workspaceId, scope.attemptId].every((v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/[\x00-\x1f\x7f]/.test(v))
     || !Number.isSafeInteger(scope.ownerEpoch) || scope.ownerEpoch < 0) throw new ProjectFileError("invalid", "Project file identity is required");
   return { projectId: scope.projectId, workspaceId: scope.workspaceId, attemptId: scope.attemptId, ownerEpoch: scope.ownerEpoch };
+}
+export function validateFileAccess(value: unknown): FileAccess {
+  const access = value as FileAccess | undefined;
+  if (access?.kind === "host") return { kind: "host" };
+  if (access?.kind === "namespace" && Number.isSafeInteger(access.pid) && access.pid > 1) return { kind: "namespace", pid: access.pid };
+  throw new ProjectFileError("denied", "Project file access is unavailable");
 }
 export function validateFilePath(value: unknown): string {
   if (typeof value !== "string" || value.length > 4096 || /[\x00-\x1f\x7f\\]/.test(value) || value.startsWith("/") || /^[a-z]:/i.test(value)) {
@@ -35,6 +43,19 @@ export function validateFilePath(value: unknown): string {
     || /^\.env(?:\.|$)/i.test(part) || /^(?:RUDDER_SHARED\.md|\.credentials\.json|\.npmrc|\.netrc)$/i.test(part)
     || /\.(?:pem|key|p12|pfx)$/i.test(part))) throw new ProjectFileError("denied", "Private project metadata is not available in the viewer");
   return value;
+}
+function validateRequest(request: ProjectFileRequest): void {
+  if (request?.version !== 1 || !["list", "read", "write"].includes(request.operation)) throw new ProjectFileError("invalid", "Unsupported project file request");
+  if (request.operation === "read" && request.knownRevision !== undefined && !(typeof request.knownRevision === "string" && REVISION.test(request.knownRevision))) {
+    throw new ProjectFileError("invalid", "Invalid known file revision");
+  }
+  if (request.operation === "write") {
+    if (request.path === "" || typeof request.baseRevision !== "string" || !REVISION.test(request.baseRevision) || typeof request.text !== "string") {
+      throw new ProjectFileError("invalid", "Invalid project file save");
+    }
+    if (Buffer.byteLength(request.text) > FILE_LIMITS.writeBytes) throw new ProjectFileError("large", "Files over 1 MiB cannot be edited here");
+    if (BINARY_TEXT.test(request.text)) throw new ProjectFileError("invalid", "The text contains control characters");
+  }
 }
 function sameScope(a: FileScope, b: FileScope): boolean {
   return a.projectId === b.projectId && a.workspaceId === b.workspaceId && a.attemptId === b.attemptId && a.ownerEpoch === b.ownerEpoch;
@@ -71,6 +92,53 @@ function validMedia(bytes: Buffer, mime: string): boolean {
   if (mime === "image/avif") return bytes.subarray(4, 8).toString() === "ftyp" && /avif|avis/.test(bytes.subarray(8, 32).toString());
   return false;
 }
+/** UTF-8 text without control characters, or null for binary content. */
+function textOf(content: Buffer): string | null {
+  if (content.includes(0)) return null;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    return BINARY_TEXT.test(text) ? null : text;
+  } catch { return null; }
+}
+const revisionOf = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+
+/** Where a grant's files are reachable from this process, and how to prove a
+ * path still names the same mount. A namespace grant walks the agent's own
+ * root (`/proc/<pid>/root`), so the service sees exactly the overlay the agent
+ * writes through; the host path of a fork holds only `.jj`.
+ */
+type Place = {
+  root: string;
+  at(parts: readonly string[]): string;
+  /** Host: the path is canonical. Namespace: the agent is still in the mount namespace first observed. */
+  current(at: string): Promise<boolean>;
+  /** A fresh grant still names this exact place. */
+  holds(fresh: FileGrant): Promise<boolean>;
+};
+async function placeOf(grant: FileGrant): Promise<Place> {
+  if (!path.isAbsolute(grant.root) || path.normalize(grant.root) !== grant.root) throw new ProjectFileError("denied", "Project file access is no longer current");
+  if (grant.access.kind === "host") {
+    const root = await realpath(grant.root);
+    return {
+      root, at: (parts) => path.join(root, ...parts),
+      current: async (at) => await realpath(at) === at,
+      holds: async (fresh) => fresh.access.kind === "host" && fresh.root === grant.root && await realpath(fresh.root) === root,
+    };
+  }
+  if (process.platform !== "linux") throw new ProjectFileError("denied", "Agent workspace namespaces exist only on Linux");
+  const pid = grant.access.pid;
+  const namespace = `/proc/${pid}/ns/mnt`;
+  const mount = await readlink(namespace);
+  // Until the fork's enter script has unshared, the agent still sees the host
+  // mount, where its workspace holds only `.jj`. Never read that instead.
+  if (mount === await readlink("/proc/self/ns/mnt")) throw new ProjectFileError("denied", "The agent workspace is not mounted yet");
+  const root = `/proc/${pid}/root${grant.root}`;
+  return {
+    root, at: (parts) => [root, ...parts].join("/"),
+    current: async () => await readlink(namespace) === mount,
+    holds: async (fresh) => fresh.access.kind === "namespace" && fresh.access.pid === pid && fresh.root === grant.root && await readlink(namespace) === mount,
+  };
+}
 
 /** No listeners, persistent watchers, synchronous filesystem IO or scheduling. */
 export class ProjectFileService {
@@ -78,7 +146,7 @@ export class ProjectFileService {
   constructor(private readonly authorize: AuthorizeProjectFiles) {}
 
   async dispatch(request: ProjectFileRequest, signal?: AbortSignal): Promise<ProjectFileResult> {
-    if (request?.version !== 1 || !["list", "read"].includes(request.operation)) throw new ProjectFileError("invalid", "Unsupported project file request");
+    validateRequest(request);
     const scope = validateFileScope(request.scope);
     const relative = validateFilePath(request.path);
     if (this.#active >= FILE_LIMITS.active) throw new ProjectFileError("busy", "Too many project files are open");
@@ -86,44 +154,50 @@ export class ProjectFileService {
     const bounded = AbortSignal.any([AbortSignal.timeout(FILE_LIMITS.timeoutMs), ...(signal ? [signal] : [])]);
     try {
       bounded.throwIfAborted();
-      const grant = await abortable(this.authorize(scope, bounded), bounded);
-      if (!sameScope(scope, grant.scope) || !path.isAbsolute(grant.root)) throw new ProjectFileError("denied", "Project file access is no longer current");
-      const root = await realpath(grant.root);
+      const grant = await this.#grant(scope, bounded);
+      const place = await placeOf(grant);
       const handles: FileHandle[] = [];
       try {
         // Linux resolves every component relative to pinned directory handles.
         // NOFOLLOW rejects symlinks even when an attacker swaps an ancestor.
-        const rootHandle = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        const rootHandle = await open(place.root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
         handles.push(rootHandle);
         const parts = relative ? relative.split("/") : [];
-        let current = root;
         for (let index = 0; index < parts.length; index++) {
           bounded.throwIfAborted();
           const parent = handles[handles.length - 1];
-          const candidate = process.platform === "linux" ? `/proc/self/fd/${parent.fd}/${parts[index]}` : path.join(current, parts[index]);
+          const candidate = process.platform === "linux" ? `/proc/self/fd/${parent.fd}/${parts[index]}` : place.at(parts.slice(0, index + 1));
           const directory = index < parts.length - 1 || request.operation === "list";
           const handle = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | (directory ? constants.O_DIRECTORY : 0));
           handles.push(handle);
-          current = path.join(current, parts[index]);
           // Portable check also detects replacement between resolving and open.
-          if (!sameFile(await handle.stat(), await lstat(current))) throw new ProjectFileError("changed", "The file changed while opening it");
+          if (!sameFile(await handle.stat(), await lstat(place.at(parts.slice(0, index + 1))))) throw new ProjectFileError("changed", "The file changed while opening it");
         }
         const selected = handles[handles.length - 1];
+        const current = place.at(parts);
         const before = await selected.stat();
+        // Verify canonical ancestry and descriptor identity before trusting the result.
+        const unmoved = async () => await place.current(current) && sameFile(await lstat(current), before)
+          && sameFile(await lstat(place.root), await rootHandle.stat())
+          && (process.platform !== "linux" || grant.access.kind !== "host" || await realpath(`/proc/self/fd/${selected.fd}`) === current);
+        if (request.operation === "write") {
+          const parent = handles[handles.length - 2];
+          const directory = process.platform === "linux" ? `/proc/self/fd/${parent.fd}` : place.at(parts.slice(0, -1));
+          return await this.write(selected, before, directory, parts[parts.length - 1], request, async () => {
+            const fresh = await this.#grant(scope, bounded);
+            return await place.holds(fresh) && await unmoved() && sameVersion(before, await selected.stat());
+          }, bounded);
+        }
         const result = request.operation === "list"
           ? await this.list(selected, current, relative, bounded)
-          : await this.read(selected, relative, bounded);
+          : await this.read(selected, relative, request.knownRevision, bounded);
         bounded.throwIfAborted();
         if (!sameVersion(before, await selected.stat())) throw new ProjectFileError("changed", "The file changed while reading it");
-        // Verify canonical ancestry and descriptor identity again before publishing.
-        if (await realpath(current) !== current || !sameFile(await lstat(current), before)
-          || !sameFile(await lstat(root), await rootHandle.stat())) throw new ProjectFileError("changed", "The project file moved while reading it");
-        if (process.platform === "linux" && await realpath(`/proc/self/fd/${selected.fd}`) !== current) throw new ProjectFileError("changed", "The project file moved while reading it");
-        const fresh = await abortable(this.authorize(scope, bounded), bounded);
+        if (!await unmoved()) throw new ProjectFileError("changed", "The project file moved while reading it");
+        const fresh = await this.#grant(scope, bounded);
         bounded.throwIfAborted();
-        if (!sameScope(scope, fresh.scope) || fresh.root !== grant.root || await realpath(fresh.root) !== root) throw new ProjectFileError("denied", "Project file access is no longer current");
-        if (!sameVersion(before, await selected.stat()) || !sameFile(await lstat(current), before)
-          || await realpath(current) !== current) throw new ProjectFileError("changed", "The project file changed before it could be displayed");
+        if (!await place.holds(fresh)) throw new ProjectFileError("denied", "Project file access is no longer current");
+        if (!sameVersion(before, await selected.stat()) || !await unmoved()) throw new ProjectFileError("changed", "The project file changed before it could be displayed");
         return result;
       } finally { await Promise.all(handles.map((handle) => handle.close())); }
     } catch (error) {
@@ -133,6 +207,13 @@ export class ProjectFileService {
       if (code === "ELOOP" || code === "EACCES" || code === "EPERM") throw new ProjectFileError("denied", "The project file is not available");
       throw new ProjectFileError("changed", "The project file could not be read safely");
     } finally { this.#active--; }
+  }
+
+  async #grant(scope: FileScope, signal: AbortSignal): Promise<FileGrant> {
+    const grant = await abortable(this.authorize(scope, signal), signal);
+    signal.throwIfAborted();
+    if (!sameScope(scope, grant.scope)) throw new ProjectFileError("denied", "Project file access is no longer current");
+    return { scope: grant.scope, root: grant.root, access: validateFileAccess(grant.access) };
   }
 
   private async list(handle: FileHandle, absolute: string, relative: string, signal: AbortSignal): Promise<FileListing> {
@@ -153,14 +234,11 @@ export class ProjectFileService {
     return { path: relative, entries, truncated };
   }
 
-  private async read(handle: FileHandle, relative: string, signal: AbortSignal): Promise<FileDocument> {
+  /** Allocate from checked size; never readFile a file that can grow unbounded. */
+  private async bytes(handle: FileHandle, limit: number, tooLarge: string, signal: AbortSignal): Promise<Buffer> {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new ProjectFileError("unsupported", "Choose a regular project file");
-    const format = classification(relative);
-    const media = format.kind === "image" || format.kind === "pdf";
-    const limit = media ? FILE_LIMITS.mediaBytes : FILE_LIMITS.textBytes;
-    if (stat.size > limit) throw new ProjectFileError("large", "This file is too large to preview");
-    // Allocate from checked size; never readFile a file that can grow unbounded.
+    if (stat.size > limit) throw new ProjectFileError("large", tooLarge);
     const bytes = Buffer.alloc(stat.size + 1);
     let offset = 0;
     while (offset < bytes.length) {
@@ -170,17 +248,56 @@ export class ProjectFileService {
       offset += read.bytesRead;
     }
     if (offset !== stat.size) throw new ProjectFileError("changed", "The file changed while reading it");
-    const content = bytes.subarray(0, offset);
-    const revision = createHash("sha256").update(content).digest("hex");
+    return bytes.subarray(0, offset);
+  }
+
+  private async read(handle: FileHandle, relative: string, knownRevision: string | undefined, signal: AbortSignal): Promise<FileDocument> {
+    const format = classification(relative);
+    const media = format.kind === "image" || format.kind === "pdf";
+    const content = await this.bytes(handle, media ? FILE_LIMITS.mediaBytes : FILE_LIMITS.textBytes, "This file is too large to preview", signal);
+    const revision = revisionOf(content);
     if (media) {
       if (!validMedia(content, format.mime)) throw new ProjectFileError("unsupported", "The file content does not match its media type");
-      return { path: relative, revision, ...format, base64: content.toString("base64") };
+      return revision === knownRevision ? { path: relative, revision, ...format, unchanged: true } : { path: relative, revision, ...format, base64: content.toString("base64") };
     }
+    const text = textOf(content);
+    if (text === null) return { path: relative, revision, mime: "application/octet-stream", kind: "binary", ...(revision === knownRevision ? { unchanged: true } : {}) };
+    return revision === knownRevision ? { path: relative, revision, ...format, unchanged: true } : { path: relative, revision, ...format, text };
+  }
+
+  /** Replace an existing UTF-8 file only while it still holds `baseRevision`.
+   * The new bytes go to a temporary file beside it, then one rename swaps them
+   * in, so an agent never reads a half-written file. Through a fork's own
+   * mount this lands in the agent's upper layer like any agent edit, and the
+   * next snapshot records it in that agent's change.
+   */
+  private async write(handle: FileHandle, before: { mode: number }, directory: string, name: string,
+    request: { path: string; baseRevision: string; text: string }, unchanged: () => Promise<boolean>, signal: AbortSignal): Promise<FileWriteResult> {
+    const kind = classification(request.path).kind;
+    if (kind === "image" || kind === "pdf") throw new ProjectFileError("unsupported", "Only text files can be edited here");
+    const content = await this.bytes(handle, FILE_LIMITS.writeBytes, "Files over 1 MiB cannot be edited here", signal);
+    if (textOf(content) === null) throw new ProjectFileError("unsupported", "Only UTF-8 text files can be edited here");
+    if (revisionOf(content) !== request.baseRevision) return { path: request.path, outcome: "conflict" };
+    const next = Buffer.from(request.text, "utf8");
+    if (next.equals(content)) return { path: request.path, outcome: "saved", revision: request.baseRevision };
+    const temporary = `${directory}/.rudder-save-${randomUUID()}`;
+    const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    let placed = false;
     try {
-      if (content.includes(0)) throw new Error("binary");
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) throw new Error("binary");
-      return { path: relative, revision, ...format, text };
-    } catch { return { path: relative, revision, mime: "application/octet-stream", kind: "binary" }; }
+      try {
+        await file.chmod(before.mode & 0o7777);
+        await file.writeFile(next);
+        await file.sync();
+      } finally { await file.close(); }
+      signal.throwIfAborted();
+      // An agent may have written between the comparison and now. The window
+      // left after this check is the rename itself.
+      if (!await unchanged()) return { path: request.path, outcome: "conflict" };
+      await rename(temporary, `${directory}/${name}`);
+      placed = true;
+    } finally { if (!placed) await unlink(temporary); }
+    const parent = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY);
+    try { await parent.sync(); } finally { await parent.close(); }
+    return { path: request.path, outcome: "saved", revision: revisionOf(next) };
   }
 }

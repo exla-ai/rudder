@@ -189,22 +189,51 @@ impl RuntimeLink {
     }
 }
 
+/// File-grant workspace id of the project checkout. Run ids always end in
+/// `-<key>` (gitio::new_run_id), so this cannot name an agent.
+pub(crate) const CHECKOUT_FILE_WORKSPACE: &str = "checkout";
+
+/// A Linux overlay fork has `<workspace>.fork/enter` beside it; the PTY layer
+/// runs its agent through that script (pty_terminal::enter_fork).
+fn overlay_fork(cwd: &Path) -> bool {
+    let mut state = cwd.as_os_str().to_owned();
+    state.push(".fork");
+    cfg!(target_os = "linux") && Path::new(&state).join("enter").is_file()
+}
+
 impl RuntimeState {
     /// Snapshot only actual App custody. Browser input never supplies a root.
-    /// Managed views need their namespace reader and are not ordinary host paths.
+    /// The project checkout comes first, live agent workspaces after it. A
+    /// Linux overlay fork's files exist only inside its agent's mount
+    /// namespace (src/warm-snapshot.ts), so its grant names the agent's PTY
+    /// child: the file service reads it through `/proc/<pid>/root`, the same
+    /// mount the agent sees. That pid stays this App's unreaped child while
+    /// the terminal is live, so it cannot be reused under the grant.
     pub(crate) fn file_grants(&self, app: &App, owner: &OwnerFence) -> serde_json::Value {
-        let grants: Vec<_> = app.agents.iter().filter_map(|agent| {
+        let mut grants = Vec::new();
+        if app.cwd.as_os_str().len() <= 4096 {
+            grants.push(serde_json::json!({"scope": {
+                "projectId": owner.project_id, "workspaceId": CHECKOUT_FILE_WORKSPACE,
+                "attemptId": CHECKOUT_FILE_WORKSPACE, "ownerEpoch": owner.epoch
+            }, "root": app.cwd, "access": {"kind": "host"}}));
+        }
+        grants.extend(app.agents.iter().filter_map(|agent| {
             let slot = self.links.get(&agent.id)?;
             let terminal = agent.terminal.as_ref()?;
             if slot.uncertain || slot.transport_uncertain || slot.draining || slot.closed
                 || terminal.instance_id() != slot.attempt || agent.cwd.as_os_str().len() > 4096 {
                 return None;
             }
+            let access = if overlay_fork(&agent.cwd) {
+                serde_json::json!({"kind": "namespace", "pid": terminal.child_process_id()?})
+            } else {
+                serde_json::json!({"kind": "host"})
+            };
             Some(serde_json::json!({"scope": {
                 "projectId": owner.project_id, "workspaceId": agent.id,
                 "attemptId": slot.attempt, "ownerEpoch": owner.epoch
-            }, "root": agent.cwd}))
-        }).take(16).collect();
+            }, "root": agent.cwd, "access": access}))
+        }).take(15));
         serde_json::json!(grants)
     }
 

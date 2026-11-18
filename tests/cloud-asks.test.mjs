@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,8 +8,15 @@ import { readAsks, askDecision } from "../cloud/worker/asks.mjs";
 
 const HOOK = path.resolve("native/src/permission_hook.mjs");
 
+const dirs = [];
+after(() => {
+  for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tmpdir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "rudder-asks-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-asks-"));
+  dirs.push(dir);
+  return dir;
 }
 
 function waitFor(check, timeoutMs = 5000) {
@@ -88,6 +95,30 @@ test("answered in the terminal: the hook sees the tool's result and leaves witho
   assert.deepEqual(fs.readdirSync(asks), []);
 });
 
+test("a question or plan answered in the terminal is withdrawn though Claude rewrote its input", async () => {
+  const dir = tmpdir();
+  const asks = path.join(dir, "run.asks");
+  const transcript = path.join(dir, "t.jsonl");
+  const result = (id) => `${JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id }] } })}\n`;
+  // The model's key order; the hook gets the schema's (2.1.327).
+  const asked = { questions: [{ question: "Which?", header: "Pick", multiSelect: true, options: [{ label: "A", description: "a" }, { label: "B", description: "b" }] }] };
+  const parsed = { questions: [{ question: "Which?", header: "Pick", options: [{ label: "A", description: "a" }, { label: "B", description: "b" }], multiSelect: true }] };
+  // An older plan, already answered, then the pending one: the transcript has
+  // `{}`, the hook the plan file.
+  fs.writeFileSync(transcript, toolUseLine("toolu_old", "ExitPlanMode", {}) + "\n" + result("toolu_old")
+    + toolUseLine("toolu_q", "AskUserQuestion", asked) + "\n" + toolUseLine("toolu_plan", "ExitPlanMode", {}) + "\n");
+  const question = runHook(asks, { transcript_path: transcript, tool_name: "AskUserQuestion", tool_input: parsed });
+  const plan = runHook(asks, { transcript_path: transcript, tool_name: "ExitPlanMode", tool_input: { plan: "# Plan", planFilePath: "/p.md" } });
+  await waitFor(() => readAsks(asks).length === 2);
+  for (const file of fs.readdirSync(asks)) {
+    const request = JSON.parse(fs.readFileSync(path.join(asks, file), "utf8"));
+    assert.equal(request.toolUseId, request.tool === "ExitPlanMode" ? "toolu_plan" : "toolu_q");
+  }
+  fs.appendFileSync(transcript, result("toolu_q") + result("toolu_plan"));
+  assert.deepEqual(await Promise.all([question.done, plan.done]), [{ code: 0, stdout: "" }, { code: 0, stdout: "" }]);
+  assert.deepEqual(fs.readdirSync(asks), []);
+});
+
 test("a request whose hook is gone is dropped", () => {
   const dir = tmpdir();
   fs.writeFileSync(path.join(dir, "1700000000000-abcdef12.json"), JSON.stringify({ pid: 99999999, tool: "Bash", input: {} }));
@@ -98,7 +129,7 @@ test("a request whose hook is gone is dropped", () => {
 test("questions are answered with the labels, multi-select joined", () => {
   const input = {
     questions: [
-      { question: "Pick a color", header: "Color", multiSelect: false, options: [{ label: "Red" }, { label: "Blue" }] },
+      { question: "Pick a color", header: "Color", multiSelect: false, options: [{ label: "Red" }, { label: "Blue", preview: "#00f" }] },
       { question: "Sizes?", header: "Size", multiSelect: true, options: [{ label: "S" }, { label: "L" }] },
     ],
   };
@@ -107,6 +138,7 @@ test("questions are answered with the labels, multi-select joined", () => {
   assert.equal(decision.behavior, "allow");
   assert.deepEqual(decision.updatedInput.questions, input.questions);
   assert.deepEqual(decision.updatedInput.answers, { "Pick a color": "Blue", "Sizes?": "S, L" });
+  assert.deepEqual(decision.updatedInput.annotations, { "Pick a color": { preview: "#00f" } });
   assert.throws(() => askDecision({ tool: "AskUserQuestion", input }, { answers: { "Pick a color": "Red" } }), /no answer/);
 });
 

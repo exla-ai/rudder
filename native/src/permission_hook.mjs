@@ -49,12 +49,38 @@ function tailLines(file) {
   }
 }
 
-function same(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
+// Key order does not count: the hook gets the input after Claude's schema
+// parse, in the schema's key order, while the transcript keeps the model's
+// (measured on 2.1.327: `question, header, options, multiSelect` against
+// `question, header, multiSelect, options`).
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  }
+  return value;
 }
 
-// The pending call's tool_use id: the newest tool_use with this name and input.
-function findToolUseId(lines, toolName, toolInput) {
+function same(a, b) {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+// Ids of the calls that already have a result in these lines.
+function settledIds(lines) {
+  const ids = new Set();
+  for (const line of lines) {
+    if (!line.includes('"tool_result"')) continue;
+    for (const match of line.matchAll(/"tool_use_id":"([^"]+)"/g)) ids.add(match[1]);
+  }
+  return ids;
+}
+
+// The pending call's tool_use id: the newest tool_use with this name and input
+// that had no result when the hook started. A plan is matched by name alone:
+// Claude replaces ExitPlanMode's input with the plan file (`plan`,
+// `planFilePath`) before hooks see it, and the transcript keeps the model's `{}`.
+function findToolUseId(lines, toolName, toolInput, settled) {
+  const anyInput = toolName === "ExitPlanMode";
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i];
     if (!line.includes('"tool_use"') || !line.includes(toolName)) continue;
@@ -68,12 +94,26 @@ function findToolUseId(lines, toolName, toolInput) {
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j -= 1) {
       const part = content[j];
-      if (part?.type === "tool_use" && part.name === toolName && same(part.input, toolInput)) {
+      if (part?.type === "tool_use" && part.name === toolName && !settled.has(part.id) && (anyInput || same(part.input, toolInput))) {
         return part.id;
       }
     }
   }
   return null;
+}
+
+// A subagent's calls are in its own transcript, under the session's
+// `subagents` directory (sometimes one folder deeper), not in transcript_path.
+function callTranscript(transcript, agentId) {
+  if (!transcript || !agentId) return transcript;
+  const root = path.join(transcript.replace(/\.jsonl$/, ""), "subagents");
+  const name = `agent-${agentId}.jsonl`;
+  try {
+    const found = fs.readdirSync(root, { recursive: true }).find((entry) => path.basename(String(entry)) === name);
+    return found ? path.join(root, String(found)) : "";
+  } catch {
+    return "";
+  }
 }
 
 // Answered somewhere else: the call has a result, or the turn was interrupted
@@ -139,7 +179,10 @@ function main() {
   } catch {
     return;
   }
-  const transcript = typeof input.transcript_path === "string" ? input.transcript_path : "";
+  const transcript = callTranscript(
+    typeof input.transcript_path === "string" ? input.transcript_path : "",
+    typeof input.agent_id === "string" ? input.agent_id : "",
+  );
   let sizeAtStart = 0;
   try {
     sizeAtStart = transcript ? fs.statSync(transcript).size : 0;
@@ -150,7 +193,9 @@ function main() {
   fs.mkdirSync(dir, { recursive: true });
   const requestFile = path.join(dir, `${id}.json`);
   const answerFile = path.join(dir, `${id}.answer.json`);
-  let toolUseId = transcript ? findToolUseId(tailLines(transcript), input.tool_name, input.tool_input) : null;
+  const startLines = transcript ? tailLines(transcript) : [];
+  const settled = settledIds(startLines);
+  let toolUseId = transcript ? findToolUseId(startLines, input.tool_name, input.tool_input, settled) : null;
   const request = {
     id,
     ts: Date.now(),
@@ -211,7 +256,7 @@ function main() {
     }
     if (transcript && size !== checkedSize) {
       checkedSize = size;
-      if (!toolUseId) toolUseId = findToolUseId(tailLines(transcript), input.tool_name, input.tool_input);
+      if (!toolUseId) toolUseId = findToolUseId(tailLines(transcript), input.tool_name, input.tool_input, settled);
       if (resolvedElsewhere(transcript, toolUseId, sizeAtStart)) {
         cleanup();
         process.exit(0);

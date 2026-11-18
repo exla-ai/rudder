@@ -101,6 +101,9 @@ export function askDecision(request, answer) {
       throw new Error("answers are required");
     }
     const answers = {};
+    // As Claude's own dialog does: a picked option's preview goes back with
+    // the answer, and Claude is told which preview was chosen.
+    const annotations = {};
     for (const question of questions) {
       const text = String(question?.question || "");
       const value = given[text];
@@ -109,8 +112,12 @@ export function askDecision(request, answer) {
         throw new Error(`no answer for "${text}"`);
       }
       answers[text] = picked.slice(0, 4000);
+      const option = Array.isArray(question.options) ? question.options.find((o) => o?.label === picked) : null;
+      if (typeof option?.preview === "string" && option.preview) {
+        annotations[text] = { preview: option.preview };
+      }
     }
-    return { output: decide({ behavior: "allow", updatedInput: { ...request.input, answers } }) };
+    return { output: decide({ behavior: "allow", updatedInput: { ...request.input, answers, annotations } }) };
   }
   if (answer?.behavior === "allow") {
     const always = answer.always === true && Array.isArray(request.suggestions) && request.suggestions.length > 0;

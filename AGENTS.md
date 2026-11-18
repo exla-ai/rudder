@@ -107,6 +107,11 @@ create, read-only ones included.
   logs, captures or JSON receipts.
 - **Add work only when truly needed.** No hardening waves or follow-up
   chains; leftover ideas go in your final message.
+- **No fallbacks or backward compatibility** unless the user asks for them.
+  No "try X, else Y", silent defaults for missing config or input, swallowed
+  errors, shims, legacy branches, readers for old formats, migrations, or
+  flags that keep old behavior. Fail with a clear error, change every caller
+  directly and delete what the change replaces. This holds for Rudder too.
 - **Keep the user's goal in front:** Rudder agents feel fast. If work does not
   make agents faster, cheaper or more reliable, skip it.
 

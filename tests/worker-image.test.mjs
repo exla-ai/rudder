@@ -22,3 +22,19 @@ test("the worker image installs what headless Chromium needs to start", async ()
     .flatMap((match) => match[1].trim().split(/\s+/));
   assert.deepEqual(CHROMIUM_RUNTIME.filter((pkg) => !installed.includes(pkg)), []);
 });
+
+// The image copies worker modules one by one. A module one of them imports but
+// the image lacks stops the home at start (ERR_MODULE_NOT_FOUND).
+test("the worker image copies every module its worker modules import", async () => {
+  const dockerfile = await fs.readFile(new URL("../cloud/worker/Dockerfile", import.meta.url), "utf8");
+  const copied = new Set([...dockerfile.matchAll(/^COPY cloud\/worker\/(\S+\.mjs) \.\/\1$/gm)].map((m) => m[1]));
+  assert.ok(copied.has("home.mjs"), "no worker modules found in the Dockerfile");
+  const missing = [];
+  for (const name of copied) {
+    const source = await fs.readFile(new URL(`../cloud/worker/${name}`, import.meta.url), "utf8");
+    for (const [, imported] of source.matchAll(/(?:from|import\()\s*["']\.\/([^"']+\.mjs)["']/g)) {
+      if (!copied.has(imported)) missing.push(`${name} imports ${imported}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+});

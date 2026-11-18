@@ -223,6 +223,7 @@ COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
+COPY cloud/worker/suggestion.mjs ./suggestion.mjs
 COPY cloud/worker/slash-commands.mjs ./slash-commands.mjs
 COPY cloud/worker/vibeprint-host.mjs ./vibeprint-host.mjs
 COPY cloud/worker/vibeprint-track.mjs ./vibeprint-track.mjs
@@ -242,6 +243,8 @@ COPY cloud/worker/cleanup.mjs ./cleanup.mjs
 COPY cloud/worker/telemetry.mjs ./telemetry.mjs
 COPY cloud/worker/burst-protocol.mjs ./burst-protocol.mjs
 COPY cloud/worker/burst-broker.mjs ./burst-broker.mjs
+COPY cloud/worker/coordinator.mjs ./coordinator.mjs
+COPY cloud/worker/coordinator-mcp.mjs ./coordinator-mcp.mjs
 COPY cloud/worker/burst.mjs ./burst.mjs
 COPY cloud/worker/builder.mjs ./builder.mjs
 RUN printf '#!/bin/sh\nexec node /opt/rudder-worker/burst.mjs "$@"\n' > /usr/local/bin/rudder-burst \

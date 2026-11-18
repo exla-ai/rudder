@@ -12,6 +12,7 @@ RUN npm install
 COPY tsconfig.json ./
 COPY src ./src
 COPY app ./app
+COPY editor ./editor
 RUN npm run build
 
 ENV NODE_ENV=production

@@ -49,13 +49,13 @@ test("two workers merge, undo takes the work back out", { timeout: 180_000 }, as
     await session.type("first unique task");
     await session.press("Enter");
     await mergeFinishedWorker(session);
-    await session.waitForText("done 1", { timeout: 30_000 });
+    await session.waitForText("merged 1", { timeout: 30_000 });
     await session.press("Ctrl+W");
     await session.press("3");
     await session.type("second unique task");
     await session.press("Enter");
     await mergeFinishedWorker(session);
-    await session.waitForText("done 2", { timeout: 60_000 });
+    await session.waitForText("merged 2", { timeout: 60_000 });
     // Each fake worker writes DONE-<workspace-slug>.txt; exactly two land.
     const deadline = Date.now() + 20_000;
     for (;;) {
@@ -103,7 +103,7 @@ test("a single merge then undo round-trips the checkout", { timeout: 120_000 }, 
   await session.press("Enter");
   // A dashboard worker's turn ending does not merge it: the user may still be
   // talking to it. The row holds in review and the checkout stays untouched.
-  await session.waitFor((s) => s.includes("press m to read the") && !s.includes("done 1"), {
+  await session.waitFor((s) => s.includes("ready for review") && !s.includes("merged 1"), {
     timeout: 60_000,
     stablePolls: 5,
     label: "the finished worker holding in review",
@@ -116,7 +116,7 @@ test("a single merge then undo round-trips the checkout", { timeout: 120_000 }, 
   );
   await mergeFinishedWorker(session);
   // The merged row is inside the `done` drawer now; the header carries its count.
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
   await waitFile(path.join(repo, "DONE.txt"), true);
 
   await session.press("Ctrl+W");
@@ -143,7 +143,7 @@ test("a merged row survives a restart with its identity intact", { timeout: 120_
   await session.press("Enter");
   await mergeFinishedWorker(session);
   // The merged row is inside the `done` drawer now; the header carries its count.
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
   await waitFile(path.join(repo, "DONE.txt"), true);
 
   // Restart. The merged row must reload as merged, still owning its workspace

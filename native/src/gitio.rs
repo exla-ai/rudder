@@ -1263,6 +1263,76 @@ pub(crate) fn run_record_status(status: AgentStatus) -> &'static str {
     }
 }
 
+/// Every session a run record names: the one the run is on and the ones it
+/// left (an edited message, a rewind, a model switch). Deleting the agent
+/// deletes all of them.
+pub(crate) fn recorded_session_ids(record: &serde_json::Value) -> Vec<String> {
+    let session = record.get("session");
+    let mut ids: Vec<String> = session
+        .and_then(|value| value.get("previousSessionIds"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect();
+    if let Some(current) = session
+        .and_then(|value| value.get("nativeSessionId"))
+        .and_then(serde_json::Value::as_str)
+    {
+        ids.push(current.to_string());
+    }
+    ids.retain(|id| !id.trim().is_empty());
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The record's `session`: the current id, and every id the record named
+/// before it, so no conversation the run had is forgotten when it moves on.
+fn session_record(existing: &serde_json::Value, current: Option<&str>) -> serde_json::Value {
+    let mut previous = recorded_session_ids(existing);
+    previous.retain(|id| Some(id.as_str()) != current);
+    let mut session = serde_json::Map::new();
+    if let Some(current) = current {
+        session.insert("nativeSessionId".to_string(), serde_json::json!(current));
+    }
+    if !previous.is_empty() {
+        session.insert("previousSessionIds".to_string(), serde_json::json!(previous));
+    }
+    if session.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(session)
+    }
+}
+
+/// Add a session the run used without ever being on it (the cut copy an
+/// edited message resumes from) to its record, so deleting the agent deletes
+/// that file too.
+pub(crate) fn record_retired_session(repo_root: &Path, run_id: &str, session: &str) -> Result<()> {
+    let path = native_run_dir(repo_root, run_id).join("run.json");
+    let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    let mut previous: Vec<String> = record
+        .get("session")
+        .and_then(|value| value.get("previousSessionIds"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect();
+    if previous.iter().any(|id| id == session) {
+        return Ok(());
+    }
+    previous.push(session.to_string());
+    if !record.get("session").is_some_and(serde_json::Value::is_object) {
+        record["session"] = serde_json::json!({});
+    }
+    record["session"]["previousSessionIds"] = serde_json::json!(previous);
+    write_run_record(&path, &record)
+}
+
 pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result<()> {
     let run_dir = native_run_dir(repo_root, &run.id);
     fs::create_dir_all(&run_dir)?;
@@ -1399,7 +1469,7 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         "reviewedAt": run.reviewed_at,
         "planDeps": run.deps,
         "delivery": run.delivery.to_json(),
-        "session": run.session_id.as_ref().map(|sid| serde_json::json!({ "nativeSessionId": sid })),
+        "session": session_record(&existing_record, run.session_id.as_deref()),
         // Written every time (null once awake): the carry-over below keeps any
         // key this projection leaves out, which would keep a woken row asleep.
         "parked": run.parked.as_ref().map(ParkedNote::to_json),
@@ -1574,6 +1644,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     if record_content_unchanged(&record, &existing_record) {
         return Ok(());
     }
+    write_run_record(&record_path, &record)
+}
+
+fn write_run_record(record_path: &Path, record: &serde_json::Value) -> Result<()> {
     let temp = record_path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
@@ -1584,7 +1658,7 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     ));
     fs::write(
         &temp,
-        format!("{}\n", serde_json::to_string_pretty(&record)?),
+        format!("{}\n", serde_json::to_string_pretty(record)?),
     )?;
     fs::rename(temp, record_path)?;
     Ok(())
@@ -2321,6 +2395,22 @@ pub(crate) fn forget_jj_workspace(
     if path.exists() {
         unlock_overlay_work(&path.join(".jj").join("working_copy").join("work"));
         fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+/// Record a workspace's on-disk edits in its jj working-copy commit. Forgetting
+/// a workspace abandons its commit only when that commit is empty with no
+/// description, so after this the agent's work stays in `jj log` when its
+/// directory is removed. Without it, edits jj had not yet seen were lost.
+pub(crate) fn snapshot_jj_workspace(path: &Path) -> Result<()> {
+    let output = Command::new(jj_program())
+        .args(["util", "snapshot"])
+        .current_dir(path)
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
 }

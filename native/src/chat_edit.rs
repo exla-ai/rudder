@@ -241,7 +241,7 @@ struct CodexRollout {
     events: Vec<CodexEvent>,
 }
 
-fn codex_home() -> Result<PathBuf, String> {
+pub(crate) fn codex_home() -> Result<PathBuf, String> {
     match std::env::var_os("CODEX_HOME").filter(|dir| !dir.is_empty()) {
         Some(dir) => Ok(PathBuf::from(dir)),
         None => user_home_dir()
@@ -760,6 +760,13 @@ impl App {
         ));
         self.mirror_graph();
         self.dirty = true;
+        // The cut copy it resumed from belongs to this agent too: deleting
+        // the agent deletes it with the rest of its conversation.
+        if let Rewound::Claude { fork_from, .. } = &rewound {
+            if let Err(error) = record_retired_session(&self.cwd, &outcome.run_id, fork_from) {
+                self.push_activity(format!("{label}: could not note its old conversation file: {error}"));
+            }
+        }
         if backend == Backend::Claude {
             // Claude's hooks last reported the old session id, and the row
             // follows what they report (adopt_reported_claude_sessions).

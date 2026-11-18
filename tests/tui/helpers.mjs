@@ -363,7 +363,7 @@ export async function waitUntil(condition, { timeout = 10_000, interval = 100, l
  * "checking whether this repo publishes · press m again" — literal
  * instructions, which slow CI runners actually exercise (a fast local machine
  * always resolved the probe before the notice rendered). The gate's own notice
- * is matched in full: the row label "done · press m to read the diff" is on
+ * is matched in full: the row label "ready for review" is on
  * screen before any key is pressed.
  */
 export async function pressMergeUntilReview(session, { timeout = 30_000 } = {}) {
@@ -391,7 +391,7 @@ export async function pressMergeUntilReview(session, { timeout = 30_000 } = {}) 
  * first m opens its diff, the second opens the confirm, and y merges.
  */
 export async function mergeFinishedWorker(session) {
-  await session.waitForText("press m to read the", { timeout: 60_000 });
+  await session.waitForText("ready for review", { timeout: 60_000 });
   await pressMergeUntilReview(session);
   await session.press("Ctrl+W");
   await session.press("m");

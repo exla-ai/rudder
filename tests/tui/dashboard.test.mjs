@@ -175,7 +175,7 @@ test("merge gate: first m shows the diff, second m merges", { timeout: 120_000 }
   // The fake agent writes DONE.txt into its workspace and exits 0. Wait for
   // the row's own done-state affordance — a bare "done" would match the
   // "Done when:" objective text while the agent is still running.
-  await session.waitForText("press m to read the", { timeout: 60_000 });
+  await session.waitForText("ready for review", { timeout: 60_000 });
 
   // Ctrl+W is the leader; m is its merge binding. The first press on
   // unreviewed work must open the diff and demand a second press, not merge
@@ -187,10 +187,10 @@ test("merge gate: first m shows the diff, second m merges", { timeout: 120_000 }
   // Second m does not merge yet: it opens the merge confirmation.
   await session.waitForText("[y] merge", { timeout: 20_000 });
   await session.press("y");
-  // The merged row collapses into the `done` drawer, so its state stamp is the
-  // drawer's count — "done 1" cannot match the ever-present "cc clear merged"
+  // The merged row collapses into the `merged` drawer, so its state stamp is the
+  // drawer's count: "merged 1" cannot match the ever-present "cc clear merged"
   // legend, so it still fails if no merge happened.
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
   // The screen can say what it likes; the merged file must be in the checkout.
   await waitForFile(path.join(repo, "DONE.txt"), 20_000);
 });
@@ -309,7 +309,7 @@ test("recorded work survives renaming the repo directory", { timeout: 120_000 },
 
   await session.type("write the done marker");
   await session.press("Enter");
-  await session.waitForText("press m to read the", { timeout: 60_000 });
+  await session.waitForText("ready for review", { timeout: 60_000 });
 
   await session.kill();
   await session.close();
@@ -340,7 +340,7 @@ test("recorded work survives renaming the repo directory", { timeout: 120_000 },
   await session.press("m");
   await session.waitForText("[y] merge", { timeout: 20_000 });
   await session.press("y");
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
   await waitForFile(path.join(renamed, "DONE.txt"), 20_000);
 });
 

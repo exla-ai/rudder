@@ -1,6 +1,6 @@
 // The finished-work drawer as a SEQUENCE against the real binary. A long session
 // ends with dozens of merged and failed rows; listing each one buries the two that
-// are still moving. `done` and `closed` collapse to a single sidebar row that opens
+// are still moving. `merged` and `earlier` collapse to a single sidebar row that opens
 // into member cards in the sidebar while preserving the worker pane.
 //
 // Unit tests cover the state machine; this covers what a user actually does — merge
@@ -20,39 +20,39 @@ import {
 
 assertPrerequisites();
 
-test("a merged row collapses into the done drawer and opens to its result", { timeout: 180_000 }, async (t) => {
+test("a merged row collapses into the merged drawer and opens to its result", { timeout: 180_000 }, async (t) => {
   const repo = await scratchRepo("rudder-tui-drawer-");
   t.after(() => removeScratch(repo));
   const { completer } = await fakeBackends(repo);
   const session = await launchRudder(t, { repo, claudeBin: completer });
   const story = journey(session, "finished work collapses into a drawer");
 
-  await story.step("a worker merged with m collapses into the done drawer", async () => {
+  await story.step("a worker merged with m collapses into the merged drawer", async () => {
     await session.waitForText("describe a task", { timeout: 20_000 });
     await session.type("write the done marker");
     await session.press("Enter");
     // A dashboard worker waits in review when its turn ends; m merges it.
     await mergeFinishedWorker(session);
     // One collapsed row with a count and a closed fold glyph — not a per-run row.
-    await session.waitForText("done 1", { timeout: 20_000 });
+    await session.waitForText("merged 1", { timeout: 20_000 });
     const screen = await session.screen();
     if (!screen.includes("\u251c\u2504")) {
-      throw new Error(`expected the closed fold glyph on the done header:\n${screen}`);
+      throw new Error(`expected the closed fold glyph on the merged header:\n${screen}`);
     }
   });
 
   await story.step("Enter on the drawer header opens it to the run's result", async () => {
     await session.press("Ctrl+W");
     await session.press("1");
-    // j walks past the live rows onto the done header, which Enter opens.
+    // j walks past the live rows onto the merged header, which Enter opens.
     for (let i = 0; i < 6; i += 1) {
       const screen = await session.screen();
-      if (/▶ *done/.test(screen)) break;
+      if (/▶ *merged/.test(screen)) break;
       await session.press("j");
     }
     const beforeOpen = await session.screen();
-    if (!/▶ *done/.test(beforeOpen)) {
-      throw new Error(`j never landed the cursor on the done header:\n${beforeOpen}`);
+    if (!/▶ *merged/.test(beforeOpen)) {
+      throw new Error(`j never landed the cursor on the merged header:\n${beforeOpen}`);
     }
     await session.press("Enter");
     // Expansion reveals the member card in the sidebar and keeps its session visible.
@@ -69,7 +69,7 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
     // an escape SEQUENCE follows, so wait for the drawer to go rather than snapshot.
     await session.waitForGone("\u252c\u2500", { timeout: 20_000 });
     const screen = await session.screen();
-    if (!screen.includes("done 1")) {
+    if (!screen.includes("merged 1")) {
       throw new Error(`the collapsed header survives closing the drawer:\n${screen}`);
     }
     if (screen.includes("\u252c\u2500")) {

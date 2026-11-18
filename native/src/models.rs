@@ -320,7 +320,8 @@ pub(crate) fn suggestions_for(app: &App) -> Vec<Suggestion> {
     if input.starts_with("/model") {
         let mut suggestions =
             model_provider_or_model_suggestions(input.strip_prefix("/model").unwrap_or_default());
-        mark_current_model_suggestions(&mut suggestions, app.backend, &app.model, app.effort);
+        let (backend, model, effort) = app.model_picker_current();
+        mark_current_model_suggestions(&mut suggestions, backend, &model, effort);
         return suggestions;
     }
 

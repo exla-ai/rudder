@@ -440,8 +440,8 @@ the arrows walk the tree rows (`subagent_cursor`) before moving on, and up
 from the next row lands on the tree's last row. The worker pane stays on the
 parent; the cursor's subagent shows its description, kind, status, time and
 last message under its row. Tab on a subagent row closes the tree back onto
-the parent; m/d/x/r/b/u there do nothing. Tab on a done/closed (or long
-review) drawer header opens or closes it, like Enter and Esc. In the worker
+the parent; m/d/x/r/b/u there do nothing. Tab on a merged/earlier (or long
+done) drawer header opens or closes it, like Enter and Esc. In the worker
 pane Tab still goes to the agent. Finished subagents stay, dimmed, until the
 parent's next human prompt, at most 8. Detection is the backends' own hooks,
 installed with the lifecycle signals (signals.rs): Claude `SubagentStart`,
@@ -475,11 +475,41 @@ observed Claude `compact_boundary` with trigger `auto`. All of it comes from
 `ContextUsage` (`base`, `auto_compact_at`, `history`), filled by timeline.rs
 off the App loop; `history` (last 60 requests) is memory only and never written
 to timeline.jsonl. Cloud and opencode agents get a two-row note instead.
-- **Agents**: the run list. Grouped: a `main`-branch agent section first, then
-  workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
-  focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running
-  plan worker; keeps its workspace), `g` toggle nested DAG view. (The `u` sync key was
-  removed along with the old workspace `/sync`; jj keeps workspaces current.)
+- **Agents**: the run list, in the app's words (5.0). Pinned and `main` rows
+  first, then the status sections (`status_bucket`): `needs you`
+  (`agent_needs_you`, the native twin of cloud/src/agent-status.ts
+  `agentNeeds`: a prompt or failed turn, a failure, a conflict, merged work
+  that left main, or finished workspace work awaiting review; never folds),
+  `one-off`, `todo`, `working`, `done` (finished and not waiting on you: a plan
+  node merging on its own, a swarm candidate, an open PR; folds past 5),
+  `cloud`, then the `merged` and `earlier` (stopped, paused, orphaned) drawers.
+  Card status words follow the app too ("ready for review", "turn failed",
+  "interrupted", "merge conflict", "not in main"); the header counts working
+  and need you. Select with `j/k` or arrows; `Enter` focuses/starts; `m` review
+  then merge, `d` delete, `r` rename, `v` review, `x` stop (a running plan
+  worker; keeps its workspace), `g` toggle nested DAG view, `P` the selected
+  agent's model and effort (below). (The `u` sync key was removed along with
+  the old workspace `/sync`; jj keeps workspaces current.)
+- **Model and effort per agent (`agent_model.rs`)**: `P` opens the task pane's
+  `/model` picker at the agent's backend with its model marked current and the
+  border reading `model for <agent>`; a pick goes through
+  `deliver_model_request`, the app's steer kind `model` (relaunch on the same
+  conversation at its prompt, refused mid-turn). `model_for` is view state and
+  is dropped as soon as the draft stops being a `/model` line. `/model` typed
+  on its own still sets the model new agents start on.
+- **Speed and context left (`agent_stats.rs`)**: the worker border's right side
+  shows the selected agent's `42 tok/s · 63% left`, the numbers the app shows
+  in a chat header: output tokens per second over the last 5 finished
+  responses (request out to last block, the app's `speedOf`), and context
+  against the window the backend compacts at (Claude: the model's models.dev
+  window, 1M for `[1m]`, or Claude Code's `autoCompactWindow` when smaller;
+  Codex: `model_context_window`). Amber past 70% used, red past 90%. Both are
+  folded by timeline.rs in the timeline job the diff panel already runs every
+  10 s for the selected agent, off the App loop; the models.dev cache (MBs) is
+  parsed again only when it changes.
+- **Palette (theme.rs)**: the app's tokens (blue accent, teal working, amber
+  needs you, green done, red failed, warm greys). Dark is the app's dark set;
+  light keeps the hues, deepened to 4.5:1 on a white terminal.
 - **Worker**: the real PTY of the focused agent (claude/codex). Keystrokes are
   forwarded to the child so its prompts, slash commands, selection, and `Tab`
   behave natively. Trackpad scroll moves scrollback like a terminal; alternate

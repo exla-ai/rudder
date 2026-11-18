@@ -592,9 +592,9 @@ fn codex_day_dirs(root: &Path, started_at_ms: u64) -> Vec<PathBuf> {
 }
 
 /// Upper bound for one `session_meta` line; real ones are tens of KiB.
-const CODEX_SESSION_META_MAX_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const CODEX_SESSION_META_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-fn read_first_line(path: &Path, max_bytes: u64) -> Option<String> {
+pub(crate) fn read_first_line(path: &Path, max_bytes: u64) -> Option<String> {
     use std::io::{BufRead, Read};
     let file = fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file.take(max_bytes));

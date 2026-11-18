@@ -77,18 +77,18 @@ pub(crate) fn terminal_background_mode() -> bool {
 pub(crate) const PAPER: Color = Color::Rgb(0xFF, 0xFF, 0xFF);
 /// Primary text: near-black ink (matches the site's #1a1a1a).
 pub(crate) const INK: Color = Color::Rgb(0x1A, 0x1A, 0x1A);
-/// Primary focus accent: a teal that reads cleanly on white.
-pub(crate) const ACCENT: Color = Color::Rgb(0x0B, 0x74, 0x7C);
-/// Slightly deeper teal used as the fill behind the focused pane title.
-pub(crate) const ACCENT_DEEP: Color = Color::Rgb(0x0B, 0x6E, 0x74);
-/// Amber secondary accent (amber-700), legible on white.
-pub(crate) const ACCENT_2: Color = Color::Rgb(0xB4, 0x53, 0x09);
+/// Primary focus accent: the app's blue, legible on white.
+pub(crate) const ACCENT: Color = Color::Rgb(0x2F, 0x56, 0xD8);
+/// Slightly deeper blue used as the fill behind the focused pane title.
+pub(crate) const ACCENT_DEEP: Color = Color::Rgb(0x26, 0x47, 0xB8);
+/// Amber secondary accent (the app's needs-you amber), legible on white.
+pub(crate) const ACCENT_2: Color = Color::Rgb(0x9A, 0x64, 0x00);
 /// Readable cool gray for secondary text.
 pub(crate) const MUTED: Color = Color::Rgb(0x6B, 0x72, 0x80);
 /// Light gray for hairline borders and de-emphasized text on white.
 pub(crate) const FAINT: Color = Color::Rgb(0xA6, 0xAD, 0xB8);
-/// Pale teal background for the selection highlight (with ink text on top).
-pub(crate) const SURFACE_SEL: Color = Color::Rgb(0xD9, 0xEE, 0xF0);
+/// Pale blue background for the selection highlight (with ink text on top).
+pub(crate) const SURFACE_SEL: Color = Color::Rgb(0xDD, 0xE5, 0xFA);
 
 // --- Legacy const names, re-pointed to the new palette ---
 // Kept so render.rs inline modals, selection.rs highlights, and the status
@@ -97,14 +97,14 @@ pub(crate) const FOCUS_COLOR: Color = ACCENT;
 pub(crate) const INACTIVE_COLOR: Color = FAINT;
 pub(crate) const MODEL_COLOR: Color = Color::Rgb(0x7E, 0x22, 0xCE); // purple-700
 pub(crate) const RUNNING_COLOR: Color = Color::Rgb(0xB4, 0x53, 0x09); // amber-700
-pub(crate) const DONE_COLOR: Color = Color::Rgb(0x15, 0x80, 0x3D); // green-700
-pub(crate) const FAILED_COLOR: Color = Color::Rgb(0xC0, 0x39, 0x2B); // red-600
-pub(crate) const CLOUD_COLOR: Color = ACCENT; // teal
+pub(crate) const DONE_COLOR: Color = Color::Rgb(0x23, 0x7A, 0x46); // the app's done green
+pub(crate) const FAILED_COLOR: Color = Color::Rgb(0xCC, 0x3D, 0x3D); // the app's failed red
+pub(crate) const CLOUD_COLOR: Color = ACCENT; // blue
 
 // --- DAG node status colors. Distinct + quiet so no state reads as gray, all
 // legible on white. ---
 pub(crate) const ST_PLANNED: Color = Color::Rgb(0x47, 0x55, 0x69); // slate-600
-pub(crate) const ST_READY: Color = ACCENT; // teal
+pub(crate) const ST_READY: Color = ACCENT; // blue
 pub(crate) const ST_RUNNING: Color = RUNNING_COLOR; // amber
 pub(crate) const ST_REVIEW: Color = Color::Rgb(0xA2, 0x1C, 0xAF); // magenta-700
 pub(crate) const ST_BLOCKED: Color = Color::Rgb(0xC2, 0x41, 0x0C); // orange-700
@@ -135,18 +135,24 @@ pub(crate) fn header_style(focused: bool) -> Style {
     Style::default().fg(if focused { p.muted } else { p.faint })
 }
 
-// --- 4.2 palette ------------------------------------------------------------
+// --- Palette ----------------------------------------------------------------
 //
-// One accent, four status colors and three greys, tuned twice: once for dark
-// terminals and once for light ones (and paper mode). Which one applies comes
-// from the outer terminal's background (term_colors.rs asks it at startup), so
-// the chrome follows the same light/dark answer the agents in the panes get.
+// The Rudder app's colors (cloud/app/styles.css): one blue accent, teal for
+// working, amber for needs you, green for done, red for failed and warm greys,
+// so an agent reads the same here as on the web, phone and Mac. Tuned twice:
+// the dark set is the app's own; the light set keeps its hues, deepened
+// where needed so small text reads on a white terminal (4.5:1). Which one
+// applies comes from the outer terminal's background (term_colors.rs asks it
+// at startup), so the chrome follows the same light/dark answer the agents in
+// the panes get.
 
 /// The resolved palette for the current frame.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Palette {
     pub accent: Color,
+    /// Working (the app's `--working`).
     pub running: Color,
+    /// Needs you (the app's `--needs`).
     pub waiting: Color,
     pub done: Color,
     pub merged: Color,
@@ -159,25 +165,25 @@ pub(crate) struct Palette {
 }
 
 const DARK: Palette = Palette {
-    accent: Color::Rgb(0xA3, 0x94, 0xFF),
-    running: Color::Rgb(0x6C, 0xB6, 0xFF),
-    waiting: Color::Rgb(0xF5, 0xC2, 0x4C),
-    done: Color::Rgb(0x5F, 0xD3, 0x8D),
-    merged: Color::Rgb(0xA3, 0x94, 0xFF),
-    failed: Color::Rgb(0xFF, 0x7A, 0x7A),
-    muted: Color::Rgb(0x8C, 0x93, 0xA3),
-    faint: Color::Rgb(0x4E, 0x55, 0x63),
+    accent: Color::Rgb(0x7C, 0x9C, 0xFF),
+    running: Color::Rgb(0x3F, 0xC6, 0xBB),
+    waiting: Color::Rgb(0xE6, 0xAD, 0x3E),
+    done: Color::Rgb(0x5C, 0xC6, 0x8A),
+    merged: Color::Rgb(0x7C, 0x9C, 0xFF),
+    failed: Color::Rgb(0xF0, 0x70, 0x70),
+    muted: Color::Rgb(0x96, 0x93, 0x8B),
+    faint: Color::Rgb(0x55, 0x53, 0x4E),
 };
 
 const LIGHT: Palette = Palette {
-    accent: Color::Rgb(0x5B, 0x45, 0xD6),
-    running: Color::Rgb(0x1F, 0x6F, 0xEB),
-    waiting: Color::Rgb(0xA8, 0x5B, 0x00),
-    done: Color::Rgb(0x16, 0x83, 0x45),
-    merged: Color::Rgb(0x5B, 0x45, 0xD6),
-    failed: Color::Rgb(0xD0, 0x30, 0x30),
-    muted: Color::Rgb(0x6B, 0x72, 0x80),
-    faint: Color::Rgb(0xB4, 0xBA, 0xC4),
+    accent: Color::Rgb(0x2F, 0x56, 0xD8),
+    running: Color::Rgb(0x0B, 0x7A, 0x74),
+    waiting: Color::Rgb(0x9A, 0x64, 0x00),
+    done: Color::Rgb(0x23, 0x7A, 0x46),
+    merged: Color::Rgb(0x2F, 0x56, 0xD8),
+    failed: Color::Rgb(0xCC, 0x3D, 0x3D),
+    muted: Color::Rgb(0x76, 0x71, 0x6A),
+    faint: Color::Rgb(0xB8, 0xB3, 0xAA),
 };
 
 thread_local! {

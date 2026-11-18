@@ -49,6 +49,8 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 mod usage;
 use crate::usage::*;
 mod timeline;
+mod agent_stats;
+mod agent_model;
 mod config;
 use crate::config::*;
 mod gitio;
@@ -127,6 +129,7 @@ mod agent_sync;
 use crate::agent_sync::*;
 mod subagents;
 mod chat_edit;
+mod agent_life;
 use crate::chat_edit::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
@@ -2246,8 +2249,10 @@ struct App {
     /// Runs the user typed or pasted into (their PTY, their resume draft or an
     /// attached client). Automatic integration leaves them for an explicit `m`.
     user_typed_runs: HashSet<String>,
-    /// When finished agents older than FINISHED_RETENTION were last swept.
-    finished_cleanup_at: Option<Instant>,
+    /// When the cleanup last looked for agents nobody touched for a day
+    /// (agent_life.rs), and the scan it is waiting on.
+    last_agent_gc: Instant,
+    agent_gc_rx: Option<mpsc::Receiver<Vec<String>>>,
     /// (run id, turn count) whose main/one-off summary was already read.
     direct_summary_read: HashSet<(String, usize)>,
     last_user_activity: Instant,
@@ -2281,6 +2286,10 @@ struct App {
     /// scratch (Finder-style "prefill is selected"). Any edit/nav key instead
     /// keeps the name and clears this, so editing-in-place still works.
     rename_prefilled: bool,
+    /// The run `P` opened the task pane's model picker for (agent_model.rs).
+    /// While set and the draft is a `/model` line, a pick switches that
+    /// agent's model and effort instead of the default for new agents.
+    model_for: Option<String>,
     /// Runs the user named by hand this session. The haiku title for a new
     /// run lands seconds after it starts and must not replace a typed name.
     renamed_runs: HashSet<String>,
@@ -3603,7 +3612,8 @@ impl App {
             post_merge_check_tx,
             post_merge_check_rx,
             user_typed_runs: HashSet::new(),
-            finished_cleanup_at: None,
+            last_agent_gc: Instant::now(),
+            agent_gc_rx: None,
             direct_summary_read: HashSet::new(),
             last_user_activity: Instant::now(),
             mouse_debug: env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
@@ -3620,6 +3630,7 @@ impl App {
             rename_input: None,
             rename_cursor: 0,
             rename_prefilled: false,
+            model_for: None,
             renamed_runs: HashSet::new(),
             diff_summary_cache: HashMap::new(),
             diff_summary_inflight: HashSet::new(),
@@ -4703,7 +4714,11 @@ impl App {
         match self.focus {
             FocusPane::Agents => self.handle_agents_key(key),
             FocusPane::Worker => self.handle_worker_key(key),
-            FocusPane::Task => self.handle_task_key(key),
+            FocusPane::Task => {
+                let quit = self.handle_task_key(key);
+                self.forget_stale_model_target();
+                quit
+            }
             FocusPane::Diff => self.handle_diff_key(key),
         }
     }
@@ -5151,7 +5166,7 @@ impl App {
             KeyCode::Char('c') => self.clear_merged_agents(),
             KeyCode::Char('b') => self.branch_selected_agent(),
             KeyCode::Char('u') => self.undo_selected_merge(),
-            KeyCode::Char('P') => self.open_main_model_switcher(),
+            KeyCode::Char('P') => self.open_agent_model_picker(),
             KeyCode::Char('o') => self.open_web_ui(),
             KeyCode::Char('U') => self.open_usage_dashboard(),
             KeyCode::Char('?') => self.show_keys = true,
@@ -6980,6 +6995,10 @@ impl App {
                 model,
                 effort,
             } => {
+                // `P` opened the picker for one agent: switch that agent.
+                if self.apply_agent_model_choice(&model, effort) {
+                    return;
+                }
                 let warning = self.set_model_defaults(backend, model.clone(), effort);
                 self.task_input.clear();
                 self.task_cursor = 0;
@@ -7030,11 +7049,10 @@ impl App {
 
     fn select_current_model_picker_choice(&mut self) {
         let suggestions = suggestions_for(self);
+        let (backend, model, effort) = self.model_picker_current();
         self.picker_index = suggestions
             .iter()
-            .position(|suggestion| {
-                is_current_model_suggestion(suggestion, self.backend, &self.model, self.effort)
-            })
+            .position(|suggestion| is_current_model_suggestion(suggestion, backend, &model, effort))
             .unwrap_or(0);
     }
 
@@ -11974,17 +11992,12 @@ Address the objection directly. If you disagree, say why inside \
         };
         self.rename_cursor = 0;
         self.rename_prefilled = false;
-        let trimmed = new_name.trim();
-        let Some(run) = self.agents.get_mut(self.selected_agent) else {
-            return;
-        };
-        if trimmed.is_empty() {
+        if new_name.trim().is_empty() {
             return;
         }
-        run.task_summary = trimmed.to_string();
-        let _ = save_native_run_record(&self.cwd, run);
-        self.renamed_runs.insert(run.id.clone());
-        self.notice = Some(format!("renamed to {trimmed}"));
+        self.notice = Some(match self.rename_agent_at(self.selected_agent, &new_name) {
+            Ok(notice) | Err(notice) => notice,
+        });
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) -> bool {
@@ -12652,16 +12665,6 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    fn open_main_model_switcher(&mut self) {
-        if !self.selected_is_main() {
-            return;
-        }
-        self.replace_task_input("/model ".to_string());
-        self.select_current_model_picker_choice();
-        self.focus = FocusPane::Task;
-        self.notice = Some("pick a model for main".to_string());
-    }
-
     fn restart_selected_agent(&mut self) {
         let Some(run) = self.agents.get_mut(self.selected_agent) else {
             self.notice = Some("no agent selected".to_string());
@@ -12758,6 +12761,9 @@ Address the objection directly. If you disagree, say why inside \
         match parts.next() {
             Some("/model") => {
                 let args = parts.collect::<Vec<_>>();
+                if self.apply_agent_model_command(&args) {
+                    return true;
+                }
                 match args.as_slice() {
                     [] => {
                         self.notice =
@@ -14247,7 +14253,10 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     /// Delete a workspace directory and its jj registration off the UI thread
-    /// (remove_dir_all on a tree with node_modules takes seconds).
+    /// (remove_dir_all on a tree with node_modules takes seconds). The agent's
+    /// jj change is kept: its edits are snapshotted first and forgetting a
+    /// workspace never abandons a change that has any, so un-integrated work
+    /// stays in `jj log`. A workspace that cannot be snapshotted is kept.
     fn remove_workspace_in_background(&self, path: PathBuf, workspace_name: Option<String>) {
         let cwd = self.cwd.clone();
         let tx = self.bg_notice_tx.clone();
@@ -14258,9 +14267,21 @@ Address the objection directly. If you disagree, say why inside \
                     // jj workspace: forget the registry entry AND remove the
                     // checkout. `git worktree remove` fails on a jj workspace
                     // and leaked both the directory and jj's workspace list.
-                    forget_jj_workspace(&cwd, name, &path)
-                        .err()
-                        .map(|error| format!("failed to remove jj workspace: {error}"))
+                    let unsaved = if path.exists() {
+                        crate::gitio::snapshot_jj_workspace(&path).err().map(|error| {
+                            format!(
+                                "kept its workspace at {}: could not record its changes in jj: {error}",
+                                path.display()
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    unsaved.or_else(|| {
+                        forget_jj_workspace(&cwd, name, &path)
+                            .err()
+                            .map(|error| format!("failed to remove jj workspace: {error}"))
+                    })
                 } else {
                     // Legacy git-worktree run.
                     match Command::new("git")
@@ -16002,6 +16023,10 @@ Address the objection directly. If you disagree, say why inside \
                 // The home machine's cleanup putting an idle agent to sleep;
                 // the instruction is the reason the card shows.
                 "park" => self.deliver_park_request(&task_id, &instruction),
+                // The app named an agent; the instruction is the new name.
+                "rename" => self.deliver_rename_request(&task_id, &instruction),
+                // The app pinned (`pin`) or unpinned (`unpin`) an agent.
+                "pin" => self.deliver_pin_request(&task_id, &instruction),
                 // The chat's model control: `<model> <effort|auto>` for one agent.
                 "model" => self.deliver_model_request(&task_id, &instruction),
                 // Edit the chat's latest prompt: `<entry>\n<text>`. Accepted
@@ -18494,7 +18519,6 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn integrate_ready_plan_nodes(&mut self) {
-        self.cleanup_stale_finished_agents();
         // Hold integration steady for a plan whose structural rebase is in flight: merging
         // would shift a RUNNING node into the MERGED zone mid-diff and the build-forward
         // apply would compute its zones against a moving target. Asked per plan below,
@@ -19080,37 +19104,6 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    /// Merged, failed and stopped agents untouched for FINISHED_RETENTION leave the
-    /// list (and their workspaces are removed), checked at most hourly. Their history
-    /// stays in jj. Agents waiting for review are never cleaned up.
-    fn cleanup_stale_finished_agents(&mut self) {
-        if self
-            .finished_cleanup_at
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(60 * 60))
-        {
-            return;
-        }
-        self.finished_cleanup_at = Some(Instant::now());
-        let stale: Vec<String> = self
-            .agents
-            .iter()
-            .filter(|run| finished_agent_is_stale(&self.cwd, run, FINISHED_RETENTION))
-            .map(|run| run.id.clone())
-            .collect();
-        if stale.is_empty() {
-            return;
-        }
-        for id in &stale {
-            if let Some(index) = self.agents.iter().position(|run| &run.id == id) {
-                let _ = self.delete_agent_now(index);
-            }
-        }
-        self.notice = Some(format!(
-            "cleaned up {} finished agent(s) older than 7 days",
-            stale.len()
-        ));
-        self.dirty = true;
-    }
 
     fn delete_selected_agent(&mut self) {
         if self.agents.is_empty() {
@@ -19183,11 +19176,15 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     /// Remove one row and everything local it owns: its record, signal files and
-    /// ledger entries, and (in the background) its workspace. The confirmed half
-    /// of `dd`, and what a delete from the phone runs. Keeps the selection on a
-    /// sensible neighbor and returns the notice to show.
+    /// ledger entries, and (in the background) its workspace and conversation.
+    /// The confirmed half of `dd`, and what a delete from the phone, `cc` and
+    /// the cleanup run. Keeps the selection on a sensible neighbor and returns
+    /// the notice to show.
     fn delete_agent_now(&mut self, index: usize) -> String {
         let run = self.agents.remove(index);
+        // Read before the record goes: it names every session the run left.
+        let conversation = self.conversation_of(&run);
+        self.delete_conversation_in_background(conversation);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
         // click resolves to nothing instead of a neighbor (next render rebuilds it).
         self.agent_row_map.clear();
@@ -19743,43 +19740,9 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
 
-        let mut persist_ledger = false;
-        let mut cleared = 0usize;
+        let cleared = merged.len();
         for index in merged.into_iter().rev() {
-            let run = self.agents.remove(index);
-            let _ = remove_native_run_record(&self.cwd, &run.id);
-            signals::cleanup_run_signals(&run.id);
-            persist_ledger |= self.followups_ingested.remove(&run.id);
-            persist_ledger |= self.completion_summary_pending.remove(&run.id);
-            if let Some(path) = run.workspace_path.as_ref() {
-                // Merged workspaces are integrated leftovers; best-effort removal,
-                // same command the single-delete path uses.
-                let _ = Command::new("git")
-                    .args(["worktree", "remove", "--force"])
-                    .arg(path)
-                    .current_dir(&self.cwd)
-                    .output();
-            }
-            cleared += 1;
-        }
-        if persist_ledger {
-            self.persist_ingested_runs();
-        }
-        // Indices shifted under the rendered rows; drop the click map so a
-        // same-tick click resolves to nothing instead of a neighbor.
-        self.agent_row_map.clear();
-        let last = self.agents.len().saturating_sub(1);
-        self.selected_agent = self.selected_agent.min(last);
-        if !self.agents.is_empty() {
-            let visible = self.visible_agent_indices();
-            if let Some(index) = visible
-                .iter()
-                .copied()
-                .find(|&index| index >= self.selected_agent)
-                .or_else(|| visible.last().copied())
-            {
-                self.selected_agent = index;
-            }
+            self.delete_agent_now(index);
         }
         self.delete_pending = None;
         self.notice = Some(format!("cleared {cleared} merged agent(s)"));
@@ -21594,6 +21557,7 @@ What to do\n\
         self.maybe_refresh_publish_capability();
         self.maybe_refresh_publish_pr_state();
 
+        self.collect_untouched_agents();
         if self.last_workspace_gc.elapsed() >= Duration::from_secs(60) {
             self.gc_merged_workspaces();
             self.gc_orphan_workspaces();
@@ -23439,25 +23403,6 @@ fn load_plan_queue(cwd: &Path) -> Option<PlanQueueFile> {
 /// disk must not relaunch), and which PLANNER ROWS survive is decided by which plans came
 /// back (every plan that ever ran left a planner row behind). Restoring them separately is
 /// what made the concurrent-plan collapse possible.
-/// How long a merged, failed or stopped agent stays in the list.
-const FINISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-
-/// A merged, failed or stopped agent with no live terminal whose run record has
-/// not changed for `retention`. Agents waiting for review (Done) are never stale.
-fn finished_agent_is_stale(repo_root: &Path, run: &AgentRun, retention: Duration) -> bool {
-    if run.pinned || run.is_main() || run.is_orchestrator() || run.terminal.is_some() {
-        return false;
-    }
-    if !matches!(run.status, AgentStatus::Merged | AgentStatus::Failed | AgentStatus::Stopped) {
-        return false;
-    }
-    let record = native_run_dir(repo_root, &run.id).join("run.json");
-    std::fs::metadata(&record)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age >= retention)
-}
 
 fn restore_persisted_state(cwd: &Path) -> (Vec<AgentRun>, Vec<PlanState>) {
     let mut agents = load_persisted_agents(cwd);

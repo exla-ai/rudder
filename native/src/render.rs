@@ -1018,6 +1018,7 @@ fn compact_diff_stat(summary: &str) -> String {
 /// Status section for the agents pane. Order here is the rendered/navigated order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Bucket {
+    NeedsYou,
     OneOff,
     Todo,
     InProgress,
@@ -1029,11 +1030,13 @@ pub(crate) enum Bucket {
 
 impl Bucket {
     /// Sections in display order; main agents + the orchestrator render above all of these.
-    /// One-off agents lead (they are quick, transient, and what you most recently asked for).
-    /// Cloud-owned rows sit after review: that is live remote work, and burying it
-    /// in the collapsed closed drawer is exactly how a migrated agent got
+    /// "needs you" leads, as it does in the app's sidebar: it is the work waiting on you.
+    /// One-off agents come next (they are quick, transient, and what you most recently
+    /// asked for). Cloud-owned rows sit after done: that is live remote work, and
+    /// burying it in the collapsed earlier drawer is exactly how a migrated agent got
     /// misread as dead and deleted while it was still running in Rudder Cloud.
-    const ORDER: [Bucket; 7] = [
+    const ORDER: [Bucket; 8] = [
+        Bucket::NeedsYou,
         Bucket::OneOff,
         Bucket::Todo,
         Bucket::InProgress,
@@ -1043,16 +1046,17 @@ impl Bucket {
         Bucket::Closed,
     ];
 
-    /// Short header label (the left pane is only 34 cols wide).
+    /// Short header label (the left pane is only 34 cols wide), in the app's words.
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Bucket::NeedsYou => "needs you",
             Bucket::OneOff => "one-off",
             Bucket::Todo => "todo",
-            Bucket::InProgress => "in progress",
-            Bucket::Review => "review",
+            Bucket::InProgress => "working",
+            Bucket::Review => "done",
             Bucket::Cloud => "cloud",
-            Bucket::Done => "done",
-            Bucket::Closed => "closed",
+            Bucket::Done => "merged",
+            Bucket::Closed => "earlier",
         }
     }
 
@@ -1060,23 +1064,22 @@ impl Bucket {
     /// A long session ends with dozens of merged and failed rows; listing them all
     /// buries the two or three that are still moving.
     ///
-    /// `done` and `closed` always collapse. `review` is the awkward one: it is
-    /// finished work that still needs a merge decision, so a handful of rows belongs
-    /// inline where the user can act on it — but a session that ends with 25 of them
-    /// (which is what a long fleet run actually produces) is not scannable at four
-    /// lines a row, and the section you must act on is the one whose shape you cannot
-    /// see. Past the threshold it collapses like the rest.
+    /// `merged` and `earlier` always collapse. `needs you` never does: every row in
+    /// it is waiting on you, live prompts included. `done` (finished work that is
+    /// merging on its own, a swarm candidate, an open PR) stays inline for a handful
+    /// of rows; a long fleet run that ends with 25 of them is not scannable at four
+    /// lines a row, so past the threshold it collapses like the rest.
     pub(crate) fn always_drawer(self) -> bool {
         matches!(self, Bucket::Done | Bucket::Closed)
     }
 }
 
-/// Review stays inline up to this many rows, then collapses. Sized so a normal plan
-/// (a few nodes awaiting merge) reads exactly as before.
+/// `done` stays inline up to this many rows, then collapses. Sized so a normal plan
+/// (a few nodes merging) reads exactly as before.
 pub(crate) const REVIEW_INLINE_LIMIT: usize = 5;
 
 /// Is this bucket currently drawn as a collapsed drawer? Depends on the fleet, because
-/// `review` collapses only once it is too long to read.
+/// `done` collapses only once it is too long to read.
 pub(crate) fn bucket_is_drawer(agents: &[AgentRun], bucket: Bucket) -> bool {
     if bucket.always_drawer() {
         return true;
@@ -1106,18 +1109,22 @@ pub(crate) fn in_drawer(agents: &[AgentRun], agent: &AgentRun) -> bool {
         && bucket_is_drawer(agents, status_bucket_in(agents, agent))
 }
 
-/// Map an agent to its status section.
+/// Map an agent to its status section. The words are the app's (cloud/app).
 ///
+/// - needs you:   `agent_needs_you`: a prompt, a failed turn, a failure, a merge
+///                conflict, merged work that left main, or finished work that
+///                waits for your review.
 /// - todo:        planned (not-yet-launched) DAG nodes (rendered from the
 ///                `planned_nodes` queue, not from agents).
-/// - in progress: Running (incl. steering/verifying via AgentStatus::Running).
-/// - review:      completed-but-not-merged (Done), plus needs-permission/-input.
+/// - working:     Running (incl. steering/verifying via AgentStatus::Running).
+/// - done:        finished and not waiting on you: a plan node merging on its
+///                own, a swarm candidate, an open PR.
 /// - cloud:       Migrated — the row's work lives in Rudder Cloud now. Rudder
 ///                owns the record but NOT the execution: it must stay visible
 ///                (live remote work) and must not be locally deleted, merged,
 ///                resumed, or reviewed as if the workspace were still local.
-/// - done:        Merged.
-/// - closed:      Failed / Stopped (cancelled).
+/// - merged:      Merged.
+/// - earlier:     Stopped (cancelled) / Paused / Orphaned.
 ///
 /// Main agents are rendered in their own leading section and are not bucketed.
 /// Agents never land in Todo: that section now holds planned nodes only.
@@ -1142,16 +1149,15 @@ pub(crate) fn status_bucket_in(agents: &[AgentRun], agent: &AgentRun) -> Bucket 
 }
 
 pub(crate) fn status_bucket(agent: &AgentRun) -> Bucket {
-    // Bucket strictly by run status. A RUNNING agent stays "in progress" even when it is
-    // waiting on a permission prompt or a question: it is still an active session, not
-    // finished work. The "needs permission"/"needs input" state is surfaced on the row
-    // itself (agent_status_label, in amber) and via a notification, so it is discoverable
-    // without being mislabeled "review". "review" means DONE: the agent finished a turn
-    // and is awaiting your review/merge. (Previously needs_permission/needs_user_input
-    // forced a running agent into Review, which read as "finished" and was confusing.)
-    // One-off conversational agents get their own leading section regardless of run status.
+    // What the app calls "needs you" comes first, whatever the run status: a live
+    // agent blocked on a permission prompt is waiting on you exactly like finished
+    // work awaiting review is, and the section says that instead of "finished".
+    // One-off conversational agents get their own section otherwise.
     if is_cloud_owned_agent(agent) {
         return Bucket::Cloud;
+    }
+    if agent_needs_you(agent) {
+        return Bucket::NeedsYou;
     }
     if agent.is_oneoff() {
         return Bucket::OneOff;
@@ -4097,9 +4103,15 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             app.plan().plan_review.field.label()
         ),
     };
+    let mut block = pane_block(&title, focused, app.nav_mode);
+    if app.worker_view == WorkerView::Terminal && !selected_is_orchestrator {
+        if let Some(stats) = worker_stats_title(app, focused) {
+            block = block.title(stats);
+        }
+    }
     let paragraph = Paragraph::new(lines)
         .style(app_style())
-        .block(pane_block(&title, focused, app.nav_mode))
+        .block(block)
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
@@ -4110,6 +4122,48 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             WorkerView::PlanReview => set_plan_review_cursor(frame, inner, app),
         }
     }
+}
+
+/// The selected agent's speed and context left, right-aligned on the worker
+/// pane's top border, as the app shows them in a chat's header: `42 tok/s ·
+/// 63% left`. The context turns amber past 70% used and red past 90%, the
+/// app's levels. From the timeline job's latest summary (computed off the App
+/// loop); nothing until it has reported for this agent.
+pub(crate) fn worker_stats_title(app: &App, focused: bool) -> Option<Line<'static>> {
+    let run = app.agents.get(app.selected_agent)?;
+    let (run_id, summary) = app.diff_panel.timeline.as_ref()?;
+    if run_id != &run.id {
+        return None;
+    }
+    let label = crate::agent_stats::stats_label(summary);
+    if label.is_empty() {
+        return None;
+    }
+    let p = pal();
+    let quiet = Style::default().fg(if focused { p.muted } else { p.faint });
+    let level = match crate::agent_stats::context_used_pct(summary) {
+        Some(used) if used >= 90.0 => Style::default().fg(p.failed),
+        Some(used) if used >= 70.0 => Style::default().fg(p.waiting),
+        _ => quiet,
+    };
+    // The context part is the last piece of the label.
+    let (speed, context) = match label.rsplit_once(" \u{b7} ") {
+        Some((speed, context)) => (Some(speed.to_string()), context.to_string()),
+        None if summary.context.is_some() => (None, label.clone()),
+        None => (Some(label.clone()), String::new()),
+    };
+    let mut spans = vec![Span::styled(" ", quiet)];
+    if let Some(speed) = speed {
+        spans.push(Span::styled(speed, quiet));
+        if !context.is_empty() {
+            spans.push(Span::styled(" \u{b7} ", quiet));
+        }
+    }
+    if !context.is_empty() {
+        spans.push(Span::styled(context, level));
+    }
+    spans.push(Span::styled(" ", quiet));
+    Some(Line::from(spans).right_aligned())
 }
 
 fn worker_title_id(app: &App, run: &AgentRun) -> String {
@@ -5422,6 +5476,16 @@ pub(crate) fn task_pane_title(app: &App) -> String {
     if app.cloud_mode {
         return "task · Rudder Cloud".to_string();
     }
+    // `P` is choosing a model for one agent: the border says which, and what
+    // it runs on now, so the pick is not mistaken for the default.
+    if let Some(run) = app.model_picker_target() {
+        let name = if run.task_summary.trim().is_empty() { summarize_task(&run.task) } else { run.task_summary.clone() };
+        return format!(
+            "model for {} · now {}",
+            truncate_chars(&name, 28),
+            agent_model_label(run.backend, &run.model, run.effort)
+        );
+    }
     let model = app.model.trim();
     if model.is_empty() {
         // opencode's legitimate "use your configured default".
@@ -6400,26 +6464,26 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
     // looks landed and is not. Same for a row still pointing at a workspace that
     // has been swept: every key you press against it will fail.
     if agent.status == AgentStatus::Merged && agent.integration.in_trunk == Some(false) {
-        return "merged · NOT in main";
+        return "not in main";
     }
     if agent.needs_permission {
         "needs permission"
     } else if agent.wait_signal == Some(WaitSignal::Idle) {
         // Silent at its composer for a minute with the row still "running":
         // the turn ended (or never ran) and nothing reported it.
-        "idle at its prompt \u{b7} no turn running"
+        "idle at its prompt"
     } else if agent.wait_signal == Some(WaitSignal::Interrupted) {
         // You stopped the turn (Esc, or rejecting a tool call). Claude reports
         // nothing for that, so this row used to read "working" for as long as
         // you left it.
-        "interrupted \u{b7} waiting for you"
+        "interrupted"
     } else if agent.needs_user_input {
         "needs input"
     } else if agent.turn_error().is_some() {
         // A live worker whose last turn died on the API (rate limit, auth,
         // overloaded). It is not Failed — the process is fine — but it is not
         // working either, and "running" was a lie that hid every rate limit.
-        "turn failed \u{b7} retry"
+        "turn failed"
     } else if let Some(label) = gam_row_status_label(agent) {
         label
     } else if matches!(agent.mode, AgentMode::Plan | AgentMode::RudderPlan)
@@ -6440,7 +6504,7 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         && agent.status == AgentStatus::Done
         && agent.merge_conflict_files.is_empty()
     {
-        "needs you · checks failed"
+        "checks failed"
     } else if agent.has_merge_conflict()
         && agent.status == AgentStatus::Done
         && agent.conflict_auto_resolvable()
@@ -6448,16 +6512,16 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
     {
         // Nobody asked for it to merge (a dashboard worker merges with m), so
         // its conflict is not resolved behind the user's back.
-        "conflict · press m to resolve"
+        "merge conflict · m resolves"
     } else if agent.has_merge_conflict()
         && agent.status == AgentStatus::Done
         && agent.conflict_auto_resolvable()
         && agent.resolver_attempts() < crate::MAX_AUTO_RESOLVER_ATTEMPTS
     {
         // Rudder starts a resolver for it by itself; nothing to do yet.
-        "conflict · resolver queued"
+        "merge conflict · resolver queued"
     } else if agent.has_merge_conflict() && agent.status == AgentStatus::Done {
-        "needs you · conflict"
+        "merge conflict"
     } else if agent.swarm_experiment && agent.status == AgentStatus::Done {
         // A swarm experiment is a candidate, not a piece of the goal: it never
         // integrates on its own, so "auto-merging" would be a lie.
@@ -6475,12 +6539,14 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
             // The gate is only visible if the two sides look different. Without this
             // both a read and an unread row said "press m to merge", and the extra
             // keystroke on unread work read as the dashboard misbehaving.
-            "reviewed · press m to merge"
+            "reviewed · m merges"
         } else {
-            "done · press m to read the diff"
+            "ready for review"
         }
     } else if agent.status == AgentStatus::Done {
-        "completed"
+        "done"
+    } else if agent.status == AgentStatus::Stopped {
+        "stopped"
     } else {
         agent.lifecycle_label()
     }
@@ -6662,13 +6728,7 @@ pub(crate) fn gods_view_grid(count: usize, width: u16, height: u16) -> (usize, u
 
 /// The short status a tile carries, in the agents list's words.
 fn gods_view_status(agent: &AgentRun) -> &'static str {
-    if agent.needs_permission
-        || agent.needs_user_input
-        || matches!(
-            agent.wait_signal,
-            Some(WaitSignal::Idle) | Some(WaitSignal::Interrupted)
-        )
-    {
+    if agent_waits_for_you(agent) {
         "needs you"
     } else if agent.turn_error().is_some() {
         "turn failed"
@@ -6885,21 +6945,19 @@ fn split_row<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) ->
     Line::from(left)
 }
 
-/// Counts of the fleet by what it needs from you, for the header.
-fn fleet_counts(app: &App) -> (usize, usize, usize) {
-    let mut running = 0;
-    let mut waiting = 0;
-    let mut failed = 0;
+/// Counts of the fleet for the header, as the app's project card counts them:
+/// working, and what needs you (failures included).
+fn fleet_counts(app: &App) -> (usize, usize) {
+    let mut working = 0;
+    let mut needs = 0;
     for agent in app.agents.iter().filter(|a| !a.is_main() || a.terminal.is_some()) {
-        if agent_waits_for_you(agent) {
-            waiting += 1;
+        if agent_needs_you(agent) {
+            needs += 1;
         } else if agent.status == AgentStatus::Running {
-            running += 1;
-        } else if agent.status == AgentStatus::Failed {
-            failed += 1;
+            working += 1;
         }
     }
-    (running, waiting, failed)
+    (working, needs)
 }
 
 /// True when the agent is blocked on the user: a question, a permission, an
@@ -6912,6 +6970,32 @@ pub(crate) fn agent_waits_for_you(agent: &AgentRun) -> bool {
             Some(WaitSignal::Idle) | Some(WaitSignal::Interrupted)
         )
         || (agent.has_merge_conflict() && agent.status == AgentStatus::Done)
+}
+
+/// The app's "needs you" (cloud/src/agent-status.ts `agentNeeds`), from the
+/// dashboard's own facts: blocked on a prompt or a failed turn, failed, a merge
+/// conflict, merged work that left main, delivery proof missing, or finished
+/// workspace work that waits for your review. A plan node merges on its own and
+/// a swarm experiment is a candidate to compare, so neither owes you a review;
+/// a row whose PR is open is waiting on GitHub, not on you.
+pub(crate) fn agent_needs_you(agent: &AgentRun) -> bool {
+    if agent_waits_for_you(agent) {
+        return true;
+    }
+    match agent.status {
+        AgentStatus::Running => agent.turn_error().is_some(),
+        AgentStatus::Failed => true,
+        AgentStatus::Merged => agent.integration.in_trunk == Some(false),
+        AgentStatus::Done => {
+            let pr_waiting = matches!(agent.publish.state.as_deref(), Some("open" | "draft" | "merged"));
+            (agent.delivery.required && !agent.delivery.is_verified())
+                || (agent_awaits_merge(agent)
+                    && agent.node_id.is_none()
+                    && !agent.swarm_experiment
+                    && !pr_waiting)
+        }
+        _ => false,
+    }
 }
 
 /// True while the agent is visibly busy, so its card gets the spinner.
@@ -6975,11 +7059,10 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(p.accent),
         ));
     }
-    let (running, waiting, failed) = fleet_counts(app);
+    let (working, needs) = fleet_counts(app);
     for (count, label, color) in [
-        (running, "running", p.running),
-        (waiting, "need you", p.waiting),
-        (failed, "failed", p.failed),
+        (working, "working", p.running),
+        (needs, if needs == 1 { "needs you" } else { "need you" }, p.waiting),
     ] {
         if count > 0 {
             right.push(Span::styled(BADGE, Style::default().fg(color)));
@@ -7083,25 +7166,34 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
 
 /// The agent-row footer keys for the selected agent's state.
 fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
-    match app.agents.get(app.selected_agent) {
+    // `P` switches the selected agent's model, like the model control in the
+    // app's chat; rows that keep their launch model do not offer it.
+    let model = app
+        .agents
+        .get(app.selected_agent)
+        .is_some_and(|agent| crate::agent_model::model_switch_refusal(agent).is_none());
+    let mut keys = match app.agents.get(app.selected_agent) {
         Some(agent) if agent.status == AgentStatus::Running => vec![
             ("enter", "open"),
             ("x", "stop"),
-            ("b", "branch"),
-            ("p", "pin"),
             ("r", "rename"),
             ("?", "keys"),
         ],
         Some(agent) if agent.status == AgentStatus::Done => vec![
             ("enter", "open"),
-            ("m", "merge"),
-            ("b", "branch"),
+            (
+                "m",
+                if agent_awaits_merge(agent) && agent.node_id.is_none() && agent.reviewed_at.is_none() {
+                    "review"
+                } else {
+                    "merge"
+                },
+            ),
             ("dd", "delete"),
             ("?", "keys"),
         ],
         Some(_) => vec![
             ("enter", "resume"),
-            ("b", "branch"),
             ("dd", "delete"),
             ("g", "nest"),
             ("?", "keys"),
@@ -7112,7 +7204,11 @@ fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("P", "model"),
             ("?", "keys"),
         ],
+    };
+    if model {
+        keys.insert(1, ("P", "model"));
     }
+    keys
 }
 
 /// Footer key hints: the key in the terminal's own text color, what it does in
@@ -7300,7 +7396,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("cc", "clear merged"),
             ("g", "nest view"),
             ("v", "plan review"),
-            ("P", "model"),
+            ("P", "model and effort"),
             ("o", "web ui"),
             ("U", "usage"),
             ("H", "move all home"),
@@ -7328,6 +7424,7 @@ pub(crate) const KEYS_OVERLAY: &[(&str, &[(&str, &str)])] = &[
             ("enter", "run"),
             ("\u{2325}\u{23ce} ^J", "new line"),
             ("/", "commands"),
+            ("/model", "model new agents start on"),
             ("\u{2191} \u{2193}", "history"),
             ("?", "keys, when empty"),
         ],

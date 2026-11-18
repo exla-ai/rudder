@@ -195,7 +195,7 @@ test("cc clears merged rows from the list (two-press)", { timeout: 120_000 }, as
   // A dashboard worker waits in review when its turn ends; m merges it.
   await mergeFinishedWorker(session);
   // Merged rows live in the collapsed `done` drawer; its count is the proof.
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
 
   // c arms the clear confirm; a second c removes every merged row.
   await session.press("Ctrl+W");

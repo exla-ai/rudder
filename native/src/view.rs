@@ -99,6 +99,7 @@ view_state! {
     rename_input: Option<String> = None,
     rename_cursor: usize = 0,
     rename_prefilled: bool = false,
+    model_for: Option<String> = None,
     quit_confirm_pending: bool = false,
     // Wheel timing is one viewer's hand on one trackpad.
     last_wheel: Option<(Instant, bool)> = None,

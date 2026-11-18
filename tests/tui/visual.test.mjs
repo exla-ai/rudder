@@ -62,10 +62,10 @@ test("running and merged statuses render in DIFFERENT colors", { timeout: 120_00
   await session.press("Enter");
   // A dashboard worker waits in review when its turn ends; m merges it.
   await mergeFinishedWorker(session);
-  // A merged row collapses into the `done` drawer, so its status label lives in the
+  // A merged row collapses into the `merged` drawer, so its status label lives in the
   // drawer's list. Open the drawer and sample the color there: collapsing the
   // section must not cost the state-at-a-glance color coding.
-  await session.waitForText("done 1", { timeout: 30_000 });
+  await session.waitForText("merged 1", { timeout: 30_000 });
   await session.press("Ctrl+W");
   await session.press("1");
   await session.press("Enter");

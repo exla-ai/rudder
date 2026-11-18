@@ -113,7 +113,8 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every process-global var the harness injects. `EnvGuard` snapshots these on
 /// acquisition and puts them back on drop, so the list must stay a superset of what
 /// the tests set — a var missing here is a var that can leak.
-const GUARDED_ENV: [&str; 14] = [
+const GUARDED_ENV: [&str; 15] = [
+    "CODEX_HOME",
     "HOME",
     "PATH",
     "RUDDER_CLAUDE_BIN",
@@ -1543,7 +1544,7 @@ fn a_merged_row_whose_work_left_trunk_stops_claiming_success() {
     run.integration.in_trunk = Some(false);
     assert_eq!(
         agent_status_label(&run),
-        "merged · NOT in main",
+        "not in main",
         "the row states the evidence rather than the belief"
     );
 }
@@ -6265,7 +6266,7 @@ fn merge_conflict_run_record_round_trips_actionable_state() {
         loaded[0].merge_conflict_files,
         vec!["src/auth.ts".to_string(), "src/session.ts".to_string()]
     );
-    assert_eq!(agent_status_label(&loaded[0]), "conflict · press m to resolve");
+    assert_eq!(agent_status_label(&loaded[0]), "merge conflict · m resolves");
 
     save_native_run_record(&repo_root, &loaded[0]).expect("save conflict record");
     let raw = fs::read_to_string(native_run_dir(&repo_root, "conflict-run-1").join("run.json"))
@@ -15643,29 +15644,35 @@ fn status_bucket_maps_each_state() {
     run.status = AgentStatus::Done;
     assert_eq!(status_bucket(&run), Bucket::Review);
 
-    // A RUNNING agent that needs permission/input stays IN PROGRESS (the row label
-    // flags it); only DONE means review. A running agent must never read as "review".
+    // A RUNNING agent blocked on a permission prompt or a question needs you,
+    // as in the app; the section is "needs you", never "finished".
     run.status = AgentStatus::Running;
     run.needs_permission = true;
     assert_eq!(
         status_bucket(&run),
-        Bucket::InProgress,
-        "running+needs-permission is in progress"
+        Bucket::NeedsYou,
+        "running+needs-permission needs you"
     );
+    run.needs_permission = false;
     run.needs_user_input = true;
     assert_eq!(
         status_bucket(&run),
-        Bucket::InProgress,
-        "running+needs-input is in progress"
+        Bucket::NeedsYou,
+        "running+needs-input needs you"
     );
-    run.needs_permission = false;
     run.needs_user_input = false;
+
+    // Finished workspace work waits for your review.
+    run.status = AgentStatus::Done;
+    run.workspace_name = Some("ws-a".to_string());
+    assert_eq!(status_bucket(&run), Bucket::NeedsYou);
+    run.workspace_name = None;
 
     run.status = AgentStatus::Merged;
     assert_eq!(status_bucket(&run), Bucket::Done);
 
     run.status = AgentStatus::Failed;
-    assert_eq!(status_bucket(&run), Bucket::Closed);
+    assert_eq!(status_bucket(&run), Bucket::NeedsYou);
     run.status = AgentStatus::Stopped;
     assert_eq!(status_bucket(&run), Bucket::Closed);
 
@@ -15689,20 +15696,24 @@ fn status_bucket_maps_each_state() {
 #[test]
 fn sectioned_order_groups_by_status_then_nests_children() {
     let mut app = App::new();
-    // parent (Running -> in progress), child hard-depends on parent (also Running),
-    // plus a merged agent (done) and a failed agent (closed).
+    // parent (Running -> working), child hard-depends on parent (also Running),
+    // plus a merged agent (merged), a stopped one (earlier) and a failed one
+    // (needs you).
     let parent = test_agent_run("parent", "parent task"); // Running
     let mut child = test_agent_run("child", "child task");
     child.deps = vec!["parent".to_string()];
     let mut merged = test_agent_run("m", "merged task");
     merged.status = AgentStatus::Merged;
+    let mut stopped = test_agent_run("s", "stopped task");
+    stopped.status = AgentStatus::Stopped;
     let mut failed = test_agent_run("f", "failed task");
     failed.status = AgentStatus::Failed;
-    app.agents = vec![parent, child, merged, failed];
+    app.agents = vec![parent, child, merged, stopped, failed];
 
-    // in progress: parent(0) then nested child(1). The merged and failed runs are
-    // inside the done/closed drawers, so they are not navigable sidebar rows.
-    assert_eq!(app.visible_agent_indices(), vec![0, 1]);
+    // needs you first: the failed run(4); then working: parent(0) and its nested
+    // child(1). The merged and stopped runs are inside the merged/earlier drawers,
+    // so they are not navigable sidebar rows.
+    assert_eq!(app.visible_agent_indices(), vec![4, 0, 1]);
     assert_eq!(
         crate::render::drawer_members(&app.agents, Bucket::Done),
         vec![2]
@@ -15769,9 +15780,9 @@ fn nest_view_selection_order_matches_nest_render_across_buckets() {
 fn sectioned_render_emits_status_headers_with_counts() {
     let mut app = App::new();
     app.focus = FocusPane::Agents;
-    let running = test_agent_run("r", "alpha work"); // in progress
+    let running = test_agent_run("r", "alpha work"); // working
     let mut done = test_agent_run("m", "beta work");
-    done.status = AgentStatus::Merged; // done section
+    done.status = AgentStatus::Merged; // merged section
     app.agents = vec![running, done];
 
     let area = Rect::new(0, 0, 34, 40);
@@ -15787,9 +15798,8 @@ fn sectioned_render_emits_status_headers_with_counts() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("in progress"), "in progress header present");
-    // "done" header (note: the row-2 "agents N runs" line never says "done").
-    assert!(text.contains("done"), "done header present: {text}");
+    assert!(text.contains("working 1"), "working header present: {text}");
+    assert!(text.contains("merged 1"), "merged header present: {text}");
     // The old grouping headers must be gone; neither agent label uses these words.
     assert!(!text.contains("workspaces"), "no workspaces header");
 }
@@ -15827,7 +15837,7 @@ fn main_agents_group_into_one_shared_checkout_section() {
     let push_at = text.find("push the release").expect("first main row");
     let deploy_at = text.find("check the deploy").expect("second main row");
     let in_progress = text
-        .find("in progress")
+        .find("working 1")
         .expect("worker section still renders");
     let worker_at = text
         .find("fix login redirect")
@@ -18879,9 +18889,9 @@ fn drawer_fleet() -> App {
     merged_b.node_id = Some("n3".to_string());
     let mut merged_c = test_agent_run("run-m3", "brand identity");
     merged_c.status = AgentStatus::Merged;
-    let mut failed = test_agent_run("run-f", "comments threading");
-    failed.status = AgentStatus::Failed;
-    app.agents = vec![live, second, merged_a, merged_b, merged_c, failed];
+    let mut stopped = test_agent_run("run-f", "comments threading");
+    stopped.status = AgentStatus::Stopped;
+    app.agents = vec![live, second, merged_a, merged_b, merged_c, stopped];
     app
 }
 
@@ -19196,27 +19206,167 @@ fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
     assert!(app.notice.as_deref().unwrap_or("").starts_with("reopened "));
 }
 
+#[cfg(not(windows))]
 #[test]
-fn finished_agents_older_than_the_retention_are_stale() {
-    let repo = unique_test_repo("finished-retention");
-    let mut merged = test_agent_run("run-merged", "merged work");
-    merged.status = AgentStatus::Merged;
-    let mut review = test_agent_run("run-review", "waiting for review");
-    review.status = AgentStatus::Done;
-    for run in [&merged, &review] {
-        let dir = native_run_dir(&repo, &run.id);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("run.json"), "{}").unwrap();
+fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change() {
+    use crate::agent_life::{cleanup_since, untouched_agents, ConversationRoots, UNTOUCHED_AGENT_TTL};
+    let _env = env_guard();
+    let repo = unique_test_repo("agent-gc");
+    let home = repo.join("home");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("CODEX_HOME", home.join(".codex"));
+    let old = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+    let jj = |dir: &Path, args: &[&str]| {
+        std::process::Command::new("jj")
+            .args(args)
+            .current_dir(dir)
+            .env("JJ_USER", "Rudder Test")
+            .env("JJ_EMAIL", "test@example.invalid")
+            .env("JJ_TIMESTAMP", "2026-01-01T00:00:00Z")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    if jj(&repo, &["git", "init", "--colocate"]).is_none() {
+        eprintln!("skipping untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change: no jj");
+        let _ = fs::remove_dir_all(&repo);
+        return;
     }
-    let week = Duration::from_secs(7 * 24 * 60 * 60);
-    assert!(!finished_agent_is_stale(&repo, &merged, week), "touched just now");
-    assert!(finished_agent_is_stale(&repo, &merged, Duration::ZERO));
-    assert!(
-        !finished_agent_is_stale(&repo, &review, Duration::ZERO),
-        "work waiting for review is never cleaned up"
-    );
-    let missing = test_agent_run("run-missing", "no record");
-    assert!(!finished_agent_is_stale(&repo, &missing, Duration::ZERO));
+    let age = |path: &Path| {
+        fs::File::options().write(true).open(path).unwrap().set_modified(old).unwrap();
+    };
+    let write = |path: &Path, body: &str| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    };
+    let claude_dir = home.join(".claude/projects").join(encode_claude_project_dir(&repo));
+    let rollout = |thread: &str, base: Option<&str>| {
+        let path = home.join(format!(".codex/sessions/2026/11/16/rollout-2026-11-16T10-00-00-{thread}.jsonl"));
+        let meta = match base {
+            Some(base) => serde_json::json!({"type": "session_meta", "payload": {"id": thread, "history_base": {"thread_id": base, "end_byte_offset": 1}}}),
+            None => serde_json::json!({"type": "session_meta", "payload": {"id": thread}}),
+        };
+        write(&path, &format!("{meta}\n"));
+        age(&path);
+        path
+    };
+    let (s1, s2, cut) = ("c1a1a1a1-0000-4000-8000-000000000001", "c1a1a1a1-0000-4000-8000-000000000002", "c1a1a1a1-0000-4000-8000-000000000003");
+    let fresh_session = "c1a1a1a1-0000-4000-8000-000000000004";
+    let (c1, c2, c3) = ("0193a000-0000-7000-8000-0000000000c1", "0193a000-0000-7000-8000-0000000000c2", "0193a000-0000-7000-8000-0000000000c3");
+
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    // A main chat that moved sessions twice (one of them an edit's cut copy).
+    let mut chat = test_agent_run("old-chat", "old chat");
+    chat.mode = AgentMode::Main;
+    chat.status = AgentStatus::Paused;
+    chat.cwd = repo.clone();
+    chat.session_id = Some(s1.to_string());
+    save_native_run_record(&repo, &chat).unwrap();
+    chat.session_id = Some(s2.to_string());
+    save_native_run_record(&repo, &chat).unwrap();
+    record_retired_session(&repo, &chat.id, cut).unwrap();
+    for session in [s1, s2, cut] {
+        write(&claude_dir.join(format!("{session}.jsonl")), "{}\n");
+        age(&claude_dir.join(format!("{session}.jsonl")));
+    }
+    write(&claude_dir.join(s1).join("subagents/agent-1.jsonl"), "{}\n");
+    // Old record, but its conversation moved a minute ago.
+    let mut fresh = test_agent_run("fresh-chat", "fresh chat");
+    fresh.status = AgentStatus::Done;
+    fresh.cwd = repo.clone();
+    fresh.session_id = Some(fresh_session.to_string());
+    write(&claude_dir.join(format!("{fresh_session}.jsonl")), "{}\n");
+    // A Codex chat whose current thread another agent's thread builds on.
+    let mut codex = test_agent_run("old-codex", "old codex");
+    codex.backend = Backend::Codex;
+    codex.status = AgentStatus::Done;
+    codex.cwd = repo.clone();
+    codex.session_id = Some(c1.to_string());
+    save_native_run_record(&repo, &codex).unwrap();
+    codex.session_id = Some(c2.to_string());
+    let c1_file = rollout(c1, None);
+    let c2_file = rollout(c2, None);
+    let mut child = test_agent_run("codex-child", "forked from it");
+    child.backend = Backend::Codex;
+    child.status = AgentStatus::Done;
+    child.pinned = true;
+    child.session_id = Some(c3.to_string());
+    let c3_file = rollout(c3, Some(c2));
+    // A worker with edits jj has not seen yet, in a workspace last changed long ago.
+    let workspace = repo.join(".rudder-workspaces/proj/node-old");
+    fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+    jj(&repo, &["workspace", "add", "--name", "rudder-node-old", workspace.to_str().unwrap()]).unwrap();
+    write(&workspace.join("agent-work.txt"), "not integrated anywhere\n");
+    let mut worker = test_agent_run("old-worker", "old worker");
+    worker.status = AgentStatus::Done;
+    worker.cwd = workspace.clone();
+    worker.workspace_path = Some(workspace.clone());
+    worker.workspace_name = Some("rudder-node-old".to_string());
+    // Never collected, however old.
+    let mut busy = test_agent_run("busy", "still working");
+    busy.status = AgentStatus::Running;
+    let mut asking = test_agent_run("asking", "has a question");
+    asking.status = AgentStatus::Done;
+    write(&home.join(".rudder/signals/asking.asks/q1.json"), "{}");
+    let mut node = test_agent_run("plan-node", "unmerged plan node");
+    node.status = AgentStatus::Done;
+    node.node_id = Some("n0".to_string());
+    for run in [&codex, &fresh, &child, &worker, &busy, &asking, &node] {
+        save_native_run_record(&repo, run).unwrap();
+    }
+    for run in [&chat, &codex, &fresh, &child, &worker, &busy, &asking, &node] {
+        age(&native_run_dir(&repo, &run.id).join("run.json"));
+    }
+    app.agents = vec![chat, fresh, codex, child, worker, busy, asking, node];
+
+    let roots = ConversationRoots::from_env().unwrap();
+    let probes = app.agent_gc_probes();
+    // The clock starts at the first scan: nothing is untouched yet, however old.
+    let start_file = repo.join(".rudder/cleanup-since");
+    assert!(!start_file.exists());
+    let since = cleanup_since(&repo, SystemTime::now()).unwrap();
+    assert!(start_file.exists(), "the first scan writes the start time");
+    assert!(untouched_agents(&repo, &roots, &probes, since, SystemTime::now(), UNTOUCHED_AGENT_TTL).is_empty());
+    // 25 hours after it started, the old agents go.
+    let started = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+    let seconds = started.duration_since(UNIX_EPOCH).unwrap().as_secs();
+    fs::write(&start_file, serde_json::json!({ "since": seconds }).to_string()).unwrap();
+    let since = cleanup_since(&repo, SystemTime::now()).unwrap();
+    assert_eq!(since, UNIX_EPOCH + Duration::from_secs(seconds), "a later scan reads it back");
+    let mut found = untouched_agents(&repo, &roots, &probes, since, SystemTime::now(), UNTOUCHED_AGENT_TTL);
+    found.sort();
+    assert_eq!(found, ["old-chat", "old-codex", "old-worker"]);
+    app.delete_untouched_agents(found);
+    let left: Vec<&str> = app.agents.iter().map(|run| run.id.as_str()).collect();
+    assert_eq!(left, ["fresh-chat", "codex-child", "busy", "asking", "plan-node"]);
+    assert!(app.activity_log.iter().any(|entry| entry.contains("cleaned up \"old chat\" (untouched for a day)")));
+
+    // Deletion runs on threads: wait until everything that should go is gone.
+    let doomed = [s1, s2, cut]
+        .iter()
+        .map(|session| claude_dir.join(format!("{session}.jsonl")))
+        .chain([claude_dir.join(s1), c1_file.clone(), workspace.clone()])
+        .collect::<Vec<_>>();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while doomed.iter().any(|path| path.exists()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for session in [s1, s2, cut] {
+        assert!(!claude_dir.join(format!("{session}.jsonl")).exists(), "{session} is deleted");
+    }
+    assert!(!claude_dir.join(s1).exists(), "the session's own folder goes with it");
+    assert!(claude_dir.join(format!("{fresh_session}.jsonl")).exists(), "another agent's chat stays");
+    assert!(!c1_file.exists(), "a rollout nothing builds on is deleted");
+    assert!(c2_file.exists(), "a rollout another agent's fork builds on stays");
+    assert!(c3_file.exists());
+    assert!(!workspace.exists(), "the workspace directory is removed");
+    let kept = jj(&repo, &["log", "--no-graph", "-r", "files(\"agent-work.txt\")", "-T", "commit_id ++ \"\\n\""]).unwrap();
+    assert!(!kept.is_empty(), "the worker's edits stay in jj log as a change");
+    let workspaces = jj(&repo, &["workspace", "list"]).unwrap();
+    assert!(!workspaces.contains("rudder-node-old"), "{workspaces}");
     let _ = fs::remove_dir_all(&repo);
 }
 
@@ -19265,8 +19415,8 @@ fn emptying_the_open_drawer_closes_it() {
     app.open_drawer(Bucket::Closed);
     assert_eq!(app.drawer_open(), Some(Bucket::Closed));
 
-    // `c` clears the failed row (or it is deleted): the drawer has nothing to show.
-    app.agents.retain(|run| run.status != AgentStatus::Failed);
+    // The stopped row is deleted: the drawer has nothing to show.
+    app.agents.retain(|run| run.status != AgentStatus::Stopped);
     app.normalize_drawer_state();
 
     assert_eq!(app.drawer_open(), None);
@@ -19323,12 +19473,12 @@ fn collapsed_drawer_header_renders_a_count_and_fold_glyph() {
         .collect();
 
     assert!(
-        text.contains("done 3  \u{251c}\u{2504}"),
-        "collapsed done header: {text}"
+        text.contains("merged 3  \u{251c}\u{2504}"),
+        "collapsed merged header: {text}"
     );
     assert!(
-        text.contains("closed 1  \u{251c}\u{2504}"),
-        "collapsed closed header: {text}"
+        text.contains("earlier 1  \u{251c}\u{2504}"),
+        "collapsed earlier header: {text}"
     );
     assert!(
         !text.contains("identity consolidation"),
@@ -19361,11 +19511,11 @@ fn open_drawer_header_flips_the_fold_glyph() {
         .collect();
 
     assert!(
-        text.contains("done 3  \u{252c}\u{2500}"),
-        "open done header: {text}"
+        text.contains("merged 3  \u{252c}\u{2500}"),
+        "open merged header: {text}"
     );
     assert!(
-        text.contains("\u{25b6} done"),
+        text.contains("\u{25b6} merged"),
         "the cursor marker sits on the header row: {text}"
     );
 }
@@ -19496,11 +19646,11 @@ fn the_pane_scrolls_to_the_drawer_header_when_the_cursor_lands_on_it() {
         .collect();
 
     assert!(
-        text.contains("done 1"),
+        text.contains("merged 1"),
         "the pane scrolled far enough to show the drawer header: {text}"
     );
     assert!(
-        text.contains("\u{25b6} done"),
+        text.contains("\u{25b6} merged"),
         "and the cursor marker is visible on it: {text}"
     );
 }
@@ -24208,7 +24358,7 @@ fn an_interrupted_claude_turn_is_shown_as_waiting_until_the_next_prompt() {
     assert!(app.agents[0].needs_user_input, "and it is waiting on you");
     assert_eq!(
         crate::render::agent_status_label(&app.agents[0]),
-        "interrupted · waiting for you"
+        "interrupted"
     );
     assert_eq!(app.tab_status_glyph(), '⬓', "the tab says it needs you, not that it is working");
 
@@ -24283,7 +24433,7 @@ fn a_minute_of_silence_at_the_composer_stops_a_running_row_spinning() {
     assert_eq!(app.agents[0].status, AgentStatus::Running, "not Done: no merge side effects");
     assert_eq!(
         crate::render::agent_status_label(&app.agents[0]),
-        "idle at its prompt · no turn running"
+        "idle at its prompt"
     );
     assert_eq!(app.tab_status_glyph(), '⬓', "the tab stops turning");
 
@@ -24551,7 +24701,7 @@ fn an_api_error_turn_end_is_shown_as_a_failure_until_the_next_prompt() {
     assert!(!sig.exists(), "consumed one-shot");
     assert_eq!(
         crate::render::agent_status_label(&app.agents[0]),
-        "turn failed · retry"
+        "turn failed"
     );
     assert_eq!(
         app.tab_status_glyph(),
@@ -30240,9 +30390,9 @@ fn a_requested_merge_conflict_found_at_startup_gets_a_resolver_and_others_wait_f
         run.workspace_path = Some(workspace.clone());
     }
     assert_eq!(app.agents[0].id, "cedar");
-    assert_eq!(agent_status_label(&app.agents[0]), "conflict · press m to resolve");
+    assert_eq!(agent_status_label(&app.agents[0]), "merge conflict · m resolves");
     assert!(app.agents[1].merge_requested, "the m request survives a restart");
-    assert_eq!(agent_status_label(&app.agents[1]), "conflict · resolver queued");
+    assert_eq!(agent_status_label(&app.agents[1]), "merge conflict · resolver queued");
     assert_eq!(app.next_conflict_to_resolve(), Some(1), "only the run someone asked to merge");
 
     // Merging again against fresh trunk left a real conflict: the resolver
@@ -30264,7 +30414,7 @@ fn a_requested_merge_conflict_found_at_startup_gets_a_resolver_and_others_wait_f
     app.start_resolver_for_conflict(1, vec!["AGENTS.md".to_string()], "left".to_string());
     let row = &app.agents[1];
     assert!(!row.merge_resolver && row.status == AgentStatus::Done);
-    assert_eq!(agent_status_label(row), "needs you · conflict");
+    assert_eq!(agent_status_label(row), "merge conflict");
     assert!(app.notice.as_deref().is_some_and(|n| n.contains("after 2 resolver attempts")));
     assert!(app.next_conflict_to_resolve().is_none());
     assert!(!app.agents[0].merge_resolver && app.agents[0].status == AgentStatus::Done);
@@ -30810,7 +30960,7 @@ fn agent_pin_survives_reload_and_moves_finished_agent_above_drawers() {
     app.selected_agent = 1;
     app.handle_agents_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
     assert!(app.agents[1].pinned);
-    assert!(!finished_agent_is_stale(&dir, &app.agents[1], Duration::ZERO), "cleanup keeps finished pins");
+    assert!(app.agent_gc_keeps(&app.agents[1]), "cleanup keeps finished pins");
     assert_eq!(app.visible_agent_indices()[0], 1);
     let record: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(".rudder/runs/finished-pin/run.json")).unwrap()).unwrap();
     assert!(agent_from_run_record(&dir, record).unwrap().pinned);
@@ -30954,5 +31104,90 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     assert!(matches!(app.deliver_model_request("chat-run", "opus high"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
     assert_eq!(app.agents[0].model, "haiku");
     app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn needs_you_groups_what_waits_on_you_like_the_app_does() {
+    // The app's "Needs you": blocked prompts, failed turns and runs, conflicts
+    // and finished work awaiting review. Not a plan node merging on its own,
+    // a swarm candidate or work whose PR is open on GitHub.
+    let mut agents = Vec::new();
+    let mut add = |id: &str, edit: &dyn Fn(&mut AgentRun)| {
+        let mut run = test_agent_run(id, id);
+        run.workspace_name = Some(format!("ws-{id}"));
+        run.workspace_path = Some(std::env::temp_dir().join(id));
+        edit(&mut run);
+        agents.push(run);
+    };
+    add("asking", &|r| r.needs_permission = true);
+    add("busy", &|_| {});
+    add("review", &|r| r.status = AgentStatus::Done);
+    add("node", &|r| {
+        r.status = AgentStatus::Done;
+        r.node_id = Some("n1".into());
+    });
+    add("candidate", &|r| {
+        r.status = AgentStatus::Done;
+        r.swarm_experiment = true;
+    });
+    add("pr", &|r| {
+        r.status = AgentStatus::Done;
+        r.publish.number = Some(7);
+        r.publish.state = Some("open".into());
+    });
+    add("broke", &|r| r.status = AgentStatus::Failed);
+    add("stopped", &|r| r.status = AgentStatus::Stopped);
+    let names = |bucket: Bucket| -> Vec<String> {
+        crate::render::bucket_members_for_test(&agents, bucket)
+            .into_iter()
+            .map(|i| agents[i].id.clone())
+            .collect()
+    };
+    assert_eq!(names(Bucket::NeedsYou), ["asking", "review", "broke"]);
+    assert_eq!(names(Bucket::InProgress), ["busy"]);
+    assert_eq!(names(Bucket::Review), ["node", "candidate", "pr"]);
+    assert_eq!(names(Bucket::Closed), ["stopped"]);
+    // Needs you is listed first and never folds away.
+    assert_eq!(crate::render::sectioned_agent_order(&agents)[..3], [0, 2, 6]);
+    assert!(!crate::render::bucket_is_drawer(&agents, Bucket::NeedsYou));
+}
+
+#[test]
+fn model_key_switches_the_selected_agent_and_leaves_the_default_alone() {
+    let dir = unique_test_repo("agent-model-key");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.backend = Backend::Claude;
+    app.model = "opus".to_string();
+    app.effort = Some(EffortLevel::High);
+    let mut run = test_agent_run("pick-run", "tidy the parser");
+    run.cwd = dir.clone();
+    run.model = "sonnet".to_string();
+    run.status = AgentStatus::Done;
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Agents;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    assert_eq!(app.focus, FocusPane::Task);
+    assert_eq!(app.task_input, "/model claude ");
+    assert!(crate::render::task_pane_title(&app).starts_with("model for "), "{}", crate::render::task_pane_title(&app));
+    app.apply_suggestion(Suggestion {
+        label: String::new(),
+        detail: String::new(),
+        action: SuggestionAction::SetModel { backend: Backend::Claude, model: "haiku".into(), effort: None },
+    });
+    assert_eq!(app.agents[0].model, "haiku");
+    assert_eq!((app.model.as_str(), app.effort), ("opus", Some(EffortLevel::High)), "the default for new agents stays");
+    assert!(app.model_for.is_none() && app.task_input.is_empty());
+
+    // Leaving the /model draft forgets the target: a later /model is the default.
+    app.focus = FocusPane::Agents;
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    for _ in 0.."/model claude ".len() {
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    }
+    assert!(app.model_for.is_none());
     fs::remove_dir_all(dir).unwrap();
 }

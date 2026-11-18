@@ -50,6 +50,12 @@ pub(crate) struct TimelineSummary {
     /// stale; this is what the session log says. Memory only.
     #[serde(skip)]
     pub(crate) model: Option<(u64, String)>,
+    /// Output speed over the newest conversation's last responses. Memory only.
+    #[serde(skip)]
+    pub(crate) speed: Option<crate::agent_stats::Speed>,
+    /// The window the backend compacts at, for "context left". Memory only.
+    #[serde(skip)]
+    pub(crate) window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -125,6 +131,14 @@ fn latest_model(summary: &mut TimelineSummary, ts: u64, model: &str) {
     }
     if summary.model.as_ref().is_none_or(|(old, _)| ts >= *old) {
         summary.model = Some((ts, model.to_string()));
+    }
+}
+
+fn latest_speed(summary: &mut TimelineSummary, speed: Option<crate::agent_stats::Speed>) {
+    if let Some(speed) = speed {
+        if summary.speed.is_none_or(|old| speed.end_ms >= old.end_ms) {
+            summary.speed = Some(speed);
+        }
     }
 }
 
@@ -239,11 +253,18 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
     let mut track = ContextTrack::default();
     let mut last_request: Option<String> = None;
     let mut latest: Option<ContextUsage> = None;
+    let mut speed = crate::agent_stats::SpeedTrack::default();
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
         let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "api-request" {
+            if let Some(ts) = value.get("timestamp").and_then(|v| v.as_str()).and_then(iso_millis) {
+                speed.claude_request(ts);
+            }
+            continue;
+        }
         if kind == "system" && value.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary") {
             let meta = value.get("compactMetadata");
             let auto = meta.and_then(|m| m.get("trigger")).and_then(|v| v.as_str()) == Some("auto");
@@ -260,6 +281,19 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
             continue;
         };
         let message = value.get("message");
+        if kind == "user" {
+            speed.claude_request(ts);
+        } else if let Some(m) = message.filter(|m| {
+            // `<synthetic>`: Claude Code's own error and interrupt notes.
+            m.get("model").and_then(|v| v.as_str()).is_some_and(|model| !model.starts_with('<'))
+        }) {
+            speed.claude_block(
+                m.get("id").and_then(|v| v.as_str()),
+                ts,
+                m.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                m.get("stop_reason").is_some_and(|v| !v.is_null()),
+            );
+        }
         let request = message.and_then(|m| m.get("usage")).filter(|_| kind == "assistant").and_then(|u| {
             let field = |k: &str| u.get(k).and_then(|v| v.as_u64());
             let (input, cached, write) =
@@ -360,6 +394,7 @@ pub(crate) fn analyze_claude_transcript(content: &str, since_ms: u64, summary: &
     if let Some(latest) = latest {
         latest_context(summary, latest);
     }
+    latest_speed(summary, speed.speed());
 }
 
 /// Fold one Codex rollout into `summary` when it belongs to `cwd`.
@@ -375,6 +410,7 @@ pub(crate) fn analyze_codex_rollout(
     let mut pending: HashMap<String, (u64, Option<String>)> = HashMap::new();
     let mut last_total: Option<(u64, u64, u64)> = None;
     let mut track = ContextTrack::default();
+    let mut speed = crate::agent_stats::SpeedTrack::default();
     // Codex can report one request twice; an unchanged running total says so.
     let mut last_request: Option<String> = None;
     for line in content.lines() {
@@ -396,9 +432,28 @@ pub(crate) fn analyze_codex_rollout(
         }
         if kind == "compacted" {
             track.compacted(None);
+            if let Some(ts) = ts {
+                speed.codex_input(ts);
+            }
+            continue;
+        }
+        if kind == "token_usage_record" {
+            if let Some(ts) = ts {
+                let output = payload.and_then(|p| p.pointer("/usage/output_tokens")).and_then(|v| v.as_u64());
+                speed.codex_record(ts, output.unwrap_or(0));
+            }
+            continue;
+        }
+        if kind == "event_msg" && ptype == "task_started" {
+            if let Some(ts) = ts {
+                speed.codex_input(ts);
+            }
             continue;
         }
         if kind == "turn_context" {
+            if let Some(ts) = ts {
+                speed.codex_input(ts);
+            }
             if let (Some(ts), Some(model)) = (ts, payload.and_then(|p| p.get("model")).and_then(|v| v.as_str())) {
                 latest_model(&mut local, ts, model);
             }
@@ -440,6 +495,14 @@ pub(crate) fn analyze_codex_rollout(
         }
         let Some(ts) = ts else { continue };
         let gap = prev_ts.map(|p| ts.saturating_sub(p)).unwrap_or(0);
+        let output_item = ptype == "reasoning"
+            || ptype.ends_with("_call")
+            || (ptype == "message" && payload.and_then(|p| p.get("role")).and_then(|v| v.as_str()) == Some("assistant"));
+        if output_item {
+            speed.codex_output();
+        } else {
+            speed.codex_input(ts);
+        }
         match ptype {
             "function_call" | "custom_tool_call" | "local_shell_call" => {
                 local.model_ms += gap;
@@ -492,6 +555,7 @@ pub(crate) fn analyze_codex_rollout(
         local.output = output;
     }
     track.stamp(local.context.as_mut());
+    latest_speed(&mut local, speed.speed());
     merge(summary, &local);
     true
 }
@@ -499,6 +563,7 @@ pub(crate) fn analyze_codex_rollout(
 fn merge(into: &mut TimelineSummary, from: &TimelineSummary) {
     if let Some(context) = &from.context { latest_context(into, context.clone()); }
     if let Some((ts, model)) = &from.model { latest_model(into, *ts, model); }
+    latest_speed(into, from.speed);
     into.install_ms += from.install_ms;
     into.build_ms += from.build_ms;
     into.test_ms += from.test_ms;
@@ -518,6 +583,8 @@ pub(crate) struct TimelineRequest {
     pub(crate) backend: Backend,
     pub(crate) cwd: PathBuf,
     pub(crate) created_at: String,
+    /// The model the run was started on (a `[1m]` suffix sets the window).
+    pub(crate) model: String,
 }
 
 impl TimelineRequest {
@@ -528,6 +595,7 @@ impl TimelineRequest {
             backend: run.backend,
             cwd: run.cwd.clone(),
             created_at: run.created_at.clone(),
+            model: run.model.clone(),
         }
     }
 }
@@ -584,11 +652,20 @@ pub(crate) fn read_timeline_file(repo_root: &Path, run_id: &str) -> (Option<u64>
 /// timeline file when it changed. Runs off the App loop.
 pub(crate) fn compute_timeline(request: &TimelineRequest) -> TimelineSummary {
     let home = user_home_dir();
-    compute_timeline_in(
+    let mut summary = compute_timeline_in(
         request,
         home.as_ref().map(|h| h.join(".claude/projects")).as_deref(),
         home.as_ref().map(|h| h.join(".codex/sessions")).as_deref(),
-    )
+    );
+    summary.window = match request.backend {
+        Backend::Claude => crate::agent_stats::claude_window(
+            &request.model,
+            summary.model.as_ref().map(|(_, model)| model.as_str()),
+        ),
+        Backend::Codex => summary.context.as_ref().and_then(|c| c.capacity),
+        Backend::Opencode => None,
+    };
+    summary
 }
 
 pub(crate) fn compute_timeline_in(
@@ -612,13 +689,14 @@ pub(crate) fn compute_timeline_in(
                         && !file_modified_before(&path, &since_iso)
                     {
                         if let Ok(content) = fs::read_to_string(&path) {
-                            let model = summary.model.clone();
+                            let (model, speed) = (summary.model.clone(), summary.speed);
                             analyze_claude_transcript(&content, since_ms, &mut summary);
                             let own = session.as_deref().is_none_or(|id| {
                                 path.file_stem().is_some_and(|stem| stem == id)
                             });
                             if !own {
                                 summary.model = model;
+                                summary.speed = speed;
                             }
                         }
                     }
@@ -662,6 +740,7 @@ pub(crate) fn compute_timeline_in(
         if let Some(mut last) = last {
             last.start_ms = start;
             last.model = summary.model;
+            last.speed = summary.speed;
             return last;
         }
     }
@@ -844,6 +923,7 @@ mod tests {
             backend: Backend::Opencode,
             cwd: dir.clone(),
             created_at: "0".into(),
+            model: String::new(),
         };
         let summary = compute_timeline_in(&request, None, None);
         assert_eq!(summary.start_ms, Some(800));

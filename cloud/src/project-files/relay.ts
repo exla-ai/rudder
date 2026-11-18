@@ -1,3 +1,5 @@
+import type { IncomingMessage } from "node:http";
+
 /** Structural v1 wire contract mirrors src/project-files/types.ts. Cloud never
  * resolves client file paths on the control plane and never receives a root.
  * Register behind existing account auth and requireHomeRepo project ACL checks.
@@ -20,6 +22,22 @@ export class CloudProjectFileError extends Error {
 }
 /** Saves carry at most this much UTF-8 text (FILE_LIMITS.writeBytes on the home). */
 export const WRITE_TEXT_BYTES = 1024 * 1024;
+/** A save is one file's text as JSON; escaping at most doubles it. */
+export const SAVE_BODY_BYTES = 2 * WRITE_TEXT_BYTES + 64 * 1024;
+export const SAVE_TOO_LARGE = "Files over 1 MiB cannot be edited here";
+/** A JSON request body of at most `limit` bytes. */
+export async function jsonBody(req: IncomingMessage, limit: number, tooLarge: string, signal: AbortSignal): Promise<unknown> {
+  if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? "")) throw new CloudProjectFileError(400, "Send JSON");
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    signal.throwIfAborted();
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if ((total += bytes.length) > limit) { req.destroy(); throw new CloudProjectFileError(413, tooLarge); }
+    chunks.push(bytes);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new CloudProjectFileError(400, "Send JSON"); }
+}
 const MEDIA = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
 const REVISION = /^[a-f0-9]{64}$/;
 function sameScope(a: CloudFileScope, b: CloudFileScope): boolean {
@@ -67,7 +85,7 @@ function saveFrom(body: unknown): CloudFileRequest {
   if (!raw || typeof raw !== "object" || Object.keys(raw).some((k) => !["projectId", "workspaceId", "attemptId", "ownerEpoch"].includes(k))) throw new CloudProjectFileError(400, "Invalid project file identity");
   const scope = { projectId: raw.projectId, workspaceId: raw.workspaceId, attemptId: raw.attemptId, ownerEpoch: raw.ownerEpoch } as CloudFileScope;
   if (!validIdentity(scope, value.path)) throw new CloudProjectFileError(400, "Invalid project file identity or path");
-  if (Buffer.byteLength(value.text) > WRITE_TEXT_BYTES) throw new CloudProjectFileError(413, "Files over 1 MiB cannot be edited here");
+  if (Buffer.byteLength(value.text) > WRITE_TEXT_BYTES) throw new CloudProjectFileError(413, SAVE_TOO_LARGE);
   return { version: 1, operation: "write", scope, path: value.path, baseRevision: value.baseRevision, text: value.text };
 }
 

@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import { CloudProjectFiles, CloudProjectFileError, type CloudFileScope } from "./relay.js";
+import { CloudProjectFiles, CloudProjectFileError, jsonBody, SAVE_BODY_BYTES, SAVE_TOO_LARGE, type CloudFileScope } from "./relay.js";
 
 /** The Files page's agent setup: what every agent on the owner's home reads
  * (instructions, skills, Claude's subagents and commands) and each project's
@@ -101,19 +101,6 @@ function actionFrom(body: unknown): Record<string, unknown> {
   }
 }
 
-async function jsonBody(req: IncomingMessage, limit: number, signal: AbortSignal): Promise<unknown> {
-  if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? "")) throw new CloudProjectFileError(400, "Send JSON");
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    signal.throwIfAborted();
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    if ((total += bytes.length) > limit) { req.destroy(); throw new CloudProjectFileError(413, "The request is too large"); }
-    chunks.push(bytes);
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new CloudProjectFileError(400, "Send JSON"); }
-}
-
 export const AGENT_SETUP_PATHS = ["/api/app/agent-setup", "/api/app/agent-setup/files", "/api/app/agent-setup/actions", "/api/app/project-guide"];
 
 export class AgentSetupRoutes {
@@ -136,16 +123,16 @@ export class AgentSetupRoutes {
     return scope;
   }
   /** One request for a path in AGENT_SETUP_PATHS, already behind account auth. */
-  async handle(req: IncomingMessage, url: URL, accountId: string, signal: AbortSignal, saveBody: () => Promise<unknown>): Promise<unknown> {
+  async handle(req: IncomingMessage, url: URL, accountId: string, signal: AbortSignal): Promise<unknown> {
     const { pathname } = url;
     if (pathname === "/api/app/agent-setup/files") {
       if (req.method === "GET") return this.#files.query(accountId, url, signal);
-      if (req.method === "POST" && !url.search) return this.#files.save(accountId, await saveBody(), signal);
+      if (req.method === "POST" && !url.search) return this.#files.save(accountId, await jsonBody(req, SAVE_BODY_BYTES, SAVE_TOO_LARGE, signal), signal);
       throw new CloudProjectFileError(405, "Use GET to read agent setup files and POST to save one");
     }
     if (pathname === "/api/app/agent-setup/actions") {
       if (req.method !== "POST" || url.search) throw new CloudProjectFileError(405, "Use POST for agent setup actions");
-      const action = actionFrom(await jsonBody(req, 8 * 1024, signal));
+      const action = actionFrom(await jsonBody(req, 8 * 1024, "The request is too large", signal));
       const homeId = this.#home(accountId);
       const reply = await this.dependencies.rpc(homeId, "agentSetup", { request: action }, signal);
       if (this.#home(accountId) !== homeId) throw new CloudProjectFileError(403, "Your cloud machine changed");

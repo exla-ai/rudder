@@ -234,11 +234,12 @@ test("every contract event name is whitelisted", () => {
     "onboarding_viewed", "onboarding_surface_toggled", "onboarding_completed", "org_created", "org_invite_created",
     "org_invite_accepted", "org_member_role_changed", "org_member_removed", "integration_connect_clicked",
     "integration_connected", "integration_disconnected", "model_picked", "agent_panel_opened", "plan_panel_opened",
-    "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened",
+    "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened", "chat_model_switched",
+    "all_agents_started",
   ];
   const serverOnly = [
-    "app_active", "app_error", "message_sent", "prompt_answered", "agent_action", "plan_approved",
-    "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
+    "app_active", "app_error", "message_sent", "message_edited", "prompt_answered", "agent_action", "agent_branched",
+    "plan_approved", "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
   ];
   assert.deepEqual([...analytics.PRODUCT_EVENTS].sort(), [...names, ...serverOnly].sort());
   assert.deepEqual([...analytics.SERVER_ONLY_EVENTS].sort(), [...serverOnly].sort());

@@ -551,8 +551,10 @@ export function createIntegrations(deps: IntegrationsDeps) {
     const accessToken = install ? str(install.token.accessToken) : "";
     if (accessToken) {
       // Best effort: the row is already gone, so a failed revoke only leaves
-      // a token nobody here can read.
-      await revokeSlackToken(deps.fetch, accessToken).catch(() => undefined);
+      // a token nobody here can read. It is logged, never silent.
+      await revokeSlackToken(deps.fetch, accessToken).catch((error: unknown) => {
+        log(`integrations: slack token revoke failed for ${owner.kind}:${owner.id}: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
     capture(account.accountId, "integration_disconnected", { provider, scope: owner.kind });
   }

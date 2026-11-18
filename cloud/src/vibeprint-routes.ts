@@ -151,9 +151,10 @@ export class VibeprintRoutes {
         send(200, { text: brief.text, at: brief.at, components: brief.components });
       } finally { this.#active--; }
     } catch (error) {
-      const status = error instanceof VibeprintRouteError ? error.status
-        : error && typeof error === "object" && "status" in error && typeof (error as { status: unknown }).status === "number" ? (error as { status: number }).status : 500;
-      send(status, { error: error instanceof Error ? error.message : "Canvas unavailable" });
+      // Anything else (a project the account cannot reach, a bug) goes to the
+      // server's handler, which answers with its status and logs it.
+      if (!(error instanceof VibeprintRouteError)) throw error;
+      send(error.status, { error: error.message });
     }
     return true;
   }

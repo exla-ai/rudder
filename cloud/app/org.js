@@ -126,6 +126,21 @@ export function SettingsScreen() {
   }
 
   const account = section("Account");
+  // Appearance: this device follows the system, or stays light or dark (theme.js).
+  const look = section("Appearance");
+  const lookSeg = h(`<div class="seg set-theme" role="radiogroup" aria-label="Appearance"></div>`);
+  for (const [value, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]]) {
+    const b = h(`<button type="button" role="radio"></button>`);
+    b.dataset.value = value;
+    setText(b, label);
+    b.addEventListener("click", () => { window.RudderTheme.set(value); paintLook(); });
+    lookSeg.appendChild(b);
+  }
+  const paintLook = () => {
+    for (const b of lookSeg.children) b.setAttribute("aria-checked", String(b.dataset.value === window.RudderTheme.get()));
+  };
+  paintLook();
+  look.body.appendChild(lookSeg);
   // Claude Code and Codex on the cloud machine: sign in, or switch accounts.
   const agentsSec = section("Agents");
   const agentsCard = app.accountsCard?.();
@@ -134,7 +149,7 @@ export function SettingsScreen() {
   const orgSec = section("Organization");
   const intSec = section("Integrations");
   const more = h(`<div class="section set-foot"></div>`);
-  body.append(account.el, agentsSec.el, scopeSec.el, orgSec.el, intSec.el, more);
+  body.append(account.el, look.el, agentsSec.el, scopeSec.el, orgSec.el, intSec.el, more);
 
   // Account: who, where the agents run, sign-in helpers.
   const kvs = h(`<div class="card set-kvs"></div>`);

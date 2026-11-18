@@ -50,17 +50,33 @@ struct RudderMacApp: App {
     }
 }
 
+/// Settings > Appearance in the web app. The page sends its choice on every
+/// load; it is kept here too so the sign-in and loading screens match.
+enum Appearance: String {
+    case system, light, dark
+
+    private static let key = "appearance"
+
+    static var saved: Appearance {
+        UserDefaults.standard.string(forKey: key).flatMap(Appearance.init(rawValue:)) ?? .system
+    }
+
+    @MainActor
+    func apply() {
+        UserDefaults.standard.set(rawValue, forKey: Self.key)
+        switch self {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
-        #if DEBUG
-        // RUDDER_APPEARANCE=light|dark pins the appearance for screenshots.
-        switch ProcessInfo.processInfo.environment["RUDDER_APPEARANCE"] {
-        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
-        case "light": NSApp.appearance = NSAppearance(named: .aqua)
-        default: break
-        }
-        #endif
+        // The last Settings > Appearance choice, before any window draws.
+        Appearance.saved.apply()
         // Before launch finishes, so a click on a notification that launched the app is delivered.
         Notifier.shared.install()
     }

@@ -20,6 +20,8 @@ import WebKit
 /// - `openPath {path, app}`: for a workspace this app pulled, "dashboard"
 ///   (Terminal running `rudder` in its checkout), "terminal", "finder" or
 ///   "xcode"; answered with `window.rudderOpenedPath({path, app, ok})`.
+/// - `appearance {value}`: Settings > Appearance ("system", "light", "dark"),
+///   sent on every page load; the whole app follows it.
 struct AppWebView: NSViewRepresentable {
     let model: AppModel
     let token: String
@@ -149,6 +151,10 @@ struct AppWebView: NSViewRepresentable {
                     } else if result["cancelled"] as? Bool != true, let error = result["error"] as? String {
                         Notifier.shared.post(title: "Could not copy the agent to this Mac", body: error, path: nil)
                     }
+                }
+            case "appearance":
+                if let value = body["value"] as? String, let appearance = Appearance(rawValue: value) {
+                    appearance.apply()
                 }
             case "openPath":
                 guard let path = body["path"] as? String, let app = body["app"] as? String else { return }

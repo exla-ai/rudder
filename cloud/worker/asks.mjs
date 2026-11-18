@@ -146,6 +146,9 @@ export function askDecision(request, answer) {
 // `request_user_input` (the pane waits on it) and, after a plan, the
 // "Implement this plan?" menu. No hook covers any of them, so they are read from
 // the rollout. Answered in the terminal, the rollout moves on and the card goes.
+// Leaving Plan mode ends the plan's card; Esc on the menu, "No, stay in Plan
+// mode" and a resumed session (which does not show the menu again) write
+// nothing, so the card stays for those.
 // The phone answers with keys in the pane.
 // ---------------------------------------------------------------------------
 
@@ -256,6 +259,14 @@ export function pendingCodexAsks(lines) {
         plan = plan && plan.turnId === payload.turn_id ? { ...plan, done: true } : null;
       } else if (payload.type === "item_completed" && payload.item?.type === "Plan" && typeof payload.item.text === "string") {
         plan = { turnId: payload.turn_id, ts, text: payload.item.text, done: false };
+      } else if (payload.type === "thread_settings_applied") {
+        // "Implement this plan?" is a Plan mode menu. Shift+Tab out of Plan mode
+        // and a /model pick both apply Default mode here; Esc on the menu and
+        // "No, stay in Plan mode" write nothing.
+        const mode = payload.thread_settings?.collaboration_mode?.mode;
+        if (typeof mode === "string" && mode !== "plan") {
+          plan = null;
+        }
       }
     }
   }

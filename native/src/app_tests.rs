@@ -1804,6 +1804,9 @@ fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
         assert!(app.handle_command(input));
         assert_eq!((app.backend, app.model.clone(), app.effort), before, "{input} changed the model");
         assert!(app.notice.is_some(), "{input} says why");
+        // A refusal is an error toast, never the success check.
+        let notice = app.notice.as_deref().unwrap();
+        assert_eq!(notice_kind(notice), NoticeKind::Error, "{input}: {notice}");
         let saved = fs::read_to_string(&config).unwrap_or_default();
         assert!(!saved.contains("/model") && !saved.contains("nonsense"), "{input} saved {saved}");
     }
@@ -1814,7 +1817,7 @@ fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
     app.handle_command("/model claude /model codex");
     assert_eq!(
         app.notice.as_deref(),
-        Some("/model is not a claude model; pick one from /model claude")
+        Some("unknown claude model: /model; pick one from /model claude")
     );
 
     app.handle_command("/model codex gpt-5.6-terra low");
@@ -19030,6 +19033,15 @@ fn the_diff_gate_guards_the_local_road_only() {
         local.merge_confirm.is_none(),
         "and does not merge on that press"
     );
+    assert_eq!(local.focus, FocusPane::Diff, "the diff panel has focus");
+
+    // The notice says "press m again to merge"; that second `m` lands in the
+    // focused diff panel and opens the same confirm the dashboard's `m` does.
+    local.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    match local.merge_confirm.as_ref().map(|c| &c.intent) {
+        Some(MergeIntent::Selected { id, .. }) => assert_eq!(id, "run-local"),
+        other => panic!("the second m opens the merge confirm, got {other:?}"),
+    }
 
     let _ = fs::remove_dir_all(&repo);
 }
@@ -19692,6 +19704,38 @@ fn collapsed_drawer_header_renders_a_count_and_fold_glyph() {
         text.contains("wire up the escrow chips"),
         "live rows still render: {text}"
     );
+}
+
+#[test]
+fn an_open_drawer_card_shows_its_diff_stat() {
+    // A row working when the dashboard quit reloads Paused into `earlier`. Opened,
+    // its card is drawn like any sidebar row and carries its +N -M.
+    let mut app = drawer_fleet();
+    app.focus = FocusPane::Agents;
+    let paused = app.agents.iter().position(|run| run.id == "run-f").unwrap();
+    app.agents[paused].status = AgentStatus::Paused;
+    app.diff_summary_cache.insert(
+        "run-f".to_string(),
+        (Instant::now(), Some("2 files changed, 4 insertions(+), 1 deletion(-)".to_string())),
+    );
+    app.drawer_cursor = Some(Bucket::Closed);
+    app.open_drawer(Bucket::Closed);
+    let area = Rect::new(0, 0, 40, 40);
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 40)).expect("test backend");
+    terminal
+        .draw(|frame| render_agents(frame, area, &mut app))
+        .expect("draw agents pane");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(text.contains("comments threading"), "the drawer is open: {text}");
+    assert!(text.contains("+4 -1"), "its card shows the diff stat: {text}");
 }
 
 #[test]
@@ -31454,8 +31498,14 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     let repo = unique_test_repo("codex-rollout-reopen");
     let mut app = App::new();
     app.cwd = repo.clone();
+    // A fake Codex with its plan menu up until a key dismisses it (Esc, "No,
+    // stay in Plan mode"), which writes nothing to the rollout.
+    let script = format!(
+        "printf '{}\\n'; read line; printf '\\033[2J\\033[H'; sleep 5",
+        codex_rollout::PLAN_MENU
+    );
     let pane = TerminalPane::spawn_shell_or_command(
-        Some(TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 5"])),
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 40 },
             cwd: Some(repo.clone()),
@@ -31478,6 +31528,14 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
         app.last_codex_rollout_scan = Instant::now();
         app.poll_codex_rollouts();
     };
+    let menu_up = |app: &mut App| {
+        app.agents[0].terminal.as_mut().unwrap().live_screen_contains(codex_rollout::PLAN_MENU)
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !menu_up(&mut app) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(menu_up(&mut app), "the fake shows its plan menu");
     // Read before the row finished: that read may predate the turn's end.
     deliver(&mut app, read_before_done, true, Vec::new());
     assert_eq!(app.agents[0].status, AgentStatus::Done);
@@ -31486,6 +31544,17 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     assert_eq!(app.agents[0].status, AgentStatus::Done);
     assert!(app.agents[0].needs_user_input);
     assert_eq!(agent_status_label(&app.agents[0]), "needs input");
+    // The menu dismissed: the rollout still ends with the plan, the screen
+    // no longer shows it, and the row stops asking for input.
+    app.agents[0].terminal.as_mut().unwrap().write_input(b"\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while menu_up(&mut app) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    deliver(&mut app, Instant::now(), false, vec![codex_rollout::CodexWait::Plan]);
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    assert!(!app.agents[0].needs_user_input);
+    assert_ne!(agent_status_label(&app.agents[0]), "needs input");
     // A new turn read after it finished reopens it.
     deliver(&mut app, Instant::now(), true, Vec::new());
     assert_eq!(app.agents[0].status, AgentStatus::Running);

@@ -6222,10 +6222,22 @@ impl App {
                             let _ = save_native_run_record(&self.cwd, run);
                             self.dirty = true;
                         }
-                        if result.waits.is_empty() {
+                        // Esc on "Implement this plan?", "No, stay in Plan mode"
+                        // and a resume (the menu is not shown again) leave the
+                        // rollout as it was, so a plan waits only while its menu
+                        // is on the pane's live screen.
+                        let mut waits = result.waits;
+                        if waits.contains(&codex_rollout::CodexWait::Plan)
+                            && !run.terminal.as_mut().is_some_and(|terminal| {
+                                terminal.live_screen_contains(codex_rollout::PLAN_MENU)
+                            })
+                        {
+                            waits.retain(|wait| *wait != codex_rollout::CodexWait::Plan);
+                        }
+                        if waits.is_empty() {
                             self.codex_waits.remove(&result.run_id);
                         } else {
-                            self.codex_waits.insert(result.run_id, result.waits);
+                            self.codex_waits.insert(result.run_id, waits);
                         }
                     }
                     for line in moved {
@@ -6686,6 +6698,14 @@ impl App {
             KeyCode::Enter => {
                 self.focus = FocusPane::Worker;
                 true
+            }
+            // The review gate opens this panel with "press m again to merge", so
+            // `m` here is that second press: the same merge the dashboard's `m`
+            // runs, for the row whose diff is on screen.
+            KeyCode::Char('m') => {
+                self.request_merge_selected_agent();
+                self.dirty = true;
+                return false;
             }
             _ => false,
         };

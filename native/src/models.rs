@@ -247,7 +247,7 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
     let (backend, model) = match named {
         Some(backend) => known_model(backend, model).map(|known| (backend, known)).ok_or_else(|| {
             format!(
-                "{model} is not a {backend} model; pick one from /model {backend}",
+                "unknown {backend} model: {model}; pick one from /model {backend}",
                 backend = backend.as_str()
             )
         })?,
@@ -264,7 +264,7 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
                 return Err(format!("unknown effort: {arg}"));
             }
             if !effort_options_for(backend, &model).contains(&effort) {
-                return Err(format!("{model} has no {arg} effort"));
+                return Err(format!("{model} cannot run at {arg} effort"));
             }
             effort
         }

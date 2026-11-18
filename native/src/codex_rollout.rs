@@ -10,9 +10,15 @@
 //!   `request_user_input_async` with unanswered questions, and a finished plan
 //!   on "Implement this plan?". These rules mirror `pendingCodexAsks` and
 //!   `newerCodexThread` in cloud/worker/asks.mjs (the phone's cards). Both are
-//!   pinned to the same real rollout and expectations,
+//!   pinned to the same real rollouts and expectations,
 //!   tests/fixtures/codex-0.170-rollout*.{jsonl,json}: a rule changed on one
 //!   side fails the other side's test until it is mirrored.
+//! - **When a plan stops waiting.** That menu belongs to Plan mode, and leaving
+//!   Plan mode (Shift+Tab, a `/model` pick) writes `thread_settings_applied`
+//!   with the new mode. Esc on the menu, "No, stay in Plan mode" and a resumed
+//!   session (it does not show the menu again) write nothing at all, so the
+//!   dashboard also asks the pane's screen (`PLAN_MENU`, see
+//!   `App::poll_codex_rollouts`).
 //!
 //! The scan runs on its own thread and returns typed results; the App loop
 //! only applies them (AGENTS.md: no file IO in the loop).
@@ -30,6 +36,8 @@ const TAIL_BYTES: u64 = 512 * 1024;
 const HEAD_BYTES: u64 = 16 * 1024;
 /// A thread whose rollout is not on disk yet is looked for again after this.
 const MISS_RECHECK: Duration = Duration::from_secs(5);
+/// The title of Codex's plan menu, on the pane's live screen while it is up.
+pub(crate) const PLAN_MENU: &str = "Implement this plan?";
 
 /// A prompt the rollout leaves waiting, named as asks.mjs names the card's `tool`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +227,15 @@ pub(crate) fn rollout_facts<'a>(lines: impl IntoIterator<Item = &'a str>) -> Rol
                     plan = plan
                         .filter(|plan| plan.turn_id.as_deref() == turn_id)
                         .map(|plan| Plan { done: true, ..plan });
+                }
+                // A Plan mode menu: applying another mode closes it.
+                Some("thread_settings_applied") => {
+                    let mode = payload
+                        .pointer("/thread_settings/collaboration_mode/mode")
+                        .and_then(serde_json::Value::as_str);
+                    if mode.is_some_and(|mode| mode != "plan") {
+                        plan = None;
+                    }
                 }
                 Some("item_completed") => {
                     let item = payload.get("item");
@@ -532,23 +549,29 @@ mod tests {
     const ROLLOUT: &str = include_str!("../../tests/fixtures/codex-0.170-rollout.jsonl");
     const CLEARED: &str = include_str!("../../tests/fixtures/codex-0.170-rollout-cleared.jsonl");
     const EXPECT: &str = include_str!("../../tests/fixtures/codex-0.170-rollout.expect.json");
+    const PLAN_LEFT: &str = include_str!("../../tests/fixtures/codex-0.170-rollout-plan-left.jsonl");
+    const PLAN_LEFT_EXPECT: &str =
+        include_str!("../../tests/fixtures/codex-0.170-rollout-plan-left.expect.json");
 
-    /// Every prefix of a real 0.170 session (a reply, an async question, the
-    /// same in Plan mode answered in the pane, a blocking question, two plans)
-    /// gives the turn and the waits that asks.mjs gives (its own test reads
-    /// the same expectations).
+    /// Every prefix of two real 0.170 sessions gives the turn and the waits
+    /// that asks.mjs gives (its own test reads the same expectations). The
+    /// first: a reply, an async question, the same in Plan mode answered in
+    /// the pane, a blocking question, two plans. The second: three plans, left
+    /// by Shift+Tab out of Plan mode and by a `/model` pick.
     #[test]
     fn a_real_codex_rollout_reads_like_the_phone_cards_at_every_line() {
-        let lines: Vec<&str> = ROLLOUT.lines().collect();
-        let expected: Vec<serde_json::Value> = serde_json::from_str(EXPECT).unwrap();
-        assert_eq!(expected.len(), lines.len());
-        for step in expected {
-            let n = step["lines"].as_u64().unwrap() as usize;
-            let facts = rollout_facts(lines[..n].iter().copied());
-            assert_eq!(facts.open_turn.as_deref(), step["openTurn"].as_str(), "turn after {n} lines");
-            let waits: Vec<&str> = facts.waits.iter().map(|wait| wait.tool()).collect();
-            let want: Vec<&str> = step["waits"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-            assert_eq!(waits, want, "waits after {n} lines");
+        for (rollout, expect) in [(ROLLOUT, EXPECT), (PLAN_LEFT, PLAN_LEFT_EXPECT)] {
+            let lines: Vec<&str> = rollout.lines().collect();
+            let expected: Vec<serde_json::Value> = serde_json::from_str(expect).unwrap();
+            assert_eq!(expected.len(), lines.len());
+            for step in expected {
+                let n = step["lines"].as_u64().unwrap() as usize;
+                let facts = rollout_facts(lines[..n].iter().copied());
+                assert_eq!(facts.open_turn.as_deref(), step["openTurn"].as_str(), "turn after {n} lines");
+                let waits: Vec<&str> = facts.waits.iter().map(|wait| wait.tool()).collect();
+                let want: Vec<&str> = step["waits"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+                assert_eq!(waits, want, "waits after {n} lines");
+            }
         }
     }
 

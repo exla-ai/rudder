@@ -2041,9 +2041,14 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // on a miss, and a row collapsed inside the done/closed/review drawer never
         // shows one — so asking for every agent made startup O(all rows ever) in
         // subprocess spawns. Measured at 200 seeded rows: ~2 git processes per row
-        // before the first frame.
-        let drawn: std::collections::HashSet<usize> =
+        // before the first frame. An OPEN drawer draws its members as cards, so
+        // they are asked too: a row that was working when the dashboard quit
+        // reloads Paused into `earlier`, and its card there lost its +N -M.
+        let mut drawn: std::collections::HashSet<usize> =
             sidebar_agent_indices(&app.agents).into_iter().collect();
+        if let Some(bucket) = app.drawer_open() {
+            drawn.extend(drawer_members(&app.agents, bucket));
+        }
         let keys: Vec<(String, PathBuf, bool, bool)> = app
             .agents
             .iter()
@@ -5406,6 +5411,9 @@ pub(crate) fn notice_kind(text: &str) -> NoticeKind {
         "no longer exists",
         "cannot",
         "disabled",
+        // A typed command refused: its usage line, or a name it does not know.
+        "usage: /",
+        "unknown ",
     ];
     const CONFIRM_MARKERS: &[&str] = &[
         "press d again",

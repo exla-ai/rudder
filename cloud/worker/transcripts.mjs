@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { promptSuggestion } from "./suggestion.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
@@ -39,9 +40,20 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
   }
   const { text, truncated } = readTail(file, TAIL_BYTES);
   const lines = text.split("\n");
-  const messages = showUserTask(record.backend === "codex" ? parseCodex(lines) : parseClaude(lines), record);
+  const codex = record.backend === "codex";
+  const stats = codex ? codexStats() : claudeStats();
+  const messages = showUserTask(codex ? parseCodex(lines, stats) : parseClaude(lines, stats), record);
   base.truncated = truncated || messages.length > limit;
   base.messages = messages.slice(-limit);
+  // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
+  base.suggestion = promptSuggestion(home, record.id);
+  // The numbers are extra: a model catalog or settings file that cannot be
+  // read says so in `stats.error` and the conversation still shows.
+  try {
+    base.stats = stats.result(home);
+  } catch (error) {
+    base.stats = { error: error instanceof Error ? error.message : String(error) };
+  }
   return base;
 }
 
@@ -240,7 +252,7 @@ function readTail(file, maxBytes) {
 // Claude Code JSONL.
 // ---------------------------------------------------------------------------
 
-function parseClaude(lines) {
+function parseClaude(lines, stats = null) {
   const messages = [];
   const tools = new Map(); // tool_use id -> message
   for (const line of lines) {
@@ -253,6 +265,7 @@ function parseClaude(lines) {
     } catch {
       continue;
     }
+    stats?.add(entry);
     if (entry.type === "system" && entry.subtype === "compact_boundary") {
       const meta = entry.compactMetadata || {};
       messages.push(compactMessage(entry.uuid || `compact-${messages.length}`, toMillis(entry.timestamp), {
@@ -386,7 +399,7 @@ function summarizeClaudeInput(name, input) {
 // Codex rollout JSONL.
 // ---------------------------------------------------------------------------
 
-function parseCodex(lines) {
+function parseCodex(lines, stats = null) {
   const messages = [];
   const calls = new Map(); // call_id -> message
   let index = 0;
@@ -400,6 +413,7 @@ function parseCodex(lines) {
     } catch {
       continue;
     }
+    stats?.add(entry);
     index += 1;
     if (entry.type === "compacted") {
       messages.push(compactMessage(`c${index}`, toMillis(entry.timestamp), { summary: String(entry.payload?.message || "").trim() }));
@@ -515,6 +529,235 @@ function summarizeCodexInput(payload) {
     return oneLine(JSON.stringify(value));
   }
   return oneLine(String(value));
+}
+
+// ---------------------------------------------------------------------------
+// Live numbers for the agent page (cloud/app/agent-stats.js), from the same
+// session log as the chat: output speed and how full the context is.
+//
+// Output speed is output tokens over wall time per model response, summed
+// over the last SPEED_RESPONSES finished responses (so a short reply does not
+// count as much as a long one). A response's time runs from its request
+// going out to its last recorded block, so it includes time to first token;
+// output tokens include thinking/reasoning tokens.
+// ---------------------------------------------------------------------------
+
+export const SPEED_RESPONSES = 5;
+const KEPT_RESPONSES = 20;
+
+function keepResponse(list, response) {
+  list.push(response);
+  if (list.length > KEPT_RESPONSES) {
+    list.shift();
+  }
+}
+
+function speedOf(responses) {
+  const timed = responses.filter((r) => r.done && r.start !== null && r.end > r.start && r.tokens > 0).slice(-SPEED_RESPONSES);
+  if (!timed.length) {
+    return null;
+  }
+  const tokens = timed.reduce((sum, r) => sum + r.tokens, 0);
+  const ms = timed.reduce((sum, r) => sum + (r.end - r.start), 0);
+  return {
+    tokensPerSecond: Math.round((tokens / ms) * 10_000) / 10,
+    responses: timed.map((r) => ({ tokens: r.tokens, ms: r.end - r.start, at: r.end })),
+  };
+}
+
+// Claude Code: one assistant entry per content block, all carrying the
+// response's message id and usage. The request goes out at Claude Code's
+// `api-request` entry, or right after the tool result or prompt entry that
+// precedes it; the newest of those since the last response is its start.
+// Context in use is the newest response's input (fresh + cache read + cache
+// write) plus its output; after a compaction it is the boundary's postTokens
+// until the next response reports.
+export function claudeStats() {
+  let requestAt = null;
+  let current = null;
+  const responses = [];
+  let model = null;
+  let context = null;
+  let compactedAt = null;
+  return {
+    add(entry) {
+      if (entry.isSidechain) {
+        return;
+      }
+      const ts = toMillis(entry.timestamp);
+      if (entry.type === "api-request" || entry.type === "user") {
+        if (ts !== null) {
+          requestAt = Math.max(requestAt ?? ts, ts);
+        }
+        return;
+      }
+      if (entry.type === "system" && entry.subtype === "compact_boundary") {
+        const post = Number(entry.compactMetadata?.postTokens);
+        compactedAt = ts;
+        context = { used: Number.isFinite(post) && post > 0 ? post : null, at: ts };
+        return;
+      }
+      if (entry.type !== "assistant" || ts === null) {
+        return;
+      }
+      const message = entry.message || {};
+      // `<synthetic>`: Claude Code's own error and interrupt notes.
+      if (typeof message.model !== "string" || message.model.startsWith("<")) {
+        return;
+      }
+      const usage = message.usage || {};
+      const output = Number(usage.output_tokens) || 0;
+      const done = message.stop_reason !== null && message.stop_reason !== undefined;
+      if (current && message.id && current.id === message.id) {
+        current.end = ts;
+        current.tokens = Math.max(current.tokens, output);
+        current.done = current.done || done;
+      } else {
+        current = { id: message.id || null, start: requestAt, end: ts, tokens: output, done };
+        keepResponse(responses, current);
+        requestAt = null;
+      }
+      model = message.model;
+      const input = (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0);
+      context = { used: input + current.tokens, at: ts };
+    },
+    result(home) {
+      const window = model ? claudeWindow(home, model) : { window: null, modelWindow: null, autoCompactWindow: null };
+      return {
+        model,
+        speed: speedOf(responses),
+        context: context ? { ...context, ...window, compactedAt } : null,
+      };
+    },
+  };
+}
+
+// Codex: one `token_usage_record` per finished response, with its usage. Its
+// request goes out after the newest input-side entry (turn start, user or
+// developer message, tool output, the previous response's record) before the
+// response's first output item. Context in use and the window are Codex's own
+// `token_count` figures (last_token_usage.total_tokens, model_context_window),
+// which Codex also reports right after a compaction.
+export function codexStats() {
+  let inputAt = null;
+  let startAt = null;
+  let outputSeen = false;
+  const responses = [];
+  let model = null;
+  let context = null;
+  let compactedAt = null;
+  return {
+    add(entry) {
+      const ts = toMillis(entry.timestamp);
+      if (ts === null) {
+        return;
+      }
+      const payload = entry.payload || {};
+      if (entry.type === "turn_context") {
+        if (typeof payload.model === "string" && payload.model) {
+          model = payload.model;
+        }
+        inputAt = ts;
+      } else if (entry.type === "compacted") {
+        compactedAt = ts;
+        inputAt = ts;
+      } else if (entry.type === "token_usage_record") {
+        keepResponse(responses, { start: outputSeen ? startAt : inputAt, end: ts, tokens: Number(payload.usage?.output_tokens) || 0, done: true });
+        startAt = null;
+        outputSeen = false;
+        inputAt = ts;
+      } else if (entry.type === "event_msg") {
+        if (payload.type === "task_started") {
+          inputAt = ts;
+        } else if (payload.type === "token_count" && payload.info) {
+          const used = Number(payload.info.last_token_usage?.total_tokens);
+          const window = Number(payload.info.model_context_window);
+          context = {
+            used: Number.isFinite(used) && used >= 0 ? used : null,
+            window: Number.isFinite(window) && window > 0 ? window : null,
+            at: ts,
+          };
+        }
+      } else if (entry.type === "response_item") {
+        if (isCodexOutput(payload)) {
+          if (!outputSeen) {
+            startAt = inputAt;
+            outputSeen = true;
+          }
+        } else {
+          inputAt = ts;
+        }
+      }
+    },
+    result() {
+      return {
+        model,
+        speed: speedOf(responses),
+        context: context ? { ...context, modelWindow: context.window, autoCompactWindow: null, compactedAt } : null,
+      };
+    },
+  };
+}
+
+function isCodexOutput(payload) {
+  const type = String(payload.type || "");
+  return type === "reasoning" || (type === "message" && payload.role === "assistant") || type.endsWith("_call");
+}
+
+// The window a Claude conversation's context is measured against: the
+// model's context window from the models.dev catalog `rudder __models` keeps
+// in ~/.rudder, or the auto-compact window Claude Code's user settings set
+// (`/autocompact` saves it per model) when that is smaller. Claude Code
+// compacts as the context nears the smaller of the two.
+function claudeWindow(home, model) {
+  const catalog = readJsonCached(path.join(home, ".rudder", "models-dev.json"), (data) => {
+    const windows = new Map();
+    for (const [id, entry] of Object.entries(data?.anthropic?.models ?? {})) {
+      const context = Number(entry?.limit?.context);
+      if (Number.isInteger(context) && context > 0) {
+        windows.set(id, context);
+      }
+    }
+    return windows;
+  });
+  const settings = readJsonCached(path.join(home, ".claude", "settings.json"), (data) => data ?? {});
+  const modelWindow = catalog?.get(model) ?? null;
+  // Per-model settings are keyed by the canonical id (no date, no [1m]).
+  const canonical = model.replace(/\[1m\]$/i, "").replace(/-\d{8}$/, "");
+  const perModel = settings?.modelSettings?.[canonical]?.autoCompactWindow;
+  const setting = perModel !== undefined ? perModel : settings?.autoCompactWindow;
+  // "auto" (or nothing set) is the window Claude Code tunes for the model.
+  const autoCompactWindow = Number.isInteger(setting) && setting > 0 ? setting : null;
+  const window = autoCompactWindow && modelWindow ? Math.min(autoCompactWindow, modelWindow) : autoCompactWindow ?? modelWindow;
+  return { window, modelWindow, autoCompactWindow: window === autoCompactWindow ? autoCompactWindow : null };
+}
+
+const jsonFiles = new Map(); // file -> { mtimeMs, size, value }
+
+/** A parsed JSON file, re-read only when it changes. Null when it does not exist. */
+function readJsonCached(file, parse) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      jsonFiles.delete(file);
+      return null;
+    }
+    throw error;
+  }
+  const hit = jsonFiles.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    return hit.value;
+  }
+  let value;
+  try {
+    value = parse(JSON.parse(fs.readFileSync(file, "utf8")));
+  } catch (error) {
+    throw new Error(`could not read ${file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  jsonFiles.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, value });
+  return value;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,382 @@
+// Live numbers beside the work: an agent's output speed and context use in
+// its page header (from the transcript's `stats`, cloud/worker/transcripts.mjs),
+// and the plan usage of the cloud machine's Claude and Codex sign-ins in the
+// sidebar footer (GET /api/app/usage, src/usage.ts fetchQuota on the home).
+// Each shows a popover with the detail: on hover with a mouse, on tap.
+import { h, setText, escapeHtml } from "/app/render.js";
+import { api, coarse, rel, toMs } from "/app/core.js";
+
+const SVG = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const GAUGE = SVG('<path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l3.5-4"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/>');
+const REFRESH = SVG('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>');
+
+/* Formatting ------------------------------------------------------------ */
+
+export function formatTokens(n) {
+  if (n >= 999_500) return `${Math.round(n / 100_000) / 10}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return String(n);
+}
+const formatRate = (r) => (r >= 10 ? String(Math.round(r)) : r.toFixed(1));
+const formatSeconds = (ms) => (ms < 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms / 1000)} s`);
+const level = (pct) => (pct >= 90 ? "hot" : pct >= 70 ? "warm" : "ok");
+// "just now", "5m ago", "Yesterday", "Nov 3".
+function ago(t) {
+  const r = rel(t);
+  return r === "now" ? "just now" : /^\d+[mhd]$/.test(r) ? `${r} ago` : r;
+}
+
+function resetText(iso) {
+  const at = toMs(iso);
+  if (!at) return "";
+  const mins = Math.round((at - Date.now()) / 60_000);
+  if (mins <= 0) return "Resets now";
+  if (mins < 60) return `Resets in ${mins}m`;
+  if (mins < 24 * 60) return `Resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `Resets ${new Date(at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`;
+}
+
+// A small ring for how full the context is.
+function ring(pct) {
+  const r = 6.5, c = 2 * Math.PI * r;
+  const used = Math.max(0, Math.min(100, pct));
+  return `<svg class="as-ring" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="${r}" class="as-ring-bg"/><circle cx="8" cy="8" r="${r}" class="as-ring-fg" stroke-dasharray="${(used / 100) * c} ${c}" transform="rotate(-90 8 8)"/></svg>`;
+}
+
+/* Popover ---------------------------------------------------------------- */
+
+// One open at a time. Anchored to its trigger, below it or above when the
+// trigger is near the bottom (the sidebar footer). Hover opens it with a
+// mouse; a click or tap keeps it open until a click outside or Escape.
+let openPop = null;
+
+function popover(anchor, { label, render, place = "below" }) {
+  let el = null, pinned = false, leaveTimer = 0, enterTimer = 0;
+  const close = () => {
+    clearTimeout(leaveTimer); clearTimeout(enterTimer);
+    if (!el) return;
+    el.remove(); el = null; pinned = false;
+    anchor.setAttribute("aria-expanded", "false");
+    if (openPop?.close === close) openPop = null;
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const outside = (e) => { if (el && !el.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === "Escape") { close(); anchor.focus(); } };
+  const position = () => {
+    if (!el) return;
+    const a = anchor.getBoundingClientRect();
+    const w = el.offsetWidth, hgt = el.offsetHeight;
+    const vw = document.documentElement.clientWidth, vh = window.innerHeight;
+    const left = Math.max(8, Math.min(vw - w - 8, place === "above" ? a.left : a.right - w));
+    const below = a.bottom + 6, above = a.top - hgt - 6;
+    const top = place === "above" ? (above >= 8 ? above : below) : (below + hgt <= vh - 8 ? below : Math.max(8, above));
+    el.style.left = `${Math.round(left)}px`;
+    el.style.top = `${Math.round(top)}px`;
+  };
+  const paint = () => {
+    if (!el) return;
+    el.replaceChildren(render());
+    position();
+  };
+  const open = () => {
+    if (el) return;
+    openPop?.close();
+    el = h(`<div class="st-pop" role="dialog"></div>`);
+    el.setAttribute("aria-label", label);
+    el.addEventListener("pointerenter", () => clearTimeout(leaveTimer));
+    el.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !pinned) leaveTimer = setTimeout(close, 220); });
+    document.body.appendChild(el);
+    anchor.setAttribute("aria-expanded", "true");
+    openPop = { close };
+    paint();
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", onKey, true);
+  };
+  anchor.setAttribute("aria-haspopup", "dialog");
+  anchor.setAttribute("aria-expanded", "false");
+  anchor.addEventListener("click", () => {
+    if (el && pinned) return close();
+    open(); pinned = true;
+  });
+  if (!coarse) {
+    anchor.addEventListener("pointerenter", (e) => {
+      if (e.pointerType !== "mouse") return;
+      clearTimeout(leaveTimer);
+      enterTimer = setTimeout(open, 140);
+    });
+    anchor.addEventListener("pointerleave", (e) => {
+      if (e.pointerType !== "mouse") return;
+      clearTimeout(enterTimer);
+      if (!pinned) leaveTimer = setTimeout(close, 220);
+    });
+  }
+  window.addEventListener("resize", position);
+  return {
+    paint, close,
+    get open() { return !!el; },
+    destroy() { close(); window.removeEventListener("resize", position); },
+  };
+}
+
+/* Agent stats: header line + popover ------------------------------------- */
+
+/**
+ * The agent page's speed and context line. Mount `el` in the header's
+ * subtitle and call `update(transcript.stats)` after each transcript load.
+ * Hidden while the transcript has no numbers (a new agent, a backend without
+ * session logs, or a teammate's agent).
+ */
+export function AgentStats() {
+  const el = h(`<button type="button" class="as-chip" hidden>
+    <span class="as-sep" aria-hidden="true">·</span><span class="as-ctx"></span><span class="as-sep as-mid" aria-hidden="true">·</span><span class="as-tps"></span>
+  </button>`);
+  const ctxEl = el.querySelector(".as-ctx");
+  const tpsEl = el.querySelector(".as-tps");
+  const midSep = el.querySelector(".as-mid");
+  let stats = null;
+
+  const pop = popover(el, { label: "Agent speed and context", render: () => renderAgentPop(stats) });
+
+  function update(next) {
+    stats = next && !next.error ? next : null;
+    const ctx = contextView(stats?.context);
+    const speed = stats?.speed;
+    el.hidden = !ctx && !speed;
+    if (el.hidden) { pop.close(); return; }
+    const ctxSig = ctx ? `${ctx.pct ?? ""}|${ctx.label}|${ctx.level}` : "";
+    if (ctxEl.dataset.sig !== ctxSig) {
+      ctxEl.dataset.sig = ctxSig;
+      ctxEl.innerHTML = ctx ? `${ctx.pct === null ? "" : ring(ctx.pct)}<span>${escapeHtml(ctx.label)}${ctx.pct === null ? "" : `<span class="as-left"> left</span>`}</span>` : "";
+      ctxEl.className = `as-ctx ${ctx ? `lv-${ctx.level}` : ""}`;
+    }
+    ctxEl.hidden = !ctx;
+    setText(tpsEl, speed ? `${formatRate(speed.tokensPerSecond)} tok/s` : "");
+    tpsEl.hidden = !speed;
+    midSep.hidden = !ctx || !speed;
+    const parts = [ctx?.aria, speed ? `${formatRate(speed.tokensPerSecond)} tokens per second over the last ${speed.responses.length} responses` : null].filter(Boolean);
+    el.setAttribute("aria-label", parts.join(", "));
+    if (pop.open) pop.paint();
+  }
+
+  return { el, update, destroy: () => pop.destroy() };
+}
+
+// What the header shows for the context: percent left of the window, or the
+// size alone when the model's window is not known.
+function contextView(c) {
+  if (!c) return null;
+  if (c.used === null) return { pct: null, label: "Compacted", level: "ok", aria: "Context compacted" };
+  if (!c.window) return { pct: null, label: `${formatTokens(c.used)} context`, level: "ok", aria: `${formatTokens(c.used)} tokens of context in use` };
+  const usedPct = Math.min(100, (c.used / c.window) * 100);
+  const left = Math.max(0, Math.round(100 - usedPct));
+  return { pct: usedPct, label: `${left}%`, level: level(usedPct), aria: `${left}% of the context window left` };
+}
+
+function renderAgentPop(stats) {
+  const box = h(`<div class="st-body"></div>`);
+  if (!stats) return box;
+  const speed = stats.speed;
+  if (speed) {
+    const max = Math.max(...speed.responses.map((r) => r.tokens / r.ms));
+    const total = speed.responses.reduce((n, r) => n + r.tokens, 0);
+    const ms = speed.responses.reduce((n, r) => n + r.ms, 0);
+    const sec = h(`<section class="st-sec">
+      <div class="st-h"><span>Output speed</span><b class="mono"></b></div>
+      <div class="st-bars" role="img"></div>
+      <div class="st-line"></div>
+      <p class="st-note">Timed from each request to its last token, so it includes the wait for the first token. Thinking counts as output.</p>
+    </section>`);
+    setText(sec.querySelector("b"), `${formatRate(speed.tokensPerSecond)} tok/s`);
+    const bars = sec.querySelector(".st-bars");
+    bars.setAttribute("aria-label", speed.responses.map((r) => `${formatRate((r.tokens / r.ms) * 1000)} tokens per second`).join(", "));
+    for (const r of speed.responses) {
+      const b = h(`<span class="st-bar"><i></i><em class="mono"></em></span>`);
+      b.querySelector("i").style.height = `${Math.max(8, Math.round(((r.tokens / r.ms) / max) * 100))}%`;
+      setText(b.querySelector("em"), formatRate((r.tokens / r.ms) * 1000));
+      b.title = `${r.tokens.toLocaleString()} tokens in ${formatSeconds(r.ms)}`;
+      bars.appendChild(b);
+    }
+    setText(sec.querySelector(".st-line"), `Last ${speed.responses.length} ${speed.responses.length === 1 ? "response" : "responses"}: ${total.toLocaleString()} tokens in ${formatSeconds(ms)}`);
+    box.appendChild(sec);
+  }
+  const c = stats.context;
+  if (c) {
+    const view = contextView(c);
+    const sec = h(`<section class="st-sec">
+      <div class="st-h"><span>Context</span><b class="mono"></b></div>
+      <div class="st-meter"><i></i></div>
+      <div class="st-line"></div>
+      <div class="st-sub"></div>
+    </section>`);
+    setText(sec.querySelector("b"), view.pct === null ? "" : `${view.label} left`);
+    const meter = sec.querySelector(".st-meter");
+    meter.hidden = view.pct === null;
+    if (view.pct !== null) {
+      meter.className = `st-meter lv-${view.level}`;
+      meter.querySelector("i").style.width = `${view.pct}%`;
+    }
+    setText(sec.querySelector(".st-line"), c.used === null
+      ? "Compacted. The new size shows after the next response."
+      : c.window ? `${formatTokens(c.used)} of ${formatTokens(c.window)} used` : `${formatTokens(c.used)} in use. This model's window is not known here.`);
+    const sub = [];
+    if (c.autoCompactWindow) sub.push(`Auto-compact window ${formatTokens(c.autoCompactWindow)}, model window ${formatTokens(c.modelWindow ?? c.autoCompactWindow)}`);
+    else if (c.window) sub.push(`Model window ${formatTokens(c.window)}`);
+    if (c.compactedAt) sub.push(`Compacted ${ago(c.compactedAt)}`);
+    setText(sec.querySelector(".st-sub"), sub.join(" · "));
+    box.appendChild(sec);
+  }
+  if (stats.model) {
+    const m = h(`<div class="st-foot mono"></div>`);
+    setText(m, stats.model);
+    box.appendChild(m);
+  }
+  return box;
+}
+
+/* Plan usage: sidebar meter + popover ------------------------------------ */
+
+const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }];
+const POLL_MS = 60_000;
+
+/**
+ * Plan usage for the cloud machine's signed-in Claude and Codex accounts: one
+ * row each in the sidebar footer (the window closest to its limit), and every
+ * window with its reset time in the popover. Mount `el` in the footer and call
+ * `update(store.state)` when the state changes; it fetches its own numbers.
+ */
+export function PlanUsage() {
+  const el = h(`<button type="button" class="pu" hidden><span class="pu-ic">${GAUGE}</span><span class="pu-rows"></span></button>`);
+  const rows = el.querySelector(".pu-rows");
+  let report = null;       // the last QuotaReport from the home
+  let problem = null;      // why the last fetch failed, shown in the popover
+  let signedIn = [];       // provider ids signed in on the machine
+  let timer = 0, inflight = false, stopped = false;
+
+  const pop = popover(el, { label: "Plan usage", place: "above", render: () => renderUsagePop({ report, problem, signedIn, refresh: () => load(true) }) });
+
+  async function load(force = false) {
+    if (inflight || stopped) return;
+    inflight = true;
+    try {
+      report = await api(`/api/app/usage${force ? "?refresh=1" : ""}`);
+      problem = null;
+    } catch (err) {
+      if (err.status === 401) return;
+      problem = err.status === 503 ? "The cloud machine is asleep. Usage shows once it wakes." : err.message;
+    } finally {
+      inflight = false;
+      paint();
+    }
+  }
+  const schedule = () => {
+    clearTimeout(timer);
+    if (stopped) return;
+    timer = setTimeout(() => { if (!document.hidden) void load(); schedule(); }, POLL_MS);
+  };
+  const onVisible = () => { if (!document.hidden) void load(); };
+  document.addEventListener("visibilitychange", onVisible);
+
+  function paint() {
+    const accounts = PROVIDERS
+      .filter((p) => signedIn.includes(p.id))
+      .map((p) => ({ ...p, account: report?.accounts?.find((a) => a.provider === p.id) || null }));
+    el.hidden = !accounts.length || (!report && !problem);
+    if (el.hidden) { pop.close(); return; }
+    rows.replaceChildren(...accounts.map(({ label, account }) => {
+      const top = bindingWindow(account);
+      const row = h(`<span class="pu-row"><span class="pu-name"></span><span class="pu-bar"><i></i></span><span class="pu-pct mono"></span></span>`);
+      setText(row.querySelector(".pu-name"), label);
+      const bar = row.querySelector(".pu-bar");
+      if (top) {
+        bar.className = `pu-bar lv-${account.blocked ? "hot" : level(top.percent)}`;
+        bar.querySelector("i").style.width = `${top.percent}%`;
+        setText(row.querySelector(".pu-pct"), account.blocked ? "Limit" : `${top.percent}%`);
+      } else {
+        row.classList.add("pu-none");
+        setText(row.querySelector(".pu-pct"), account ? "n/a" : "");
+      }
+      return row;
+    }));
+    el.classList.toggle("stale", !!problem);
+    el.setAttribute("aria-label", `Plan usage: ${accounts.map(({ label, account }) => {
+      const top = bindingWindow(account);
+      return top ? `${label} ${top.percent}% of ${top.label}` : `${label} not available`;
+    }).join(", ")}`);
+    if (pop.open) pop.paint();
+  }
+
+  function update(state) {
+    const creds = state?.home?.credentials;
+    // An asleep machine sends no credentials: keep what was last shown.
+    if (creds) {
+      const next = PROVIDERS.filter((p) => creds[p.id]?.ok).map((p) => p.id);
+      if (next.join() !== signedIn.join()) { signedIn = next; paint(); }
+    }
+  }
+
+  void load();
+  schedule();
+  return {
+    el, update,
+    destroy() {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      pop.destroy();
+    },
+  };
+}
+
+// The window closest to its limit decides when the account is blocked.
+// Extra usage is paid overage, not a limit, so it never decides.
+function bindingWindow(account) {
+  const windows = (account?.windows || []).filter((w) => w.label !== "Extra usage");
+  return windows.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
+}
+
+function renderUsagePop({ report, problem, signedIn, refresh }) {
+  const box = h(`<div class="st-body pu-pop"></div>`);
+  for (const p of PROVIDERS.filter((x) => signedIn.includes(x.id))) {
+    const account = report?.accounts?.find((a) => a.provider === p.id) || null;
+    const sec = h(`<section class="st-sec">
+      <div class="st-h"><span class="pu-acct"></span><b class="pu-plan"></b></div>
+      <div class="pu-email"></div>
+      <div class="pu-wins"></div>
+    </section>`);
+    setText(sec.querySelector(".pu-acct"), p.label);
+    setText(sec.querySelector(".pu-plan"), account?.plan || "");
+    setText(sec.querySelector(".pu-email"), account?.email || "");
+    const wins = sec.querySelector(".pu-wins");
+    if (account?.blocked) {
+      const b = h(`<div class="pu-blocked"></div>`);
+      setText(b, account.blocked.charAt(0).toUpperCase() + account.blocked.slice(1));
+      wins.appendChild(b);
+    }
+    for (const w of account?.windows || []) {
+      const extra = w.label === "Extra usage";
+      const row = h(`<div class="pu-win"><div class="pu-wh"><span></span><b class="mono"></b></div><div class="st-meter"><i></i></div><div class="pu-reset"></div></div>`);
+      setText(row.querySelector(".pu-wh span"), w.label);
+      setText(row.querySelector(".pu-wh b"), `${w.percent}% used`);
+      row.querySelector(".st-meter").className = `st-meter lv-${extra ? "ok" : level(w.percent)}`;
+      row.querySelector(".st-meter i").style.width = `${Math.min(100, w.percent)}%`;
+      setText(row.querySelector(".pu-reset"), resetText(w.resetsAt));
+      wins.appendChild(row);
+    }
+    if (account?.error) {
+      const e = h(`<div class="pu-err"></div>`);
+      setText(e, `Usage unavailable: ${account.error}`);
+      wins.appendChild(e);
+    } else if (!account) {
+      const e = h(`<div class="pu-err"></div>`);
+      setText(e, "Not loaded yet.");
+      wins.appendChild(e);
+    }
+    box.appendChild(sec);
+  }
+  const foot = h(`<div class="st-foot pu-foot"><span class="pu-when"></span><button type="button" class="pu-refresh" aria-label="Refresh plan usage" title="Refresh">${REFRESH}</button></div>`);
+  setText(foot.querySelector(".pu-when"), problem || (report?.fetchedAt ? `Checked with the providers ${ago(report.fetchedAt)}` : ""));
+  foot.querySelector(".pu-refresh").addEventListener("click", (e) => { e.stopPropagation(); refresh(); });
+  box.appendChild(foot);
+  return box;
+}

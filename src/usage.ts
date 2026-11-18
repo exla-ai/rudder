@@ -665,7 +665,7 @@ export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string 
   const email = typeof profile?.account?.email === "string" ? profile.account.email : null;
   const plan = planLabel(profile?.organization?.rate_limit_tier, fallbackPlan);
   const lockedReason = [usage?.five_hour, usage?.seven_day].map((w) => w?.locked_reason).find((r) => typeof r === "string" && r);
-  const blocked = lockedReason ? `blocked — ${String(lockedReason).replace(/_/g, " ")}` : null;
+  const blocked = lockedReason ? `blocked: ${String(lockedReason).replace(/_/g, " ")}` : null;
   return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
 }
 
@@ -673,9 +673,9 @@ async function fetchClaudeQuota(): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
   const base = { provider: "claude" as const, email: null, plan: null, windows: [], blocked: null, fetchedAt };
   const creds = await readClaudeCredentials();
-  if (!creds) return { ...base, error: "not signed in — run `claude` and log in" };
+  if (!creds) return { ...base, error: "not signed in: run `claude` and log in" };
   if (creds.expiresAt && creds.expiresAt < Date.now()) {
-    return { ...base, plan: planLabel(null, creds.subscriptionType), error: "sign-in expired — run `claude` once to refresh it" };
+    return { ...base, plan: planLabel(null, creds.subscriptionType), error: "sign-in expired: run `claude` once to refresh it" };
   }
   const headers = {
     Authorization: `Bearer ${creds.accessToken}`,
@@ -688,7 +688,7 @@ async function fetchClaudeQuota(): Promise<AccountQuota> {
       fetch("https://api.anthropic.com/api/oauth/profile", { headers, signal: AbortSignal.timeout(15_000) }),
     ]);
     if (usageRes.status === 401 || usageRes.status === 403) {
-      return { ...base, error: "sign-in rejected — run `claude` once to refresh it" };
+      return { ...base, error: "sign-in rejected: run `claude` once to refresh it" };
     }
     if (!usageRes.ok) return { ...base, error: `usage endpoint returned ${usageRes.status}` };
     const usage = await usageRes.json();
@@ -785,7 +785,7 @@ export function parseCodexQuota(body: any): Omit<AccountQuota, "fetchedAt" | "pr
   const plan = codexPlanLabel(body?.plan_type);
   const reachedKind = body?.rate_limit_reached_type?.type;
   const blocked = body?.rate_limit?.limit_reached
-    ? `blocked — ${CODEX_BLOCK_REASONS[reachedKind] ?? (typeof reachedKind === "string" ? reachedKind.replace(/_/g, " ") : "rate limit reached")}`
+    ? `blocked: ${CODEX_BLOCK_REASONS[reachedKind] ?? (typeof reachedKind === "string" ? reachedKind.replace(/_/g, " ") : "rate limit reached")}`
     : null;
   return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
 }
@@ -794,7 +794,7 @@ async function fetchCodexQuota(): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
   const base = { provider: "codex" as const, email: null, plan: null, windows: [], blocked: null, fetchedAt };
   const creds = await readCodexCredentials();
-  if (!creds) return { ...base, error: "not signed in — run `codex login`" };
+  if (!creds) return { ...base, error: "not signed in: run `codex login`" };
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
     "User-Agent": "rudder-usage",
@@ -802,7 +802,7 @@ async function fetchCodexQuota(): Promise<AccountQuota> {
   if (creds.accountId) headers["chatgpt-account-id"] = creds.accountId;
   try {
     const res = await fetch("https://chatgpt.com/backend-api/wham/usage", { headers, signal: AbortSignal.timeout(15_000) });
-    if (res.status === 401 || res.status === 403) return { ...base, error: "sign-in expired — run `codex login`" };
+    if (res.status === 401 || res.status === 403) return { ...base, error: "sign-in expired: run `codex login`" };
     if (!res.ok) return { ...base, error: `usage endpoint returned ${res.status}` };
     return { ...base, ...parseCodexQuota(await res.json()) };
   } catch (error) {

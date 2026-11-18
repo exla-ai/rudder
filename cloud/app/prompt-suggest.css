@@ -1,0 +1,9 @@
+/* Claude Code's suggested next prompt in the chat composer (prompt-suggest.js). */
+.composer.ps-on textarea::placeholder { color: var(--faint); opacity: 1; }
+.ps-chip { color: var(--ink); align-self: center; }
+.ps-chip[hidden] { display: none; }
+.ps-chip:active { background: var(--surface-2); }
+.ps-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}

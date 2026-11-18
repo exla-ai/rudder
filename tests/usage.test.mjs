@@ -269,7 +269,7 @@ test("Claude's weekly per-model limit (usage.limits[]) supplements the blended s
     profile,
     "max",
   );
-  assert.equal(locked.blocked, "blocked — usage limit reached");
+  assert.equal(locked.blocked, "blocked: usage limit reached");
 });
 
 test("Codex quota meters label windows by length and include the extra per-model limits", () => {
@@ -319,7 +319,7 @@ test("a Codex account that has hit its rate limit reports why, without hiding th
     rate_limit_reached_type: { type: "workspace_owner_credits_depleted" },
   };
   const quota = parseCodexQuota(body);
-  assert.equal(quota.blocked, "blocked — workspace owner's credits are depleted");
+  assert.equal(quota.blocked, "blocked: workspace owner's credits are depleted");
   assert.equal(quota.windows.length, 1, "the meter is still reported alongside the block reason");
 
   const clear = parseCodexQuota({ plan_type: "plus", rate_limit: { allowed: true, limit_reached: false } });

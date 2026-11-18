@@ -246,24 +246,40 @@ struct SignInView: View {
 
     private var actions: some View {
         VStack(spacing: 10) {
-            Button {
-                pending = .google
-                session.signIn(provider: "google")
-            } label: {
-                buttonLabel("Continue with Google", busy: pending == .google)
-            }
-            .buttonStyle(RudderButtonStyle(kind: .primary, height: 40))
-            .keyboardShortcut(codeFocused ? nil : .defaultAction)
+            VStack(spacing: 10) {
+                Button {
+                    pending = .google
+                    session.signIn(.google)
+                } label: {
+                    buttonLabel("Continue with Google", busy: pending == .google)
+                }
+                .buttonStyle(RudderButtonStyle(kind: .primary, height: 40))
+                .keyboardShortcut(codeFocused ? nil : .defaultAction)
 
-            Button {
-                pending = .github
-                session.signIn(provider: "github")
-            } label: {
-                buttonLabel("Continue with GitHub", busy: pending == .github, onAccent: false)
+                Button {
+                    pending = .github
+                    session.signIn(.github)
+                } label: {
+                    buttonLabel("Continue with GitHub", busy: pending == .github, onAccent: false)
+                }
+                .buttonStyle(RudderButtonStyle(kind: .secondary, height: 40))
             }
-            .buttonStyle(RudderButtonStyle(kind: .secondary, height: 40))
+            .disabled(session.signingIn)
+
+            if session.waitingForBrowser {
+                HStack(spacing: 6) {
+                    Text("Finish signing in in your browser.")
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { session.cancelSignIn() }
+                        .buttonStyle(.link)
+                        .keyboardShortcut(.cancelAction)
+                }
+                .font(.system(size: 12))
+                .padding(.top, 4)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .disabled(session.signingIn)
+        .animation(.easeOut(duration: 0.2), value: session.waitingForBrowser)
     }
 
     private var pairing: some View {

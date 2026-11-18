@@ -30,13 +30,20 @@ enum RudderLinks {
         server.appendingPathComponent("app")
     }
 
-    /// Google (or GitHub) sign-in that ends at rudder://auth?token=.
-    static func loginURL(_ server: URL, provider: String = "google") -> URL {
-        var components = URLComponents(url: server.appendingPathComponent("app/login"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "native", value: "1"),
-            URLQueryItem(name: "provider", value: provider == "github" ? "github" : "google"),
-        ]
+    /// Sign-in is the device login `rudder login` uses: start one here, open
+    /// `browserLoginURL` in the default browser, poll until the token arrives.
+    static func loginStartURL(_ server: URL) -> URL {
+        server.appendingPathComponent("api/cli/login")
+    }
+
+    static func loginPollURL(_ server: URL) -> URL {
+        server.appendingPathComponent("api/cli/login/poll")
+    }
+
+    /// The provider's sign-in page for one device login.
+    static func browserLoginURL(_ server: URL, provider: SignInProvider, deviceCode: String) -> URL {
+        var components = URLComponents(url: server.appendingPathComponent("cli/oauth/\(provider.rawValue)/start"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "device_code", value: deviceCode)]
         return components.url!
     }
 
@@ -87,7 +94,7 @@ enum RudderLinks {
     static func restorable(_ string: String?, server: URL) -> URL? {
         guard let string, let url = URL(string: string), isInApp(url, server: server) else { return nil }
         let path = url.path
-        guard path == "/app" || path.hasPrefix("/app/"), path != "/app/login", !path.hasPrefix("/app/native-done") else {
+        guard path == "/app" || path.hasPrefix("/app/"), path != "/app/login" else {
             return nil
         }
         return url
@@ -105,17 +112,56 @@ enum RudderLinks {
     }
 }
 
-/// rudder:// links: the sign-in callback and laptop pairing codes.
-enum AuthCallback {
-    /// rudder://auth?token=rdr_... -> the bearer token.
-    static func token(from url: URL) -> String? {
-        guard url.scheme?.lowercased() == "rudder", url.host?.lowercased() == "auth",
-              let value = query(url, "token") else { return nil }
-        let token = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard token.range(of: "^rdr_[A-Za-z0-9._~+/=-]{8,512}$", options: .regularExpression) != nil else { return nil }
-        return token
+enum SignInProvider: String {
+    case google, github
+}
+
+/// The device login's replies: `POST /api/cli/login` starts one, and
+/// `POST /api/cli/login/poll` says whether the browser has finished it.
+enum DeviceSignIn {
+    struct Start: Decodable, Equatable {
+        var deviceCode: String
+        /// Seconds between polls.
+        var interval: Int
+        /// Seconds until the login expires.
+        var expiresIn: Int
     }
 
+    enum Poll: Equatable {
+        case waiting
+        case signedIn(token: String)
+        case denied
+        /// Gone: expired, or its token was already picked up.
+        case expired
+    }
+
+    struct Failure: LocalizedError, Equatable {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    static func start(status: Int, body: Data) throws -> Start {
+        guard status == 200 else { throw Failure(message: "Could not start signing in (HTTP \(status)).") }
+        return try JSONDecoder().decode(Start.self, from: body)
+    }
+
+    static func poll(status: Int, body: Data) throws -> Poll {
+        if status == 404 { return .expired }
+        guard status == 200, let reply = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            throw Failure(message: "Signing in failed (HTTP \(status)).")
+        }
+        if reply["pending"] as? Bool == true { return .waiting }
+        if reply["denied"] as? Bool == true { return .denied }
+        guard let token = reply["token"] as? String,
+              token.range(of: "^rdr_[A-Za-z0-9._~+/=-]{8,512}$", options: .regularExpression) != nil else {
+            throw Failure(message: "Signing in returned no token.")
+        }
+        return .signedIn(token: token)
+    }
+}
+
+/// rudder:// links: laptop pairing codes. Sign-in tokens never arrive by link.
+enum AuthCallback {
     /// rudder://pair?code=ABCD-EFGH -> the code.
     static func pairCode(from url: URL) -> String? {
         guard url.scheme?.lowercased() == "rudder", url.host?.lowercased() == "pair",

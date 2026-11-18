@@ -57,6 +57,8 @@ type DeviceLogin = {
   userCode?: string;
   /** What the CLI called the computer (its hostname), shown on the phone. */
   deviceName?: string;
+  /** Who is polling: the Mac app or the CLI. Picks the browser's "you're in" page. */
+  client: "mac" | "cli";
   /** The phone said no: the CLI's next poll stops waiting. */
   denied?: boolean;
   approvedOnPhone?: boolean;
@@ -1817,7 +1819,13 @@ async function handleCliLoginStart(req: IncomingMessage, res: ServerResponse): P
   while (cliUserCodes.has(userCode)) {
     userCode = newCliUserCode();
   }
-  deviceLogins.set(deviceCode, { deviceCode, expiresAt, userCode, deviceName: cleanDeviceName(stringField(body, "deviceName")) });
+  deviceLogins.set(deviceCode, {
+    deviceCode,
+    expiresAt,
+    userCode,
+    deviceName: cleanDeviceName(stringField(body, "deviceName")),
+    client: stringField(body, "client") === "mac" ? "mac" : "cli",
+  });
   cliUserCodes.set(userCode, deviceCode);
   const loginBase = publicLoginUrl || `${baseURL}/cli/login`;
   const separator = loginBase.includes("?") ? "&" : "?";
@@ -2219,7 +2227,7 @@ async function handleCliGithubWait(url: URL, res: ServerResponse): Promise<void>
     login.accountId = issued.accountId;
     login.email = issued.email;
     githubBrowserLogins.delete(deviceCode);
-    renderSuccessPage(res, login.email);
+    renderSuccessPage(res, login);
     return;
   }
   if (poll.error === "slow_down") {
@@ -2396,7 +2404,7 @@ async function handleCliApprove(req: IncomingMessage, res: ServerResponse, url: 
   login.token = issued.token;
   login.accountId = issued.accountId;
   login.email = verifiedEmail;
-  renderSuccessPage(res, login.email);
+  renderSuccessPage(res, login);
 }
 
 async function handleAdminWorkspaceGc(
@@ -5070,13 +5078,29 @@ function renderHome(res: ServerResponse): void {
   }));
 }
 
-function renderSuccessPage(res: ServerResponse, email?: string): void {
+function renderSuccessPage(res: ServerResponse, login: DeviceLogin): void {
+  const signedInAs = login.email ? `Signed in as <strong>${escapeHtml(login.email)}</strong>. ` : "";
+  if (login.client === "mac") {
+    // rudder:// with no token only brings the app forward: the Mac app gets
+    // its token by polling, never from a link.
+    sendHtml(res, renderShell({
+      title: "Signed in · Rudder",
+      body: `
+      <section class="hero">
+        <h1>You're in.</h1>
+        <p class="lede">${signedInAs}Rudder on your Mac is signed in. You can close this tab.</p>
+        <p><a class="btn-primary" href="rudder://open">Open Rudder</a></p>
+      </section>
+    `,
+    }));
+    return;
+  }
   sendHtml(res, renderShell({
     title: "Signed in · Rudder Cloud",
     body: `
       <section class="hero">
         <h1>You're in.</h1>
-        <p class="lede">${email ? `Signed in as <strong>${escapeHtml(email)}</strong>. ` : ""}You can close this tab. The Rudder CLI will pick up the session in a moment.</p>
+        <p class="lede">${signedInAs}You can close this tab. The Rudder CLI will pick up the session in a moment.</p>
         <div class="card">
           <span class="pill">Logged in</span>
           <p class="muted" style="margin-top:14px">Try it next:</p>

@@ -1,26 +1,27 @@
 import AppKit
-import AuthenticationServices
 import Foundation
 import Observation
 import Security
 import WebKit
 
-/// Who is signed in, and how to sign in. The macOS twin of ios/App/Session.swift.
+/// Who is signed in, and how to sign in.
 ///
-/// Sign-in runs Google (or GitHub) in an `ASWebAuthenticationSession` against
-/// `/app/login?native=1`, which ends at `rudder://auth?token=rdr_...`: a bearer
-/// token for the same account `rudder login` uses. It lives in the Keychain
-/// and is handed to the web app at document start.
+/// Sign-in is the device login `rudder login` uses, in the default browser:
+/// start a login, open Google (or GitHub) for it, and poll until the control
+/// plane hands back a bearer `rdr_` token. Only this Mac knows the device
+/// code, so no link can sign it into someone else's account. The token lives
+/// in the Keychain and is handed to the web app at document start.
 @MainActor
 @Observable
 final class Session {
     private(set) var token: String?
     var signingIn = false
+    /// The browser is open on the sign-in page and this Mac is polling.
+    private(set) var waitingForBrowser = false
     var errorMessage: String?
 
     let server: URL
-    private var authSession: ASWebAuthenticationSession?
-    private let anchor = PresentationAnchor()
+    private var signInTask: Task<Void, Never>?
 
     init() {
         let override = ProcessInfo.processInfo.environment["RUDDER_CLOUD_URL"]
@@ -31,48 +32,82 @@ final class Session {
 
     var appURL: URL { RudderLinks.appURL(server) }
 
-    func signIn(provider: String = "google") {
+    func signIn(_ provider: SignInProvider) {
         guard !signingIn else { return }
         errorMessage = nil
         signingIn = true
-        let session = ASWebAuthenticationSession(
-            url: RudderLinks.loginURL(server, provider: provider),
-            callbackURLScheme: "rudder"
-        ) { [weak self] url, error in
-            Task { @MainActor in
-                self?.finishSignIn(url: url, error: error)
-            }
-        }
-        session.presentationContextProvider = anchor
-        // The default browser's cookies, so an existing Google session is reused.
-        session.prefersEphemeralWebBrowserSession = false
-        authSession = session
-        if !session.start() {
+        signInTask = Task { await browserSignIn(provider) }
+    }
+
+    /// Stops waiting. The browser tab stays open; its login simply expires.
+    func cancelSignIn() {
+        signInTask?.cancel()
+    }
+
+    private func browserSignIn(_ provider: SignInProvider) async {
+        defer {
             signingIn = false
-            authSession = nil
-            errorMessage = "Could not open the sign-in window."
+            waitingForBrowser = false
+            signInTask = nil
+        }
+        do {
+            let login = try await startDeviceLogin()
+            let page = RudderLinks.browserLoginURL(server, provider: provider, deviceCode: login.deviceCode)
+            guard NSWorkspace.shared.open(page) else {
+                errorMessage = "Could not open your browser."
+                return
+            }
+            waitingForBrowser = true
+            let deadline = ContinuousClock.now + .seconds(login.expiresIn)
+            while ContinuousClock.now < deadline {
+                try await Task.sleep(for: .seconds(login.interval))
+                switch try await pollDeviceLogin(login.deviceCode) {
+                case .waiting:
+                    continue
+                case .signedIn(let token):
+                    Keychain.write(token)
+                    self.token = token
+                    NSApp.activate()
+                    return
+                case .denied:
+                    errorMessage = "The sign-in was denied on your phone."
+                    return
+                case .expired:
+                    errorMessage = "The sign-in expired. Try again."
+                    return
+                }
+            }
+            errorMessage = "The sign-in expired. Try again."
+        } catch is CancellationError {
+            // Cancelled on the sign-in screen.
+        } catch let error as URLError where error.code == .cancelled {
+            // Cancelled mid-request.
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
-    private func finishSignIn(url: URL?, error: Error?) {
-        signingIn = false
-        authSession = nil
-        if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
-            return
+    private func startDeviceLogin() async throws -> DeviceSignIn.Start {
+        let body = ["deviceName": ProcessInfo.processInfo.hostName, "client": "mac"]
+        let (data, status) = try await post(RudderLinks.loginStartURL(server), body)
+        return try DeviceSignIn.start(status: status, body: data)
+    }
+
+    private func pollDeviceLogin(_ deviceCode: String) async throws -> DeviceSignIn.Poll {
+        let (data, status) = try await post(RudderLinks.loginPollURL(server), ["deviceCode": deviceCode])
+        return try DeviceSignIn.poll(status: status, body: data)
+    }
+
+    private func post(_ url: URL, _ body: [String: String]) async throws -> (Data, Int) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw DeviceSignIn.Failure(message: "Signing in got a reply that was not HTTP.")
         }
-        if let error {
-            errorMessage = error.localizedDescription
-            return
-        }
-        if let url, let token = AuthCallback.token(from: url) {
-            Keychain.write(token)
-            self.token = token
-        } else {
-            // The server says why (an email already signed up another way, a
-            // cancelled or expired sign-in).
-            let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
-            errorMessage = items.first(where: { $0.name == "message" })?.value ?? "Sign-in did not finish. Try again."
-        }
+        return (data, http.statusCode)
     }
 
     /// Sign in with a one-time code from `rudder cloud app` on another computer.
@@ -100,9 +135,8 @@ final class Session {
         }
     }
 
-    /// rudder://pair?code=... while signed out. rudder://auth is only ever
-    /// accepted from the sign-in session above: a token arriving from any
-    /// other link could sign this Mac into someone else's account.
+    /// rudder://pair?code=... while signed out. Any other rudder:// link (the
+    /// browser's "Open Rudder" after sign-in) only brings the app forward.
     func handle(url: URL) {
         guard token == nil, let code = AuthCallback.pairCode(from: url) else { return }
         Task { await pair(code: code) }
@@ -124,15 +158,6 @@ final class Session {
             request.setValue("Bearer \(revoked)", forHTTPHeaderField: "Authorization")
             // Best effort: signed out on this Mac whether or not it lands.
             URLSession.shared.dataTask(with: request).resume()
-        }
-    }
-}
-
-/// The window the sign-in sheet attaches to.
-private final class PresentationAnchor: NSObject, ASWebAuthenticationPresentationContextProviding {
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        MainActor.assumeIsolated {
-            NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible) ?? ASPresentationAnchor()
         }
     }
 }

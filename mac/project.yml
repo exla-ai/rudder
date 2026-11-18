@@ -1,6 +1,6 @@
 # Rudder for macOS. A native shell around the Rudder app (/app on the control
-# plane), the macOS twin of ../ios: Google sign-in through
-# ASWebAuthenticationSession, the bearer token in the Keychain, the app UI in a
+# plane), the macOS twin of ../ios: Google sign-in in the default browser
+# (the CLI's device login), the bearer token in the Keychain, the app UI in a
 # WKWebView, plus a menu bar item and pulling cloud agents onto this Mac.
 # Distributed with Developer ID (not the App Store): no sandbox, hardened runtime.
 #

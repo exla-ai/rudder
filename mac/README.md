@@ -3,8 +3,10 @@
 A native shell around the Rudder app (`/app` on the control plane), the macOS
 twin of `../ios`. It adds what a browser tab cannot do:
 
-- Sign in with Google or GitHub through `ASWebAuthenticationSession`
-  (`/app/login?native=1` ends at `rudder://auth?token=rdr_...`). The token is a
+- Sign in with Google or GitHub in the default browser, through the device
+  login `rudder login` uses: `POST /api/cli/login` (with `client: "mac"`),
+  open `/cli/oauth/<provider>/start?device_code=...`, poll
+  `/api/cli/login/poll` until it returns an `rdr_` token. The token is a
   generic password in the login keychain (service `ai.exla.rudder`). Sign Out
   (app menu, or the page's `signOut`) deletes it.
 - A menu bar item that lists the agents that need you, polled every 30s, with a
@@ -131,9 +133,34 @@ RUDDER_NOTARY_PROFILE=rudder-notary mac/scripts/build.sh
 It generates the project, runs RudderCoreTests, archives a universal
 (arm64 + x86_64) Release build signed with Developer ID, hardened runtime and a
 secure timestamp, checks the signature, notarizes and staples the app, builds
-`mac/build/Rudder.dmg` (app + Applications link), signs, notarizes and staples
-the DMG, runs `spctl` on both, and prints the SHA-256.
+`mac/build/Rudder.dmg` with `mac/scripts/make-dmg.sh`, signs, notarizes and
+staples the DMG, runs `spctl` on both, and prints the SHA-256.
 `RUDDER_SKIP_NOTARIZE=1` gives a signed, unnotarized build for local testing.
+
+### DMG window
+
+`make-dmg.sh <Rudder.app> <out.dmg>` lays out the Finder window with
+[dmgbuild](https://pypi.org/project/dmgbuild/) 1.6.7 (pinned, in a throwaway
+venv; needs Python 3.10+, so Homebrew's `python3`, not Xcode's 3.9). Settings are
+in `mac/dmg/settings.py`: 660x420, 128pt icons, Rudder at (170, 196) and
+Applications at (490, 196), LZFSE-compressed, the app icon as the volume icon.
+The release workflow (`.github/workflows/mac.yml`) uses the same script.
+
+The art is light on purpose: Finder keeps icon labels dark on a background
+picture. `mac/dmg/background.py` writes `background.svg` (paper, faint chart
+contours, a wake from Rudder into ripples around Applications, with a gap in the
+rings for the label). After changing it, render both PNGs; dmgbuild joins them
+into one Retina TIFF:
+
+```bash
+python3 mac/dmg/background.py
+for s in 1 2; do
+  chrome --headless=new --hide-scrollbars --force-device-scale-factor=$s \
+    --window-size=660,420 --virtual-time-budget=8000 \
+    --screenshot="mac/dmg/background$([ $s = 2 ] && echo @2x).png" \
+    "file://$PWD/mac/dmg/background.svg"
+done
+```
 
 Bump `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in `project.yml` per release.
 

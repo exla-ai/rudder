@@ -18,11 +18,12 @@ final class RudderCoreTests: XCTestCase {
 
     func testAppAndLoginURLs() {
         XCTAssertEqual(RudderLinks.appURL(server).absoluteString, "https://rudder.example.com/app")
-        XCTAssertEqual(RudderLinks.loginURL(server).absoluteString, "https://rudder.example.com/app/login?native=1&provider=google")
-        XCTAssertEqual(RudderLinks.loginURL(server, provider: "github").absoluteString,
-                       "https://rudder.example.com/app/login?native=1&provider=github")
-        XCTAssertEqual(RudderLinks.loginURL(server, provider: "evil").absoluteString,
-                       "https://rudder.example.com/app/login?native=1&provider=google")
+        XCTAssertEqual(RudderLinks.loginStartURL(server).absoluteString, "https://rudder.example.com/api/cli/login")
+        XCTAssertEqual(RudderLinks.loginPollURL(server).absoluteString, "https://rudder.example.com/api/cli/login/poll")
+        XCTAssertEqual(RudderLinks.browserLoginURL(server, provider: .google, deviceCode: "6f1c2a9e-0b7d-4e3a-9c55-1d2e3f4a5b6c").absoluteString,
+                       "https://rudder.example.com/cli/oauth/google/start?device_code=6f1c2a9e-0b7d-4e3a-9c55-1d2e3f4a5b6c")
+        XCTAssertEqual(RudderLinks.browserLoginURL(server, provider: .github, deviceCode: "d1").absoluteString,
+                       "https://rudder.example.com/cli/oauth/github/start?device_code=d1")
         XCTAssertEqual(RudderLinks.stateURL(server).absoluteString, "https://rudder.example.com/api/app/state?passive=1")
     }
 
@@ -56,14 +57,27 @@ final class RudderCoreTests: XCTestCase {
 
     // MARK: rudder:// links
 
-    func testTokenFromCallback() {
-        XCTAssertEqual(AuthCallback.token(from: URL(string: "rudder://auth?token=rdr_abcDEF123-_x")!), "rdr_abcDEF123-_x")
-        XCTAssertNil(AuthCallback.token(from: URL(string: "rudder://auth?token=abc12345678")!))
-        XCTAssertNil(AuthCallback.token(from: URL(string: "rudder://pair?token=rdr_abcDEF123")!))
-        XCTAssertNil(AuthCallback.token(from: URL(string: "https://auth?token=rdr_abcDEF123")!))
-        XCTAssertNil(AuthCallback.token(from: URL(string: "rudder://auth?token=rdr_short")!))
-        XCTAssertNil(AuthCallback.token(from: URL(string: "rudder://auth")!))
-        XCTAssertNil(AuthCallback.token(from: URL(string: "rudder://auth?token=rdr_abc%20def12345")!))
+    // MARK: Device sign-in
+
+    func testDeviceSignInStart() throws {
+        let body = Data(#"{"deviceCode":"d1","loginUrl":"x","pollUrl":"/api/cli/login/poll","interval":2,"expiresIn":600}"#.utf8)
+        XCTAssertEqual(try DeviceSignIn.start(status: 200, body: body), .init(deviceCode: "d1", interval: 2, expiresIn: 600))
+        XCTAssertThrowsError(try DeviceSignIn.start(status: 500, body: body))
+        XCTAssertThrowsError(try DeviceSignIn.start(status: 200, body: Data(#"{"deviceCode":"d1"}"#.utf8)))
+    }
+
+    func testDeviceSignInPoll() throws {
+        func poll(_ status: Int, _ json: String) throws -> DeviceSignIn.Poll {
+            try DeviceSignIn.poll(status: status, body: Data(json.utf8))
+        }
+        XCTAssertEqual(try poll(200, #"{"pending":true}"#), .waiting)
+        XCTAssertEqual(try poll(200, #"{"pending":false,"token":"rdr_abcDEF123-_x","email":"a@b.c"}"#), .signedIn(token: "rdr_abcDEF123-_x"))
+        XCTAssertEqual(try poll(200, #"{"pending":false,"denied":true,"error":"no"}"#), .denied)
+        XCTAssertEqual(try poll(404, #"{"error":"login expired"}"#), .expired)
+        XCTAssertThrowsError(try poll(200, #"{"pending":false,"token":"abc12345678"}"#))
+        XCTAssertThrowsError(try poll(200, #"{"pending":false,"token":"rdr_short"}"#))
+        XCTAssertThrowsError(try poll(200, #"{"pending":false}"#))
+        XCTAssertThrowsError(try poll(502, "<html>"))
     }
 
     func testPairCode() {

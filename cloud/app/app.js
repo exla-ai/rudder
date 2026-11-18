@@ -576,6 +576,14 @@ document.addEventListener("click", (e) => {
   if (external && NATIVE) { e.preventDefault(); openExternal(a.href); }
   else if (external && a.target !== "_blank") { a.target = "_blank"; a.rel = "noopener noreferrer"; }
 });
+// A file dropped anywhere but a composer must not open in place of the app.
+for (const type of ["dragover", "drop"]) {
+  document.addEventListener(type, (e) => {
+    if (e.defaultPrevented || ![...e.dataTransfer.types].includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "none";
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* Screen mounting                                                     */
@@ -654,7 +662,7 @@ PLAN_COLUMN_MQ.addEventListener?.("change", () => updateScreen());
 function DesktopShell() {
   const el = h(`<div class="dsk">
     <nav class="dsk-side" aria-label="Projects and agents">
-      <div class="ds-top"><a class="brand ds-brand" href="/app" data-link><img src="/app/icon.svg" alt=""><span>Rudder</span></a></div>
+      <div class="ds-top"><a class="brand ds-brand" href="/app" data-link><img src="/app/icon.svg" alt=""><span>Rudder</span></a><button type="button" class="ds-side-btn ds-hide" aria-label="Hide sidebar">${icon("sidebar")}</button></div>
       <div class="ds-scroll">
         <div class="ds-sec ds-needs" hidden><div class="ds-h"><span>Needs you</span><span class="ds-c"></span></div><div class="ds-list ds-needs-list"></div></div>
         <div class="ds-sec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div></div>
@@ -667,6 +675,8 @@ function DesktopShell() {
     </nav>
     <div class="dsk-main"></div>
     <aside class="dsk-plan" hidden aria-label="Plan"></aside>
+    <div class="ds-grip" aria-hidden="true"></div>
+    <button type="button" class="ds-side-btn ds-show" aria-label="Show sidebar">${icon("sidebar")}</button>
   </div>`);
   const main = el.querySelector(".dsk-main");
   const planCol = el.querySelector(".dsk-plan");
@@ -676,11 +686,68 @@ function DesktopShell() {
   el.querySelector(".ds-add").addEventListener("click", () => openAddProject());
   const openSet = new Set(ls.get("rudder.sideOpen", []));
   const saveOpen = () => ls.set("rudder.sideOpen", [...openSet]);
+  let openedFor;
   let planView = null;
   let route = null;
+  const life = new AbortController();
+
+  // The sidebar's edge drags to resize it; past half its narrowest width it
+  // hides. Dragging from the window's left edge, the show button or Ctrl+Cmd+S
+  // brings it back. Width and hidden state belong to this viewer.
+  const SIDE_MIN = 200, SIDE_MAX = 440;
+  const nav = el.querySelector(".dsk-side");
+  const grip = el.querySelector(".ds-grip");
+  const hideBtn = el.querySelector(".ds-hide");
+  const showBtn = el.querySelector(".ds-show");
+  let sideWidth = ls.get("rudder.sideWidth"); // null: the layout's own width
+  let sideClosed = ls.get("rudder.sideClosed") === true;
+  const paintSide = () => {
+    if (sideWidth) document.body.style.setProperty("--side-w", `${sideWidth}px`);
+    else document.body.style.removeProperty("--side-w");
+    document.body.classList.toggle("side-closed", sideClosed);
+  };
+  const saveSide = () => { ls.set("rudder.sideWidth", sideWidth); ls.set("rudder.sideClosed", sideClosed); };
+  const setSideClosed = (closed) => { sideClosed = closed; paintSide(); saveSide(); };
+  const shortcut = /Mac/.test(navigator.platform) ? " (Ctrl+Cmd+S)" : "";
+  hideBtn.title = `Hide sidebar${shortcut}`;
+  showBtn.title = `Show sidebar${shortcut}`;
+  hideBtn.addEventListener("click", () => { setSideClosed(true); showBtn.focus(); });
+  showBtn.addEventListener("click", () => { setSideClosed(false); hideBtn.focus(); });
+  document.addEventListener("keydown", (e) => {
+    if (!e.metaKey || !e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "s") return;
+    e.preventDefault();
+    setSideClosed(!sideClosed);
+  }, { signal: life.signal });
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const left = el.getBoundingClientRect().left;
+    // An open edge stays where it was grabbed, not under the grip's middle; a
+    // hidden one comes out under the pointer.
+    const offset = sideClosed ? 0 : nav.getBoundingClientRect().width - (e.clientX - left);
+    const startWidth = sideWidth;
+    const drag = new AbortController();
+    el.classList.add("resizing");
+    grip.addEventListener("pointermove", (ev) => {
+      const x = ev.clientX - left + offset;
+      sideClosed = x < SIDE_MIN / 2;
+      if (!sideClosed) sideWidth = Math.round(Math.min(SIDE_MAX, window.innerWidth * 0.45, Math.max(SIDE_MIN, x)));
+      paintSide();
+    }, { signal: drag.signal });
+    grip.addEventListener("lostpointercapture", () => {
+      drag.abort();
+      el.classList.remove("resizing");
+      // Dragged shut: it opens again at the width it had.
+      if (sideClosed) sideWidth = startWidth;
+      paintSide(); saveSide();
+    }, { signal: drag.signal });
+  });
+  paintSide();
 
   const sideAgent = (x) => {
-    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"></span></span></a>`);
+    // The status line: in "Needs you" the project name gives way before the status does.
+    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span></a>`);
     return a;
   };
   const paintAgent = (a, { p, a: ag, showProject }) => {
@@ -689,7 +756,11 @@ function DesktopShell() {
     a.querySelector(".dot").classList.toggle("live", !!st.live);
     if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
     setText(a.querySelector(".ds-an"), ag.title || ag.task || "Untitled agent");
-    setText(a.querySelector(".ds-as"), showProject ? `${p.name} · ${st.label}` : st.label);
+    const ap = a.querySelector(".ds-ap");
+    setText(ap, showProject ? p.name : "");
+    ap.hidden = !showProject;
+    a.querySelector(".ds-sep").hidden = !showProject;
+    setText(a.querySelector(".ds-sl"), st.label);
     const here = route?.name === "agent" && route.ws === p.workspaceId && route.run === ag.id;
     a.classList.toggle("on", here);
     if (here) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -720,12 +791,17 @@ function DesktopShell() {
       if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
       return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
     });
-    const here = route?.ws;
-    if (here && !openSet.has(here)) { openSet.add(here); saveOpen(); }
+    // Arriving on a project or one of its agents opens that project once.
+    // Every refresh repaints too, so opening it on each paint would undo the
+    // chevron for the project on screen.
+    if (route?.path !== openedFor) {
+      openedFor = route?.path;
+      if (route?.ws && !openSet.has(route.ws)) { openSet.add(route.ws); saveOpen(); }
+    }
     // reconcile keeps unkeyed children, so the "Loading…" placeholder goes by hand.
     if (projects.length) projectsEl.querySelector(":scope > .ds-none")?.remove();
     reconcile(projectsEl, projects, (p) => p.workspaceId,
-      () => h(`<div class="ds-proj"><div class="ds-prow"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link><span class="ds-pname"></span><span class="ds-pc"></span></a></div><div class="ds-agents" role="list"></div></div>`),
+      () => h(`<div class="ds-proj"><div class="ds-prow"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link><span class="ds-pname"></span><span class="ds-pc"></span></a><button type="button" class="ds-pin" aria-pressed="false">${icon("pin")}</button></div><div class="ds-agents" role="list"></div></div>`),
       (pEl, p) => {
         const ws = p.workspaceId;
         const open = openSet.has(ws);
@@ -733,6 +809,14 @@ function DesktopShell() {
         tw.setAttribute("aria-expanded", String(open));
         tw.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${p.name}`);
         tw.onclick = () => { if (openSet.has(ws)) openSet.delete(ws); else openSet.add(ws); saveOpen(); update(); };
+        // Pinned projects sit first, as on the home screen; the pin shows on hover, and always once pinned.
+        const pinned = !!pinnedAt(p);
+        pEl.classList.toggle("pinned", pinned);
+        const pin = pEl.querySelector(".ds-pin");
+        pin.setAttribute("aria-pressed", String(pinned));
+        pin.setAttribute("aria-label", pinned ? `Unpin ${p.name || "project"}` : `Pin ${p.name || "project"} to the top`);
+        pin.title = pinned ? "Unpin" : "Pin to the top";
+        pin.onclick = () => setPinned(ws, !pEl.classList.contains("pinned"));
         const link = pEl.querySelector(".ds-pn");
         link.href = projectPath(ws);
         setText(pEl.querySelector(".ds-pname"), p.name || p.repo);
@@ -779,7 +863,15 @@ function DesktopShell() {
     planView.update(p);
     for (const n of planCol.querySelectorAll(".pv-node")) n.classList.toggle("on", !!route?.run && n.getAttribute("href") === agentPath(p.workspaceId, route.run));
   }
-  return { el, main, update, destroy() { el.remove(); document.body.classList.remove("desktop"); } };
+  return {
+    el, main, update,
+    destroy() {
+      life.abort();
+      el.remove();
+      document.body.classList.remove("desktop", "side-closed");
+      document.body.style.removeProperty("--side-w");
+    },
+  };
 }
 
 /* Shared pieces ------------------------------------------------------ */
@@ -1032,6 +1124,46 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
     input.addEventListener("change", () => {
       addFiles([...(input.files || [])]);
       input.value = "";
+      ta.focus();
+    });
+    // A pasted screenshot or a file copied in Finder attaches like a picked one.
+    el.addEventListener("paste", (e) => {
+      const pasted = [...e.clipboardData.files];
+      if (!pasted.length) return;
+      // A table or styled text copied from another app often carries a
+      // picture of itself as well: the text is what was meant.
+      if (e.clipboardData.getData("text/plain") && pasted.every((f) => /^image\//.test(f.type))) return;
+      e.preventDefault();
+      addFiles(pasted);
+    });
+    // So does a file dropped on the composer.
+    const carriesFiles = (e) => [...e.dataTransfer.types].includes("Files");
+    let dragDepth = 0;
+    el.addEventListener("dragenter", (e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      dragDepth += 1;
+      el.classList.add("drop-over");
+    });
+    el.addEventListener("dragover", (e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    });
+    el.addEventListener("dragleave", (e) => {
+      if (!carriesFiles(e)) return;
+      dragDepth -= 1;
+      if (dragDepth <= 0) { dragDepth = 0; el.classList.remove("drop-over"); }
+    });
+    el.addEventListener("drop", (e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      el.classList.remove("drop-over");
+      const dropped = [...e.dataTransfer.items].filter((i) => i.kind === "file")
+        .map((i) => ({ file: i.getAsFile(), folder: !!i.webkitGetAsEntry()?.isDirectory }));
+      if (dropped.some((d) => d.folder)) toast("Folders can't be attached. Drop the files inside instead.", { error: true });
+      addFiles(dropped.filter((d) => !d.folder).map((d) => d.file));
       ta.focus();
     });
   }

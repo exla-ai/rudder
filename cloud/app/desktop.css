@@ -240,12 +240,33 @@
 }
 
 body.desktop .view { max-width: none; border: 0; background: var(--bg); }
-.dsk { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: 100%; min-height: 0; }
-.dsk.with-plan { grid-template-columns: 272px minmax(0, 1fr) minmax(300px, 360px); }
-.dsk-side {
-  display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--bg);
-  padding-left: var(--sal);
+/* --side-w is the sidebar's open width (set inline once the viewer drags it);
+   --side is the column it takes, 0 while hidden. */
+body.desktop { --side-w: 272px; --side-open: min(var(--side-w), 45vw); --side: var(--side-open); }
+body.desktop.side-closed { --side: 0px; }
+.dsk {
+  position: relative; display: grid; grid-template-columns: var(--side) minmax(0, 1fr); height: 100%; min-height: 0;
+  transition: grid-template-columns 200ms cubic-bezier(.2,.7,.2,1);
 }
+.dsk.with-plan { grid-template-columns: var(--side) minmax(0, 1fr) minmax(300px, 360px); }
+.dsk.resizing { transition: none; }
+.dsk.resizing, .dsk.resizing * { cursor: col-resize; -webkit-user-select: none; user-select: none; }
+.dsk-side {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  border-right: 1px solid var(--line); background: var(--bg); padding-left: var(--sal);
+}
+/* The content keeps its open width, so hiding slides it away instead of squeezing it. */
+.dsk-side > * { width: calc(var(--side-open) - var(--sal) - 1px); }
+body.side-closed .dsk-side { visibility: hidden; transition: visibility 0s 200ms; }
+/* The edge to drag: on the sidebar's border, or the window's left edge while it is hidden. */
+.ds-grip { position: absolute; top: 0; bottom: 0; left: max(0px, calc(var(--side) - 4px)); width: 8px; z-index: 8; cursor: col-resize; touch-action: none; }
+.ds-grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--accent); opacity: 0; transition: opacity 120ms; }
+.dsk.resizing .ds-grip::after { opacity: 0.6; }
+.ds-side-btn { flex: none; width: 34px; height: 34px; border: 0; border-radius: 9px; background: none; color: var(--muted); display: grid; place-items: center; }
+.ds-side-btn svg { width: 19px; height: 19px; }
+.ds-show { position: absolute; z-index: 8; top: calc(var(--sat) + 9px); left: calc(var(--sal) + 10px); display: none; }
+body.side-closed .ds-show { display: grid; }
+body.desktop.side-closed .dsk-main .topbar { padding-left: calc(var(--sal) + 52px); }
 .dsk-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-elev); }
 .dsk-main > .screen { width: 100%; }
 .dsk-plan { min-height: 0; overflow-y: auto; border-left: 1px solid var(--line); background: var(--bg); padding: 10px 14px 24px; overscroll-behavior: contain; }
@@ -265,7 +286,7 @@ body.desktop .dsk-main .topbar { padding-left: 16px; padding-right: 12px; }
 body.desktop .dsk-main .project-screen .back,
 body.desktop .dsk-main .digest-screen .back,
 body.desktop .dsk-main .settings-screen .back { display: none; }
-body.desktop .toasts { left: 272px; }
+body.desktop .toasts { left: var(--side); }
 
 .ds-top { display: flex; align-items: center; min-height: 56px; padding: 6px 10px 2px 6px; }
 .ds-brand { text-decoration: none; color: var(--ink); padding: 8px; border-radius: 10px; }
@@ -280,7 +301,11 @@ body.desktop .toasts { left: 272px; }
 .ds-agent.on { background: var(--surface-3); }
 .ds-at { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ds-an { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ds-as { font-size: 12px; color: var(--c, var(--muted)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ds-as { display: flex; gap: 4px; min-width: 0; font-size: 12px; color: var(--c, var(--muted)); white-space: nowrap; }
+.ds-ap, .ds-sl { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ds-ap { flex: 0 1000 auto; }
+.ds-sep { flex: none; }
+.ds-sl { flex: 0 1 auto; }
 .ds-agents { margin: 1px 0 6px 18px; padding-left: 6px; border-left: 1px solid var(--line); }
 .ds-agents .ds-agent { min-height: 36px; padding: 5px 8px; }
 .ds-prow { display: flex; align-items: center; gap: 2px; }
@@ -293,6 +318,11 @@ body.desktop .toasts { left: 272px; }
 .ds-pc { font-size: 11.5px; font-weight: 700; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; display: grid; place-items: center; }
 .ds-pc:empty { display: none; }
 .ds-pc[class*="s-"] { background: var(--cs); color: var(--c); }
+.ds-pin { width: 26px; height: 32px; border: 0; background: none; border-radius: 7px; color: var(--faint); display: grid; place-items: center; flex: none; opacity: 0; }
+.ds-pin svg { width: 15px; height: 15px; }
+.ds-pin:focus-visible, .ds-proj.pinned .ds-pin { opacity: 1; }
+.ds-proj.pinned .ds-pin { color: var(--accent); }
+.ds-proj.pinned .ds-pin svg path:nth-child(2) { fill: currentColor; }
 .ds-more { display: block; font-size: 12.5px; color: var(--muted); text-decoration: none; padding: 2px 10px 8px 52px; }
 .ds-none { font-size: 13px; color: var(--faint); padding: 6px 10px; }
 .ds-foot { border-top: 1px solid var(--line); padding: 8px 8px calc(var(--sab) + 10px); display: flex; flex-direction: column; gap: 2px; }
@@ -309,10 +339,18 @@ body.desktop .toasts { left: 272px; }
   .ds-add:hover { background: var(--surface-2); color: var(--ink); }
   .ds-agent:hover { background: var(--surface-2); }
   .ds-tw:hover { background: var(--surface-2); color: var(--ink-2); }
+  .ds-side-btn:hover { background: var(--surface-2); color: var(--ink); }
+  .ds-grip:hover::after { opacity: 0.6; transition-delay: 150ms; }
   .ds-pn:hover { background: var(--surface-2); }
+  .ds-prow:hover .ds-pin { opacity: 1; }
+  .ds-pin:hover { background: var(--surface-2); color: var(--ink-2); }
+  .ds-proj.pinned .ds-pin:hover { color: var(--accent); }
   .ds-more:hover { color: var(--ink); }
   .ds-link:hover { background: var(--surface-2); }
 }
+
+/* Without hover (an iPad), the pin stays in sight. */
+@media (hover: none) { .ds-pin { opacity: 1; } }
 
 /* In the iOS shell the page runs under the status bar. */
 .ds-top { padding-top: calc(var(--sat) + 6px); }
@@ -320,8 +358,7 @@ body.desktop .toasts { left: 272px; }
 
 /* An iPad in portrait: the sidebar and the screen, a little narrower. */
 @media (max-width: 1023px) {
-  .dsk { grid-template-columns: 248px minmax(0, 1fr); }
-  body.desktop .toasts { left: 248px; }
+  body.desktop { --side-w: 248px; }
 }
 
 /* The Mac app's window has its own titlebar inset. */

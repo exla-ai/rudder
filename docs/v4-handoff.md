@@ -136,12 +136,16 @@ mtime and the jj working-copy commit time, checked every 15 minutes off the
 App loop. The clock starts at the first scan in a project
 (`.rudder/cleanup-since`), so nothing is deleted on update; existing agents
 get a full day from then. Never collected: pinned, running or waiting, pending asks, cloud
-owned, mid-integration, unmerged plan nodes, orchestrators of a live plan.
-Every delete (`dd`, `cc`, the app, the cleanup) now deletes the conversation:
-each Claude session the record names (`session.previousSessionIds`, the edit
-cut copy included) with its folder, and Codex rollouts no remaining run's
-`history_base` chain needs. Workspace removal snapshots first, so the agent's
-jj change stays in `jj log`. Checked with native filter `untouched_agents` and
+owned, mid-integration, unmerged plan nodes, orchestrators of a live plan,
+finished work waiting for a merge, and merged work that is no longer in main.
+Every delete (`dd`, `cc`, the app, the cleanup) now deletes the conversations
+Rudder made for the agent and no other (`session.rudderSessionIds`: launches
+with `--session-id`, edit and branch copies, Codex forks, the Codex session a
+workspace agent's launch started): Claude sessions with their folder, and Codex
+rollouts no remaining run's `history_base` chain needs. A conversation the agent
+was switched to (`/resume`, a restored session) stays. Workspace removal
+snapshots first, so the agent's jj change stays in `jj log`; a workspace with
+no jj name is kept. Checked with native filter `untouched_agents` and
 a headless run against dev-mock.
 
 Branch an agent (local, unreleased): the app's row menu (Branch, with an
@@ -160,6 +164,19 @@ workspace, goal continuation deferred. Without a prompt the branch is Done,
 idle at its prompt. The cleanup keeps the source's conversation while a branch
 of it is being set up. Checked with native filter `branch` (fake CLIs; no real
 session was forked).
+
+All agents (local, unreleased): a button at the top of the app's sidebar
+(phone: the home top bar) opens one chat that talks to every agent in every
+project on the home: list, read, message, interrupt, start, answer prompts and
+watch for finished/failed/needs-you without polling. It is a Main agent in a
+hidden local project `rudder-all-agents` with an `all_agents` MCP server
+registered for that project only; every action goes through the owning
+project's steer inbox (engineering reference 9.8.2, "All agents"). The +
+button in the chat starts a new one; older chats are reachable only until the
+24-hour cleanup deletes them. Checked with `tests/coordinator.test.mjs`, a real
+`claude -p --model haiku` run against the broker with fake projects (all five
+read/write/wait tools), `codex mcp list` for the project config, and headless
+screenshots against dev-mock. Needs a worker image for homes to get it.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

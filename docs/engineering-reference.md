@@ -109,7 +109,7 @@ publishing; there is nothing to commit under `dist/`.
   │  hosts PTYs          │  spawns a detached `rudder __worker --repo --run <id>`
   │  reads run.json      ▼
   │  directly        __worker -> backend adapter (backends.ts)
-  │                      │  claude / codex(rudder-codex) / acpx, streamed as events
+  │                      │  claude / codex / acpx, streamed as events
   ▼                      ▼
  panes: Agents | Worker | Task     .rudder/runs/<id>/{run.json,events.ndjson,output.txt}
 ```
@@ -232,10 +232,10 @@ Implemented in `src/run-manager.ts`.
 3. **Backends** (`src/backends.ts`, `getBackend(id)` returns a `BackendAdapter`):
    - **claude**: spawns `claude`. New session: `--session-id <uuid>`. Resume:
      `--resume <id> --fork-session`. Effort mapped via `normalizeEffortForBackend`.
-   - **codex**: spawns the wrapped `rudder-codex` binary (see
-     `src/codex-binary.ts`: `ensureRudderCodexBinary`, `codexLaunchEnv`,
-     `CODEX_RUDDER_CONFIG_ARGS`) so Rudder controls config/auth without touching
-     the user's global Codex setup.
+   - **codex**: spawns the `codex` on PATH with Rudder's `-c` overrides
+     (`src/codex-config.ts`), so Rudder controls config without touching the
+     user's global Codex setup. Without `codex` on PATH the run fails with the
+     install command (`npm install -g @openai/codex`).
    - **acpx**: ensures a Codex session via `acpx codex sessions ensure --name`,
      then runs `acpx codex ...`.
    - All three funnel through `spawnAndStream(...)` which pipes child stdout/stderr
@@ -1359,12 +1359,39 @@ brain lives in the cloud, and the phone is a first-class client.
   writes `<id>.answer.json`, which the hook prints as the decision. Approvals:
   allow, allow always (`updatedPermissions` = Claude's suggestions), deny + reason.
   Questions (AskUserQuestion, bypass mode included): allow with `updatedInput.answers`
-  keyed by question text, multi-select joined ", ". Plans (ExitPlanMode): Claude
-  IGNORES a hook allow for a plan but takes deny + message as "revise", so approve is
-  the key `1` and revise is a deny. Claude does not cancel a hook whose dialog was
-  answered in the terminal: the hook watches the transcript for the call's
-  `tool_result` (or an interrupt) and withdraws. The app's stop-square sends Esc
-  (interrupt the turn, not the agent).
+  keyed by question text, multi-select joined ", "; the card shows an option's
+  `preview` (the picked one's, the first one's until then). Plans (ExitPlanMode):
+  Claude IGNORES a hook allow for a plan but takes deny + message as "revise", so
+  approve is the key `1` and revise is a deny. A deny's message reaches Claude as a
+  bare error result, so it is worded as the user's ("To tell you how to proceed, the
+  user said: ...", Claude's own words for the terminal's revise): unattributed, haiku
+  took a revision for an error and kept its plan (2.1.327). Claude does not cancel a
+  hook whose dialog was answered in the terminal: the hook watches the transcript for
+  the call's `tool_result` (or an interrupt) and withdraws. The app's stop-square
+  sends Esc (interrupt the turn, not the agent).
+- **Codex prompts come from its rollout** (`codexAsks` in `cloud/worker/asks.mjs`).
+  No hook covers them (measured on 0.170). Workers run with approvals off, so Codex
+  asks three ways. `request_user_input_async`, offered in every mode, is the one a
+  worker uses: the turn goes on and the questions wait in the pane's "Queued follow-up
+  inputs" until each gets a reply (a user message `<send_user_message_question_reply>`
+  whose `questionItemId` names the call and question) or the turn ends, which closes
+  the pane. In Plan mode, `request_user_input` blocks the pane until its
+  `function_call_output` or a turn end, and a plan (`item_completed` of type Plan,
+  then `task_complete`) waits on "Implement this plan?" until the next `task_started`,
+  or until a newer rollout in the same folder starts ("Yes, clear context and
+  implement" or `/new` writes nothing more to the old one). None survive the process.
+  The answer is keys in the pane (`codexAskSteps`): Down to the option and Enter per
+  question; text of your own is a `paste:<hex>` key (a bracketed paste,
+  `remote_input_bytes`) on the entry after the options ("None of the above" in Plan
+  mode, "Other" for async). Async questions sit behind the main prompt: one write of
+  Shift+Right (back out from any question) and Shift+Left (the first question), then
+  the answers in one more write; keys in the same write as that Shift+Left move the
+  highlight but Enter does nothing, and each answer wakes the model, so the answers
+  go together. Approve is `1`; revise is Esc, then the text as a normal message (in
+  one write, Esc and the paste read as Esc plus a literal `[200~`). Known gaps: a
+  plan menu dismissed in the terminal without a message keeps its card until the next
+  turn (approving it then types `1` into the prompt), and an async question skipped in
+  the terminal (Ctrl+]) writes nothing, so its card stays until the turn ends.
 - **A remote message is never typed into a menu.** The phone once "delivered" two
   messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
   reads a menu's or permission prompt's key hints off the bottom rows, and the steer
@@ -1643,7 +1670,8 @@ on the user's own Claude Code / Codex subscription.
   covered at once (`SERVER_ONLY_EVENTS`, which `/api/app/event` refuses):
   `app_active` (once per account, UTC day and platform, never from a passive
   poll), `message_sent`, `prompt_answered`, `agent_action` {action},
-  `plan_approved` {via app|voice}, `agent_pulled`, `voice_session_started`
+  `plan_approved` {via app|voice}, `agent_branched` {prompted},
+  `message_edited`, `agent_pulled`, `voice_session_started`
   {surface}, `voice_tool_used` {tool, ok, surface: phone|carplay|call} (the
   `onTool` hook on `VoiceContext`), `voice_call_started` / `voice_call_ended`
   {duration_s}, and `app_error` {route with ids replaced, status} for a 5xx on
@@ -1720,6 +1748,31 @@ on the user's own Claude Code / Codex subscription.
   stops the dashboards and publishes one last state (rows read Paused) before
   exiting. Slack holds a first needs-you for 2.5s (`NEEDS_DEBOUNCE_MS`) so an
   interrupt's blip is not posted.
+- **All agents** (`cloud/app/all-agents.js`, `cloud/worker/coordinator.mjs`,
+  2026-11-18): the button at the top of the sidebar (phone: the home top bar)
+  opens one chat that talks to every agent in every project. It is an ordinary
+  Main agent (`/main <message>`) in a hidden local project, `rudder-all-agents`
+  (slug `~rudder/rudder-all-agents`, `isCoordinatorRow`), so chat, transcript,
+  model picker, prompts and edit work unchanged. The server leaves that row out
+  of every project list (`homeProjects(home, { coordinator: true })` is the
+  app's `state.coordinator`; `rudder cloud list`, attach and sync skip it) and
+  the supervisor leaves it out of the digest. At each start the supervisor
+  writes the project's CLAUDE.md/AGENTS.md (the coordinator's instructions) and
+  registers the `all_agents` MCP server for that project only: `.mcp.json` +
+  `.claude/settings.json` for Claude, `.codex/config.toml` for Codex (trusted
+  projects only; it forwards `RUDDER_SCRATCH`), all git-excluded. The server is
+  `coordinator-mcp.mjs`, a stdio proxy to `$TMPDIR/rudder-all-agents.sock` in
+  the supervisor, which holds the tools: `list_agents`, `read_agent`,
+  `send_message`, `interrupt_agent`, `start_agent`, `answer_prompt`,
+  `wait_for_events`. Every write goes through the supervisor's own RPCs
+  (`send`, `keys` esc, `task`, `answer`), that is the owning project's steer
+  inbox, so each dashboard stays the one writer and scheduler of its agents.
+  `wait_for_events` diffs agent snapshots every 1.5 s (finished, failed,
+  stopped, started, needs you) for up to 15 minutes, and returns early when the
+  caller's own `lastUserInputAt` moves (the caller is the basename of its
+  `RUDDER_SCRATCH`, the run id), so a message typed into the chat is read at
+  once. `tests/coordinator.test.mjs` covers the event diff, the early return
+  and the MCP round trip.
 - **Not built yet**: the cloud agent using the Mac as a runner (xcodebuild /
   simulator on the user's Mac on the agent's behalf), Sparkle auto-update for the
   Mac app, and org-level shared credentials / SSO.
@@ -1757,7 +1810,7 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   reject is worse than offering no dial.
 - **Codex launch policy (4.0.0-alpha.17).** Every Codex CLI launch (native
   panes and TS workers) carries one config list, `CODEX_COMMON_CONFIG` (`native/src/launch.rs`), mirrored by
-  `CODEX_RUDDER_COMMON_CONFIG_ARGS` (`src/codex-binary.ts`); a test in
+  `CODEX_RUDDER_COMMON_CONFIG_ARGS` (`src/codex-config.ts`); a test in
   `tests/workflow-contracts.test.mjs` fails if they drift. It adds
   `model_auto_compact_token_limit=150000` and `tool_output_token_limit=6000`,
   and an effort is always sent: the chosen one, else `DEFAULT_EFFORT` (`high`).
@@ -2007,10 +2060,12 @@ rudder.viraat.dev 308-redirects there (site/vercel.json).
 - **The native dashboard reads `run.json` directly** and skips the TS load path,
   so it does not see the TS-side background summarizer's in-memory state. Persist
   through `saveRunRecord` and let the native side re-read.
-- **Codex binary and capability profiles.** `src/codex-binary.ts` prefers the user's
-  current `codex` on PATH (matching a direct session), with the checksum-pinned managed
-  `rudder-codex` binary only as a compatibility fallback; `RUDDER_CODEX_BIN` remains the
-  explicit override. Implementation/review/resume/shipping commands set
+- **Codex binary and capability profiles.** Every Codex agent runs the user's `codex`
+  on PATH, the same binary as a direct session. Nothing else resolves or downloads Codex,
+  and only a Codex launch needs it: a missing `codex` fails that launch with the install
+  command, while Claude agents and the dashboard start without it. `RUDDER_CODEX_BIN`
+  exists only for native test fakes (`codex_program()` in `native/src/launch.rs`).
+  Implementation/review/resume/shipping commands set
   `features.plugins=true` and `features.computer_use=true`. Read-only planner/conductor
   commands set both false. Keep the TS and Rust command builders in parity and retain
   `notify=[]` before `signals::augment_worker_command` installs the per-run notifier.
@@ -2270,7 +2325,7 @@ starts on every launch whether or not anyone opens the board.
 
 - New CLI command: add a `case` in `src/main.ts` and the implementation in the
   matching module (`run-manager.ts` / `cloud.ts` / `auth.ts`).
-- New backend behavior: `src/backends.ts` (`BackendAdapter`) + `src/codex-binary.ts`
+- New backend behavior: `src/backends.ts` (`BackendAdapter`) + `src/codex-config.ts`
   for Codex specifics.
 - Run isolation/merge/sync behavior: `src/jj.ts` (jj substrate) + `src/run-manager.ts`
   (routing); `src/git.ts` for the externally-git surface + legacy git runs.

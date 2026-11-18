@@ -1945,10 +1945,11 @@ Do NOT run `npm publish` by hand anymore. Hand-publishing is exactly what caused
 the drift, and it also ties the bundled native binary to whatever machine you
 publish from.
 
-Platforms: the release builds `rudder-native` on darwin-arm64, darwin-x64 and
-linux-x64 runners (`native-artifacts` matrix) and `copy-native` folds all three
-into `dist/native/<platform>-<arch>/`, so one package serves Apple Silicon,
-Intel Macs and Linux x64. Windows and linux-arm64 are not built.
+Platforms: the release builds `rudder-native` on darwin-arm64 and linux-x64
+runners (`native-artifacts` matrix) and `copy-native` folds both into
+`dist/native/<platform>-<arch>/`, so one package serves Apple Silicon Macs and
+Linux x64. Intel Macs, Windows and linux-arm64 are not built; the Mac app is
+arm64 only too.
 
 **Old package name retired (4.2.12).** The project moved from `viraatdas/rudder`
 to `exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from

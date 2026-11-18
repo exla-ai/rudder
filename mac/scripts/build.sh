@@ -80,8 +80,7 @@ xcodebuild archive \
   -project Rudder.xcodeproj -scheme Rudder -configuration Release \
   -destination 'generic/platform=macOS' -archivePath "$ARCHIVE" \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM" \
-  ENABLE_HARDENED_RUNTIME=YES OTHER_CODE_SIGN_FLAGS="--timestamp" \
-  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO
+  ENABLE_HARDENED_RUNTIME=YES OTHER_CODE_SIGN_FLAGS="--timestamp"
 
 ditto "$ARCHIVE/Products/Applications/Rudder.app" "$APP"
 

@@ -21,7 +21,6 @@ export const MANAGED_JJ_VERSION = "0.40.0";
 // sha256 of each release archive, from github.com/jj-vcs/jj/releases/tag/v0.40.0.
 export const MANAGED_JJ_ASSETS: Record<string, { target: string; sha256: string }> = {
   "darwin-arm64": { target: "aarch64-apple-darwin", sha256: "8a1d713103bb968c771617c9b2c48b0b5982193090ee74dec935bff710af2082" },
-  "darwin-x64": { target: "x86_64-apple-darwin", sha256: "ce62cf26e3c6c72a295f5917056e33cfa972874f882a2d15b5a3687b3ddce1e5" },
   "linux-x64": { target: "x86_64-unknown-linux-musl", sha256: "5c8979f46873e052f59bdd9535636dca6e6f9f70571b73f6d63c3b92acfaa037" },
   "linux-arm64": { target: "aarch64-unknown-linux-musl", sha256: "b26f24ff7a34838fbafe8788e6a94a9cdcf51601ef8c9af8fab4fa22c06ddbee" },
 };

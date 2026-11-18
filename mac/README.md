@@ -135,8 +135,8 @@ Then:
 RUDDER_NOTARY_PROFILE=rudder-notary mac/scripts/build.sh
 ```
 
-It generates the project, runs RudderCoreTests, archives a universal
-(arm64 + x86_64) Release build signed with Developer ID, hardened runtime and a
+It generates the project, runs RudderCoreTests, archives an Apple
+Silicon (arm64) Release build signed with Developer ID, hardened runtime and a
 secure timestamp, checks the signature, notarizes and staples the app, builds
 `mac/build/Rudder.dmg` with `mac/scripts/make-dmg.sh`, signs, notarizes and
 staples the DMG, runs `spctl` on both, and prints the SHA-256.

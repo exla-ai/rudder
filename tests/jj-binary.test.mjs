@@ -57,7 +57,7 @@ async function serve(t, bytes) {
 }
 
 test("every platform Rudder ships a jj for is pinned to a checksum", () => {
-  for (const key of ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"]) {
+  for (const key of ["darwin-arm64", "linux-x64", "linux-arm64"]) {
     const asset = managedJjAsset(...key.split("-"));
     assert.ok(asset, `${key} has a managed jj`);
     assert.match(asset.sha256, /^[0-9a-f]{64}$/);

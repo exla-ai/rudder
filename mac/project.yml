@@ -21,6 +21,8 @@ settings:
     # strict checking can be turned on once it builds clean under it.
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # Apple Silicon only: no Intel (x86_64) slice in any build.
+    ARCHS: arm64
     MARKETING_VERSION: "1.1.0"
     CURRENT_PROJECT_VERSION: "4"
 

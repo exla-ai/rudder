@@ -5,7 +5,7 @@ import {
 } from "/app/render.js";
 
 import {
-  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError,
+  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { ProjectFiles } from "/app/project-files.js";
@@ -2955,21 +2955,36 @@ function createAskCard(ask, { onAnswer }) {
   };
 
   if (kind === "plan") {
+    el.classList.add("plan");
+    const planText = String(input.plan || "The agent did not include the plan text.");
     const md = h(`<div class="ask-plan md"></div>`);
-    renderMarkdown(md, String(input.plan || "The agent did not include the plan text."));
+    renderMarkdown(md, planText);
     md.dataset.sig = `${markdownReady()}`;
     el._repaintMarkdown = () => {
       if (md.dataset.sig === `${markdownReady()}`) return;
-      renderMarkdown(md, String(input.plan || "")); md.dataset.sig = `${markdownReady()}`;
+      renderMarkdown(md, planText); md.dataset.sig = `${markdownReady()}`;
     };
     body.appendChild(md);
-    actions.append(
-      reasonFlow({
-        openLabel: "Revise…", openCls: "", placeholder: "What should change in the plan?", sendLabel: "Send revision",
-        required: true, build: (message) => ({ approve: false, message }),
-      }),
-      btn("Approve", "accent", () => answer({ approve: true }), "Approve the plan"),
-    );
+    const revise = reasonFlow({
+      openLabel: "Revise…", openCls: "", placeholder: "What should change in the plan?", sendLabel: "Send revision",
+      required: true, build: (message) => ({ approve: false, message }),
+    });
+    // The whole plan in a large reader, with the same two answers.
+    const expand = h(`<button type="button" class="btn small ask-expand">${icon("expand")}<span>Expand</span></button>`);
+    expand.setAttribute("aria-label", "Read the full plan");
+    expand.addEventListener("click", () => {
+      const sheet = openSheet({ title: "Plan", className: "plan-sheet" });
+      const full = h(`<div class="plan-read md"></div>`);
+      renderMarkdown(full, planText);
+      const bar = h(`<div class="ask-actions"></div>`);
+      bar.append(
+        btn("Revise…", "", () => { sheet.close(); revise.click(); }),
+        btn("Approve", "accent", () => { sheet.close(); answer({ approve: true }); }, "Approve the plan"),
+      );
+      sheet.body.append(full, bar);
+    });
+    el.querySelector(".ask-head").appendChild(expand);
+    actions.append(revise, btn("Approve", "accent", () => answer({ approve: true }), "Approve the plan"));
     return el;
   }
 

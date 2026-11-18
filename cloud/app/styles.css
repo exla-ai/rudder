@@ -851,10 +851,20 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .ask-diff span { display: block; padding: 0 12px; }
 .ask-diff .del { background: var(--failed-soft); color: var(--failed); }
 .ask-diff .add { background: var(--done-soft); color: var(--done); }
+/* A plan scrolls in one place (its own box), never inside a scrolling card;
+   Expand opens the whole plan in a large reader. */
+.ask-card.plan { max-height: none; overflow: visible; }
 .ask-plan {
-  max-height: 300px; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 12px;
+  max-height: min(46vh, calc(var(--vvh) - 280px)); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 10px 14px;
   border-radius: var(--radius-sm); background: var(--bg-elev); border: 1px solid var(--line); font-size: 14.5px; line-height: 1.5;
 }
+.ask-expand { flex: none; gap: 6px; }
+.ask-expand svg { width: 14px; height: 14px; }
+dialog.sheet.plan-sheet { max-width: 880px; }
+dialog.plan-sheet .dialog { height: 92vh; max-height: 92vh; }
+.plan-read { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 2px 8px 16px; font-size: 15.5px; line-height: 1.6; }
+.plan-read ol, .ask-plan ol { padding-left: 2.2em; }
+.plan-sheet .ask-actions { flex: none; margin-top: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .ask-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .ask-actions .btn { min-height: 40px; }
 .btn.danger-fill { background: var(--failed); color: #fff; border-color: transparent; }

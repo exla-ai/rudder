@@ -27,6 +27,27 @@ body.desktop .dsk-main .fh-screen .back { display: none; }
 .fh-loading { padding: 10px 4px; font-size: 13px; color: var(--muted); }
 .fh-note { margin: 4px 0 6px; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
 
+/* A part that could not load (sectionError): a card in Everywhere and the
+   compare view, one line inside a project. Calm: amber mark, readable text. */
+.fh-error {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; row-gap: 10px; align-items: start;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 11px 12px 12px;
+  font-size: 13px; line-height: 1.45;
+}
+.fh-error > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--needs); }
+.fh-error-title { display: block; font-weight: 600; color: var(--ink); }
+.fh-error-detail { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.fh-error > .fh-retry { grid-column: 2; justify-self: start; min-height: 32px; height: 32px; padding: 0 12px; font-size: 13px; border-radius: 9px; }
+.fh-error.line { border: 0; border-radius: 0; background: none; padding: 5px 10px 6px 8px; column-gap: 6px; font-size: 12.5px; }
+.fh-error.line > svg { width: 14px; height: 14px; margin-top: 2px; }
+.fh-error.line .fh-error-title, .fh-error.line .fh-error-detail { display: inline; }
+.fh-error.line .fh-error-title { font-weight: 500; color: var(--ink-2); }
+.fh-error.line .fh-retry {
+  display: inline; padding: 0; border: 0; background: none; color: var(--accent);
+  font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.fh-error.line .fh-retry:hover { text-decoration: underline; }
+
 .fh-card { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 12px 12px 10px; }
 .fh-card-h { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14.5px; margin-bottom: 8px; }
 .fh-card-h svg { color: var(--accent); }
@@ -58,20 +79,28 @@ body.desktop .dsk-main .fh-screen .back { display: none; }
 .fh-desc { margin: 0 6px 4px 50px; font-size: 13px; line-height: 1.4; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .fh-item > .fh-note, .fh-item > .fh-actions { margin-left: 50px; margin-right: 6px; }
 .fh-item > .fh-actions { margin-bottom: 8px; }
-.fh-side .fp-tree { overflow: visible; padding: 2px 0 8px 22px; flex: none; }
+/* Children start under the parent's icon (6px row padding + 14px chevron + 7px gap = 27px, less fp-row's 8px). */
+.fh-side .fp-tree { overflow: visible; padding: 2px 0 8px 19px; flex: none; }
 
-.fh-project-body { padding: 2px 0 8px 22px; }
+.fh-project-body { padding: 2px 0 8px 19px; min-width: 0; }
 .fh-project-body[hidden] { display: none; }
-.fh-guide { display: grid; gap: 2px; margin-bottom: 4px; }
+.fh-project-body > .fh-loading { padding: 6px 8px; }
+/* One column that may shrink, so long names ellipsize instead of pushing the chips out. */
+.fh-guide { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-bottom: 4px; }
+/* Same box as a tree row (.fp-row), with an empty chevron column, so the icons line up. */
 .fh-guide-file {
-  display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 3px 8px; border: 0; border-radius: 8px;
+  display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 30px; padding: 3px 10px 3px 8px; border: 0; border-radius: 8px;
   background: none; color: var(--ink); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer;
 }
 .fh-guide-file:hover:not(:disabled) { background: var(--surface-2); }
 .fh-guide-file:disabled { cursor: default; color: var(--muted); }
 .fh-guide-file > svg { width: 16px; height: 16px; color: var(--muted); }
-.fh-link { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.fh-guide-file .fh-chips { margin-left: auto; }
+.fh-guide-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fh-guide-name { font-weight: 500; }
+.fh-link { margin-left: 2px; font-size: 12px; color: var(--muted); }
+.fh-guide-file .fh-chips { margin-left: auto; padding-left: 6px; }
+.fh-guide > .fh-note { margin: 6px 10px 2px 8px; }
+.fh-project-body > .fh-note { margin: 6px 10px 2px 8px; }
 .fh-tree-h { margin: 10px 8px 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .fh-project-body .fp-tree { padding-left: 0; }
 
@@ -89,6 +118,7 @@ body.desktop .dsk-main .fh-screen .back { display: none; }
 .fh-compare-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 10px; }
 .fh-compare-title { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin-bottom: 8px; min-width: 0; }
 .fh-compare-title code { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fh-compare-msg { padding: 12px; }
 .fh-pre { flex: 1 1 auto; margin: 0; max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--ink-2); }
 
 .fh-form .hint { font-size: 12.5px; color: var(--muted); margin: 10px 2px 14px; line-height: 1.45; }

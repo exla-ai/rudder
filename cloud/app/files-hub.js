@@ -6,7 +6,7 @@
 // Only the machine's own account reaches this (the Cloud routes check it).
 import { api, app, confirmDialog, openSheet, showError, toast } from "/app/core.js";
 import { h, icon } from "/app/render.js";
-import { FileTree, FileView, errorRow, nameOf } from "/app/file-view.js";
+import { FileTree, FileView, nameOf } from "/app/file-view.js";
 import { projectFileSource, projectFileScopes } from "/app/files-panel.js";
 
 const SETUP = "agent-setup";
@@ -30,6 +30,20 @@ function setupSource(id) {
 const chips = (agents) => `<span class="fh-chips">${agents.map((a) => `<span class="fh-chip fh-${a}">${SHORT[a]}</span>`).join("")}</span>`;
 const textEl = (tag, className, text) => { const n = document.createElement(tag); n.className = className; n.textContent = text; return n; };
 
+/** A part of the page that could not load, inside that part: what failed, the
+ * reason, and a retry. `line` is the one-line form inside a project. */
+function sectionError(e, title, retry, { line = false } = {}) {
+  const box = h(`<div class="fh-error${line ? " line" : ""}" role="alert">${icon("alert")}<div class="fh-error-text"></div></div>`);
+  const body = box.querySelector(".fh-error-text");
+  // Plain spaces between the parts, so a wrapped line starts flush.
+  body.append(textEl("span", "fh-error-title", line ? `${title}:` : title), " ", textEl("span", "fh-error-detail", e.message));
+  const again = textEl("button", line ? "fh-retry" : "btn fh-retry", "Try again");
+  again.type = "button";
+  again.addEventListener("click", retry);
+  if (line) body.append(" ", again); else box.appendChild(again);
+  return box;
+}
+
 export function FilesHubScreen({ projects }) {
   const el = h(`<section class="screen fh-screen">
     <header class="topbar">
@@ -43,9 +57,11 @@ export function FilesHubScreen({ projects }) {
           <h2 class="fh-h">Everywhere</h2>
           <p class="fh-sub">What every agent on your cloud machine reads, in any project.</p>
           <div class="fh-instr"><div class="fh-loading">Loading</div></div>
-          <div class="fh-subh"><h3>Skills</h3><button type="button" class="btn fh-new">${icon("plus")}<span>New skill</span></button></div>
-          <div class="fh-skills"></div>
-          <div class="fh-folders"></div>
+          <div class="fh-setup" hidden>
+            <div class="fh-subh"><h3>Skills</h3><button type="button" class="btn fh-new">${icon("plus")}<span>New skill</span></button></div>
+            <div class="fh-skills"></div>
+            <div class="fh-folders"></div>
+          </div>
         </section>
         <section class="fh-sec">
           <h2 class="fh-h">Projects</h2>
@@ -60,14 +76,15 @@ export function FilesHubScreen({ projects }) {
   </section>`);
   const $ = (s) => el.querySelector(s);
   const fh = $(".fh"), main = $(".fh-main"), emptyEl = $(".fh-empty"), compareEl = $(".fh-compare");
-  const instrEl = $(".fh-instr"), skillsEl = $(".fh-skills"), foldersEl = $(".fh-folders"), projectsEl = $(".fh-projects");
+  const instrEl = $(".fh-instr"), setupEl = $(".fh-setup"), skillsEl = $(".fh-skills"), foldersEl = $(".fh-folders"), projectsEl = $(".fh-projects");
   const back = $(".back");
   back.addEventListener("click", (e) => { e.preventDefault(); app.goBack?.("/app"); });
 
   let overview = null;
   const sources = new Map();          // setup root id -> source (stable, so trees can tell what is open)
   const items = new Map();            // row key -> { tree, open }
-  const projectState = new Map();     // ws -> { open, guide, error, scopes, scopesAt, source, tree }
+  // ws -> { open, loading, loaded, generation, guide, guideError, filesError, scopesAt, source, tree, paint }
+  const projectState = new Map();
   let paintedProjects = "";
 
   const view = FileView({
@@ -102,9 +119,24 @@ export function FilesHubScreen({ projects }) {
 
   // ---------- Everywhere ----------
 
+  let setupLoads = 0;
+  /** The overview. A failure shows inside Everywhere only; projects load on their own. */
   async function load() {
-    try { overview = await api("/api/app/agent-setup"); paintSetup(); }
-    catch (e) { instrEl.replaceChildren(errorRow(e, "Unable to read the agent setup")); skillsEl.replaceChildren(); foldersEl.replaceChildren(); }
+    const mine = ++setupLoads;
+    if (!overview) instrEl.replaceChildren(textEl("div", "fh-loading", "Loading"));
+    let next;
+    try { next = await api("/api/app/agent-setup"); }
+    catch (e) {
+      if (mine !== setupLoads) return;
+      overview = null;
+      setupEl.hidden = true;
+      instrEl.replaceChildren(sectionError(e, "Could not load the agent setup", () => { void load(); }));
+      return;
+    }
+    if (mine !== setupLoads) return;
+    overview = next;
+    setupEl.hidden = false;
+    paintSetup();
   }
 
   async function act(body, done) {
@@ -174,7 +206,9 @@ export function FilesHubScreen({ projects }) {
     if (!(await view.discardOk())) return;
     view.close();
     compareEl.hidden = false;
-    compareEl.replaceChildren(h(`<div class="fh-loading">Loading</div>`));
+    const head = h(`<div class="fh-compare-head"><button type="button" class="icon-btn fh-compare-back" aria-label="Back" title="Back">${icon("back")}</button><span>Two separate instruction files</span></div>`);
+    head.querySelector("button").addEventListener("click", () => { compareEl.hidden = true; fh.classList.remove("show-file"); emptyEl.hidden = false; });
+    compareEl.replaceChildren(head, textEl("div", "fh-loading fh-compare-msg", "Loading"));
     fh.classList.add("show-file");
     emptyEl.hidden = true;
     try {
@@ -184,8 +218,6 @@ export function FilesHubScreen({ projects }) {
         const file = (await source.list("")).entries.find((e) => e.kind === "file");
         return { agent, state, doc: await source.read(file.path) };
       }));
-      const head = h(`<div class="fh-compare-head"><button type="button" class="icon-btn fh-compare-back" aria-label="Back" title="Back">${icon("back")}</button><span>Two separate instruction files</span></div>`);
-      head.querySelector("button").addEventListener("click", () => { compareEl.hidden = true; fh.classList.remove("show-file"); emptyEl.hidden = false; });
       const cols = h(`<div class="fh-compare-cols"></div>`);
       for (const side of sides) {
         const col = h(`<div class="fh-compare-col"><div class="fh-compare-title">${chips([side.agent])}<code></code></div><pre class="fh-pre"></pre><div class="fh-actions"></div></div>`);
@@ -199,7 +231,11 @@ export function FilesHubScreen({ projects }) {
         cols.appendChild(col);
       }
       compareEl.replaceChildren(head, cols);
-    } catch (e) { compareEl.replaceChildren(errorRow(e, "Unable to read the instruction files")); }
+    } catch (e) {
+      const box = textEl("div", "fh-compare-msg", "");
+      box.appendChild(sectionError(e, "Could not read the instruction files", () => { void showCompare(); }));
+      compareEl.replaceChildren(head, box);
+    }
   }
 
   /** A row that expands to the tree of its root. */
@@ -242,7 +278,9 @@ export function FilesHubScreen({ projects }) {
           extra = h(`<div class="fh-actions"><button type="button" class="btn">Use with both agents</button></div>`);
           extra.querySelector("button").addEventListener("click", async () => {
             const ok = await confirmDialog({ title: `Use ${s.name} with ${NAME[other]} too?`, body: `${NAME[other]}'s skills folder gets a link to ${s.location}, so both agents load the same skill.`, confirm: "Use with both" });
-            if (ok) await act({ operation: "share-skill", name: s.name, from: s.agents[0] }, `${NAME[other]} can use ${s.name} now`);
+            // The home finds the skill by its folder (the root's last part), which
+            // can differ from the name in its SKILL.md.
+            if (ok) await act({ operation: "share-skill", name: s.root.split(":")[2], from: s.agents[0] }, `${NAME[other]} can use ${s.name} now`);
           });
         }
       }
@@ -301,45 +339,59 @@ export function FilesHubScreen({ projects }) {
     const row = h(`<div class="fh-item fh-project"><button type="button" class="fh-row"><span class="fp-chev">${icon("chevron")}</span>${icon("folder")}<span class="fh-name"></span></button><div class="fh-project-body"></div></div>`);
     const toggle = row.querySelector(".fh-row"), bodyEl = row.querySelector(".fh-project-body");
     toggle.querySelector(".fh-name").textContent = p.name || ws;
+    // The instruction files and the file tree load and fail on their own. When
+    // both fail for the same reason, one line says so.
     const paint = () => {
       toggle.classList.toggle("open", st.open);
       toggle.setAttribute("aria-expanded", String(st.open));
       bodyEl.hidden = !st.open;
       if (!st.open) return;
+      if (!st.loaded) { bodyEl.replaceChildren(textEl("div", "fh-loading", "Loading")); return; }
+      const retry = () => { void loadProject(ws, st); };
+      const same = st.guideError && st.filesError && st.guideError.message === st.filesError.message;
       const parts = [];
-      if (st.error) parts.push(errorRow(st.error));
-      else if (!st.guide) parts.push(textEl("div", "fh-loading", "Loading"));
+      if (same) parts.push(sectionError(st.guideError, "Could not open this project", retry, { line: true }));
+      else if (st.guideError) parts.push(sectionError(st.guideError, "Could not read its instruction files", retry, { line: true }));
       else parts.push(guideView(st));
-      if (st.tree) parts.push(textEl("h4", "fh-tree-h", "All files"), st.tree.el);
-      else if (st.guide && !st.source) parts.push(textEl("p", "fh-note", "The project's engine is not running on your cloud machine, so its files cannot be opened right now."));
+      if (st.filesError) { if (!same) parts.push(sectionError(st.filesError, "Could not list its files", retry, { line: true })); }
+      else if (st.tree) parts.push(textEl("h4", "fh-tree-h", "All files"), st.tree.el);
+      else parts.push(textEl("p", "fh-note", "The project's engine is not running on your cloud machine, so its files cannot be opened right now."));
       bodyEl.replaceChildren(...parts);
     };
-    toggle.addEventListener("click", async () => {
+    st.paint = paint;
+    toggle.addEventListener("click", () => {
       st.open = !st.open;
       paint();
-      if (st.open && !st.guide) { await loadProject(ws, st); paint(); }
+      if (st.open && !st.loaded && !st.loading) void loadProject(ws, st);
     });
     paint();
     return row;
   }
 
   async function loadProject(ws, st) {
-    st.error = null;
-    try {
-      const [guide, scopes] = await Promise.all([
-        api(`/api/app/project-guide?${new URLSearchParams({ workspaceId: ws })}`),
-        projectFileScopes(ws),
-      ]);
-      st.guide = guide;
+    const mine = st.generation = (st.generation ?? 0) + 1;
+    st.tree?.destroy();
+    Object.assign(st, { loading: true, loaded: false, guide: null, guideError: null, filesError: null, source: null, tree: null });
+    st.paint?.();
+    const [guide, scopes] = await Promise.allSettled([
+      api(`/api/app/project-guide?${new URLSearchParams({ workspaceId: ws })}`),
+      projectFileScopes(ws),
+    ]);
+    if (mine !== st.generation) return;
+    if (guide.status === "fulfilled") st.guide = guide.value; else st.guideError = guide.reason;
+    if (scopes.status === "rejected") st.filesError = scopes.reason;
+    else {
       st.scopesAt = Date.now();
-      const checkout = scopes.find((s) => s.workspaceId === CHECKOUT);
+      const checkout = scopes.value.find((s) => s.workspaceId === CHECKOUT);
       if (checkout) {
         const renew = async () => { if (Date.now() - st.scopesAt >= SCOPE_RENEW_MS) { await projectFileScopes(ws); st.scopesAt = Date.now(); } };
         st.source = projectFileSource(checkout, { renew, denied: () => { st.scopesAt = 0; } });
         st.tree = FileTree({ source: st.source, label: "Project files", current: () => openPath(st.source), onOpen: (path) => { void openFile(st.source, path); } });
         void st.tree.refresh();
       }
-    } catch (e) { st.error = e; }
+    }
+    Object.assign(st, { loading: false, loaded: true });
+    st.paint?.();
   }
 
   function guideView(st) {
@@ -347,9 +399,11 @@ export function FilesHubScreen({ projects }) {
     const { files, shared } = st.guide;
     if (!files.length) { box.appendChild(textEl("p", "fh-note", "This project has no AGENTS.md, CLAUDE.md, RUDDER.md or README.md.")); return box; }
     for (const f of files) {
-      const b = h(`<button type="button" class="fh-guide-file">${icon("file")}<span class="fh-name"></span><span class="fh-link"></span>${chips(f.readBy)}</button>`);
-      b.querySelector(".fh-name").textContent = f.path;
-      b.querySelector(".fh-link").textContent = f.linksTo ? `links to ${f.linksTo}` : f.imports.length ? `includes ${f.imports.join(", ")}` : "";
+      // Name and link in one ellipsized label: a narrow row cuts the link's end, not the name.
+      const b = h(`<button type="button" class="fh-guide-file"><span class="fp-chev"></span>${icon("file")}<span class="fh-guide-label"><span class="fh-guide-name"></span></span>${chips(f.readBy)}</button>`);
+      b.querySelector(".fh-guide-name").textContent = f.path;
+      const link = f.linksTo ? `links to ${f.linksTo}` : f.imports.length ? `includes ${f.imports.join(", ")}` : "";
+      if (link) b.querySelector(".fh-guide-label").append(" ", textEl("span", "fh-link", link));
       b.disabled = !st.source;
       b.addEventListener("click", () => { if (st.source) void openFile(st.source, f.linksTo ?? f.path); });
       box.appendChild(b);
@@ -364,11 +418,15 @@ export function FilesHubScreen({ projects }) {
     return box;
   }
 
-  $(".fh-refresh").addEventListener("click", async () => {
-    await load();
+  $(".fh-refresh").addEventListener("click", () => {
+    void load();
     for (const item of items.values()) if (item.open) void item.tree?.refresh();
-    for (const [ws, st] of projectState) if (st.open) { st.guide = null; st.tree?.destroy(); st.tree = null; st.source = null; await loadProject(ws, st); paintedProjects = ""; }
     paintProjects();
+    // Open projects reload now; closed ones when next opened.
+    for (const [ws, st] of projectState) {
+      if (st.open) void loadProject(ws, st);
+      else if (!st.loading) st.loaded = false;
+    }
     void view.refresh();
   });
 

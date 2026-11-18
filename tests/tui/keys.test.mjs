@@ -152,9 +152,10 @@ test("guard-notice keys each fire: o (web), U (usage), b (branch)", { timeout: 6
     const opened = JSON.parse(await fsp.readFile(browserLog, "utf8").catch(() => "null"));
     return opened?.pathname === "/usage" && opened?.hasTicket;
   }, { timeout: 10_000, label: "the same private host callback opens usage" });
-  // b: a sleeping fake worker has no transcript, so branch explains why.
+  // b: a sleeping fake worker has no conversation yet, so branch says so
+  // (branch.rs NOTHING_TO_BRANCH).
   await session.press("b");
-  await session.waitFor((s) => /branch failed|no session/i.test(s), {
+  await session.waitFor((s) => s.includes("Nothing to branch yet"), {
     timeout: 15_000,
     label: "the branch guard notice",
   });

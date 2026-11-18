@@ -50,9 +50,17 @@ with Git.
 npm version X.Y.Z --no-git-tag-version
 jj commit package.json package-lock.json -m "X.Y.Z"
 jj bookmark set main -r @-
-git tag -a vX.Y.Z -m X.Y.Z "$(jj log -r main --no-graph -T commit_id)"
+sha="$(jj log -r main --no-graph -T commit_id)"
+git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "$sha:refs/heads/release-check/X.Y.Z"
+# wait for that Release run to pass; on a failure, fix, commit and push the branch again
+git tag -a vX.Y.Z -m X.Y.Z "$sha"
 git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin main vX.Y.Z
+git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin --delete release-check/X.Y.Z
 ```
+
+Qualify on `release-check/X.Y.Z` first: a failure there costs a push, not a
+version. The tag run then reuses that qualification for the same SHA and only
+verifies and publishes.
 
 The plain `git push` can hit a bot token that gets 403; the `gh` helper uses
 the user's own token.

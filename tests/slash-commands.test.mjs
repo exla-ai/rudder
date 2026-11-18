@@ -1,15 +1,18 @@
-// The "/" lists of an agent's CLI (cloud/worker/slash-commands.mjs), built
-// from synthetic config folders with the installed claude and codex. Neither
-// folder holds a login, so no model can be called.
+// The "/" lists of an agent's CLI (cloud/worker/slash-commands.mjs) and how
+// the app orders them for what is typed (cloud/app/slash-rank.js). The CLI
+// test builds both lists with the installed claude, codex and tmux from
+// synthetic config folders. Neither holds a login and nothing is sent, so no
+// model is called.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  CLAUDE_CLASSIFIED_FOR, CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, claudeInitialize,
-  readClaudeBinaryCommands, readCodexState,
+  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, claudeInitialize, codexHasVoice,
+  codexPackageDir, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
+import { rank } from "../cloud/app/slash-rank.js";
 
 function onPath(name) {
   for (const dir of String(process.env.PATH).split(path.delimiter)) {
@@ -19,6 +22,24 @@ function onPath(name) {
   throw new Error(`${name} must be installed for this test`);
 }
 
+// Not a real key: it only lets Claude Code start without a login screen.
+const FAKE_KEY = "sk-ant-api03-rudder-slash-test-000000000000000000000000";
+
+// A stdio MCP server with two prompts.
+const MCP_SERVER = `import readline from "node:readline";
+const send = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.id === undefined) return;
+  if (m.method === "initialize") return send({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { prompts: {} }, serverInfo: { name: "testmcp", version: "1.0.0" } } });
+  if (m.method === "prompts/list") return send({ jsonrpc: "2.0", id: m.id, result: { prompts: [
+    { name: "summarize", description: "Summarize a file", arguments: [{ name: "path", required: true }] },
+    { name: "standup", description: "Write my standup" },
+  ] } });
+  send({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "unknown method" } });
+});
+`;
+
 function writeFixture(root) {
   const write = (rel, body) => {
     const file = path.join(root, rel);
@@ -26,6 +47,12 @@ function writeFixture(root) {
     fs.writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body, null, 2));
   };
   const claude = "home/.claude";
+  const project = path.join(root, "project");
+  write(`${claude}/.claude.json`, {
+    hasCompletedOnboarding: true,
+    customApiKeyResponses: { approved: [FAKE_KEY.slice(-20)], rejected: [] },
+    projects: { [project]: { hasTrustDialogAccepted: true } },
+  });
   write(`${claude}/commands/hello.md`, "---\ndescription: Say hello to someone\nargument-hint: <name>\n---\nSay hello to $ARGUMENTS\n");
   write(`${claude}/commands/ops/deploy.md`, "---\ndescription: Deploy the service\n---\nDeploy it\n");
   write(`${claude}/skills/tidy/SKILL.md`, "---\nname: tidy\ndescription: Tidy the working tree\n---\nTidy up.\n");
@@ -43,8 +70,12 @@ function writeFixture(root) {
   write(`${claude}/plugins/installed_plugins.json`, { version: 2, plugins: { "greeter@testmkt": [{ scope: "user", installPath: installed, version: "1.0.0", installedAt: now, lastUpdated: now }] } });
   write(`${claude}/settings.json`, { enabledPlugins: { "greeter@testmkt": true } });
   write("project/.claude/commands/ship.md", "---\ndescription: Ship this project\n---\nShip\n");
+  write("project/.claude/commands/greet-args.md", "---\ndescription: Greet with named arguments\narguments: [who, when]\n---\nGreet $who at $when\n");
+  write("mcp-server.mjs", MCP_SERVER);
+  write("project/.mcp.json", { mcpServers: { testmcp: { command: process.execPath, args: [path.join(root, "mcp-server.mjs")] } } });
+  write("project/.claude/settings.local.json", { enabledMcpjsonServers: ["testmcp"] });
   // Codex: a catalog whose model has a Fast tier, and a custom prompt that
-  // Codex 0.169's "/" popup does not list.
+  // Codex's "/" popup does not list.
   write("home/.codex/config.toml", 'model = "test-model"\n');
   write("home/.codex/models_cache.json", { models: [{ slug: "test-model", service_tiers: [{ id: "priority", name: "Fast", description: "Quicker answers" }], available_access_programs: { cyber: ["standard"] } }] });
   write("home/.codex/prompts/standup.md", "---\ndescription: Write my standup\n---\nWrite it\n");
@@ -55,8 +86,116 @@ test("the worker image pins the Codex whose '/' commands Rudder lists", () => {
   assert.equal(/^ARG CODEX_VERSION=(\S+)$/m.exec(dockerfile)?.[1], CODEX_VERSION);
 });
 
-test("Claude and Codex '/' lists from synthetic config folders", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-slash-"));
+test("Claude Code's popup is read off its screen", () => {
+  // The prompt arrow is followed by a no-break space; rows are indented two
+  // columns, the selected one marked; a long description wraps under itself.
+  const below = [
+    "╭────╮",
+    "❯ /",
+    "────",
+    "  ❯ /code-review                       Review the current diff",
+    "    /add-dir                           Add a working directory",
+    "    /docs                              Read this before any search, file read or plan,",
+    "                                       even with files attached. (claude.ai sync)",
+    "    /claude.ai Notion:make-page (MCP)  Turn the current work into a page",
+    "    /tidy",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseClaudeMenu(below), [
+    { display: "code-review", description: "Review the current diff" },
+    { display: "add-dir", description: "Add a working directory" },
+    { display: "docs", description: "Read this before any search, file read or plan, even with files attached. (claude.ai sync)" },
+    { display: "claude.ai Notion:make-page (MCP)", description: "Turn the current work into a page" },
+    { display: "tidy", description: "" },
+  ]);
+  // With no room below, the popup is drawn above the prompt.
+  const above = ["    /plan     Plan first", "", "  ❯ /add-dir   Add a working directory", "    /clear    Clear the conversation", "────", "❯ /", "  ? for shortcuts"].join("\n");
+  assert.deepEqual(parseClaudeMenu(above).map((r) => r.display), ["add-dir", "clear"], "the popup is the longest block of rows");
+  assert.equal(parseClaudeMenu("❯ hello\n"), null, "no menu until / is typed");
+  assert.throws(() => parseClaudeMenu(`❯ /\n  ❯ /add-dir   Add\n    ↓ 117 more\n`), /did not fit/);
+});
+
+test("Claude rows get the inserted name, argument rule and what they open", () => {
+  const binary = new Map([
+    ["resume", [{ type: "local-jsx", argumentHint: "[session ID]", aliases: ["continue"] }]],
+    ["model", [{ type: "local-jsx", argumentHint: "[model]", aliases: [] }]],
+    ["compact", [{ type: "local", headless: true, argumentHint: "<instructions>", aliases: [] }]],
+    ["context", [{ type: "local-jsx", aliases: [] }, { type: "local", headless: true, aliases: [] }]],
+  ]);
+  const headless = [
+    { name: "compact", builtin: true, aliases: [] },
+    { name: "context", builtin: false, argumentHint: "", aliases: [] },
+    { name: "greet", builtin: false, argumentHint: "<who>", aliases: [] },
+  ];
+  const menu = [
+    { display: "resume", description: "Resume a previous session" },
+    { display: "model", description: "Switch model (currently Opus)" },
+    { display: "compact", description: "Free up context" },
+    { display: "context", description: "My own context command (project)" },
+    { display: "greet", description: "Greet (project) (arguments: who, when)" },
+    { display: "my server:sum up (MCP)", description: "Summarize" },
+  ];
+  const byName = new Map(buildClaudeCommands({ menu, headless, binary }).map((c) => [c.name, c]));
+  assert.deepEqual(byName.get("resume"), { name: "resume", description: "Resume a previous session", hint: "[session ID]", args: null, opens: "terminal", when: "always", aliases: ["continue"] });
+  assert.equal(byName.get("model").opens, "model");
+  assert.equal(byName.get("compact").opens, null);
+  assert.equal(byName.get("context").opens, null, "a project command that shares a built-in's name is the project's");
+  assert.deepEqual([byName.get("greet").args, byName.get("greet").hint], ["required", "<who>"]);
+  assert.deepEqual(byName.get("mcp__my_server__sum_up"), { name: "mcp__my_server__sum_up", label: "my server:sum up (MCP)", description: "Summarize", hint: null, args: null, opens: null, aliases: [] });
+});
+
+test("Codex gates /daybreak on the sign-in and /voice on the install", () => {
+  const base = { version: CODEX_VERSION, models: [], model: null, platform: "linux", chatgpt: false, apiKey: true, voice: false };
+  const names = (state) => buildCodexCommands({ ...base, ...state }).map((c) => c.name);
+  const daybreak = new Map([["cli_daybreak", true]]);
+  assert.equal(names({ features: daybreak }).includes("daybreak"), false, "an API key needs the access-program feature too");
+  assert.equal(names({ features: new Map([...daybreak, ["api_key_cyber_access_programs", true]]) }).includes("daybreak"), true);
+  assert.equal(names({ features: daybreak, apiKey: false, chatgpt: true }).includes("daybreak"), true);
+  assert.equal(names({ features: new Map() }).includes("voice"), false);
+  assert.equal(names({ features: new Map(), voice: true }).includes("voice"), true);
+
+  const pkg = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-pkg-"));
+  try {
+    fs.mkdirSync(path.join(pkg, "codex-resources/voice/bin"), { recursive: true });
+    fs.writeFileSync(path.join(pkg, "codex-resources/voice/bin/codex-voice-host"), "");
+    assert.equal(codexHasVoice(pkg, "linux"), false, "the helper alone is not the runtime");
+    fs.mkdirSync(path.join(pkg, "codex-resources/voice/lib"));
+    fs.writeFileSync(path.join(pkg, "codex-resources/voice/lib/libgstreamer-1.0.so.0"), "");
+    assert.equal(codexHasVoice(pkg, "linux"), true);
+  } finally {
+    fs.rmSync(pkg, { recursive: true, force: true });
+  }
+});
+
+test("typed text orders Claude rows as Claude does and Codex rows as Codex does", () => {
+  const c = (name, description, extra = {}) => ({ name, description, aliases: [], ...extra });
+  const claude = [
+    c("code-review", "Review the diff", { aliases: ["review"] }),
+    c("compact", "Free up context"),
+    c("context", "Show what fills the context"),
+    c("copy", "Copy the last reply"),
+    c("resume", "Resume a session", { aliases: ["continue"] }),
+    c("security-review", "Review for security"),
+    c("usage", "Show plan usage", { aliases: ["cost", "stats"] }),
+    c("status", "Show status"),
+    c("mcp__srv__standup", "Write my standup", { label: "srv:standup (MCP)" }),
+  ];
+  const show = (rows) => rows.map(({ command, alias }) => (alias ? `${command.name} (${alias})` : command.name));
+  assert.deepEqual(show(rank(claude, "co", "claude")).slice(0, 4), ["copy", "compact", "context", "code-review"], "prefix matches, shortest first");
+  assert.deepEqual(show(rank(claude, "rev", "claude")).slice(0, 2), ["code-review (review)", "security-review"], "an alias match shows the alias");
+  assert.deepEqual(show(rank(claude, "stat", "claude")).slice(0, 2), ["status", "usage (stats)"], "a name prefix before an alias prefix");
+  assert.deepEqual(show(rank(claude, "cont", "claude")).slice(0, 2), ["context", "resume (continue)"]);
+  assert.equal(show(rank(claude, "stand", "claude"))[0], "mcp__srv__standup", "an MCP prompt is found by what its row shows");
+  assert.equal(rank(claude, "", "claude").length, claude.length);
+
+  const codex = [c("model", "choose model"), c("review", "review changes"), c("btw", "ask aside", { alias: true }), c("resume", "resume a chat")];
+  assert.deepEqual(show(rank(codex, "", "codex")), ["model", "review", "resume"], "alias rows wait for typed text");
+  assert.deepEqual(show(rank(codex, "re", "codex")), ["review", "resume"], "Codex keeps its own order and only prefixes");
+  assert.deepEqual(show(rank(codex, "b", "codex")), ["btw"]);
+});
+
+test("Claude and Codex '/' lists from the installed CLIs", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-slash-")));
   try {
     writeFixture(root);
     const env = {
@@ -64,49 +203,59 @@ test("Claude and Codex '/' lists from synthetic config folders", async () => {
       HOME: path.join(root, "home"),
       CLAUDE_CONFIG_DIR: path.join(root, "home/.claude"),
       CODEX_HOME: path.join(root, "home/.codex"),
+      ANTHROPIC_API_KEY: FAKE_KEY,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     };
     const cwd = path.join(root, "project");
 
     const claudeBin = onPath("claude");
-    const [answer, binary] = await Promise.all([
+    onPath("tmux");
+    const [menu, answer, binary] = await Promise.all([
+      readClaudeMenu({ bin: claudeBin, cwd, env }),
       claudeInitialize({ bin: claudeBin, cwd, env }),
       readClaudeBinaryCommands(fs.realpathSync(claudeBin)),
     ]);
-    const { commands, unclassified } = buildClaudeCommands({ headless: answer.commands, binary });
+    const commands = buildClaudeCommands({ menu, headless: answer.commands, binary });
+    const names = commands.map((c) => c.name);
     const byName = new Map(commands.map((c) => [c.name, c]));
-    assert.deepEqual(byName.get("hello"), { name: "hello", description: "Say hello to someone (user)", hint: "<name>", args: "required", opens: null, aliases: [] });
+    assert.deepEqual(byName.get("hello"), { name: "hello", description: "Say hello to someone (user)", hint: "<name>", args: null, opens: null, aliases: [] });
     assert.equal(byName.get("ops:deploy")?.description, "Deploy the service (user)", "a subfolder namespaces the command");
     assert.equal(byName.get("tidy")?.description, "Tidy the working tree (user)");
     assert.equal(byName.has("model-only"), false, "a skill that is not user-invocable stays out");
-    assert.deepEqual(byName.get("greeter:greet"), { name: "greeter:greet", description: "(greeter) Greet the team", hint: "[team]", args: "optional", opens: null, aliases: [] });
-    assert.equal(byName.get("ship")?.description, "Ship this project (project)");
-    // Built-ins: the headless ones, the TUI's own (open in the terminal), and
-    // model and effort, which open the chat's model sheet.
-    assert.equal(byName.get("compact")?.opens, null);
-    assert.equal(byName.get("resume")?.opens, "terminal");
-    assert.equal(byName.get("permissions")?.opens, "terminal");
-    assert.equal(byName.get("context")?.description, "Show what fills the context", "the TUI's half of a twin");
-    assert.equal(byName.get("model")?.opens, "model");
-    assert.equal(byName.get("effort")?.opens, "model");
-    assert.equal(byName.has("__remote-workflow"), false, "hidden built-ins stay out");
-    assert.deepEqual(commands.map((c) => c.name), [...commands.map((c) => c.name)].sort((a, b) => a.localeCompare(b)));
-    if (answer.version === CLAUDE_CLASSIFIED_FOR) {
-      assert.deepEqual(unclassified, [], `Claude Code ${answer.version} built-ins Rudder has not classified`);
-    }
+    assert.equal(byName.get("greeter:greet")?.hint, "[team]");
+    assert.deepEqual(byName.get("greet-args"), {
+      name: "greet-args", description: "Greet with named arguments (project) (arguments: who, when)", hint: "[who] [when]", args: "required", opens: null, aliases: [],
+    });
+    assert.deepEqual(byName.get("mcp__testmcp__summarize"), {
+      name: "mcp__testmcp__summarize", label: "testmcp:summarize (MCP)", description: "Summarize a file (arguments: path)", hint: "[path]", args: "required", opens: null, aliases: [],
+    });
+    // Claude's order: built-ins, then user, then project, then plugins, MCP
+    // prompts and bundled skills, each A to Z.
+    const at = (name) => {
+      assert.ok(names.includes(name), `/${name} is listed`);
+      return names.indexOf(name);
+    };
+    const order = ["resume", "hello", "ops:deploy", "tidy", "greet-args", "ship", "greeter:greet", "mcp__testmcp__standup", "mcp__testmcp__summarize"];
+    assert.deepEqual([...order].sort((a, b) => at(a) - at(b)), order);
+    assert.equal(byName.get("resume").opens, "terminal");
+    assert.ok(byName.get("resume").aliases.includes("continue"));
+    assert.equal(byName.get("model").opens, "model");
+    assert.equal(byName.get("compact").opens, null);
 
     const state = await readCodexState({ bin: onPath("codex"), cwd, env, plugins: true });
     assert.ok(CODEX_VERSIONS.includes(state.version), `CODEX_BUILTINS is checked against Codex ${CODEX_VERSIONS.join(", ")}, not ${state.version}`);
     assert.equal(state.chatgpt, false);
+    assert.equal(state.voice, codexHasVoice(codexPackageDir(onPath("codex"))));
     const models = JSON.parse(fs.readFileSync(path.join(env.CODEX_HOME, "models_cache.json"), "utf8")).models;
     const codex = buildCodexCommands({ ...state, models, model: "test-model", platform: "linux" });
-    const names = codex.map((c) => c.name);
-    assert.deepEqual(names.slice(0, 4), ["model", "fast", "presets", "ide"], "popup order, the model's tiers right after /model");
+    const codexNames = codex.map((c) => c.name);
+    assert.deepEqual(codexNames.slice(0, 4), ["model", "fast", "presets", "ide"], "popup order, the model's tiers right after /model");
     assert.equal(codex[0].opens, "model");
     assert.equal(codex[1].description, "Quicker answers");
-    assert.ok(names.includes("plugins") && names.includes("goal"), "Rudder starts Codex with plugins and goals on");
-    for (const absent of ["usage", "apps", "debug-config", "app", "voice", "prompts:standup", "standup"]) {
-      assert.equal(names.includes(absent), false, `/${absent} is not in this popup`);
+    assert.ok(codexNames.includes("plugins") && codexNames.includes("goal"), "Rudder starts Codex with plugins and goals on");
+    assert.equal(codexNames.includes("voice"), state.voice);
+    for (const absent of ["usage", "apps", "debug-config", "app", "prompts:standup", "standup"]) {
+      assert.equal(codexNames.includes(absent), false, `/${absent} is not in this popup`);
     }
     assert.equal(codex.find((c) => c.name === "btw")?.alias, true);
     assert.throws(() => buildCodexCommands({ ...state, version: "0.0.1", models, model: "test-model" }), /this machine has Codex 0\.0\.1\. Install /);

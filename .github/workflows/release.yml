@@ -304,12 +304,14 @@ jobs:
           chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-jj
           prebuilt-native/rudder-native-darwin-arm64/rudder-jj --version
           prebuilt-native/rudder-native-darwin-arm64/rudder-jj --help
-          # tests/slash-commands.test.mjs reads the real CLIs' "/" commands:
-          # install exactly the versions Rudder lists them for, the way the
-          # worker image does (Claude's own installer, Codex from npm).
-          read -r claude_version codex_version < <(node --input-type=module -e \
-            'const m = await import("./cloud/worker/slash-commands.mjs"); console.log(m.CLAUDE_CLASSIFIED_FOR, m.CODEX_VERSION)')
-          curl -fsSL https://claude.ai/install.sh | bash -s "$claude_version"
+          # tests/slash-commands.test.mjs reads the real CLIs' "/" commands,
+          # Claude's from its popup in tmux. Install them the way the worker
+          # image does: Claude's own installer, Codex from npm at the version
+          # Rudder lists it for.
+          brew install tmux
+          codex_version=$(node --input-type=module -e \
+            'const m = await import("./cloud/worker/slash-commands.mjs"); console.log(m.CODEX_VERSION)')
+          curl -fsSL https://claude.ai/install.sh | bash
           npm install -g --no-audit --no-fund "@openai/codex@$codex_version"
           export PATH="$HOME/.local/bin:$PATH"
           claude --version && codex --version

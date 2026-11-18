@@ -10,6 +10,7 @@
 
 import { h, setText } from "/app/render.js";
 import { api, coarse } from "/app/core.js";
+import { labelOf, rank } from "/app/slash-rank.js";
 
 const lists = new Map(); // `${workspace}|${run}` -> { model, at, promise, data, error }
 let seq = 0;
@@ -29,27 +30,6 @@ function load(workspace, run, model, { force = false } = {}) {
   return entry;
 }
 
-// Codex: exact, then prefix, in its own order, and its alias rows only once
-// something is typed. Claude Code: exact, then the name's prefix, then an
-// alias or a word of the name (codex:review for "rev"), then the name
-// containing it, then (three letters on) the description.
-function rank(commands, query, backend) {
-  const q = query.toLowerCase();
-  if (!q) return backend === "codex" ? commands.filter((c) => !c.alias) : commands;
-  const tiers = [[], [], [], [], []];
-  for (const c of commands) {
-    const name = c.name.toLowerCase();
-    const aliases = (c.aliases || []).map((n) => n.toLowerCase());
-    if (name === q || aliases.includes(q)) tiers[0].push(c);
-    else if (name.startsWith(q)) tiers[1].push(c);
-    else if (backend === "codex") continue;
-    else if (aliases.some((n) => n.startsWith(q)) || name.split(/[:\-_]/).some((w) => w.startsWith(q))) tiers[2].push(c);
-    else if (name.includes(q)) tiers[3].push(c);
-    else if (q.length >= 3 && c.description.toLowerCase().includes(q)) tiers[4].push(c);
-  }
-  return tiers.flat();
-}
-
 /**
  * The "/" menu for one agent's composer.
  * `agent()` returns the agent's row; `modelControl` is the chat's model chip
@@ -66,7 +46,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   ta.setAttribute("aria-controls", menu.id);
   ta.setAttribute("aria-expanded", "false");
 
-  let shown = []; // commands in the menu now
+  let shown = []; // { command, alias } in the menu now
   let active = 0;
   let dismissed = null; // the text Esc closed the menu on
   let painted = null;
@@ -101,10 +81,10 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
     ta.removeAttribute("aria-activedescendant");
   };
 
-  const row = (c, i) => {
+  const row = ({ command: c, alias }, i) => {
     const el = h(`<div class="sm-row" role="option"><div class="sm-line"><span class="sm-name"></span><span class="sm-hint"></span><span class="sm-note"></span></div><div class="sm-desc"></div></div>`);
     el.id = `${menu.id}-${i}`;
-    setText(el.querySelector(".sm-name"), `/${c.name}`);
+    setText(el.querySelector(".sm-name"), `/${labelOf(c)}${alias && alias !== labelOf(c) ? ` (${alias})` : ""}`);
     const hint = el.querySelector(".sm-hint");
     if (c.hint) setText(hint, c.hint); else hint.remove();
     const note = el.querySelector(".sm-note");
@@ -115,7 +95,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
     el.title = c.description;
     el.addEventListener("mousedown", (e) => e.preventDefault()); // keep the caret in the box
     el.addEventListener("mousemove", () => { if (active !== i) { active = i; markActive(); } });
-    el.addEventListener("click", () => pick(c, "click"));
+    el.addEventListener("click", () => pick(shown[i], "click"));
     return el;
   };
   const message = (title, detail) => {
@@ -164,20 +144,27 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
     menu.scrollTop = 0;
   }
 
-  // Enter picks and sends a command that needs nothing more; Tab only fills it
-  // in, and so does a click, except on one that opens in the terminal, which
-  // goes at once. One that takes arguments waits for them in the box.
-  function pick(c, how) {
+  // As in both CLIs, Enter runs the command at once, except one that waits
+  // for its arguments ("required": a Claude prompt that names them); Tab
+  // fills it in with a space after. A click fills it in too, except one that
+  // opens in the terminal, which goes at once. A row found by its alias puts
+  // the alias in the box, as Claude does.
+  function pick({ command: c, alias }, how) {
     if (c.opens === "model" && chipWorks()) {
       setValue("");
       close();
       modelControl.el.click();
       return;
     }
-    const needsArgs = c.args === "required" || (c.args === "optional" && !opensTerminal(c));
-    if (needsArgs) { setValue(`/${c.name} `); close(); return; }
-    setValue(`/${c.name}`);
-    if (how === "enter" || (how === "click" && opensTerminal(c))) { close(); form.requestSubmit(); }
+    const name = alias ?? c.name;
+    if (c.args === "required" || how === "tab" || (how === "click" && !opensTerminal(c))) {
+      setValue(`/${name} `);
+      close();
+      return;
+    }
+    setValue(`/${name}`);
+    close();
+    form.requestSubmit();
   }
 
   // Before the composer sends: a bare /model goes to the model sheet, and a
@@ -211,7 +198,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
       if ((e.key === "Enter" && !e.shiftKey) || (e.key === "Tab" && !e.shiftKey)) {
         e.preventDefault();
         e.stopPropagation();
-        const c = shown[active];
+        const c = shown[active].command;
         const exact = query()?.toLowerCase() === c.name.toLowerCase();
         // Enter on a command already typed out in full sends it as typed.
         if (e.key === "Enter" && exact && c.args !== "required" && !(c.opens === "model" && chipWorks())) {
@@ -219,7 +206,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
           form.requestSubmit();
           return;
         }
-        pick(c, e.key === "Enter" ? "enter" : "tab");
+        pick(shown[active], e.key === "Enter" ? "enter" : "tab");
         return;
       }
     }

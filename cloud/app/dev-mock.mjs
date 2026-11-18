@@ -274,6 +274,10 @@ const SUBAGENT_DEMO = new Set(["run_b1", "run_a7"]);
 // MOCK_TRANSCRIPT=<file>: a real /api/app/transcript response (readTranscript
 // output) shown as the first agent's conversation.
 const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
+// MOCK_SLASH_CLAUDE=<file>, MOCK_SLASH_CODEX=<file>: real /api/app/slash-commands
+// responses (worker/slash-commands.mjs forRun) for the chat's "/" menu.
+const slashLists = Object.fromEntries(["claude", "codex"].filter((b) => process.env[`MOCK_SLASH_${b.toUpperCase()}`])
+  .map((b) => [b, JSON.parse(fs.readFileSync(process.env[`MOCK_SLASH_${b.toUpperCase()}`], "utf8"))]));
 const transcripts = new Map();
 // The agent page's speed and context line (worker/transcripts.mjs `stats`).
 function mockStats(a) {
@@ -819,6 +823,13 @@ const server = http.createServer(async (req, res) => {
       const d = digestStore.find((x) => x.id === body.id);
       if (d && !d.readAt) d.readAt = iso(now());
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/slash-commands" && req.method === "GET") {
+      const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      const list = slashLists[t.a.backend];
+      if (!list) return json(res, 500, { error: `no "/" list for ${t.a.backend} agents in the mock (MOCK_SLASH_${t.a.backend.toUpperCase()})` });
+      return json(res, 200, list);
     }
     if (p === "/api/app/transcript" && req.method === "GET") {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));

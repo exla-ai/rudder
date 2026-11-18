@@ -2,67 +2,39 @@
 // composer. Each list is built on the home ahead of time, per agent working
 // directory, so the menu opens at once.
 //
-// Claude Code. Its headless `initialize` control request answers with the
-// commands a session in that directory has, with the names, descriptions and
-// argument hints Claude Code itself shows: user and project commands
-// (namespaced by folder), user-invocable skills, enabled plugins' commands and
-// skills, claude.ai skills and the bundled built-ins. It costs no model call;
-// it runs with hooks and MCP servers off, so it starts nothing and writes no
-// session. That list is the headless one: built-ins that only exist in the
-// interactive TUI (pickers and panels such as /resume or /permissions) are
-// missing, and a few built-ins are twins whose interactive half differs. Those
-// come from the installed binary, whose bundled JavaScript holds each command
-// object. Whether an interactive built-in shows depends on account and feature
-// state the binary decides at run time, so CLAUDE_INTERACTIVE classifies each
-// one for the version it was checked against. A built-in the classification
-// does not know (a newer Claude Code) is left out and named in `unclassified`.
+// Claude Code. The menu comes from Claude Code itself: an interactive session
+// in the agent's directory, started off-screen in a private tmux with hooks
+// off, is sent "/" and its popup is read (readClaudeMenu). That gives the rows
+// in Claude's own order (its five most used skills, then built-ins, user,
+// project, policy and other commands, each A to Z) with the descriptions it
+// shows, and every gate Claude decides at run time: account, plan, org
+// policy, feature flags, platform, MCP servers' prompts. Nothing is sent, so
+// no model is called and no transcript is written. The popup has no argument
+// hints and no aliases: the headless `initialize` answer (no hooks, no MCP)
+// and the command objects in the installed binary give those, and the binary
+// says which built-ins open a picker or a panel in the TUI.
 //
 // Codex. Its "/" popup lists built-ins in a fixed order, gated by features,
-// the sign-in type and the platform, plus one row per service tier of the
-// current model (/fast). It has no custom prompts and no skills (skills are
-// `$name` mentions). CODEX_BUILTINS is codex-rs/tui/src/slash_command.rs with
-// the gates of bottom_pane/slash_commands.rs and command_popup.rs. Those three
-// files are identical at rust-v0.169.0 and rust-v0.170.0 (diffed), so both are
-// in CODEX_VERSIONS; any other Codex version is refused rather than guessed.
+// the sign-in type, the platform and the install (voice), plus one row per
+// service tier of the current model (/fast). It has no custom prompts and no
+// skills (skills are `$name` mentions). CODEX_BUILTINS is
+// codex-rs/tui/src/slash_command.rs with the gates of
+// bottom_pane/slash_commands.rs, command_popup.rs and chatwidget. Those files
+// are identical at rust-v0.169.0 and rust-v0.170.0 (diffed), and both
+// versions' popups were read in a terminal, so both are in CODEX_VERSIONS; any
+// other Codex version is refused rather than guessed.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
 const MAX_DESCRIPTION = 400;
 
 // ---------------------------------------------------------------------------
 // Claude Code
 // ---------------------------------------------------------------------------
-
-export const CLAUDE_CLASSIFIED_FOR = "2.1.327";
-
-// Built-ins with an interactive (TUI) definition in Claude Code 2.1.327:
-//   shown   in the "/" menu of a local interactive session whatever the account
-//   headless shown exactly when the headless list has it (one definition, same gate)
-//   hidden  hidden, disabled, or gated on account or feature state Rudder cannot read
-const CLAUDE_INTERACTIVE = {
-  shown: [
-    "add-dir", "autocompact", "background", "branch", "btw", "bug", "cd", "color", "config", "context",
-    "copy", "daemon", "effort", "export", "feedback", "focus", "goal", "help", "hooks", "install",
-    "install-github-app", "install-slack-app", "logout", "mcp", "memory", "mobile", "model", "permissions",
-    "plan", "plugin", "powerup", "radio", "release-notes", "rename", "resume", "rewind", "skill-doctor",
-    "skills", "statusline", "status", "stickers", "tasks", "theme", "tui", "usage",
-  ],
-  headless: ["advisor", "clear", "compact", "list-agents", "project", "recap", "reload-plugins", "reload-skills"],
-  hidden: [
-    "__remote-workflow", "agents", "artifacts", "auto-mode-setup", "autofix-pr", "brief", "chrome",
-    "cloud-plugins", "design-consent", "design-login", "design-revoke", "desktop", "diff", "exit",
-    "extra-usage", "fast", "fork", "heapdump", "ide", "import", "keybindings", "login", "loops",
-    "output-style", "passes", "pause-memory", "privacy-settings", "pro-trial-expired", "rate-limit-options",
-    "remote-control", "remote-env", "restart", "sandbox", "scroll-speed", "session", "setup-bedrock",
-    "setup-vertex", "stop", "subtask", "teleport", "terminal-setup", "ultraplan", "ultrareview", "upgrade",
-    "usage-credits", "use-case", "version", "voice", "web-setup", "wellbeing", "workflow-launch-exec",
-    "workflows",
-  ],
-};
-const CLAUDE_CLASS = new Map(Object.entries(CLAUDE_INTERACTIVE).flatMap(([cls, names]) => names.map((name) => [name, cls])));
 
 // In the chat these open its model sheet, the app's control for both.
 const CLAUDE_MODEL_COMMANDS = new Set(["model", "effort"]);
@@ -333,63 +305,152 @@ export function claudeInitialize({ bin, cwd, env, timeoutMs = 30_000 }) {
   });
 }
 
-const argsOf = (hint) => (!hint ? null : /^<(?!optional)/i.test(hint) ? "required" : "optional");
 const clip = (text) => {
   const value = String(text || "").replace(/\s+/g, " ").trim();
   return value.length > MAX_DESCRIPTION ? `${value.slice(0, MAX_DESCRIPTION - 1)}…` : value;
 };
 
-/**
- * Claude Code's interactive "/" menu from its headless list (`headless`) and
- * the command objects of its binary (`binary`, name -> variants).
- * Returns { commands, unclassified }.
- */
-export function buildClaudeCommands({ headless, binary }) {
-  const byName = new Map(headless.map((command) => [command.name, command]));
-  const commands = [];
-  const unclassified = [];
-  for (const command of headless) {
-    // Built-ins with an interactive definition are decided below.
-    if (command.builtin && binary.has(command.name)) continue;
-    const hint = command.argumentHint || null;
-    commands.push({ name: command.name, description: clip(command.description), hint, args: argsOf(hint), opens: null, aliases: [] });
+// The off-screen terminal: wide enough that no description is cut, tall
+// enough that the whole popup shows at once.
+const MENU_COLUMNS = 1000;
+const MENU_ROWS = 1000;
+// MCP servers connect after the prompt shows; their prompts join the popup
+// as they do. The popup is read once it has not changed for MENU_STILL_MS,
+// no sooner than MENU_SETTLE_MS after "/".
+const MENU_SETTLE_MS = 3000;
+const MENU_STILL_MS = 2000;
+let menuSeq = 0;
+
+/** The popup rows on a Claude Code screen: [{ display, description }], or null when none show. */
+export function parseClaudeMenu(screen) {
+  const lines = screen.split("\n").map((line) => line.trimEnd());
+  // The prompt line reads "❯ /" (a no-break space follows the arrow).
+  if (!lines.some((line) => /^❯\s\/$/.test(line))) return null;
+  if (lines.some((line) => /^\s+[↑↓] \d+ more/.test(line))) {
+    throw new Error("Claude Code's menu did not fit the off-screen terminal");
   }
-  for (const [name, variants] of binary) {
-    const cls = CLAUDE_CLASS.get(name);
-    if (!cls) {
-      unclassified.push(name);
+  // The popup is one block of rows, above or below the prompt as room allows.
+  // A long description wraps onto lines indented to its column.
+  let rows = [];
+  let run = [];
+  for (const line of [...lines, ""]) {
+    const m = /^ {2}[❯ ]\s\/(.+)$/.exec(line);
+    if (m) {
+      // The description column starts after a run of spaces; a name has none.
+      const gap = m[1].search(/ {2,}/);
+      run.push(gap < 0 ? { display: m[1], description: "" } : { display: m[1].slice(0, gap), description: m[1].slice(gap).trim() });
       continue;
     }
-    if (cls === "hidden") continue;
-    const twin = byName.get(name);
-    if (cls === "headless") {
-      if (!twin) continue;
-      const hint = twin.argumentHint || null;
-      commands.push({ name, description: clip(twin.description), hint, args: argsOf(hint), opens: null, aliases: aliasesOf(variants) });
+    if (run.length && /^ {6,}\S/.test(line)) {
+      run.at(-1).description += ` ${line.trim()}`;
       continue;
     }
-    // What the TUI runs: its own definition when there is one.
-    const tui = variants.find((v) => v.type === "local-jsx") ?? variants.find((v) => v.type === "local" && !v.headless)
-      ?? variants.find((v) => v.type === "prompt") ?? variants.find((v) => v.type === "local");
-    const description = tui.description ?? variants.find((v) => v.description)?.description ?? twin?.description;
-    if (!description) continue;
-    const hint = tui.argumentHint ?? twin?.argumentHint ?? null;
-    const interactive = tui.type === "local-jsx" || (tui.type === "local" && !tui.headless);
-    commands.push({
-      name,
-      description: clip(description),
-      hint: hint || null,
-      args: argsOf(hint),
-      opens: CLAUDE_MODEL_COMMANDS.has(name) ? "model" : interactive ? "terminal" : null,
-      ...(interactive && !CLAUDE_MODEL_COMMANDS.has(name) ? { when: "always" } : {}),
-      aliases: aliasesOf(variants),
-    });
+    if (run.length > rows.length) rows = run;
+    run = [];
   }
-  commands.sort((a, b) => a.name.localeCompare(b.name));
-  return { commands, unclassified: unclassified.sort() };
+  return rows.length ? rows : null;
 }
 
-const aliasesOf = (variants) => [...new Set(variants.flatMap((v) => v.aliases))];
+/**
+ * Claude Code's "/" popup in `cwd`: an interactive session started in a
+ * private tmux server with the agent's environment and model and hooks off,
+ * sent "/". Returns [{ display, description }] in Claude's order.
+ */
+export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 45_000 }) {
+  const tmux = which("tmux", env);
+  // tmux leaves its socket behind when the server is killed.
+  const socket = path.join(os.tmpdir(), `rudder-slash-${process.pid}-${menuSeq++}`);
+  const t = (...args) => run(tmux, ["-S", socket, "-f", "/dev/null", ...args], { cwd, env });
+  const screen = async () => (await t("capture-pane", "-p", "-t", "menu")).stdout;
+  const deadline = Date.now() + timeoutMs;
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 250));
+  try {
+    // remain-on-exit keeps a Claude that quit on screen, so its error is read.
+    await t("set-option", "-g", "remain-on-exit", "on", ";",
+      "new-session", "-d", "-s", "menu", "-x", String(MENU_COLUMNS), "-y", String(MENU_ROWS), "-c", cwd,
+      // Rudder starts every Claude agent with the inline renderer (launch.rs).
+      "env", "-u", "TMUX", "-u", "TMUX_PANE", "TERM=xterm-256color", "CLAUDE_CODE_NO_FLICKER=0",
+      bin, "--settings", JSON.stringify({ disableAllHooks: true }), ...(model ? ["--model", model] : []));
+    let text = "";
+    for (;;) {
+      text = await screen();
+      if (/^❯\s/m.test(text)) break;
+      if (/Is this a project you created or one you trust/.test(text)) {
+        throw new Error(`Claude Code has not been trusted in ${cwd}`);
+      }
+      const dead = (await t("display-message", "-p", "-t", "menu", "#{pane_dead}")).stdout.trim() === "1";
+      if (dead || Date.now() > deadline) {
+        const said = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 3).join(" ");
+        throw new Error(`Claude Code ${dead ? "exited" : "showed no prompt"} before its menu could be read${said ? `: ${said}` : ""}`);
+      }
+      await pause();
+    }
+    await t("send-keys", "-t", "menu", "-l", "/");
+    const sent = Date.now();
+    let last = null;
+    let since = 0;
+    for (;;) {
+      await pause();
+      const rows = parseClaudeMenu(await screen());
+      const sig = JSON.stringify(rows);
+      if (sig !== last) {
+        last = sig;
+        since = Date.now();
+      } else if (rows && Date.now() - since >= MENU_STILL_MS && Date.now() - sent >= MENU_SETTLE_MS) {
+        return rows;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(rows ? "Claude Code's menu kept changing" : "Claude Code showed no menu for /");
+      }
+    }
+  } finally {
+    await t("kill-server").catch(() => {});
+    fs.rmSync(socket, { force: true });
+  }
+}
+
+// What Claude inserts for an MCP prompt, shown as "server:prompt (MCP)".
+function claudeCommandName(display) {
+  const mcp = /^(.+?):(.+) \(MCP\)$/.exec(display);
+  if (!mcp) return display;
+  const part = (text) => text.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `mcp__${part(mcp[1])}__${part(mcp[2])}`;
+}
+
+/**
+ * The app's rows for Claude Code's popup (`menu`), with argument hints and
+ * aliases from its headless list (`headless`) and the command objects of its
+ * binary (`binary`, name -> variants).
+ */
+export function buildClaudeCommands({ menu, headless, binary }) {
+  const byName = new Map(headless.map((command) => [command.name, command]));
+  return menu.map(({ display, description }) => {
+    const name = claudeCommandName(display);
+    const twin = byName.get(display);
+    // A built-in, unless a user, project or plugin command has its name.
+    const variants = !twin || twin.builtin ? binary.get(name) : undefined;
+    // What the TUI runs: its own definition when there is one.
+    const tui = variants && (variants.find((v) => v.type === "local-jsx") ?? variants.find((v) => v.type === "local" && !v.headless)
+      ?? variants.find((v) => v.type === "prompt") ?? variants.find((v) => v.type === "local"));
+    const interactive = !!tui && (tui.type === "local-jsx" || (tui.type === "local" && !tui.headless));
+    const opens = tui && CLAUDE_MODEL_COMMANDS.has(name) ? "model" : interactive ? "terminal" : null;
+    // A prompt that names its arguments says so last: "(arguments: who, when)".
+    const argNames = /\(arguments: ([^)]*)\)$/.exec(description)?.[1].split(", ");
+    return {
+      name,
+      // The row's own text where it differs from what is typed (MCP prompts).
+      ...(display !== name ? { label: display } : {}),
+      description: clip(description),
+      hint: tui?.argumentHint || twin?.argumentHint || argNames?.map((arg) => `[${arg}]`).join(" ") || null,
+      // Picked with Enter, Claude runs a command at once, except a prompt
+      // that names its arguments: that one waits for them.
+      args: argNames ? "required" : null,
+      opens,
+      ...(opens === "terminal" ? { when: "always" } : {}),
+      aliases: [...new Set([...(twin?.aliases ?? []), ...(variants ?? []).flatMap((v) => v.aliases)])],
+    };
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Codex
@@ -433,7 +494,7 @@ const CODEX_BUILTINS = [
   ["config", "configure Codex preferences", { opens: "terminal" }],
   ["recap", "summarize the current conversation now", {}],
   ["plan", "switch to Plan mode", { args: true }],
-  ["voice", "start or stop voice; use /voice settings to choose a voice", { args: true, gate: "never" }],
+  ["voice", "start or stop voice; use /voice settings to choose a voice", { args: true, gate: "voice" }],
   ["goal", "set or view the goal for a long-running task", { args: true, opens: "terminal", gate: "goals" }],
   ["agents", "open the agent command center", { opens: "terminal" }],
   ["side", "start a side conversation", { args: true, opens: "terminal", when: "always" }],
@@ -479,9 +540,11 @@ export const codexPluginsFor = (mode) => !CODEX_PLANNER_MODES.has(mode);
 
 const isDaybreak = (program) => String(program).startsWith("daybreak_");
 // chatwidget/settings.rs daybreak_command_description for a session that
-// has not turned Daybreak on; null hides the command.
-function daybreakDescription({ features, chatgpt, models }) {
-  if (!features.get("cli_daybreak") || !chatgpt) return null;
+// has not turned Daybreak on; null hides the command. An API-key sign-in
+// needs one more feature (daybreak_account_eligible).
+function daybreakDescription({ features, chatgpt, apiKey, models }) {
+  if (!features.get("cli_daybreak")) return null;
+  if (!chatgpt && !(apiKey && features.get("api_key_cyber_access_programs"))) return null;
   if (models.some((m) => (m.available_access_programs?.cyber ?? []).some(isDaybreak))) return "Enable broader access for cybersecurity work";
   if (!models.length) return "Manage broader access for cybersecurity work";
   if (models.every((m) => (m.available_access_programs?.cyber ?? []).length > 0)) return "Learn about broader access for cybersecurity work";
@@ -498,20 +561,71 @@ function codexGate(gate, state) {
     case "plugins": return state.features.get("plugins") === true;
     case "chatgpt": return state.chatgpt;
     case "daybreak": return daybreakDescription(state) !== null;
+    case "voice": return state.voice;
     default: throw new Error(`unknown Codex gate ${gate}`);
   }
 }
 
+// codex-cli/bin/codex.js: the platform package whose binary the npm launcher runs.
+const CODEX_NPM_TARGETS = {
+  "linux-x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl"],
+  "linux-arm64": ["@openai/codex-linux-arm64", "aarch64-unknown-linux-musl"],
+  "darwin-x64": ["@openai/codex-darwin-x64", "x86_64-apple-darwin"],
+  "darwin-arm64": ["@openai/codex-darwin-arm64", "aarch64-apple-darwin"],
+  "win32-x64": ["@openai/codex-win32-x64", "x86_64-pc-windows-msvc"],
+  "win32-arm64": ["@openai/codex-win32-arm64", "aarch64-pc-windows-msvc"],
+};
+
+/** The package folder (codex-package.json) of the Codex that `bin` runs. */
+export function codexPackageDir(bin) {
+  const real = fs.realpathSync(bin);
+  // A native install runs <package>/bin/codex itself (install-context from_exe).
+  const native = path.dirname(path.dirname(real));
+  if (path.basename(path.dirname(real)) === "bin" && fs.existsSync(path.join(native, "codex-package.json"))) {
+    return native;
+  }
+  const target = CODEX_NPM_TARGETS[`${process.platform}-${process.arch}`];
+  if (!target) {
+    throw new Error(`Codex has no package for ${process.platform} ${process.arch}`);
+  }
+  const [pkg, triple] = target;
+  // The launcher looks in its platform package, then in its own vendor folder.
+  let vendor;
+  try {
+    vendor = path.join(path.dirname(createRequire(real).resolve(`${pkg}/package.json`)), "vendor");
+  } catch (error) {
+    if (error.code !== "MODULE_NOT_FOUND") throw error;
+    vendor = path.join(path.dirname(real), "..", "vendor");
+  }
+  const dir = path.join(vendor, triple);
+  if (!fs.existsSync(path.join(dir, "codex-package.json"))) {
+    throw new Error(`${real} runs no Codex package Rudder can find (looked in ${dir})`);
+  }
+  return dir;
+}
+
+// realtime-webrtc session.rs is_supported: /voice shows when the package
+// carries the voice runtime (macOS, Linux and Windows builds that ship it).
+export function codexHasVoice(packageDir, platform = process.platform) {
+  const voice = path.join(packageDir, "codex-resources", "voice");
+  const [helper, runtime] = platform === "darwin" ? ["bin/codex-voice-host", "lib/libgstreamer-1.0.0.dylib"]
+    : platform === "win32" ? ["bin/codex-voice-host.exe", "bin/gstreamer-1.0-0.dll"]
+      : ["bin/codex-voice-host", "lib/libgstreamer-1.0.so.0"];
+  const file = (rel) => fs.statSync(path.join(voice, rel), { throwIfNoEntry: false })?.isFile() === true;
+  return file(helper) && file(runtime);
+}
+
 /**
  * Codex's "/" popup for one agent. `features`: name -> enabled, as
- * `codex features list` prints them with Rudder's launch flags; `models`: the
- * model catalog; `model`: the agent's model.
+ * `codex features list` prints them with Rudder's launch flags; `chatgpt` and
+ * `apiKey`: the sign-in; `voice`: the install has the voice runtime;
+ * `models`: the model catalog; `model`: the agent's model.
  */
-export function buildCodexCommands({ version, features, chatgpt, models, model, platform = process.platform }) {
+export function buildCodexCommands({ version, features, chatgpt, apiKey, voice, models, model, platform = process.platform }) {
   if (!CODEX_VERSIONS.includes(version)) {
     throw new Error(`Rudder knows the commands of Codex ${CODEX_VERSIONS.join(" and ")}; this machine has Codex ${version}. Install ${CODEX_VERSION} with: npm install -g @openai/codex@${CODEX_VERSION}`);
   }
-  const state = { features, chatgpt, models, platform };
+  const state = { features, chatgpt, apiKey, voice, models, platform };
   const commands = [];
   for (const [name, description, spec] of CODEX_BUILTINS) {
     if (!codexGate(spec.gate, state)) continue;
@@ -594,7 +708,13 @@ export async function readCodexState({ bin, cwd, env, plugins }) {
     throw new Error(`could not read the Codex version from "${versionOut.stdout.trim()}"`);
   }
   const login = `${loginOut.stdout}\n${loginOut.stderr}`;
-  return { version, features: parseCodexFeatures(featuresOut.stdout), chatgpt: /using ChatGPT/i.test(login) };
+  return {
+    version,
+    features: parseCodexFeatures(featuresOut.stdout),
+    chatgpt: /using ChatGPT/i.test(login),
+    apiKey: /^API key configured/m.test(login),
+    voice: codexHasVoice(codexPackageDir(bin)),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -669,9 +789,36 @@ function claudeStamp({ bin, cwd, env }) {
       treeStamp(path.join(claude, "commands"), 4, parts);
       treeStamp(path.join(claude, "skills"), 2, parts);
     }
+    parts.push(fileStamp(path.join(dir, ".mcp.json")));
     if (path.dirname(dir) === dir) break;
   }
+  parts.push(claudeGlobalStamp(env, path.resolve(cwd)));
   return parts.join("\n");
+}
+
+// The parts of Claude's global config the menu shows: the most used skills
+// lead it, and the account and MCP servers gate rows. The file changes all
+// the time for other reasons, so only these parts count.
+const globalConfigCache = new Map(); // file -> { mtimeMs, config }
+function claudeGlobalStamp(env, cwd) {
+  const file = env.CLAUDE_CONFIG_DIR?.trim()
+    ? path.join(env.CLAUDE_CONFIG_DIR.trim(), ".claude.json")
+    : path.join(env.HOME || os.homedir(), ".claude.json");
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return `${file}:-`;
+    throw error;
+  }
+  let cached = globalConfigCache.get(file);
+  if (cached?.mtimeMs !== stat.mtimeMs) {
+    cached = { mtimeMs: stat.mtimeMs, config: JSON.parse(fs.readFileSync(file, "utf8")) };
+    globalConfigCache.set(file, cached);
+  }
+  const { skillUsage, oauthAccount, mcpServers, projects } = cached.config;
+  const project = projects?.[cwd] ?? {};
+  return JSON.stringify([skillUsage, oauthAccount, mcpServers, project.mcpServers, project.enabledMcpjsonServers, project.disabledMcpjsonServers, project.disabledMcpServers]);
 }
 
 function codexStamp({ bin, cwd, env }) {
@@ -748,16 +895,15 @@ export function createSlashCommands({ env, log, projectDirs }) {
 
   const sources = {
     claude: {
-      key: ({ cwd }) => `claude\n${cwd}`,
+      // The menu names the agent's model ("Switch model (currently …)").
+      key: ({ cwd, model }) => `claude\n${cwd}\n${model ?? ""}`,
       stamp: ({ cwd }) => claudeStamp({ bin: which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env), cwd, env }),
-      build: async ({ cwd }) => {
+      build: async ({ cwd, model }) => {
         const bin = which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env);
-        const [answer, binary] = await Promise.all([claudeInitialize({ bin, cwd, env }), claudeBinary(bin)]);
-        const { commands, unclassified } = buildClaudeCommands({ headless: answer.commands, binary });
-        if (unclassified.length) {
-          log(`slash commands: Claude Code ${answer.version} has built-ins Rudder has not classified: ${unclassified.join(", ")}`);
-        }
-        return { version: answer.version, classifiedFor: CLAUDE_CLASSIFIED_FOR, unclassified, commands };
+        const [menu, answer, binary] = await Promise.all([
+          readClaudeMenu({ bin, cwd, env, model }), claudeInitialize({ bin, cwd, env }), claudeBinary(bin),
+        ]);
+        return { version: answer.version, commands: buildClaudeCommands({ menu, headless: answer.commands, binary }) };
       },
     },
     codex: {
@@ -808,7 +954,7 @@ export function createSlashCommands({ env, log, projectDirs }) {
     if (typeof cwd !== "string" || !cwd) {
       throw new Error("this agent has no working directory yet");
     }
-    if (backend === "claude") return { backend, input: { cwd } };
+    if (backend === "claude") return { backend, input: { cwd, model: record.model?.trim() || null } };
     if (backend === "codex") return { backend, input: { cwd, plugins: codexPluginsFor(record.mode) } };
     throw new Error(`the app has no "/" list for ${backend} agents`);
   }

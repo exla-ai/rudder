@@ -38,7 +38,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(workspace,'pending.md'),'original unmerged source');
   const transcript=path.join(root,'session.jsonl');await fs.writeFile(transcript,'original session');
   const record={id:'retained',task:'recover my work',status:'running',backend:'codex',
-    model:'account-model',effort:'high',worktree:{enabled:true,path:workspace,jjChangeId:'retained-change'},
+    model:'account-model',effort:'high',workspace:{enabled:true,path:workspace,jjChangeId:'retained-change'},
     session:{nativeSessionId:'retained-session'},process:{pid:1234},merge:{operationId:'accepted-op'}};
   const run=path.join(repo,'.rudder/runs/retained');await fs.mkdir(run,{recursive:true});
   await fs.writeFile(path.join(run,'run.json'),JSON.stringify(record));

@@ -904,7 +904,7 @@ impl EngineControl {
                 serde_json::json!({"ok":false,"error":"engine control identity or epoch mismatch"})
             } else if !matches!(request.op.as_str(), "status" | "shutdown" | "files" | "screen" | "results" | "await" | "previews" | "preview-register") {
                 serde_json::json!({"ok":false,"error":"unknown engine control operation"})
-            } else if !owner.is_fabric() && matches!(request.op.as_str(), "shutdown" | "preview-register" | "results" | "await") {
+            } else if !owner.is_fabric() && matches!(request.op.as_str(), "shutdown" | "preview-register" | "previews" | "results" | "await") {
                 serde_json::json!({"ok":false,"error":format!("the project owner (legacy-native) does not serve {}; use its own dashboard", request.op)})
             } else {
                 if request.op == "shutdown" {
@@ -1241,11 +1241,11 @@ pub(crate) fn run_engine_command(args: &[String]) -> Result<()> {
         let record: OwnerRecord = serde_json::from_slice(&fs::read(repo.join(".rudder/engine/owner.json"))?)?;
         anyhow::ensure!(record.repo == repo, "the project owner record names a different checkout");
         // A dashboard owner (legacy-native) answers the same authenticated
-        // control socket for reads that need no journal: files, screen and
-        // previews. Command history (results, await) and preview-register
-        // live in the Fabric journal: Fabric only.
+        // control socket for reads that need no journal: files and screen.
+        // Command history (results, await) and preview registrations live in
+        // the Fabric journal: Fabric only.
         let serves = match operation {
-            "files" | "screen" | "previews" => matches!(record.authority.as_str(), "fabric" | "legacy-native"),
+            "files" | "screen" => matches!(record.authority.as_str(), "fabric" | "legacy-native"),
             _ => record.authority == "fabric",
         };
         anyhow::ensure!(serves, "the project owner ({}) does not serve {operation}", record.authority);

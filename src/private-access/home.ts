@@ -1,3 +1,4 @@
+import { projectEngineAuthority } from "../engine-authority.js";
 import { queryPreviewOwner, type RegisteredPreviewProcess } from "./engine.js";
 import { PrivatePreviewDirectory, observeLinuxPreviewListeners, previewProcessMatches, type PreviewListener, type PrivatePreview } from "./previews.js";
 
@@ -23,6 +24,9 @@ export class HomePrivatePreviews {
     // in this tick rather than preserving stale published URLs.
     for (const project of projects.slice(0, 64)) {
       try {
+        // Only a Fabric engine registers previews. A dashboard-owned project
+        // has none, so it costs no native process or dashboard round trip.
+        if (projectEngineAuthority(project.dir) !== "fabric") continue;
         const rows = await this.query(project.dir, "previews");
         if (Array.isArray(rows)) next.set(project.workspaceId, rows as RegisteredPreviewProcess[]);
       } catch { /* no current custody, so no preview */ }

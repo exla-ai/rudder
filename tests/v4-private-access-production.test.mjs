@@ -36,6 +36,9 @@ async function until(check) {for(let i=0;i<80;i++){if(check())return;await pause
 test('registered Home preview reaches authorized exact-reference discovery and expires with process custody',{skip:process.platform!=='linux'},async t=>{
   const task='/workspace/rudder-scratch/n13-private-terminal';await fs.mkdir(task,{recursive:true});
   const dir=await fs.mkdtemp(path.join(task,'preview-'));t.after(async()=>{await fs.rm(dir,{recursive:true,force:true});await fs.rmdir(task).catch(()=>{});});
+  // Only a Fabric-owned project is scanned for previews.
+  await fs.mkdir(path.join(dir,'.rudder/engine'),{recursive:true});
+  await fs.writeFile(path.join(dir,'.rudder/engine/owner.json'),JSON.stringify({format_version:1,authority:'fabric'}));
   const childFile=path.join(dir,'listener.cjs');await fs.writeFile(childFile,"const s=require('node:http').createServer((q,r)=>r.end('preview'));s.listen(0,'127.0.0.1',()=>process.send({port:s.address().port}));");
   const child=fork(childFile,{cwd:dir,stdio:['ignore','ignore','ignore','ipc'],execArgv:[]});
   t.after(async()=>{if(child.exitCode===null){child.kill();await once(child,'exit');}});

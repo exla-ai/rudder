@@ -97,7 +97,7 @@ rudder-native and home.mjs, rudder-worker-images and rudder-workers-exla:4.4.2
 (digest 3da31bc7), control plane redeployed. The home offers 4.4.2; npm comes
 from the v4.4.2 tag run.
 
-5.0 dashboard matches the app (local, unreleased): the agent list uses the app's
+5.0 dashboard matches the app (shipped in 5.0.4): the agent list uses the app's
 sections and words (`needs you` first, then `working`, `done`, and the `merged`
 and `earlier` drawers; "ready for review", "turn failed", "merge conflict"),
 the header counts working and need you, `P` switches the selected agent's
@@ -106,7 +106,7 @@ and context left like a chat header, and the palette is the app's. Checked
 with native filters `agent_stats`, `needs_you_groups`, `model_key_switches`,
 the updated sidebar/label tests, and `tests/tui/done-drawer.test.mjs`.
 
-Vibeprint canvas in the app (local, unreleased): a Canvas button beside Files
+Vibeprint canvas in the app (shipped in 5.0.4): a Canvas button beside Files
 opens the project's vibeprint canvas in the right column (a sheet on phones),
 following the selected agent. The home worker runs one `vibeprint serve` per
 project (`cloud/worker/vibeprint-host.mjs`, RPC `vibeprint`, Cloud route
@@ -123,7 +123,7 @@ key the local Claude Code or Codex reads submitted sketches. Needs vibeprint
 image builds. Checked with `tests/vibeprint-host.test.mjs` and headless runs
 against dev-mock with a fake Claude Code.
 
-Agent rename, row menu and day-old cleanup (local, unreleased): the app renames
+Agent rename, row menu and day-old cleanup (shipped in 5.0.4): the app renames
 an agent in place (double click a sidebar title, the row menu, or click the
 agent screen's title) through `/api/app/agent-rename`, RPC `agentRename`, steer
 kind `rename`, native `rename_agent_at` (the dashboard's `r` uses it too, 200
@@ -149,13 +149,13 @@ snapshots first, so the agent's jj change stays in `jj log`; a workspace with
 no jj name is kept. Checked with native filter `untouched_agents` and
 a headless run against dev-mock.
 
-Every run is jj (local, unreleased). The git-worktree path is gone: the
+Every run is jj (shipped in 5.0.4). The git-worktree path is gone: the
 `vcs ?? "git"` routing and the git merge, sync and rebase helpers in `git.ts`,
 the `worktree` record key, `workspace.branch`, the `mergeStrategy` setting, the
 cloud handoff's `worktree*` spellings, native's git rebase conflict prompt, and
 the record's `vcs` field (an old record that still has it loads like any other).
 
-Branch an agent (local, unreleased): the app's row menu (Branch, with an
+Branch an agent (shipped in 5.0.4): the app's row menu (Branch, with an
 optional first message) and the dashboard's `b` start a new agent named
 "<name> (branch)" right after the source, with a copy of its conversation and
 files, while the source keeps running (`native/src/branch.rs`; route
@@ -172,7 +172,7 @@ idle at its prompt. The cleanup keeps the source's conversation while a branch
 of it is being set up. Checked with native filter `branch` (fake CLIs; no real
 session was forked).
 
-All agents (local, unreleased): a button at the top of the app's sidebar
+All agents (shipped in 5.0.4): a button at the top of the app's sidebar
 (phone: the home top bar) opens one chat that talks to every agent in every
 project on the home: list, read, message, interrupt, start, answer prompts and
 watch for finished/failed/needs-you without polling. It is a Main agent in a
@@ -183,9 +183,9 @@ button in the chat starts a new one; older chats are reachable only until the
 24-hour cleanup deletes them. Checked with `tests/coordinator.test.mjs`, a real
 `claude -p --model haiku` run against the broker with fake projects (all five
 read/write/wait tools), `codex mcp list` for the project config, and headless
-screenshots against dev-mock. Needs a worker image for homes to get it.
+screenshots against dev-mock.
 
-"/" menu (local, unreleased): Claude's list comes from Claude itself. The
+"/" menu (shipped in 5.0.4): Claude's list comes from Claude itself. The
 worker opens an interactive claude off-screen in a private tmux with the
 agent's env, cwd and model, types "/" and parses the popup (nothing is sent,
 no transcript; ~4s, cached on the Claude version, model and every file that
@@ -193,6 +193,19 @@ changes the menu). Matched the real popup row for row on Claude 2.1.327 (198
 rows) and Codex 0.169/0.170 (56). Each build starts the user's MCP servers,
 as an agent start does. Not run on macOS yet. opencode agents still get
 "Commands unavailable" (the app starts only Claude and Codex agents).
+
+5.0.4 is published as npm latest (2026-11-18 13:56Z) and deployed to Cloud
+(Fly release 209, 14:01Z, worker image `rudder-workers-exla:5.0.4`, also in
+`rudder-worker-images`). Full local release checks and release CI passed. 5.0.2
+and 5.0.3 never published: each stopped in Release CI's macOS native tests on a
+test that was timing-sensitive under load (the fleet test's provider check, then
+the gam fake reviewer printing nothing between its prompt hook and turn end).
+Release CI accepts only the first attempt of a tag, so each fix took a new
+version. The site (rudder.exla.ai, Linear removed) is deployed. The live home
+offers the image and adopts it when idle. The Mac app is not released: the
+download still serves 1.0.2; a signed build needs the Developer ID identity
+(the MacBook Pro, or a Developer ID Application .p12 as the
+MAC_DEVELOPER_ID_P12 and MAC_DEVELOPER_ID_PASSWORD secrets for mac.yml).
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

@@ -1,9 +1,11 @@
 //! Claude Code loads CLAUDE.md from every directory above its cwd, and an agent
 //! workspace sits inside the main checkout (`<root>/.rudder-workspaces/<group>/<name>`).
 //! So each worker loaded the project's memory twice: the main checkout's copy
-//! and its own. In libra, whose CLAUDE.md imports a 300k-character AGENTS.md,
-//! that took a worker's first turn from about 131k to 249k tokens. The outer
-//! copies go into the worker's own `--settings` file as `claudeMdExcludes`.
+//! and its own. A project with no CLAUDE.md gets its AGENTS.md loaded the same
+//! way. The second copy rides on every request and shrinks the room left before
+//! each compaction, so a worker with large instructions compacts far more
+//! often. The outer copies go into the worker's own `--settings` file as
+//! `claudeMdExcludes`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,10 +62,16 @@ pub(crate) fn outer_memory(cwd: &Path) -> Vec<String> {
     let lower = fs::read_to_string(PathBuf::from(state).join("lower"))
         .ok()
         .map(|dir| PathBuf::from(dir.trim()));
-    let mut names: Vec<PathBuf> = ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"]
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let mut names: Vec<PathBuf> = [
+        "CLAUDE.md",
+        "CLAUDE.local.md",
+        ".claude/CLAUDE.md",
+        "AGENTS.md",
+        ".claude/AGENTS.md",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
     markdown_under(&root, Path::new(".claude/rules"), &mut names);
     let mut excludes: Vec<String> = Vec::new();
     for name in names {
@@ -153,7 +161,13 @@ mod tests {
         let temp = tempdir();
         let root = temp.0.join("repo");
         let workspace = root.join(".rudder-workspaces/repo-1a2b/agent-1");
-        for name in ["CLAUDE.md", "AGENTS.md", ".claude/rules/style.md"] {
+        // Claude Code loads AGENTS.md itself where a directory has no CLAUDE.md.
+        for name in [
+            "CLAUDE.md",
+            "AGENTS.md",
+            ".claude/AGENTS.md",
+            ".claude/rules/style.md",
+        ] {
             write(&root.join(name), "x");
             write(&workspace.join(name), "x");
         }
@@ -162,7 +176,12 @@ mod tests {
         write(&root.join(".claude/rules/local/notes.md"), "mine");
         assert_eq!(
             outer_memory(&workspace),
-            vec![path(root.join("CLAUDE.md")), path(root.join(".claude/rules/style.md"))]
+            vec![
+                path(root.join("CLAUDE.md")),
+                path(root.join("AGENTS.md")),
+                path(root.join(".claude/AGENTS.md")),
+                path(root.join(".claude/rules/style.md")),
+            ]
         );
         // The main agent runs in the checkout itself.
         assert!(outer_memory(&root).is_empty());

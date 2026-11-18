@@ -10,7 +10,7 @@ import {
 import { PlanView, planOf } from "/app/plan.js";
 import { ProjectFiles } from "/app/project-files.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
-import { openModelPicker, modelChip } from "/app/model-picker.js";
+import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -576,10 +576,13 @@ document.addEventListener("click", (e) => {
   if (external && NATIVE) { e.preventDefault(); openExternal(a.href); }
   else if (external && a.target !== "_blank") { a.target = "_blank"; a.rel = "noopener noreferrer"; }
 });
-// A file dropped anywhere but a composer must not open in place of the app.
+// A file dropped anywhere but a composer, or an agent dragged from the
+// sidebar dropped outside its drop zones, must not open in place of the app.
+const AGENT_DRAG = "application/x-rudder-agent";
 for (const type of ["dragover", "drop"]) {
   document.addEventListener(type, (e) => {
-    if (e.defaultPrevented || ![...e.dataTransfer.types].includes("Files")) return;
+    const types = [...e.dataTransfer.types];
+    if (e.defaultPrevented || !(types.includes("Files") || types.includes(AGENT_DRAG))) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "none";
   });
@@ -598,6 +601,8 @@ let screen = null;
 // Slide Over, keep the stacked screens.
 const DESKTOP_MQ = matchMedia("(min-width: 1024px), (min-width: 768px) and (pointer: coarse)");
 const PLAN_COLUMN_MQ = matchMedia("(min-width: 1024px)");
+// Room for two agents side by side next to the sidebar.
+const SPLIT_MQ = matchMedia("(min-width: 1100px)");
 let desktop = null;
 app.onScopeChange = () => desktop?.update();
 const isDesktop = () => !!desktop;
@@ -607,9 +612,9 @@ const hasPlanColumn = () => isDesktop() && PLAN_COLUMN_MQ.matches;
 // Full-page screens (no sidebar), on desktop too.
 const FULL_PAGE = new Set(["join", "slack-link", "welcome", "onboarding"]);
 
-function buildScreen(route) {
+function buildScreen(route, paneOpts = {}) {
   if (route.name === "project") return ProjectScreen(route.ws);
-  if (route.name === "agent") return AgentScreen(route.ws, route.run);
+  if (route.name === "agent") return AgentScreen(route.ws, route.run, paneOpts);
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
   if (route.name === "team") return TeamScreen();
@@ -622,7 +627,6 @@ function buildScreen(route) {
 }
 
 function mountScreen(dir = "forward") {
-  if (screen) { screen.destroy?.(); screen = null; }
   let route = null;
   if (!store.signedOut) {
     route = parseRoute(location.pathname);
@@ -632,19 +636,26 @@ function mountScreen(dir = "forward") {
   }
   const wantDesktop = DESKTOP_MQ.matches && !!route && !FULL_PAGE.has(route.name);
   document.body.classList.toggle("desktop", wantDesktop);
-  if (wantDesktop && !desktop) {
-    viewEl.textContent = "";
-    desktop = DesktopShell();
-    viewEl.appendChild(desktop.el);
-  } else if (!wantDesktop && desktop) {
-    desktop.destroy(); desktop = null;
+  if (!wantDesktop && desktop) {
+    desktop.destroy(); desktop = null; screen = null;
     viewEl.textContent = "";
   }
-  const target = desktop ? desktop.main : viewEl;
-  target.textContent = "";
-  screen = store.signedOut ? SignInScreen() : buildScreen(route);
-  if (dir === "back" && !desktop) screen.el.classList.add("back-nav");
-  target.appendChild(screen.el);
+  if (wantDesktop) {
+    if (!desktop) {
+      screen?.destroy?.();
+      viewEl.textContent = "";
+      desktop = DesktopShell();
+      viewEl.appendChild(desktop.el);
+    }
+    // Its panes keep their screens while they show the same page.
+    screen = desktop.show(route);
+  } else {
+    screen?.destroy?.();
+    viewEl.textContent = "";
+    screen = store.signedOut ? SignInScreen() : buildScreen(route);
+    if (dir === "back") screen.el.classList.add("back-nav");
+    viewEl.appendChild(screen.el);
+  }
   screen.update?.();
   desktop?.update(route);
 }
@@ -658,6 +669,7 @@ function updateScreen() {
 }
 DESKTOP_MQ.addEventListener?.("change", () => mountScreen());
 PLAN_COLUMN_MQ.addEventListener?.("change", () => updateScreen());
+SPLIT_MQ.addEventListener?.("change", () => mountScreen());
 
 function DesktopShell() {
   const el = h(`<div class="dsk">
@@ -673,7 +685,15 @@ function DesktopShell() {
         <a class="ds-link ds-settings" href="/app/settings" data-link><span class="avatar"></span><span class="ds-who"><span class="ds-email"></span><span class="ds-org"></span></span>${icon("settings")}</a>
       </div>
     </nav>
-    <div class="dsk-main"></div>
+    <div class="dsk-main">
+      <div class="dsk-pane p0"></div>
+      <div class="pane-div" hidden aria-hidden="true"></div>
+      <div class="dsk-pane p1" hidden></div>
+      <div class="split-drop" hidden>
+        <div class="sd-zone z0" data-pane="0"><span class="sd-label"></span></div>
+        <div class="sd-zone z1" data-pane="1"><span class="sd-label">${icon("split")}<span>Open side by side</span></span></div>
+      </div>
+    </div>
     <aside class="dsk-plan" hidden aria-label="Plan"></aside>
     <div class="ds-grip" aria-hidden="true"></div>
     <button type="button" class="ds-side-btn ds-show" aria-label="Show sidebar">${icon("sidebar")}</button>
@@ -723,6 +743,133 @@ function DesktopShell() {
     e.preventDefault();
     setSideClosed(!sideClosed);
   }, { signal: life.signal });
+  // Two agents side by side: drag one from the sidebar onto the right of
+  // the main area, or use its "Open on the right" button. At most two panes;
+  // the URL follows the focused one. Remembered per viewer until closed.
+  const panes = [...main.querySelectorAll(".dsk-pane")].map((paneEl) => ({ el: paneEl, route: null, screen: null }));
+  const divider = main.querySelector(".pane-div");
+  const dropEl = main.querySelector(".split-drop");
+  const zones = [...dropEl.querySelectorAll(".sd-zone")];
+  let split = ls.get("rudder.split"); // { panes: [{ ws, run }, { ws, run }], ratio } or null
+  let splitShown = false;
+  let focused = 0;
+  const saveSplit = () => ls.set("rudder.split", split);
+  const agentOf = (r) => (r?.name === "agent" ? { ws: r.ws, run: r.run } : null);
+  const sameAgent = (x, y) => !!x && !!y && x.ws === y.ws && x.run === y.run;
+  const shownAgents = () => (splitShown ? split.panes : [agentOf(route)]);
+  const paintSplit = () => {
+    main.classList.toggle("split", splitShown);
+    panes[1].el.hidden = !splitShown;
+    divider.hidden = !splitShown;
+    if (split) main.style.setProperty("--split", String(split.ratio));
+    panes.forEach((p, i) => p.el.classList.toggle("focused", splitShown && i === focused));
+  };
+  function show(r) {
+    const here = agentOf(r);
+    splitShown = !!split && !!here && SPLIT_MQ.matches;
+    if (splitShown) {
+      const at = split.panes.findIndex((t) => sameAgent(t, here));
+      if (at >= 0) focused = at;
+      else { split.panes[focused] = here; saveSplit(); }
+    } else focused = 0;
+    const want = splitShown ? split.panes.map((t) => parseRoute(agentPath(t.ws, t.run))) : [r, null];
+    want[focused] = r;
+    panes.forEach((p, i) => {
+      const w = want[i];
+      if (p.screen && p.route?.path === w?.path) return;
+      p.screen?.destroy?.();
+      p.el.textContent = "";
+      p.route = w;
+      p.screen = w ? buildScreen(w, i === 1 ? { onClose: closeSide } : {}) : null;
+      if (p.screen) p.el.appendChild(p.screen.el);
+    });
+    paintSplit();
+    return panes[focused].screen;
+  }
+  // The focused pane is the page: its URL, its title, the sidebar's highlight.
+  function takeFocus(i) {
+    focused = i;
+    const r = panes[i].route;
+    history.replaceState({ depth }, "", r.path);
+    ls.set("rudder.lastRoute", { path: r.path, at: Date.now() });
+    screen = panes[i].screen;
+    paintSplit();
+    screen.update?.();
+    update(r);
+  }
+  const onPaneEvent = (e) => {
+    const i = panes.findIndex((p) => p.el.contains(e.target));
+    if (splitShown && i >= 0 && i !== focused) takeFocus(i);
+  };
+  main.addEventListener("pointerdown", onPaneEvent, true);
+  main.addEventListener("focusin", onPaneEvent);
+  function closeSide() {
+    split = null; saveSplit();
+    splitShown = false;
+    panes[1].screen?.destroy?.();
+    panes[1].el.textContent = "";
+    panes[1].route = null; panes[1].screen = null;
+    takeFocus(0);
+  }
+  // Pane `i` shows agent `t`: the right one opens beside the agent on screen.
+  function openIn(i, t) {
+    const at = shownAgents().findIndex((x) => sameAgent(x, t));
+    if (at >= 0) { if (splitShown && at !== focused) takeFocus(at); return; }
+    if (splitShown) split.panes[i] = t;
+    else if (i === 1) split = { panes: [agentOf(route), t], ratio: split?.ratio ?? 0.5 };
+    saveSplit();
+    navigate(agentPath(t.ws, t.run));
+  }
+  divider.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    divider.setPointerCapture(e.pointerId);
+    const box = main.getBoundingClientRect();
+    const min = Math.min(320, box.width / 2);
+    const drag = new AbortController();
+    main.classList.add("resizing");
+    divider.addEventListener("pointermove", (ev) => {
+      split.ratio = Math.min(box.width - min, Math.max(min, ev.clientX - box.left)) / box.width;
+      main.style.setProperty("--split", String(split.ratio));
+    }, { signal: drag.signal });
+    divider.addEventListener("lostpointercapture", () => { drag.abort(); main.classList.remove("resizing"); saveSplit(); }, { signal: drag.signal });
+  });
+  // Dragging an agent row: the main area shows where it can land.
+  const carriesAgent = (e) => [...e.dataTransfer.types].includes(AGENT_DRAG);
+  const hideDrop = () => { dropEl.hidden = true; for (const z of zones) z.classList.remove("over"); };
+  nav.addEventListener("dragstart", (e) => {
+    const a = e.target instanceof Element ? e.target.closest(".ds-agent") : null;
+    if (!a?.dataset.run) return;
+    // No room for two panes here: the drag does nothing.
+    if (!SPLIT_MQ.matches) { e.preventDefault(); return; }
+    e.dataTransfer.setData(AGENT_DRAG, JSON.stringify({ ws: a.dataset.ws, run: a.dataset.run }));
+    e.dataTransfer.effectAllowed = "copy";
+    e.dataTransfer.setDragImage(a, 24, a.offsetHeight / 2);
+    const beside = !!agentOf(route);
+    zones[1].hidden = !beside;
+    setText(zones[0].querySelector(".sd-label"), beside ? "Open here" : "Open");
+    setText(zones[1].querySelector(".sd-label span"), splitShown ? "Open here" : "Open side by side");
+    dropEl.hidden = false;
+  });
+  document.addEventListener("dragend", hideDrop, { signal: life.signal });
+  for (const z of zones) {
+    const over = (e) => {
+      if (!carriesAgent(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      z.classList.add("over");
+    };
+    z.addEventListener("dragenter", over);
+    z.addEventListener("dragover", over);
+    z.addEventListener("dragleave", () => z.classList.remove("over"));
+    z.addEventListener("drop", (e) => {
+      if (!carriesAgent(e)) return;
+      e.preventDefault();
+      hideDrop();
+      openIn(Number(z.dataset.pane), JSON.parse(e.dataTransfer.getData(AGENT_DRAG)));
+    });
+  }
+
   grip.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -752,7 +899,7 @@ function DesktopShell() {
 
   const sideAgent = (x) => {
     // The status line: in "Needs you" the project name gives way before the status does.
-    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span></a>`);
+    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
     return a;
   };
   const paintAgent = (a, { p, a: ag, showProject }) => {
@@ -760,6 +907,12 @@ function DesktopShell() {
     a.className = `ds-agent ${st.cls}`;
     a.querySelector(".dot").classList.toggle("live", !!st.live);
     if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
+    const target = { ws: p.workspaceId, run: ag.id };
+    a.dataset.ws = target.ws; a.dataset.run = ag.pending ? "" : target.run;
+    a.draggable = !ag.pending;
+    const openR = a.querySelector(".ds-open-r");
+    openR.hidden = !!ag.pending || !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, target));
+    openR.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openIn(1, target); };
     setText(a.querySelector(".ds-an"), ag.title || ag.task || "Untitled agent");
     const ap = a.querySelector(".ds-ap");
     setText(ap, showProject ? p.name : "");
@@ -857,7 +1010,9 @@ function DesktopShell() {
 
     // The plan beside the screen, for the project on screen.
     const p = route?.ws ? findProject(route.ws) : null;
-    const showPlan = hasPlanColumn() && !!planOf(p);
+    if (splitShown) panes[1 - focused].screen?.update?.();
+    // Two agents side by side take the room the plan column would.
+    const showPlan = hasPlanColumn() && !!planOf(p) && !splitShown;
     planCol.hidden = !showPlan;
     el.classList.toggle("with-plan", showPlan);
     if (!showPlan) { if (planView) { planView.el.remove(); planView = null; } return; }
@@ -871,9 +1026,11 @@ function DesktopShell() {
     for (const n of planCol.querySelectorAll(".pv-node")) n.classList.toggle("on", !!route?.run && n.getAttribute("href") === agentPath(p.workspaceId, route.run));
   }
   return {
-    el, main, update,
+    el, update,
+    show,
     destroy() {
       life.abort();
+      for (const p of panes) p.screen?.destroy?.();
       el.remove();
       document.body.classList.remove("desktop", "side-closed");
       document.body.style.removeProperty("--side-w");
@@ -985,7 +1142,7 @@ function base64File({ name, type, data }) {
 // The menu lives in the composer so it rides up with the keyboard. A tap
 // anywhere outside closes it (a scrim would be clipped to the composer, whose
 // backdrop filter contains fixed children).
-function openAttachMenu(composer, anchor, pick) {
+function openAttachMenu(anchor, pick) {
   const menu = h(`<div class="menu attach-menu" role="menu" aria-label="Attach"></div>`);
   const close = () => {
     menu.remove();
@@ -996,6 +1153,8 @@ function openAttachMenu(composer, anchor, pick) {
   const outside = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) close(); };
   const onKey = (e) => { if (e.key === "Escape") { close(); anchor.focus(); } };
   for (const src of ATTACH_SOURCES) {
+    // A Mac or desktop browser has no camera to point: the file dialog it opens is Photos again.
+    if (src.kind === "camera" && !coarse) continue;
     const locked = ATTACH_DOCS_ONLY && src.kind !== "files";
     const b = h(`<button type="button" role="menuitem">${icon(src.icon)}<span class="m-label"><span></span>${locked ? "<small>Update the app in TestFlight</small>" : ""}</span></button>`);
     b.querySelector(".m-label > span").textContent = src.label;
@@ -1003,7 +1162,8 @@ function openAttachMenu(composer, anchor, pick) {
     b.addEventListener("click", () => { close(); pick(src); });
     menu.appendChild(b);
   }
-  composer.appendChild(menu);
+  // In the paperclip's own form, so it opens above the paperclip wherever the form sits.
+  anchor.closest("form").appendChild(menu);
   anchor.setAttribute("aria-expanded", "true");
   document.addEventListener("pointerdown", outside, true);
   document.addEventListener("keydown", onKey, true);
@@ -1126,7 +1286,7 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
       if (closeMenu && attachBtn.getAttribute("aria-expanded") === "true") { closeMenu(); return; }
       // A desktop file dialog already covers photos and files alike.
       if (!coarse && !NATIVE) { pick(ATTACH_SOURCES.find((s) => s.kind === "files")); return; }
-      closeMenu = openAttachMenu(el, attachBtn, pick);
+      closeMenu = openAttachMenu(attachBtn, pick);
     });
     input.addEventListener("change", () => {
       addFiles([...(input.files || [])]);
@@ -2910,7 +3070,7 @@ function createAskCard(ask, { onAnswer }) {
 
 const OUT_LIMIT = 2400;
 
-function AgentScreen(ws, run, { member = null } = {}) {
+function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   // `member`: a teammate's agent (team.js), read only. No composer, prompts,
   // terminal or actions, and its transcript comes through the team route.
   const ro = !!member;
@@ -2953,6 +3113,13 @@ function AgentScreen(ws, run, { member = null } = {}) {
   back.setAttribute("aria-label", ro ? "Back to team" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
   if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
+  // The right of two panes: history belongs to the left one, so it closes instead.
+  if (onClose) {
+    back.hidden = true;
+    const closeBtn = h(`<button type="button" class="icon-btn pane-close" aria-label="Close this pane" title="Close">${icon("x")}</button>`);
+    closeBtn.addEventListener("click", onClose);
+    bar.appendChild(closeBtn);
+  }
   topbarScrollShadow(scroller, bar);
 
   const composer = createComposer({
@@ -2963,6 +3130,10 @@ function AgentScreen(ws, run, { member = null } = {}) {
     onSubmit: (text, files) => { send(text, files); return true; },
   });
   el.querySelector(".chat-wrap").after(composer.el);
+  // The model and effort this chat runs on, and switching them (model-picker.js).
+  const chatTools = h(`<div class="c-tools"></div>`);
+  composer.el.querySelector("form").before(chatTools);
+  const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -3062,10 +3233,11 @@ function AgentScreen(ws, run, { member = null } = {}) {
     }
   });
   const isRunning = (status) => status === "running" || !!statusOf(status).live;
-  if (!ro) fastStatePoll = () => {
+  const fastPoll = () => {
     const a = agentNow();
     return !!a && (isRunning(a.status) || pendingAsks(a).length > 0);
   };
+  if (!ro) fastPolls.add(fastPoll);
   if (!ro) pollState();
 
   // `/` commands: the message is typed into the agent's own terminal, so its
@@ -3073,8 +3245,8 @@ function AgentScreen(ws, run, { member = null } = {}) {
   const slashBox = h(`<div class="slash-suggest" role="listbox" hidden></div>`);
   composer.el.prepend(slashBox);
   const SLASH = {
-    claude: [["/compact", "summarize and free context"], ["/clear", "start a fresh conversation"], ["/model opus", "switch model (or sonnet, haiku)"], ["/effort high", "reasoning effort"], ["/cost", "usage so far"], ["/context", "what fills the context"], ["/review", "review the changes"], ["/init", "write CLAUDE.md"], ["/resume", "pick a past session (use the terminal keys)"], ["/model", "model picker (use the terminal keys)"]],
-    codex: [["/compact", "summarize and free context"], ["/new", "start a fresh conversation"], ["/model", "model picker (use the terminal keys)"], ["/status", "session and usage"], ["/review", "review the changes"], ["/diff", "show the diff"], ["/init", "write AGENTS.md"], ["/approvals", "approval mode (use the terminal keys)"]],
+    claude: [["/compact", "summarize and free context"], ["/clear", "start a fresh conversation"], ["/cost", "usage so far"], ["/context", "what fills the context"], ["/review", "review the changes"], ["/init", "write CLAUDE.md"], ["/resume", "pick a past session (use the terminal keys)"]],
+    codex: [["/compact", "summarize and free context"], ["/new", "start a fresh conversation"], ["/status", "session and usage"], ["/review", "review the changes"], ["/diff", "show the diff"], ["/init", "write AGENTS.md"], ["/approvals", "approval mode (use the terminal keys)"]],
   };
   const renderSlash = () => {
     const value = composer.textarea.value;
@@ -3258,7 +3430,7 @@ function AgentScreen(ws, run, { member = null } = {}) {
       add(`<button type="button" role="menuitem" class="danger">${icon("stop")}<span>Stop agent</span></button>`, () => act("stop"));
     }
     add(`<button type="button" role="menuitem" class="danger">${icon("trash")}<span>Delete agent</span></button>`,
-      () => deleteAgent(ws, a || { id: run, title: store.transcripts.get(key)?.title, status }, { after: () => goBack(projectPath(ws)) }));
+      () => deleteAgent(ws, a || { id: run, title: store.transcripts.get(key)?.title, status }, { after: onClose || (() => goBack(projectPath(ws))) }));
     menuEl.querySelector(".scrim").addEventListener("click", closeMenu);
     el.appendChild(menuEl);
     moreBtn.setAttribute("aria-expanded", "true");
@@ -3361,11 +3533,13 @@ function AgentScreen(ws, run, { member = null } = {}) {
   function header() {
     paintRoBar();
     paintLock();
+    chatModel?.refresh();
     const a = agentNow();
     const t = store.transcripts.get(key);
     const title = a?.title || t?.title || "Agent";
     setText(el.querySelector(".title"), title);
-    document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
+    // Of two agents side by side, the focused one names the window.
+    if (screen?.el === el) document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
     const status = a?.status || t?.status;
     const st = a ? agentStatus(a) : statusOf(status);
     const sub = el.querySelector(".subtitle");
@@ -3581,7 +3755,7 @@ function AgentScreen(ws, run, { member = null } = {}) {
     else terminalView.stop();
   };
   document.addEventListener("visibilitychange", onVis);
-  const unReady = () => { if (screen?.el === el) paint(); };
+  const unReady = () => { if (el.isConnected) paint(); };
   onMarkdownReady(unReady);
   tick();
 
@@ -3591,10 +3765,10 @@ function AgentScreen(ws, run, { member = null } = {}) {
     destroy() {
       clearTimeout(timer); timer = -1;
       termOn = false; clearTimeout(termTimer); terminalView.stop();
-      if (!ro) fastStatePoll = null;
+      fastPolls.delete(fastPoll);
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
-      document.title = "Rudder";
+      if (screen?.el === el) document.title = "Rudder";
     },
   };
 }
@@ -3619,13 +3793,14 @@ syncViewport();
 let stateTimer = null;
 // The open agent screen asks for a faster cadence while its agent is running
 // or waiting on an answer, so a new prompt shows up promptly.
-let fastStatePoll = null;
+// Open agent screens that want state polled fast (a live agent, an open prompt).
+const fastPolls = new Set();
 function pollState() {
   clearTimeout(stateTimer);
   stateTimer = setTimeout(async () => {
     if (!document.hidden) await refreshState();
     pollState();
-  }, fastStatePoll?.() ? 1500 : 4000);
+  }, [...fastPolls].some((f) => f()) ? 1500 : 4000);
 }
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { refreshState(); pollState(); }

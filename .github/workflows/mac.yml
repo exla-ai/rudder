@@ -8,18 +8,23 @@
 # mac/scripts/ci.sh (check, sign, notarize, dmg).
 #
 # Secrets: OFFSTAGE_API_KEY (the offstage team key), and for a release the
-# App Store Connect key (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8) that signs
-# with Xcode's cloud-managed Developer ID and notarizes, as in ios.yml. It
-# reaches the Mac only as the environment of the commands that need it, and
-# the sandbox account is wiped when the job ends. Bump MARKETING_VERSION /
+# App Store Connect key (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8: provisioning
+# and notarytool, as in ios.yml) and the Developer ID certificate
+# (MAC_DEVELOPER_ID_P12: base64 of the exported "Developer ID Application"
+# certificate with its key; MAC_DEVELOPER_ID_PASSWORD). Apple refuses
+# cloud-managed Developer ID signing for this key. They reach the Mac only as
+# the environment of the commands that need them, and the sandbox account is
+# wiped when the job ends. Bump MARKETING_VERSION /
 # CURRENT_PROJECT_VERSION in mac/project.yml, push, then
 # `gh workflow run mac.yml -f release=true` and `gh run watch`.
 name: Mac
 
 on:
   push:
+    branches: ["**"]
     paths:
       - "mac/**"
+      - ".offstage/**"
       - ".github/workflows/mac.yml"
   workflow_dispatch:
     inputs:
@@ -58,6 +63,8 @@ jobs:
           ASC_KEY_ID: ${{ inputs.release == true && secrets.ASC_KEY_ID || '' }}
           ASC_ISSUER_ID: ${{ inputs.release == true && secrets.ASC_ISSUER_ID || '' }}
           ASC_KEY_P8: ${{ inputs.release == true && secrets.ASC_KEY_P8 || '' }}
+          MAC_DEVELOPER_ID_P12: ${{ inputs.release == true && secrets.MAC_DEVELOPER_ID_P12 || '' }}
+          MAC_DEVELOPER_ID_PASSWORD: ${{ inputs.release == true && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
         run: node .offstage/mac.mjs
       - name: Publish the release
         if: inputs.release

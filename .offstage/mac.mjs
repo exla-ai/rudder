@@ -8,6 +8,7 @@
 //   OFFSTAGE_API_KEY  the team key
 //   RELEASE           "true": also sign, notarize and build the DMG
 //   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  the App Store Connect key, release only
+//   MAC_DEVELOPER_ID_P12, MAC_DEVELOPER_ID_PASSWORD  the Developer ID certificate, release only
 //
 // Exits with the failing stage's exit code. The sandbox is killed whatever
 // happens.
@@ -17,11 +18,11 @@ import { Sandbox } from "offstage-cloud"
 
 const release = process.env.RELEASE === "true"
 const stages = release ? ["check", "sign", "notarize", "dmg"] : ["check"]
-const secretNames = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"]
+const secretNames = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8", "MAC_DEVELOPER_ID_P12", "MAC_DEVELOPER_ID_PASSWORD"]
 const secrets = {}
 if (release) {
   for (const name of secretNames) {
-    if (!process.env[name]) throw new Error(`${name} is not set; a release needs the App Store Connect key`)
+    if (!process.env[name]) throw new Error(`${name} is not set; a release needs the App Store Connect key and the Developer ID certificate`)
     secrets[name] = process.env[name]
   }
 }

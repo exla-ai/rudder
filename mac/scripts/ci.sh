@@ -3,15 +3,20 @@
 # .offstage/mac.mjs from the checkout's root (which holds mac/):
 #
 #   check     pinned tools, xcodegen, the core tests and a Debug build
-#   sign      archive with cloud-managed Developer ID signing, export, verify
+#   sign      archive and export signed with the Developer ID certificate, verify
 #   notarize  notarize and staple the app
 #   dmg       Rudder.dmg, notarized and stapled, and build/release.env
 #   collect   ../out.tgz with the logs and whatever dmg made
 #
 # Each stage is its own command (30 minutes at most) in the same sandbox, so
 # tools/ and mac/build/ carry over between them. sign, notarize and dmg need
-# ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 in the environment. The account has
-# no root and no Homebrew, so tools go next to the checkout.
+# ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (the App Store Connect key, for
+# provisioning and notarytool); sign also needs MAC_DEVELOPER_ID_P12 (base64 of
+# the exported "Developer ID Application" certificate with its private key)
+# and MAC_DEVELOPER_ID_PASSWORD. Apple refuses cloud-managed Developer ID
+# signing for this key ("Cloud signing permission error"), so the certificate
+# goes into a throwaway keychain. The account has no root and no Homebrew, so
+# tools go next to the checkout.
 set -euo pipefail
 
 stage="${1:?usage: mac/scripts/ci.sh check|sign|notarize|dmg|collect}"
@@ -63,6 +68,21 @@ asc_key() {
         -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 }
 
+developer_id_keychain() {
+  : "${MAC_DEVELOPER_ID_P12:?MAC_DEVELOPER_ID_P12 is not set}" "${MAC_DEVELOPER_ID_PASSWORD:?MAC_DEVELOPER_ID_PASSWORD is not set}"
+  local kc="$HOME/signing.keychain-db" kc_pass p12="$HOME/devid.p12"
+  kc_pass=$(uuidgen)
+  (umask 077 && printf '%s' "$MAC_DEVELOPER_ID_P12" | base64 --decode > "$p12")
+  security create-keychain -p "$kc_pass" "$kc"
+  security set-keychain-settings -lut 21600 "$kc"
+  security unlock-keychain -p "$kc_pass" "$kc"
+  security import "$p12" -k "$kc" -P "$MAC_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+  rm "$p12"
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" > /dev/null
+  security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+  security find-identity -v -p codesigning "$kc" | grep "Developer ID Application"
+}
+
 notarize() {
   xcrun notarytool submit "$1" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
     --wait --timeout 25m --output-format json | tee notary.json
@@ -90,6 +110,7 @@ case "$stage" in
   sign)
     use_tools
     asc_key
+    developer_id_keychain
     cd mac
     run_logged archive.log xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Release \
       -destination 'generic/platform=macOS' -archivePath build/Rudder.xcarchive "${AUTH[@]}" \

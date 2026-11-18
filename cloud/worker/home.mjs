@@ -37,6 +37,7 @@ import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
 import { createSlashCommands } from "./slash-commands.mjs";
+import { createVibeprintHosts } from "./vibeprint-host.mjs";
 import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
 
 let projectFiles;
@@ -176,6 +177,8 @@ const logins = createLoginRunner({
 const projects = new Map();
 // The "/" menu of each agent's CLI for the app's chat (slash-commands.mjs).
 const slashCommands = createSlashCommands({ env: baseChildEnv, log, projectDirs: () => [...projects.values()].filter((p) => p.status !== "cloning").map((p) => p.dir) });
+// Each project's vibeprint canvas, beside its agents (vibeprint-host.mjs).
+const vibeprint = createVibeprintHosts({ stateRoot: path.join(PERSIST_HOME, ".rudder", "vibeprint"), embedOrigin: cloudUrl, env: () => baseChildEnv, log });
 let controlSocket = null;
 let controlEverConnected = false;
 // Replaced by startHomeTelemetry's hooks once the SDK loads (or kept: off).
@@ -220,6 +223,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     log(`received ${signal}; stopping dashboards`);
     logins.dispose();
+    vibeprint.stopAll();
     for (const project of projects.values()) {
       project.stop();
     }
@@ -517,6 +521,7 @@ function reconcileProjects(descriptors) {
     projects.set(descriptor.workspaceId, project);
     void project.start();
   }
+  vibeprint.resume([...projects.values()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +657,7 @@ async function handleRpc(method, params) {
     const project = projects.get(params.workspaceId);
     if (project) {
       project.stop();
+      vibeprint.stop(params.workspaceId);
       projectFiles?.close(project.dir);
       projects.delete(params.workspaceId);
       if (params.removeClone) {
@@ -757,6 +763,9 @@ async function handleRpc(method, params) {
   if (method === "projectFiles") {
     return (await fileService()).dispatch(project.dir, params.request);
   }
+  if (method === "vibeprint") {
+    return await vibeprint.handle(project, params);
+  }
   if (method === "projectGuide") {
     return (await agentSetupService()).projectGuide(project.dir);
   }
@@ -778,6 +787,10 @@ async function handleRpc(method, params) {
   if (method === "agentModel") {
     // One chat's model and effort (native deliver_model_request).
     return await steer(project, { kind: "model", taskId: String(params.runId || ""), instruction: `${params.model} ${params.effort}` });
+  }
+  if (method === "agentRename") {
+    // Name an agent (native deliver_rename_request): the instruction is the name.
+    return await steer(project, { kind: "rename", taskId: String(params.runId || ""), instruction: String(params.title || "") });
   }
   if (method === "agentEdit") {
     // Edit the chat's latest prompt (native chat_edit.rs): the conversation
@@ -831,14 +844,16 @@ async function handleRpc(method, params) {
     return await pullRun(project, params);
   }
   if (method === "action") {
-    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : params.action === "approve" ? "approve" : null;
+    const kinds = { merge: "merge", stop: "cancel", delete: "delete", pin: "pin", unpin: "pin", approve: "approve" };
+    const kind = Object.hasOwn(kinds, params.action) ? kinds[params.action] : null;
     if (!kind) {
       throw new Error("unknown action");
     }
     // Approve names a plan, not a run: the web's Approve button on a plan
     // waiting for its go-ahead (empty = the one plan waiting).
     const taskId = kind === "approve" ? String(params.planId || "") : String(params.runId || "");
-    return await steer(project, { kind, taskId, instruction: kind });
+    // A pin says which way it goes: `pin` or `unpin` (native deliver_pin_request).
+    return await steer(project, { kind, taskId, instruction: kind === "pin" ? params.action : kind });
   }
   throw new Error(`unknown method ${method}`);
 }
@@ -1381,6 +1396,8 @@ function agentSummary(record, options = {}) {
     // null: the agent decides (the dashboard's "auto").
     effort: record.effort ?? null,
     mode: record.mode ?? null,
+    // Pinned in the app or the dashboard: kept by the day-old cleanup.
+    ...(record.pinned === true ? { pinned: true } : {}),
     createdAt: toMillis(record.createdAt),
     updatedAt,
     lastMessage,

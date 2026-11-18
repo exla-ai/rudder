@@ -40,6 +40,7 @@ import { HomeControlSessions, HomeRpcEffectUnknownError } from "./home-control-s
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
 import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
+import { VibeprintRoutes } from "./vibeprint-routes.js";
 import { startControlTelemetry, type ControlSnapshot, type ControlTelemetry } from "./telemetry.js";
 import { BuilderPoolError, builderPolicy, createBuilderPool, type BuilderFly, type BuilderPool } from "./builders.js";
 import { externalHomeImage, externalHomeNeedsUpdate, externalHomeRefusal, HOME_HOST_OFFLINE, homeHostEnv, homeHostKind, parseHomeHostKind, type HomeHostKind } from "./home-host.js";
@@ -7339,6 +7340,14 @@ const privatePreviewRoutes = new PrivatePreviewRoutes({
   workspace: (actor, workspaceId) => ({homeId:requireHomeRepo(actor,workspaceId).home.id}),
   rpc: (homeId,method,params,signal) => homeRpc(homeId,method,params as JsonRecord,10_000,signal),
 });
+// Each project's vibeprint canvas on its home (cloud/worker/vibeprint-host.mjs).
+const vibeprintRoutes = new VibeprintRoutes({
+  workspace: (accountId, workspaceId) => {
+    const { home, repo } = requireHomeRepo(accountId, workspaceId);
+    return { homeId: home.id, repoId: repo.id };
+  },
+  rpc: (homeId, params, signal) => homeRpc(homeId, "vibeprint", params as JsonRecord, 10_000, signal),
+});
 const canonicalTerminalRelay = new CanonicalTerminalRelay({
   authorize: async ({actor,workspaceId}) => {try {requireHomeRepo(actor,workspaceId);return true;} catch {return false;}},
   read: async ({actor,workspaceId,runId},signal) => {
@@ -7351,6 +7360,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   const account = await requireAccount(req);
   if (await projectFileRoutes.handle(req, res, url, account.accountId)) return;
   if (await privatePreviewRoutes.handle(req,res,url,account.accountId)) return;
+  if (await vibeprintRoutes.handle(req, res, url, account.accountId)) return;
   if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
     return;
   }
@@ -7662,6 +7672,21 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort }));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-rename") {
+    // Name an agent. The dashboard saves it the way its own rename does
+    // (native rename_agent_at), so every screen shows the new name.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const title = (stringField(body, "title") ?? "").replace(/\s+/g, " ").trim();
+    if (!title) {
+      throw badRequest("a name can't be empty");
+    }
+    if ([...title].length > 200) {
+      throw badRequest("a name is at most 200 characters");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "agentRename", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", title }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/agent-edit") {
     // Edit a chat's latest prompt: the dashboard takes the conversation back
     // to just before it and runs the new text (native chat_edit.rs). `entry`
@@ -7734,13 +7759,14 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
-    // Dashboard actions the phone and web can take: stop, merge or delete one
-    // agent, or approve a plan waiting for its go-ahead (`plan` = its id).
+    // Dashboard actions the phone and web can take: stop, merge, delete, pin
+    // or unpin one agent, or approve a plan waiting for its go-ahead (`plan` =
+    // its id).
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const action = stringField(body, "action") ?? "";
-    if (action !== "stop" && action !== "merge" && action !== "delete" && action !== "approve") {
-      throw badRequest("action must be stop, merge, delete or approve");
+    if (!["stop", "merge", "delete", "pin", "unpin", "approve"].includes(action)) {
+      throw badRequest("action must be stop, merge, delete, pin, unpin or approve");
     }
     const planId = stringField(body, "plan") ?? "";
     if (planId && !/^[A-Za-z0-9._-]{1,120}$/.test(planId)) {

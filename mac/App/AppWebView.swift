@@ -194,6 +194,12 @@ struct AppWebView: NSViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
+            // The Canvas panel frames vibeprint's relay page (canvas-panel.js).
+            if let frame = navigationAction.targetFrame, !frame.isMainFrame,
+               url.scheme == "https", url.host?.hasSuffix(".live.vibeprint.viraat.dev") == true {
+                decisionHandler(.allow)
+                return
+            }
             if RudderLinks.isInApp(url, server: model.session.server) && navigationAction.targetFrame != nil {
                 if url.path == "/app/login" {
                     // Sign in natively: Google refuses OAuth inside web views.

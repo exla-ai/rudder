@@ -1,0 +1,52 @@
+/* Canvas panel (canvas-panel.js): the right column it shares with Files, or a sheet. */
+
+.cv {
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%;
+  background: var(--bg-elev); color: var(--ink); container-type: inline-size;
+}
+/* A narrow panel (a phone, or a thin column) keeps the buttons and drops the word. */
+@container (max-width: 460px) {
+  .cv-title > span { display: none; }
+  .cv-head { padding-left: 10px; }
+}
+.cv svg { width: 17px; height: 17px; flex: none; }
+.cv.cv-sheet {
+  position: fixed; left: 0; right: 0; top: var(--vvtop); height: var(--vvh); z-index: 40;
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
+  box-shadow: 0 0 0 1px var(--line), 0 18px 48px rgba(0, 0, 0, 0.18);
+  animation: cv-in 180ms cubic-bezier(.2, .7, .2, 1);
+}
+@keyframes cv-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .cv.cv-sheet { animation: none; } }
+
+.cv-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 14px; border-bottom: 1px solid var(--line); min-height: 52px; }
+.cv-title { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 15px; flex: none; }
+.cv-title svg { color: var(--muted); }
+.cv-agent { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13.5px; }
+.cv-agent[hidden] { display: none; }
+.cv-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.cv-actions .icon-btn { width: 38px; height: 38px; }
+.cv-actions [hidden] { display: none; }
+.cv-send { height: 32px; padding: 0 12px; font-size: 13.5px; margin-right: 4px; }
+.cv-track[aria-pressed="true"] { color: var(--accent); }
+.cv-track.cv-track-error { color: var(--failed); }
+
+.cv-body { flex: 1 1 auto; min-height: 0; display: flex; position: relative; }
+.cv-frame { flex: 1 1 auto; width: 100%; height: 100%; border: 0; background: #fff; }
+.cv-empty { margin: auto; display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; padding: 24px; text-align: center; }
+.cv-card { margin: auto; max-width: 360px; padding: 24px; text-align: center; }
+.cv-card h3 { margin: 0 0 8px; font-size: 17px; }
+.cv-card p { margin: 0 0 18px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.cv-error { color: var(--ink-2) !important; overflow-wrap: anywhere; }
+.cv-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: cv-spin 0.8s linear infinite; }
+@keyframes cv-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cv-spin { animation-duration: 2.4s; } }
+
+dialog.cv-dlg { max-width: min(560px, calc(100vw - 32px)); }
+dialog.cv-dlg .dialog { max-height: 82vh; display: flex; flex-direction: column; }
+.cv-dlg h3 { overflow-wrap: anywhere; }
+.cv-brief {
+  flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0 0 18px; padding: 12px 14px; border-radius: 12px;
+  background: var(--bg-elev); border: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 13.5px; line-height: 1.5; color: var(--ink-2);
+}

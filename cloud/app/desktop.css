@@ -458,3 +458,9 @@ body.desktop.mac .ds-top { padding-top: 28px; }
 .ro-bar .rb-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ro-bar .rb-t { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ro-bar .rb-s { font-size: 13px; color: var(--muted); }
+
+/* A pinned agent in the sidebar: the cleanup of untouched agents leaves it alone. */
+.ds-apin { display: grid; place-items: center; color: var(--faint); }
+.ds-apin svg { width: 13px; height: 13px; }
+.ds-agent.renaming { background: var(--surface-3); }
+.ds-agent.renaming .ds-open-r, .ds-agent.renaming .ds-apin { display: none; }

@@ -97,6 +97,53 @@ rudder-native and home.mjs, rudder-worker-images and rudder-workers-exla:4.4.2
 (digest 3da31bc7), control plane redeployed. The home offers 4.4.2; npm comes
 from the v4.4.2 tag run.
 
+5.0 dashboard matches the app (local, unreleased): the agent list uses the app's
+sections and words (`needs you` first, then `working`, `done`, and the `merged`
+and `earlier` drawers; "ready for review", "turn failed", "merge conflict"),
+the header counts working and need you, `P` switches the selected agent's
+model and effort through the app's model steer, the worker border shows tok/s
+and context left like a chat header, and the palette is the app's. Checked
+with native filters `agent_stats`, `needs_you_groups`, `model_key_switches`,
+the updated sidebar/label tests, and `tests/tui/done-drawer.test.mjs`.
+
+Vibeprint canvas in the app (local, unreleased): a Canvas button beside Files
+opens the project's vibeprint canvas in the right column (a sheet on phones),
+following the selected agent. The home worker runs one `vibeprint serve` per
+project (`cloud/worker/vibeprint-host.mjs`, RPC `vibeprint`, Cloud route
+`/api/app/vibeprint`) with state in `~/.rudder/vibeprint/<workspace>`, never
+in the checkout, and no vibeprint rule or MCP for agents. The frame is the
+relay page signed in by a `#t=` token; "Send to agent" previews the canvas
+brief and sends it as a normal message. Build tracking: the panel's eye (and
+Send to agent) tracks an agent; after its turns the home sends its `jj diff`
+to vibeprint's `POST /api/track` (`cloud/worker/vibeprint-track.mjs`): no pass
+for an unchanged diff, at most one per agent per 10 minutes. vibeprint's own
+"Update from code" checks the checkout on the same runner, and without an API
+key the local Claude Code or Codex reads submitted sketches. Needs vibeprint
+0.10.0 on npm (commit 2fdd8fb2 in that repo, not pushed) before the worker
+image builds. Checked with `tests/vibeprint-host.test.mjs` and headless runs
+against dev-mock with a fake Claude Code.
+
+Agent rename, row menu and day-old cleanup (local, unreleased): the app renames
+an agent in place (double click a sidebar title, the row menu, or click the
+agent screen's title) through `/api/app/agent-rename`, RPC `agentRename`, steer
+kind `rename`, native `rename_agent_at` (the dashboard's `r` uses it too, 200
+characters at most). Desktop rows have a right-click menu (also the
+context-menu key and Shift+F10): Rename, Pin/Unpin (`/api/app/action` pin and
+unpin, steer kind `pin`), Open beside, Close (the existing delete). The native
+dashboard deletes agents nobody touched for 24 hours (`agent_life.rs`; replaces
+the 7-day finished-agent sweep): newest of run.json mtime, current transcript
+mtime and the jj working-copy commit time, checked every 15 minutes off the
+App loop. The clock starts at the first scan in a project
+(`.rudder/cleanup-since`), so nothing is deleted on update; existing agents
+get a full day from then. Never collected: pinned, running or waiting, pending asks, cloud
+owned, mid-integration, unmerged plan nodes, orchestrators of a live plan.
+Every delete (`dd`, `cc`, the app, the cleanup) now deletes the conversation:
+each Claude session the record names (`session.previousSessionIds`, the edit
+cut copy included) with its folder, and Codex rollouts no remaining run's
+`history_base` chain needs. Workspace removal snapshots first, so the agent's
+jj change stays in `jj log`. Checked with native filter `untouched_agents` and
+a headless run against dev-mock.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

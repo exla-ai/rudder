@@ -628,6 +628,51 @@ const projectGuides = {
   ], shared: true },
 };
 
+// ---------- Vibeprint canvas (canvas-panel.js) ----------
+// A real `vibeprint serve` stands in for the home's: MOCK_VIBEPRINT_URL is its
+// page (http://127.0.0.1:PORT/) and MOCK_VIBEPRINT_TOKEN its access token. The
+// eye's check sends it a made-up diff for the agent, as the home sends the real one.
+const vibeprintOn = new Map(); // ws -> start time
+const vibeprintTracked = new Map(); // `${ws}/${run}` -> { lastAt }
+async function vibeprintMock(req, res, url) {
+  const body = req.method === "POST" ? await readBody(req) : null;
+  const ws = body ? body.workspace : url.searchParams.get("workspace");
+  const run = body ? body.run : url.searchParams.get("run");
+  const base = process.env.MOCK_VIBEPRINT_URL, token = process.env.MOCK_VIBEPRINT_TOKEN;
+  const tracking = () => {
+    const t = vibeprintTracked.get(`${ws}/${run}`);
+    return t ? { on: true, ...(t.lastAt ? { lastAt: new Date(t.lastAt).toISOString() } : {}) } : { on: false };
+  };
+  const view = () => {
+    const since = vibeprintOn.get(ws);
+    const t = run ? { tracking: tracking() } : {};
+    if (since === undefined) return { state: "off", ...t };
+    if (!base || !token) return { state: "failed", error: "Set MOCK_VIBEPRINT_URL and MOCK_VIBEPRINT_TOKEN to a running vibeprint serve.", ...t };
+    return now() - since < 1500 ? { state: "starting", ...t } : { state: "running", url: base, token, ...t };
+  };
+  const vp = (route, payload) => fetch(`${base}${route}`, { method: payload ? "POST" : "GET", headers: { "x-vibeprint-token": token, "content-type": "application/json" }, ...(payload ? { body: JSON.stringify(payload) } : {}) });
+  if (!body) return json(res, 200, view());
+  if (body.op === "start") { if (!vibeprintOn.has(ws)) vibeprintOn.set(ws, now()); return json(res, 200, view()); }
+  if (body.op === "stop") { vibeprintOn.delete(ws); return json(res, 200, { ...view(), state: "off" }); }
+  if (body.op === "tracking") {
+    if (!body.on) { vibeprintTracked.delete(`${ws}/${run}`); return json(res, 200, view()); }
+    const entry = vibeprintTracked.get(`${ws}/${run}`) ?? {};
+    vibeprintTracked.set(`${ws}/${run}`, entry);
+    if (body.check) {
+      const agent = projects.find((p) => p.workspaceId === ws)?.agents.find((a) => a.id === run);
+      const r = await vp("api/track", { author: agent?.title ?? run, task: agent?.task ?? "", diff: "diff --git a/api/items.js b/api/items.js\n+export const items = (db) => db.query('select * from items')\n" });
+      if (r.ok) entry.lastAt = now();
+    }
+    return json(res, 200, view());
+  }
+  if (body.op === "brief") {
+    if (view().state !== "running") return json(res, 409, { error: "The canvas is not running" });
+    const r = await vp(`api/brief${body.since ? `?since=${encodeURIComponent(body.since)}` : ""}`);
+    return json(res, r.status, await r.json());
+  }
+  return json(res, 400, { error: "Unknown canvas request" });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const p = url.pathname;
@@ -712,6 +757,7 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/app/project-files") {
       return projectFiles(req, res, url, req.method === "POST" ? await readBody(req) : null);
     }
+    if (p === "/api/app/vibeprint") return vibeprintMock(req, res, url);
     if (p === "/api/app/agent-setup" && req.method === "GET") return json(res, 200, setupOverview());
     if (p === "/api/app/agent-setup/actions" && req.method === "POST") return setupAction(res, await readBody(req));
     if (p === "/api/app/agent-setup/files") {
@@ -817,6 +863,10 @@ const server = http.createServer(async (req, res) => {
         if (proj) proj.agents = proj.agents.filter((x) => x !== t.a);
         return json(res, 200, { ok: true, status: "delivered" });
       }
+      if (body.action === "pin" || body.action === "unpin") {
+        if (body.action === "pin") t.a.pinned = true; else delete t.a.pinned;
+        return json(res, 200, { ok: true, status: "delivered" });
+      }
       if (body.action === "stop") { t.a.status = "stopped"; t.a.lastMessage = "Stopped by you."; }
       else if (body.action === "merge") {
         if (!["done", "review"].includes(t.a.status)) return json(res, 409, { error: "Only finished agents can be merged." });
@@ -825,6 +875,18 @@ const server = http.createServer(async (req, res) => {
       t.a.updatedAt = now();
       t.msgs.push({ id: `s${now()}`, role: "system", ts: now(), text: body.action === "stop" ? "Agent stopped from the app." : "Merged into main." });
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/agent-rename") {
+      // Like the dashboard: a name with "fail" in it is refused, and the
+      // state shows a new name a moment after the rename is delivered.
+      const t = transcriptFor(body.workspace, body.run);
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      const title = String(body.title || "").replace(/\s+/g, " ").trim();
+      if (!title) return json(res, 400, { error: "a name can't be empty" });
+      await delay(300);
+      if (/fail/i.test(title)) return json(res, 502, { error: "the dashboard could not deliver it" });
+      setTimeout(() => { t.a.title = title.slice(0, 200); }, 1500);
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/pin") {
       const proj = projects.find((x) => x.workspaceId === body.workspace);

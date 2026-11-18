@@ -248,6 +248,12 @@ struct AppWebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
+            // The Canvas panel frames vibeprint's relay page (canvas-panel.js).
+            if let frame = navigationAction.targetFrame, !frame.isMainFrame,
+               url.scheme == "https", url.host?.hasSuffix(".live.vibeprint.viraat.dev") == true {
+                decisionHandler(.allow)
+                return
+            }
             let sameHost = url.host == session.server.host
             let inApp = sameHost && (url.path == "/app" || url.path.hasPrefix("/app/") || url.path.hasPrefix("/api/"))
             if inApp && navigationAction.targetFrame != nil {

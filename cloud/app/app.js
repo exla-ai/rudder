@@ -10,12 +10,14 @@ import {
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
+import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
+import { applyAgentEdits, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
@@ -166,6 +168,8 @@ async function refreshState() {
   stateInflight = (async () => {
     try {
       store.state = await api("/api/app/state");
+      // Renames and pins made here until the dashboard publishes them (agent-menu.js).
+      applyAgentEdits(store.state);
       store.stateError = null;
       store.signedOut = false;
       // An invite or Slack link opened while signed out reopens once signed in.
@@ -668,6 +672,7 @@ function mountScreen(dir = "forward") {
   screen.update?.();
   desktop?.update(route);
   followFiles(route, findAgent);
+  followCanvas(route, findAgent);
 }
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
@@ -813,6 +818,7 @@ function DesktopShell() {
     screen.update?.();
     update(r);
     followFiles(r, findAgent);
+    followCanvas(r, findAgent);
   }
   const onPaneEvent = (e) => {
     const i = panes.findIndex((p) => p.el.contains(e.target));
@@ -988,7 +994,7 @@ function DesktopShell() {
   const stepHint = `${alt}+[ and ${alt}+] step through agents`;
   const sideAgent = (x) => {
     // The status line: in "Needs you" the project name gives way before the status does.
-    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
+    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><span class="ds-apin" hidden aria-hidden="true">${icon("pin")}</span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
     a.title = stepHint;
     return a;
   };
@@ -1035,7 +1041,10 @@ function DesktopShell() {
     const openR = a.querySelector(".ds-open-r");
     openR.hidden = !!ag.pending || !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, target));
     openR.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openIn(1, target); };
-    setText(a.querySelector(".ds-an"), ag.title || ag.task || "Untitled agent");
+    a._target = { p, a: ag };
+    const name = a.querySelector(".ds-an");
+    if (!isRenaming(name)) setText(name, ag.title || ag.task || "Untitled agent");
+    a.querySelector(".ds-apin").hidden = !ag.pinned;
     const ap = a.querySelector(".ds-ap");
     setText(ap, showProject ? p.name : "");
     ap.hidden = !showProject;
@@ -1044,8 +1053,81 @@ function DesktopShell() {
     const here = route?.name === "agent" && route.ws === p.workspaceId && route.run === ag.id;
     a.classList.toggle("on", here);
     if (here) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
-    a.setAttribute("aria-label", `${ag.title || "Agent"}, ${st.label}${showProject ? `, ${p.name}` : ""}`);
+    a.setAttribute("aria-label", `${ag.title || "Agent"}, ${st.label}${ag.pinned ? ", pinned" : ""}${showProject ? `, ${p.name}` : ""}`);
   };
+
+  // An agent row's menu: right click, or the context-menu key or Shift+F10
+  // on a focused row, in the sidebar and in the project's list. A double
+  // click on a sidebar title renames it in place.
+  const rowOf = (node) => (node instanceof Element && !node.closest("input") ? node.closest(".ds-agent, .row.agent") : null);
+  const renameRow = (row) => {
+    const { p, a } = row._target;
+    const ws = p.workspaceId, run = a.id;
+    const find = () => findAgent(ws, run);
+    const node = row.querySelector(".ds-an, .a-title");
+    const draggable = row.draggable;
+    row.draggable = false;
+    row.classList.add("renaming");
+    editInPlace(node, {
+      value: find()?.title || a.title || "",
+      label: "Agent name",
+      onSave: (text) => renameAgent({ ws, run, find, title: text, repaint: updateScreen }),
+      onEnd: (byKey) => { row.draggable = draggable; row.classList.remove("renaming"); if (byKey) row.focus(); },
+    });
+  };
+  // Closing the agent on screen leaves its page: the other pane's agent, or the project.
+  const leaveClosed = (t) => {
+    if (!shownAgents().some((x) => sameAgent(x, t))) return;
+    const other = splitShown ? split.panes.find((x) => !sameAgent(x, t)) : null;
+    if (splitShown) closeSide();
+    navigate(other ? agentPath(other.ws, other.run) : projectPath(t.ws), { replace: true });
+  };
+  const agentMenu = (row, at) => {
+    const { p, a } = row._target;
+    const t = { ws: p.workspaceId, run: a.id };
+    const find = () => findAgent(t.ws, t.run);
+    const pinned = !!(find() || a).pinned;
+    showAgentMenu({
+      ...at,
+      label: a.title || "Agent",
+      returnFocus: row,
+      items: [
+        { label: "Rename", icon: "edit", run: () => renameRow(row) },
+        { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pinAgent({ ws: t.ws, run: t.run, find, pinned: !pinned, repaint: updateScreen }) },
+        { label: "Open beside", icon: "split", disabled: !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, t)), run: () => openIn(1, t) },
+        "divider",
+        { label: "Close", icon: "trash", danger: true, run: () => deleteAgent(t.ws, find() || a, { after: () => leaveClosed(t) }) },
+      ],
+    });
+  };
+  // The context-menu key also fires a contextmenu event; the key opened the
+  // menu already. A right click always presses a button first.
+  let keyMenu = false;
+  el.addEventListener("contextmenu", (e) => {
+    const row = rowOf(e.target);
+    if (!row?._target || row._target.a.pending) return;
+    e.preventDefault();
+    if (keyMenu) { keyMenu = false; return; }
+    agentMenu(row, { x: e.clientX, y: e.clientY });
+  }, { signal: life.signal });
+  el.addEventListener("keydown", (e) => {
+    const row = isMenuKey(e) ? rowOf(e.target) : null;
+    if (!row?._target || row._target.a.pending) return;
+    e.preventDefault();
+    keyMenu = true;
+    agentMenu(row, { anchor: row });
+  }, { signal: life.signal });
+  el.addEventListener("pointerdown", () => { keyMenu = false; }, { capture: true, signal: life.signal });
+  el.addEventListener("mousedown", (e) => {
+    // A double click on a title renames it instead of selecting the words.
+    if (e.detail > 1 && rowOf(e.target)?.matches(".ds-agent") && e.target.closest(".ds-an")) e.preventDefault();
+  }, { signal: life.signal });
+  el.addEventListener("dblclick", (e) => {
+    const row = rowOf(e.target);
+    if (!row?.matches(".ds-agent") || !row._target || row._target.a.pending || !e.target.closest(".ds-an")) return;
+    e.preventDefault();
+    renameRow(row);
+  }, { signal: life.signal });
 
   function update(r) {
     if (r) route = r;
@@ -1540,7 +1622,7 @@ async function deleteAgent(ws, a, { after } = {}) {
   const live = a.status === "working" || a.status === "waiting";
   const ok = await confirmDialog({
     title: "Delete this agent?",
-    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your cloud machine and every screen. This cannot be undone.`,
+    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your cloud machine and every screen. Changes it made that are not merged stay in the project's jj history. This cannot be undone.`,
     confirm: "Delete",
     danger: true,
   });
@@ -1567,7 +1649,8 @@ function updateAgentRow(el, { p, a }) {
   if (a.pending) el.removeAttribute("href"); else el.href = agentPath(p.workspaceId, a.id);
   el.className = `row agent tap ${st.cls}`;
   el.querySelector(".dot").classList.toggle("live", !!st.live);
-  setText(el.querySelector(".a-title"), a.title || a.task || "Untitled agent");
+  const titleEl = el.querySelector(".a-title");
+  if (!isRenaming(titleEl)) setText(titleEl, a.title || a.task || "Untitled agent");
   setText(el.querySelector(".a-time"), rel(a.updatedAt));
   setText(el.querySelector(".status-text"), st.label);
   const proj = el.querySelector(".c-proj");
@@ -2939,6 +3022,7 @@ function ProjectScreen(ws) {
   headModel.el.classList.add("head-model");
   bar.appendChild(headModel.el);
   bar.appendChild(refreshButton(refreshState));
+  bar.appendChild(canvasButton({ ws, findAgent }));
   bar.appendChild(filesButton({ ws, findAgent }));
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
@@ -3359,6 +3443,27 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
       <button type="button" class="new-pill">${icon("down")}<span>New messages</span></button>
     </div></section>`);
   const bar = el.querySelector(".topbar");
+  // The title renames the agent in place: click it, or Enter on it.
+  const titleEl = el.querySelector(".title");
+  if (!ro) {
+    titleEl.tabIndex = 0;
+    titleEl.setAttribute("role", "button");
+    titleEl.title = "Rename";
+    const startRename = () => {
+      const a = agentNow();
+      if (!a || a.pending || isRenaming(titleEl)) return;
+      editInPlace(titleEl, {
+        value: a.title || "",
+        label: "Agent name",
+        onSave: (text) => renameAgent({ ws, run, find: agentNow, title: text, repaint: updateScreen }),
+        onEnd: (byKey) => { if (byKey) titleEl.focus(); },
+      });
+    };
+    titleEl.addEventListener("click", startRename);
+    titleEl.addEventListener("keydown", (e) => {
+      if (e.target === titleEl && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); startRename(); }
+    });
+  }
   // This pane's speed and context line (agent-stats.js), from the transcript.
   const agentStats = AgentStats();
   el.querySelector(".subtitle").appendChild(agentStats.el);
@@ -3372,7 +3477,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   back.setAttribute("aria-label", ro ? "Back to team" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
   if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
-  else bar.appendChild(filesButton({ ws, run, findAgent }));
+  else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }));
   // The right of two panes: history belongs to the left one, so it closes instead.
   if (onClose) {
     back.hidden = true;
@@ -3773,7 +3878,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     const a = agentNow();
     const t = store.transcripts.get(key);
     const title = a?.title || t?.title || "Agent";
-    setText(el.querySelector(".title"), title);
+    if (!isRenaming(titleEl)) setText(titleEl, title);
+    if (!ro) titleEl.setAttribute("aria-label", `${title}. Rename`);
     // Of two agents side by side, the focused one names the window.
     if (screen?.el === el) document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
     const status = a?.status || t?.status;

@@ -509,6 +509,7 @@ const mainTs = `import { runManager } from "./run-manager.js";\n\n// Start one a
 const fileTrees = {
   checkout: {
     "README.md": readmeText(),
+    "AGENTS.md": "# Rudder engineering rules\n\nRudder runs Claude Code and Codex agents locally and on Fly.io Linux.\n\n## Verification\n\n- Run one targeted check for what you changed.\n- No full suites per change.\n",
     "docs/guide.md": "# Guide\n\nStart with the [README](../README.md).\n\n- Agents work in their own workspace.\n- Finished work merges into main.\n",
     "docs/diagram.png": Buffer.from(PNG_DOT, "base64"),
     "src/main.ts": mainTs,
@@ -535,6 +536,9 @@ function projectFiles(req, res, url, body) {
   const scope = body ? body.scope : { workspaceId: q.workspaceId };
   const tree = fileTrees[scope?.workspaceId] ?? (scope?.workspaceId === "checkout" ? fileTrees.checkout : null);
   if (!tree) return json(res, 403, { error: "Refresh this project's file workspaces" });
+  return treeFiles(res, tree, q, body);
+}
+function treeFiles(res, tree, q, body) {
   const rel = q.path ?? "";
   if (body) {
     const current = tree[rel];
@@ -558,6 +562,71 @@ function projectFiles(req, res, url, body) {
   if (value === undefined) return json(res, 404, { error: "The project file no longer exists" });
   return json(res, 200, fileDoc(rel, value, q.knownRevision));
 }
+
+// ---------- Agent setup (files-hub.js) ----------
+// Separate instruction files at first, so the page offers "Use one file for both".
+const skillText = (name, description, body) => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body}\n`;
+const freshSetup = () => ({
+  linked: false,
+  roots: {
+    "instructions:claude": { "CLAUDE.md": "# Rules for every agent\n\n- No fallbacks unless asked.\n- Links to things running here go over Tailscale.\n- Run one targeted check per change.\n" },
+    "instructions:codex": { "AGENTS.md": "# Codex notes\n\n- Prefer small commits on main.\n" },
+    "skill:claude:rudder-burst": { "SKILL.md": skillText("rudder-burst", "Run heavy builds on the burst build pool instead of the shared home", "Use `rudder-burst <command>`.") },
+    "skill:codex:rudder-burst": { "SKILL.md": skillText("rudder-burst", "Run heavy builds on the burst build pool instead of the shared home", "Use `rudder-burst <command>` (older copy).") },
+    "skill:claude:yc": { "SKILL.md": skillText("yc", "Search Bookface and YC knowledge from the terminal", "Run `yc search`."), "reference/commands.md": "# Commands\n" },
+    "skill:codex:libra-investigate": { "SKILL.md": skillText("libra-investigate", "Investigate a production alert with Libra's telemetry", "Start from the alert.") },
+    "folder:claude-agents": { "reviewer.md": "---\nname: reviewer\ndescription: Reviews a diff for bugs\n---\nReview the diff.\n" },
+  },
+  shared: [],   // names of skills in ~/.agents/skills
+  sharedWith: {}, // name -> true when linked into the other agent
+});
+let setup = freshSetup();
+const setupTree = (id) => (id === "instructions:codex" && setup.linked ? setup.roots["instructions:claude"] : setup.roots[id]);
+function setupOverview() {
+  const claudeFile = setup.roots["instructions:claude"]["CLAUDE.md"] !== undefined;
+  const skills = [];
+  const row = (name, agents, root, location, note = "") => {
+    const meta = /description: (.*)/.exec(setupTree(root)?.["SKILL.md"] ?? "");
+    skills.push({ name, description: meta?.[1] ?? "", agents, root, location, note });
+  };
+  row("rudder-burst", ["claude"], "skill:claude:rudder-burst", "~/.claude/skills/rudder-burst", "Each agent has its own copy of rudder-burst. Edits to one do not reach the other.");
+  row("rudder-burst", ["codex"], "skill:codex:rudder-burst", "~/.codex/skills/rudder-burst", "Each agent has its own copy of rudder-burst. Edits to one do not reach the other.");
+  row("yc", setup.sharedWith.yc ? ["claude", "codex"] : ["claude"], "skill:claude:yc", "~/.claude/skills/yc");
+  row("libra-investigate", ["codex"], "skill:codex:libra-investigate", "~/workspace/code/libra/.agents/skills/libra-investigate");
+  for (const name of setup.shared) row(name, ["claude", "codex"], `skill:shared:${name}`, `~/.agents/skills/${name}`);
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    agents: { claude: { dir: "~/.claude", present: true }, codex: { dir: "~/.codex", present: true } },
+    instructions: {
+      claude: { agent: "claude", path: "~/.claude/CLAUDE.md", state: claudeFile ? "file" : "missing", linksTo: null, root: "instructions:claude" },
+      codex: { agent: "codex", path: "~/.codex/AGENTS.md", state: setup.linked ? "link" : "file", linksTo: setup.linked ? "~/.claude/CLAUDE.md" : null, root: "instructions:codex" },
+      shared: setup.linked,
+    },
+    skills,
+    folders: [{ id: "folder:claude-agents", label: "Claude subagents", root: "folder:claude-agents" }],
+  };
+}
+function setupAction(res, body) {
+  if (body.operation === "link-instructions") {
+    const replaced = setup.roots["instructions:codex"]["AGENTS.md"];
+    if (!setup.linked && body.keep === "claude" && revisionOf(replaced) !== body.replacedRevision) return json(res, 409, { error: "~/.codex/AGENTS.md changed since you looked at it. Nothing was linked." });
+    if (body.keep === "codex") setup.roots["instructions:claude"] = { "CLAUDE.md": replaced };
+    setup.linked = true;
+  } else if (body.operation === "share-skill") {
+    setup.sharedWith[body.name] = true;
+  } else if (body.operation === "new-skill") {
+    setup.shared.push(body.name);
+    setup.roots[`skill:shared:${body.name}`] = { "SKILL.md": skillText(body.name, body.description, "What the agent should do, step by step.") };
+  }
+  return json(res, 200, setupOverview());
+}
+const projectGuides = {
+  wsp_rudder: { files: [
+    { path: "AGENTS.md", kind: "file", linksTo: null, imports: [], readBy: ["claude", "codex"] },
+    { path: "CLAUDE.md", kind: "link", linksTo: "AGENTS.md", imports: [], readBy: ["claude", "codex"] },
+    { path: "README.md", kind: "file", linksTo: null, imports: [], readBy: [] },
+  ], shared: true },
+};
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -590,6 +659,11 @@ const server = http.createServer(async (req, res) => {
     computers.set(code, { deviceName: "Viraats-MacBook-Pro.local", expiresAt: now() + 5 * MIN });
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end(`code: ${code}\napprove: /app/approve?code=${code}\n`);
+  }
+  if (p === "/app/__mock/files/reset-setup") {
+    setup = freshSetup();
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("agent setup reset\n");
   }
   if (p === "/app/__mock/files/agent-edit") {
     fileTrees.run_a1["README.md"] = readmeText(`The agent rewrote this at ${new Date().toLocaleTimeString()}.`);
@@ -637,6 +711,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === "/api/app/project-files") {
       return projectFiles(req, res, url, req.method === "POST" ? await readBody(req) : null);
+    }
+    if (p === "/api/app/agent-setup" && req.method === "GET") return json(res, 200, setupOverview());
+    if (p === "/api/app/agent-setup/actions" && req.method === "POST") return setupAction(res, await readBody(req));
+    if (p === "/api/app/agent-setup/files") {
+      const body = req.method === "POST" ? await readBody(req) : null;
+      const tree = setupTree(body ? body.scope?.workspaceId : url.searchParams.get("workspaceId"));
+      if (!tree) return json(res, 403, { error: "That agent setup file is not available" });
+      return treeFiles(res, tree, body ?? Object.fromEntries(url.searchParams), body);
+    }
+    if (p === "/api/app/project-guide" && req.method === "GET") {
+      return json(res, 200, projectGuides[url.searchParams.get("workspaceId")] ?? { files: [{ path: "README.md", kind: "file", linksTo: null, imports: [], readBy: [] }], shared: false });
     }
     if (p === "/api/app/digests" && req.method === "GET") {
       return json(res, 200, { digests: digestStore.map(digestPreviewOf), timeZone: "America/Los_Angeles" });

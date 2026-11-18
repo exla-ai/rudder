@@ -47,6 +47,17 @@ async function fileService() {
   return projectFiles;
 }
 
+// The Files hub: instructions and skills shared by Claude and Codex, and each
+// project's guide files (src/project-files/agent-setup.ts).
+let agentSetup;
+async function agentSetupService() {
+  if (!agentSetup) {
+    const { AgentSetup } = await import("/opt/rudder/dist/project-files/agent-setup.js");
+    agentSetup ??= new AgentSetup({ projectDirs: () => [...projects.values()].map((p) => p.dir) });
+  }
+  return agentSetup;
+}
+
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
 const workerToken = (process.env.RUDDER_WORKER_TOKEN || "").trim();
@@ -730,6 +741,9 @@ async function handleRpc(method, params) {
   if (method === "loginCancel") {
     return logins.cancel(String(params.provider || ""), String(params.id || "")) ?? { ok: true };
   }
+  if (method === "agentSetup") {
+    return (await agentSetupService()).handle(params.request);
+  }
   const project = projects.get(params.workspaceId);
   if (!project) {
     throw new Error("that project is not open on the home machine");
@@ -739,6 +753,9 @@ async function handleRpc(method, params) {
   }
   if (method === "projectFiles") {
     return (await fileService()).dispatch(project.dir, params.request);
+  }
+  if (method === "projectGuide") {
+    return (await agentSetupService()).projectGuide(project.dir);
   }
   if (method === "transcript") {
     return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });

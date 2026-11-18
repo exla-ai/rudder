@@ -10,7 +10,8 @@ export class ProjectFileError extends Error {
     super(message); this.name = "ProjectFileError";
   }
 }
-export type FileGrant = { scope: FileScope; root: string; access: FileAccess };
+/** `only` narrows a grant to the one file of that name at its root. */
+export type FileGrant = { scope: FileScope; root: string; access: FileAccess; only?: string };
 /** Resolve from CURRENT trusted project/run state, never from a client-supplied root.
  * Check session/account ACL, project/workspace/attempt membership and owner epoch.
  * Called again before publication, so revocation or ownership changes fail closed.
@@ -122,7 +123,7 @@ async function placeOf(grant: FileGrant): Promise<Place> {
     return {
       root, at: (parts) => path.join(root, ...parts),
       current: async (at) => await realpath(at) === at,
-      holds: async (fresh) => fresh.access.kind === "host" && fresh.root === grant.root && await realpath(fresh.root) === root,
+      holds: async (fresh) => fresh.access.kind === "host" && fresh.root === grant.root && fresh.only === grant.only && await realpath(fresh.root) === root,
     };
   }
   if (process.platform !== "linux") throw new ProjectFileError("denied", "Agent workspace namespaces exist only on Linux");
@@ -136,7 +137,7 @@ async function placeOf(grant: FileGrant): Promise<Place> {
   return {
     root, at: (parts) => [root, ...parts].join("/"),
     current: async () => await readlink(namespace) === mount,
-    holds: async (fresh) => fresh.access.kind === "namespace" && fresh.access.pid === pid && fresh.root === grant.root && await readlink(namespace) === mount,
+    holds: async (fresh) => fresh.access.kind === "namespace" && fresh.access.pid === pid && fresh.root === grant.root && fresh.only === grant.only && await readlink(namespace) === mount,
   };
 }
 
@@ -155,6 +156,9 @@ export class ProjectFileService {
     try {
       bounded.throwIfAborted();
       const grant = await this.#grant(scope, bounded);
+      if (grant.only !== undefined && relative !== grant.only && !(relative === "" && request.operation === "list")) {
+        throw new ProjectFileError("denied", "Only one file is open here");
+      }
       const place = await placeOf(grant);
       const handles: FileHandle[] = [];
       try {
@@ -189,7 +193,7 @@ export class ProjectFileService {
           }, bounded);
         }
         const result = request.operation === "list"
-          ? await this.list(selected, current, relative, bounded)
+          ? await this.list(selected, current, relative, bounded, grant.only)
           : await this.read(selected, relative, request.knownRevision, bounded);
         bounded.throwIfAborted();
         if (!sameVersion(before, await selected.stat())) throw new ProjectFileError("changed", "The file changed while reading it");
@@ -213,10 +217,13 @@ export class ProjectFileService {
     const grant = await abortable(this.authorize(scope, signal), signal);
     signal.throwIfAborted();
     if (!sameScope(scope, grant.scope)) throw new ProjectFileError("denied", "Project file access is no longer current");
-    return { scope: grant.scope, root: grant.root, access: validateFileAccess(grant.access) };
+    if (grant.only !== undefined && (typeof grant.only !== "string" || validateFilePath(grant.only).includes("/") || grant.only === "")) {
+      throw new ProjectFileError("denied", "Project file access is no longer current");
+    }
+    return { scope: grant.scope, root: grant.root, access: validateFileAccess(grant.access), ...(grant.only === undefined ? {} : { only: grant.only }) };
   }
 
-  private async list(handle: FileHandle, absolute: string, relative: string, signal: AbortSignal): Promise<FileListing> {
+  private async list(handle: FileHandle, absolute: string, relative: string, signal: AbortSignal, only?: string): Promise<FileListing> {
     if (!(await handle.stat()).isDirectory()) throw new ProjectFileError("invalid", "Choose a project folder");
     const directory = await opendir(process.platform === "linux" ? `/proc/self/fd/${handle.fd}` : absolute);
     const entries: FileEntry[] = [];
@@ -228,6 +235,7 @@ export class ProjectFileService {
       const child = relative ? `${relative}/${entry.name}` : entry.name;
       try { validateFilePath(child); } catch { continue; }
       if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) continue;
+      if (only !== undefined && (entry.name !== only || !entry.isFile())) continue;
       entries.push({ name: entry.name, path: child, kind: entry.isDirectory() ? "folder" : "file" });
     }
     entries.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "folder" ? -1 : 1));

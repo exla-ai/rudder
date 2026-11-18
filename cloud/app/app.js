@@ -10,10 +10,12 @@ import {
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
+import { FilesHubScreen } from "/app/files-hub.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { chatEdit } from "/app/chat-edit.js";
+import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -527,6 +529,7 @@ function parseRoute(path) {
   if (parts[0] !== "app") return { name: "home", path: "/app" };
   if (parts[1] === "digest") return { name: "digest", id: parts[2] ? decodeURIComponent(parts[2]) : null, path };
   if (parts[1] === "settings") return { name: "settings", path: "/app/settings" };
+  if (parts[1] === "files") return { name: "files", path: "/app/files" };
   if (parts[1] === "team" && parts[2] && parts[3] && parts[4]) {
     // A teammate's agent, read only. Not `ws`: the sidebar and plan column
     // follow `ws`, and this project is not yours.
@@ -621,6 +624,7 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "agent") return AgentScreen(route.ws, route.run, paneOpts);
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
+  if (route.name === "files") return FilesHubScreen({ projects: () => store.state?.projects || [] });
   if (route.name === "team") return TeamScreen();
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
   if (route.name === "welcome") return OnboardingScreen({ again: !onboardingDue(store.state) });
@@ -686,6 +690,7 @@ function DesktopShell() {
       </div>
       <div class="ds-foot">
         <a class="ds-link ds-team" href="/app/team" data-link hidden>${icon("users")}<span>Team</span></a>
+        <a class="ds-link ds-files" href="/app/files" data-link>${icon("folder")}<span>Files</span></a>
         <a class="ds-link ds-digest" href="/app/digest" data-link>${icon("sun")}<span>Digest</span></a>
         <a class="ds-link ds-settings" href="/app/settings" data-link><span class="avatar"></span><span class="ds-who"><span class="ds-email"></span><span class="ds-org"></span></span>${icon("settings")}</a>
       </div>
@@ -1052,6 +1057,7 @@ function DesktopShell() {
     setText(el.querySelector(".ds-org"), org ? org.name : "Personal");
     el.querySelector(".ds-settings").classList.toggle("on", route?.name === "settings");
     el.querySelector(".ds-digest").classList.toggle("on", route?.name === "digest");
+    el.querySelector(".ds-files").classList.toggle("on", route?.name === "files");
     el.querySelector(".ds-team").hidden = !hasTeam(s);
     el.querySelector(".ds-team").classList.toggle("on", route?.name === "team" || route?.name === "team-agent");
 
@@ -2292,6 +2298,7 @@ function HomeScreen() {
   // Team: what your teammates' agents are doing (team.js), once you have one.
   const teamBtn = h(`<a class="icon-btn" href="/app/team" data-link aria-label="Team" title="Team" hidden>${icon("users")}</a>`);
   acts.appendChild(teamBtn);
+  acts.appendChild(h(`<a class="icon-btn" href="/app/files" data-link aria-label="Files" title="Files">${icon("folder")}</a>`));
   const avatarBtn = h(`<button type="button" class="icon-btn" aria-label="Settings"><span class="avatar"></span></button>`);
   avatarBtn.addEventListener("click", openSettings);
   acts.appendChild(avatarBtn);
@@ -3713,6 +3720,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })) };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
+    // Only a user message the transcript adds after this point can be this one (pending.js).
+    item.after = sentAfter(store.transcripts.get(key)?.messages);
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
     atBottom = true;
     paint();
@@ -3777,14 +3786,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   function reconcilePending(t) {
     const list = store.pending.get(key);
     if (!list?.length) return;
-    const users = (t.messages || []).filter((m) => m.role === "user");
-    const kept = list.filter((p) => {
-      if (p.state === "failed") return true;
-      if (Date.now() - p.ts > 5 * 60 * 1000) return false;
-      const sent = (p.sentText || p.text).trim();
-      return !users.some((m) => (m.text || "").trim() === sent && (m.ts == null || m.ts >= p.ts - 120000));
-    });
-    store.pending.set(key, kept);
+    store.pending.set(key, settlePending(list, t.messages, Date.now()));
   }
 
   function header() {

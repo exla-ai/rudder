@@ -140,17 +140,17 @@ body.desktop { --files-w: min(46vw, 760px); }
 .fp-frame { display: block; width: 100%; height: 100%; min-height: 60vh; border: 0; background: #fff; }
 
 /* Syntax colors for CodeMirror's class highlighter. */
-.fp .tok-keyword, .fp .tok-operator.tok-keyword { color: var(--tok-keyword); }
-.fp .tok-string, .fp .tok-string2, .fp .tok-inserted { color: var(--tok-string); }
-.fp .tok-number, .fp .tok-bool, .fp .tok-atom, .fp .tok-literal { color: var(--tok-number); }
-.fp .tok-comment { color: var(--tok-comment); font-style: italic; }
-.fp .tok-typeName, .fp .tok-className, .fp .tok-namespace { color: var(--tok-type); }
-.fp .tok-definition, .fp .tok-macroName, .fp .tok-labelName { color: var(--tok-def); }
-.fp .tok-propertyName { color: var(--tok-prop); }
-.fp .tok-meta, .fp .tok-punctuation { color: var(--tok-meta); }
-.fp .tok-heading { color: var(--tok-heading); font-weight: 700; }
-.fp .tok-emphasis { font-style: italic; }
-.fp .tok-strong { font-weight: 700; }
-.fp .tok-link, .fp .tok-url { color: var(--accent); text-decoration: underline; }
-.fp .tok-strikethrough { text-decoration: line-through; }
-.fp .tok-deleted, .fp .tok-invalid { color: var(--tok-invalid); }
+.fp-editor .tok-keyword, .fp-editor .tok-operator.tok-keyword { color: var(--tok-keyword); }
+.fp-editor .tok-string, .fp-editor .tok-string2, .fp-editor .tok-inserted { color: var(--tok-string); }
+.fp-editor .tok-number, .fp-editor .tok-bool, .fp-editor .tok-atom, .fp-editor .tok-literal { color: var(--tok-number); }
+.fp-editor .tok-comment { color: var(--tok-comment); font-style: italic; }
+.fp-editor .tok-typeName, .fp-editor .tok-className, .fp-editor .tok-namespace { color: var(--tok-type); }
+.fp-editor .tok-definition, .fp-editor .tok-macroName, .fp-editor .tok-labelName { color: var(--tok-def); }
+.fp-editor .tok-propertyName { color: var(--tok-prop); }
+.fp-editor .tok-meta, .fp-editor .tok-punctuation { color: var(--tok-meta); }
+.fp-editor .tok-heading { color: var(--tok-heading); font-weight: 700; }
+.fp-editor .tok-emphasis { font-style: italic; }
+.fp-editor .tok-strong { font-weight: 700; }
+.fp-editor .tok-link, .fp-editor .tok-url { color: var(--accent); text-decoration: underline; }
+.fp-editor .tok-strikethrough { text-decoration: line-through; }
+.fp-editor .tok-deleted, .fp-editor .tok-invalid { color: var(--tok-invalid); }

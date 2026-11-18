@@ -1,8 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CloudProjectFiles, CloudProjectFileError, WRITE_TEXT_BYTES, type CloudFileScope } from "./relay.js";
+import { AgentSetupRoutes, AGENT_SETUP_PATHS } from "./agent-setup.js";
 
 type Dependencies = {
   workspace(accountId: string, workspaceId: string): { homeId: string };
+  /** The account's own connected home (the Files page's agent setup), or null. */
+  ownHome(accountId: string): string | null;
   rpc(homeId: string, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
 };
 type Binding = { scope: CloudFileScope; accountId: string; homeId: string; workspaceId: string; expires: number };
@@ -38,7 +41,9 @@ export class ProjectFileRoutes {
   #bindings = new Map<string, Binding>();
   #relay: CloudProjectFiles<string>;
   #listing = 0;
+  #setup: AgentSetupRoutes;
   constructor(private readonly dependencies: Dependencies) {
+    this.#setup = new AgentSetupRoutes(dependencies);
     this.#relay = new CloudProjectFiles({
       authorize: async (accountId, scope, signal) => {
         signal.throwIfAborted();
@@ -63,7 +68,8 @@ export class ProjectFileRoutes {
     return binding;
   }
   async handle(req: IncomingMessage, res: ServerResponse, url: URL, accountId: string): Promise<boolean> {
-    if (!["/api/app/project-files", "/api/app/project-file-scopes"].includes(url.pathname)) return false;
+    const setup = AGENT_SETUP_PATHS.includes(url.pathname);
+    if (!setup && !["/api/app/project-files", "/api/app/project-file-scopes"].includes(url.pathname)) return false;
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -71,6 +77,15 @@ export class ProjectFileRoutes {
     const cancel = () => controller.abort();
     req.once("aborted", cancel); res.once("close", cancel);
     try {
+      if (setup) {
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+        const result = await this.#setup.handle(req, url, accountId, signal, () => {
+          if (!/^application\/json(?:;|$)/i.test(req.headers["content-type"] ?? "")) throw new CloudProjectFileError(400, "Send the save as JSON");
+          return saveBody(req, signal);
+        });
+        if (!controller.signal.aborted && !res.destroyed) res.end(JSON.stringify(result));
+        return true;
+      }
       const save = req.method === "POST" && url.pathname === "/api/app/project-files";
       if (req.method !== "GET" && !save) throw new CloudProjectFileError(405, "Use GET to read project files and POST to save one");
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);

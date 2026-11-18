@@ -7332,6 +7332,7 @@ const teamApiDeps = {
 
 const projectFileRoutes = new ProjectFileRoutes({
   workspace: (accountId, workspaceId) => ({ homeId: requireHomeRepo(accountId, workspaceId).home.id }),
+  ownHome: (accountId) => findHomeRow(accountId)?.id ?? null,
   rpc: (homeId, method, params, signal) => homeRpc(homeId, method, params as JsonRecord, 10_000, signal),
 });
 

@@ -280,6 +280,19 @@ function parseClaude(lines, stats = null) {
       }));
       continue;
     }
+    // A message typed while the agent works: Claude Code hands it to the running
+    // turn as a queued_command attachment, never as a user entry.
+    const queued = entry.type === "attachment" && !entry.isSidechain ? entry.attachment : null;
+    if (queued?.type === "queued_command" && queued.commandMode === "prompt" && queued.origin?.kind === "human") {
+      const prompt = Array.isArray(queued.prompt)
+        ? queued.prompt.filter((part) => part?.type === "text").map((part) => part.text).join("\n")
+        : queued.prompt;
+      const text = cleanUserText(prompt);
+      if (text) {
+        messages.push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text });
+      }
+      continue;
+    }
     if ((entry.type !== "user" && entry.type !== "assistant") || entry.isSidechain || entry.isMeta) {
       continue;
     }

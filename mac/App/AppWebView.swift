@@ -44,7 +44,7 @@ struct AppWebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.applicationNameForUserAgent = "RudderMac/\(Bundle.main.shortVersion)"
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = RudderWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
@@ -296,6 +296,21 @@ struct AppWebView: NSViewRepresentable {
             guard let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return }
             NSWorkspace.shared.open(url)
         }
+    }
+}
+
+/// Cmd+, is the app menu's Settings wherever focus is in the page. WebKit
+/// hands key equivalents to the page first and only gives back the ones it
+/// leaves alone, so a focused iframe, editor or key handler that keeps the key
+/// would stop Settings from opening. Passing on it here sends it straight to
+/// the menu.
+final class RudderWebView: WKWebView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "," {
+            return false
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 

@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { contextUsage } from "./context-usage.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexRolloutFile, codexTypedText, editablePrompts, readCodexLineage, unwrapPastedContent } from "./session-lineage.mjs";
 
@@ -77,6 +78,13 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
     base.stats = stats.result(home);
   } catch (error) {
     base.stats = { error: error instanceof Error ? error.message : String(error) };
+  }
+  // Context left and where the backend compacts (context-usage.mjs), the
+  // same way: a failed read says so and the conversation still shows.
+  try {
+    base.context = contextUsage(record, file, home);
+  } catch (error) {
+    base.context = { error: error instanceof Error ? error.message : String(error) };
   }
   return base;
 }

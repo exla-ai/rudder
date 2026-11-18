@@ -9,6 +9,7 @@ import {
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
+import { ContextMeter } from "/app/context-meter.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
@@ -3548,6 +3549,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
   // Claude Code's suggested next prompt: dim in the empty box, Tab or the chip fills it (prompt-suggest.js).
   const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
+  // Context left and where the backend compacts, at the row's end (context-meter.js).
+  const contextMeter = ContextMeter(chatTools);
   // Edit on any prompt but the first: rewinds the conversation to it (chat-edit.js).
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript() });
   // Read only: whose agent this is, where the composer would be.
@@ -3951,6 +3954,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     setText(sub.querySelector(".bk"), bk);
     sub.querySelector(".sep").hidden = !bk;
     agentStats.update(t?.stats);
+    contextMeter.update(t?.context);
     return status;
   }
 
@@ -4181,6 +4185,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
       agentStats.destroy();
+      contextMeter.destroy();
       if (screen?.el === el) document.title = "Rudder";
     },
   };

@@ -1,0 +1,36 @@
+/* Context left and the auto-compact point, at the right of the row above the
+   composer (cloud/app/context-meter.js). Colors come from styles.css tokens. */
+.cm {
+  flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 4px 0 8px;
+  border: 0; border-radius: 8px; background: none; cursor: pointer;
+  font: 12.5px/1 var(--font); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.cm[hidden] { display: none; }
+.cm:hover, .cm[aria-expanded="true"] { color: var(--ink-2); }
+.cm:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cm.lv-hot { color: var(--failed); }
+
+/* A narrow row (a phone, a split pane) drops the word "context", then the bar. */
+.c-tools:has(> .cm:not([hidden])) { container-type: inline-size; }
+@container (max-width: 400px) { .cm .cm-w { display: none; } }
+@container (max-width: 320px) { .cm .cm-bar { display: none; } }
+
+/* The window, filled to what is used, with a tick where compaction starts. */
+.cm-bar { position: relative; width: 34px; height: 5px; flex: none; border-radius: 3px; background: var(--line-strong); }
+.cm-bar[hidden] { display: none; }
+.cm-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--muted); }
+.cm-bar b { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--ink-2); }
+.cm-bar b[hidden] { display: none; }
+.cm.lv-warm .cm-bar i { background: var(--needs); }
+.cm.lv-hot .cm-bar i { background: var(--failed); }
+
+.cm-pop {
+  position: fixed; z-index: 40; width: min(300px, calc(100vw - 16px));
+  padding: 10px 13px; border-radius: 12px;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line-strong); box-shadow: var(--shadow-2);
+  font-size: 13px; line-height: 1.4;
+}
+.cm-pop p { margin: 0; }
+.cm-pop .cm-main { font-variant-numeric: tabular-nums; }
+.cm-pop .cm-sub { margin-top: 4px; color: var(--muted); font-size: 12.5px; }

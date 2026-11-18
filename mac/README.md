@@ -17,6 +17,9 @@ twin of `../ios`. It adds what a browser tab cannot do:
   It is a copy: the cloud agent keeps running.
 - Mac menus: Cmd+R reload, Cmd+[ / Cmd+] back and forward, Cmd+, opens
   `/app/settings`. The last page is reopened on launch.
+- Updates itself with [Sparkle](https://sparkle-project.org) 2: a daily check,
+  downloaded in the background and installed when Rudder quits, and
+  Rudder > Check for Updates… (see "Updates" below).
 
 Bundle id `ai.exla.rudder.mac`, macOS 14+, SwiftUI app lifecycle, Developer ID
 distribution (not the App Store): no sandbox, hardened runtime with no exceptions.
@@ -33,10 +36,17 @@ mac/
 │   ├── Session.swift        sign-in, pairing codes, Keychain
 │   ├── LocalAgents.swift    finding local tools, `rudder cloud pull`, checkout mapping
 │   ├── About.swift          Rudder > About Rudder: the app's own About window
+│   ├── Updates.swift        Sparkle: the updater and Rudder > Check for Updates…
 │   ├── Info.plist, Rudder.entitlements, Assets.xcassets (icon from ../assets/rudder.icns)
 ├── Core/RudderCore.swift    pure logic: URLs, rudder:// parsing, needs-you counting, CLI output
 ├── Tests/RudderCoreTests.swift
-└── scripts/build.sh         xcodegen, tests, archive, notarize, DMG, optional GitHub release
+└── scripts/
+    ├── build.sh             xcodegen, tests, unsigned Release archive, then package.sh
+    ├── package.sh           sign (Sparkle's helpers too), notarize, DMG, release.env
+    ├── publish.sh           appcast.xml and the GitHub release (Rudder.dmg + appcast.xml)
+    ├── appcast.mjs          the Sparkle appcast, EdDSA-signed
+    ├── make-dmg.sh          the DMG window (dmgbuild)
+    └── ci.sh                the same steps on an offstage Mac for .github/workflows/mac.yml
 ```
 
 ## The bridge (for the web app)
@@ -136,12 +146,28 @@ Then:
 RUDDER_NOTARY_PROFILE=rudder-notary mac/scripts/build.sh
 ```
 
-It generates the project, runs RudderCoreTests, archives an Apple
-Silicon (arm64) Release build signed with Developer ID, hardened runtime and a
-secure timestamp, checks the signature, notarizes and staples the app, builds
+It generates the project, runs RudderCoreTests and archives an unsigned Apple
+Silicon (arm64) Release build. `mac/scripts/package.sh` then signs it with
+Developer ID, the hardened runtime and a secure timestamp, inside out:
+Sparkle's helpers (`Installer.xpc`, `Downloader.xpc` keeping its entitlements,
+`Autoupdate`, `Updater.app`), `Sparkle.framework`, then the app with
+`App/Rudder.entitlements`, never `--deep`. It checks every one of them for team
+`3C4383262W` and the runtime flag, notarizes and staples the app, builds
 `mac/build/Rudder.dmg` with `mac/scripts/make-dmg.sh`, signs, notarizes and
-staples the DMG, runs `spctl` on both, and prints the SHA-256.
+staples the DMG, runs `spctl` on both, writes `mac/build/release.env`
+(`VERSION`, `BUILD`, `MINIMUM_SYSTEM`) and prints the SHA-256.
 `RUDDER_SKIP_NOTARIZE=1` gives a signed, unnotarized build for local testing.
+
+When Xcode cannot build on the signing Mac, build the unsigned Release archive
+on another Mac (an Offstage Mac:
+`xcodebuild archive ... CODE_SIGNING_ALLOWED=NO`, as build.sh does), copy its
+`Rudder.app` over (`ditto -c -k --keepParent`), and run only
+`mac/scripts/package.sh path/to/Rudder.app` on the signing Mac. Never sign the
+app alone with a bare `codesign`: `Sparkle.framework` and its helpers need this
+team's signature first, or the hardened runtime refuses to load the framework.
+
+The CI route (`mac/scripts/ci.sh`) signs through Xcode's archive and Developer
+ID export instead, which re-signs Sparkle's helpers itself.
 
 ### DMG window
 
@@ -170,22 +196,63 @@ done
 
 Bump `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in `project.yml` per release.
 
-## Hosting the DMG
+## Releasing: the DMG and the appcast
 
-`https://rudder.exla.ai/download/mac` already redirects (site/vercel.json) to
-`https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg`, so the
-DMG must be an asset named exactly `Rudder.dmg` on the repo's **latest** GitHub
-release:
+Both live on the repo's **latest** GitHub release, `mac-v<version>-<build>`:
+
+- `Rudder.dmg`: `https://rudder.exla.ai/download/mac` redirects (site/vercel.json)
+  to `https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg`.
+- `appcast.xml`: the Sparkle feed, `SUFeedURL` in `App/Info.plist`,
+  `https://github.com/exla-ai/rudder/releases/latest/download/appcast.xml`.
+  GitHub answers with redirects to the asset, which Sparkle follows (https all
+  the way). It has one item: that release's version and build, minimum macOS
+  14.0, and an enclosure pointing at that release's own
+  `releases/download/mac-v<version>-<build>/Rudder.dmg` with its length and
+  EdDSA signature, so it stays right however "latest" moves.
+
+Publish both from a machine with the Sparkle key (see "Updates"), Node 18+
+and `gh`, once `mac/build/Rudder.dmg` and `mac/build/release.env` are there
+(copied from the Mac that packaged them) and the commit they were built from is
+pushed:
 
 ```bash
-RUDDER_NOTARY_PROFILE=rudder-notary RUDDER_RELEASE_TAG=mac-v1.0.0 mac/scripts/build.sh
+RUDDER_SPARKLE_KEY=~/.rudder-sparkle-ed25519 mac/scripts/publish.sh mac/build <commit>
 ```
 
-creates release `mac-v1.0.0` with the DMG and marks it latest. If any other
-GitHub release is created later (and marked latest), the download link breaks
-until the DMG is attached to it too (`gh release upload <tag> mac/build/Rudder.dmg`),
-so either keep GitHub releases for the Mac app only, or point the redirect at a
-fixed tag or a bucket instead.
+`appcast.mjs` refuses a key that is not the one in `SUPublicEDKey` and checks
+its signature before `gh release create` uploads both files and marks the
+release latest (gh publishes only after both uploads finished). A release
+without `appcast.xml` stops every installed app's updates until the next one,
+and a version or build in the appcast that differs from the DMG's would make
+the apps update in a loop: always publish with `release.env` from the build.
+
+Rudder's npm releases create no GitHub release, so the Mac release stays
+latest. If any other GitHub release is created later and marked latest, both
+links break until `Rudder.dmg` and `appcast.xml` are attached to it too.
+
+## Updates
+
+Sparkle 2 (`packages` in `project.yml`, pinned to an exact release at least two
+weeks old) runs from `App/Updates.swift`: an `SPUStandardUpdaterController`
+started once launch finishes, and Rudder > Check for Updates…. `Info.plist`
+sets `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks` (check daily
+without asking) and `SUAutomaticallyUpdate` (download in the background,
+install when Rudder quits; Rudder keeps running with its window closed, so a
+downloaded update is offered in Sparkle's window at a later check). The app is
+not sandboxed, so Sparkle's XPC services stay unused (`SUEnableInstallerLauncherService`
+and `SUEnableDownloaderService` are off), and no entitlement is needed.
+
+Updates are signed with an Ed25519 key in Sparkle's format. `SUPublicEDKey` is
+base64 of the raw 32-byte public key. The private key is a file holding base64
+of the 32-byte seed, what Sparkle's `generate_keys -x` exports; it is in
+`~/.rudder-sparkle-ed25519` (mode 600) on the Linux home machine and, for the
+CI route, in the `SPARKLE_ED_PRIVATE_KEY` repo secret. Keep a copy somewhere
+safe: losing it means no installed app accepts another update until users
+download a new DMG by hand. `generate_keys -f <file>` imports it into a Mac's
+keychain if Sparkle's own tools are ever wanted; they are not needed.
+
+The first Sparkle build (1.2.0) cannot reach users of 1.1.0 or older, who have
+no updater: they download it once from `/download/mac`.
 
 ## Verify on a Mac
 
@@ -202,6 +269,8 @@ fixed tag or a bucket instead.
    choose the clone, wait for `window.rudderLocal`, try each open button (Open Rudder in Terminal should show the copy paused).
 6. Close the window: the menu bar item stays; the Dock icon reopens the window.
 7. `spctl --assess --type execute -v mac/build/Rudder.app` says "Notarized Developer ID".
+8. Rudder > Check for Updates… answers in Sparkle's window: up to date, or the
+   newer release offered and installed with a relaunch.
 
 ## Known gaps
 
@@ -211,4 +280,5 @@ fixed tag or a bucket instead.
   passive read, an open Mac app keeps the home awake and never idle.
 - Slack connects that send the page to an OAuth url open in the default
   browser, so the callback lands in the browser, not this window.
-- No auto-update (Sparkle) yet: users download new DMGs.
+- A Cloud deploy reaches an open window only after Cmd+R or a relaunch: the
+  web app has no version the shell could compare against.

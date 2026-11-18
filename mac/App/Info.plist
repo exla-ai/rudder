@@ -44,5 +44,13 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>SUFeedURL</key>
+	<string>https://github.com/exla-ai/rudder/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>OLgGlRodEHSyE5notS8QHdg4XVWYswfDRfWagj8zRmg=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 </dict>
 </plist>

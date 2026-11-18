@@ -17,6 +17,10 @@
 # wiped when the job ends. Bump MARKETING_VERSION /
 # CURRENT_PROJECT_VERSION in mac/project.yml, push, then
 # `gh workflow run mac.yml -f release=true` and `gh run watch`.
+#
+# A release also needs SPARKLE_ED_PRIVATE_KEY (the Sparkle EdDSA private key,
+# base64 of its 32-byte seed): mac/scripts/publish.sh signs Rudder.dmg with it
+# into appcast.xml, the feed installed apps update from, and uploads both.
 name: Mac
 
 on:
@@ -45,6 +49,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # Before the Mac build, not after it: without the key no release can publish.
+      - name: Sparkle key
+        if: inputs.release
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "SPARKLE_ED_PRIVATE_KEY is not set; a release signs appcast.xml with it"
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -70,13 +84,13 @@ jobs:
         if: inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
-        # One DMG per version and build: a release that exists already fails
-        # here instead of swapping its download. Bump CURRENT_PROJECT_VERSION.
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        # Release mac-v<version>-<build> with Rudder.dmg and appcast.xml.
         run: |
-          . offstage-out/mac/build/release.env
-          gh release create "mac-v$VERSION-$BUILD" offstage-out/mac/build/Rudder.dmg --latest --target "$GITHUB_SHA" \
-            --title "Rudder for Mac $VERSION ($BUILD)" \
-            --notes "Rudder for macOS $VERSION, signed with Developer ID and notarized. Download: https://rudder.exla.ai/download/mac"
+          key="$RUNNER_TEMP/sparkle-ed25519"
+          (umask 077 && printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key")
+          RUDDER_SPARKLE_KEY="$key" mac/scripts/publish.sh offstage-out/mac/build "$GITHUB_SHA"
+          rm -f "$key"
       - name: Logs
         if: always()
         uses: actions/upload-artifact@v4

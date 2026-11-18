@@ -10,6 +10,7 @@ struct RudderMacApp: App {
 
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = AppModel.shared
+    @State private var updates = Updates.shared
 
     var body: some Scene {
         Window("Rudder", id: Self.mainWindowID) {
@@ -24,6 +25,8 @@ struct RudderMacApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About Rudder") { AboutWindow.show() }
+                Button("Check for Updates…") { updates.check() }
+                    .disabled(!updates.canCheck)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
@@ -86,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppModel.shared.startPolling()
+        Updates.shared.start()
     }
 
     /// Closing the window keeps the menu bar item and its notifications.

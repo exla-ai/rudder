@@ -5,13 +5,20 @@
 # Distributed with Developer ID (not the App Store): no sandbox, hardened runtime.
 #
 #   brew install xcodegen && xcodegen generate && open Rudder.xcodeproj
-#   scripts/build.sh            # archive, notarize, DMG (see README.md)
+#   scripts/build.sh            # archive, sign, notarize, DMG (see README.md)
 name: Rudder
 options:
   bundleIdPrefix: ai.exla
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
+
+packages:
+  # Self-update (App/Updates.swift). Pin an exact release at least two weeks
+  # old; the binary's checksum is in that tag's Package.swift.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
 
 settings:
   base:
@@ -33,6 +40,12 @@ targets:
     sources:
       - path: App
       - path: Core
+    dependencies:
+      # A package's framework is embedded only when asked. Code Sign on Copy
+      # signs the framework but not the helpers inside it: an export
+      # (scripts/ci.sh) re-signs them, scripts/package.sh signs them itself.
+      - package: Sparkle
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder.mac

@@ -126,6 +126,8 @@ case "$stage" in
 </dict>
 </plist>
 PLIST
+    # The export also re-signs the helpers inside Sparkle.framework (Autoupdate,
+    # Updater.app, the XPC services) with this identity and the hardened runtime.
     run_logged export.log xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
       -exportOptionsPlist build/ExportOptions.plist -exportPath build/export "${AUTH[@]}"
     codesign --verify --deep --strict --verbose=2 build/export/Rudder.app
@@ -159,6 +161,7 @@ PLIST
     {
       echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
       echo "BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+      echo "MINIMUM_SYSTEM=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")"
     } > release.env
     cat release.env
     ;;

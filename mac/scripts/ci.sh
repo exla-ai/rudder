@@ -5,7 +5,7 @@
 #   check     pinned tools, xcodegen, the core tests and a Debug build
 #   sign      archive and export signed with the Developer ID certificate, verify
 #   notarize  notarize and staple the app
-#   dmg       Rudder.dmg, notarized and stapled, and build/release.env
+#   dmg       Rudder.dmg, signed, notarized and stapled, and build/release.env
 #   collect   ../out.tgz with the logs and whatever dmg made
 #
 # Each stage is its own command (30 minutes at most) in the same sandbox, so
@@ -148,8 +148,12 @@ PLIST
     asc_key
     cd mac/build
     ../scripts/make-dmg.sh export/Rudder.app Rudder.dmg
+    # Signed like build.sh signs it: the sign stage's keychain is still in
+    # this sandbox's search list.
+    codesign --sign "Developer ID Application" --timestamp Rudder.dmg
     notarize Rudder.dmg
     xcrun stapler staple Rudder.dmg
+    spctl --assess --type open --context context:primary-signature --verbose=2 Rudder.dmg
     shasum -a 256 Rudder.dmg
     plist=export/Rudder.app/Contents/Info.plist
     {

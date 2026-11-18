@@ -70,17 +70,13 @@ jobs:
         if: inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
+        # One DMG per version and build: a release that exists already fails
+        # here instead of swapping its download. Bump CURRENT_PROJECT_VERSION.
         run: |
           . offstage-out/mac/build/release.env
-          TAG="mac-v$VERSION-$BUILD"
-          dmg=offstage-out/mac/build/Rudder.dmg
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$dmg" --clobber
-          else
-            gh release create "$TAG" "$dmg" --latest --target "$GITHUB_SHA" \
-              --title "Rudder for Mac $VERSION ($BUILD)" \
-              --notes "Rudder for macOS $VERSION, signed with Developer ID and notarized. Download: https://rudder.exla.ai/download/mac"
-          fi
+          gh release create "mac-v$VERSION-$BUILD" offstage-out/mac/build/Rudder.dmg --latest --target "$GITHUB_SHA" \
+            --title "Rudder for Mac $VERSION ($BUILD)" \
+            --notes "Rudder for macOS $VERSION, signed with Developer ID and notarized. Download: https://rudder.exla.ai/download/mac"
       - name: Logs
         if: always()
         uses: actions/upload-artifact@v4

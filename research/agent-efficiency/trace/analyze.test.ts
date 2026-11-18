@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { analyze } from "./analyze.ts";
+import { readClaudeSession } from "./claude.ts";
 import { classifySegment, redact, splitShell } from "./classify.ts";
 import { findSessionTree, readCodexRollout } from "./codex.ts";
+import { summarize } from "./survey.ts";
 
 const ROOT = "01a00000-0000-7000-8000-000000000001";
 const CHILD = "01a00000-0000-7000-8000-000000000002";
@@ -78,4 +80,53 @@ test("attributes tokens, waits, re-reads and docs-only edits", async () => {
   // The first 3K-token read is resent twice before the compaction.
   assert.equal(report.categories.find((entry) => entry.category === "read")?.carried, 3_000 * 2);
   assert.equal(report.agents.find((agent) => agent.agentPath === "/root")?.floorContext, 30_000);
+});
+
+test("reads a Claude transcript once across a fork and measures the outer instructions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "trace-claude-"));
+  const cwd = "/repo/.rudder-workspaces/repo-1a/agent-1";
+  const base = { sessionId: "s1", cwd, entrypoint: "cli" };
+  const t = (seconds: number) => new Date(Date.parse("2026-11-10T00:00:00.000Z") + seconds * 1000).toISOString();
+  const usage = (input: number) => ({ input_tokens: 1, cache_read_input_tokens: input - 1001, cache_creation_input_tokens: 1000, output_tokens: 40 });
+  const records = [
+    { ...base, type: "attachment", uuid: "a1", timestamp: t(0), attachment: { type: "instructions", files: [
+      { path: "/repo/AGENTS.md", type: "Project", content: "x".repeat(4000) },
+      { path: `${cwd}/AGENTS.md`, type: "Project", content: "x".repeat(4000) },
+    ] }, rendered: [{ content: "x".repeat(8000) }] },
+    { type: "api-request", sessionId: "s1", id: "r1", timestamp: t(1) },
+    // One response, split into a thinking record and a tool-use record.
+    { ...base, type: "assistant", uuid: "u1", timestamp: t(5), requestRef: "r1", effort: "high", message: { id: "m1", model: "claude-test", usage: usage(50_000), content: [{ type: "thinking", thinking: "" }] } },
+    { ...base, type: "assistant", uuid: "u2", timestamp: t(6), requestRef: "r1", message: { id: "m1", model: "claude-test", usage: usage(50_000), content: [{ type: "tool_use", id: "c1", name: "Read", input: { file_path: `${cwd}/a.ts` } }] } },
+    { ...base, type: "user", uuid: "u3", timestamp: t(8), message: { content: [{ type: "tool_result", tool_use_id: "c1", content: "y".repeat(400) }] } },
+    { ...base, type: "system", uuid: "u4", subtype: "compact_boundary", timestamp: t(9), compactMetadata: { preTokens: 360_000 } },
+    { type: "api-request", sessionId: "s1", id: "r2", timestamp: t(10) },
+    { ...base, type: "assistant", uuid: "u5", timestamp: t(12), requestRef: "r2", message: { id: "m2", model: "claude-test", usage: usage(30_000), content: [{ type: "text", text: "done" }] } },
+  ];
+  const write = (path: string, lines: object[]) => writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+  mkdirSync(join(dir, "a")); mkdirSync(join(dir, "b"));
+  write(join(dir, "a", "s1.jsonl"), records);
+  // A fork copies the history into a new file, then continues.
+  write(join(dir, "b", "s2.jsonl"), [...records.map((record) => ({ ...record, sessionId: "s2" })),
+    { type: "api-request", sessionId: "s2", id: "r3", timestamp: t(20) },
+    { ...base, sessionId: "s2", type: "assistant", uuid: "u6", timestamp: t(22), requestRef: "r3", message: { id: "m3", model: "claude-test", usage: usage(31_000), content: [] } },
+  ]);
+
+  const seen = new Set<string>();
+  const first = await readClaudeSession(join(dir, "a", "s1.jsonl"), { seen });
+  const fork = await readClaudeSession(join(dir, "b", "s2.jsonl"), { seen });
+  assert.deepEqual(first.requests.map((request) => request.input), [50_000, 30_000]);
+  assert.equal(first.requests[0].modelSeconds, 5);
+  assert.equal(first.requests[0].calls[0].wallSeconds, 2);
+  assert.equal(first.requests[0].calls[0].outputTokens, 100);
+  assert.deepEqual(first.compactions, [1]);
+  assert.deepEqual(fork.requests.map((request) => request.input), [31_000]);
+  assert.equal(fork.contextLoads?.length, 0);
+
+  const row = summarize(first);
+  assert.equal(row.role, "worker");
+  assert.equal(row.instructions.outerBytesPerLoad, 4000);
+  // The outer copy rides on both requests after the load.
+  assert.equal(row.instructions.outerCarried, 1000 * 2);
+  assert.equal(row.tokens.cacheWrite, 2000);
+  rmSync(dir, { recursive: true });
 });

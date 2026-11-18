@@ -16,7 +16,7 @@ const LITERAL = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/;
 const CMD = new RegExp(String.raw`(?:"cmd"|\bcmd)\s*:\s*(` + LITERAL.source + ")");
 
 export async function readCodexRollout(path: string): Promise<Trace> {
-  const trace: Trace = { id: "", agentPath: "/root", path, startedAt: 0, endedAt: 0, requests: [], compactions: [], prompts: [], updates: [] };
+  const trace: Trace = { id: "", backend: "codex", agentPath: "/root", path, startedAt: 0, endedAt: 0, requests: [], compactions: [], prompts: [], updates: [] };
   const calls = new Map<string, ToolCall>();
   const running = new Map<number, { command: Command; startAt: number }>();
   let pending: ToolCall[] = [];
@@ -55,9 +55,11 @@ export async function readCodexRollout(path: string): Promise<Trace> {
         trace.agentPath = payload.agent_path ?? "/root";
         trace.parentId = payload.parent_thread_id;
         trace.cwd = payload.cwd;
+        trace.entrypoint = payload.originator;
         break;
       case "turn_context":
         trace.model ??= payload.model;
+        trace.effort ??= payload.effort;
         turnId = payload.turn_id ?? turnId;
         break;
       case "compacted":

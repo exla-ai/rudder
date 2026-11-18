@@ -37,10 +37,27 @@ node --test research/agent-efficiency/trace/analyze.test.ts
 It finds every rollout in the session tree (sub-agents share the root
 `session_id`), so one id covers the main agent and all its helpers.
 
+To rank waste across every Claude Code and Codex session in a date window
+(about a minute for three weeks of logs), write the rows outside the repo and
+rank them, optionally only sessions after a change shipped:
+
+```sh
+node research/agent-efficiency/trace/survey.ts --since 2026-10-28 --out /workspace/rudder-rsi/survey
+node research/agent-efficiency/trace/rank.ts /workspace/rudder-rsi/survey/sessions.jsonl [--after 2026-11-18T12:00]
+```
+
+Rows hold numbers, roles and project names only, but they describe private
+work, so they and the ranking stay out of the repo. Roles come from the cwd:
+`worker` is a Rudder workspace (`.rudder-workspaces/`), `main` a checkout,
+`probe` a one-shot call from `/tmp`, `subagent` a backend's own helper.
+
 | File | Role |
 |---|---|
 | `trace/model.ts` | Backend-neutral trace records |
 | `trace/codex.ts` | Codex rollout adapter (`~/.codex/sessions/**/rollout-*.jsonl`) |
+| `trace/claude.ts` | Claude Code adapter (`~/.claude/projects/**/*.jsonl`); counts forked history once |
+| `trace/survey.ts` | One row per session across both backends: time, tokens, compactions, instruction loads, cache-write causes |
+| `trace/rank.ts` | Waste ranking from survey rows, priced at API list prices |
 | `trace/classify.ts` | Shell command classification and credential redaction |
 | `trace/analyze.ts` | Token attribution and ranked findings |
 | `trace/tools.ts` | Per-tool calls, latency and output; model vs tool time |
@@ -173,5 +190,7 @@ Next:
 - Commands are classified from their text, not their effect.
 - Carried tokens assume an output stays in context until the next compaction.
   They are an estimate, not a billing record.
-- Claude Code transcripts (`~/.claude/projects/**.jsonl`) need their own
-  adapter into `trace/model.ts`; not written yet.
+- Claude Code logs request start and the last streamed block, so its model
+  time is measured; Codex model time is the gap not spent in tools.
+- Dollar figures use API list prices. Subscription use is metered against
+  limits, not billed per token, so they rank cost rather than state a bill.

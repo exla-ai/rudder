@@ -63,11 +63,23 @@ export interface ToolCall {
 export interface Request {
   at: number;
   turnId: string;
+  // Every prompt token the request carried, cached or not.
   input: number;
   cached: number;
+  // Prompt tokens written to the cache by this request (Claude only).
+  cacheWrite?: number;
   output: number;
   reasoning: number;
+  // Request start to last streamed block, when the log records both (Claude).
+  modelSeconds?: number;
   calls: ToolCall[];
+}
+
+// Instruction files (CLAUDE.md, AGENTS.md, memory) the backend put into the
+// prompt at session start or after a compaction.
+export interface ContextLoad {
+  at: number;
+  files: { path: string; kind: string; bytes: number }[];
 }
 
 export interface Note {
@@ -77,9 +89,13 @@ export interface Note {
 
 export interface Trace {
   id: string;
+  backend: "codex" | "claude";
   agentPath: string;
   parentId?: string;
   model?: string;
+  effort?: string;
+  // How the backend was started: codex-tui, codex_exec, cli, sdk-cli, ...
+  entrypoint?: string;
   cwd?: string;
   path: string;
   startedAt: number;
@@ -87,6 +103,13 @@ export interface Trace {
   requests: Request[];
   // Index into `requests` of the first request after each compaction.
   compactions: number[];
+  // Context size each compaction started from and how long it took, when the
+  // log says (Claude).
+  compactedFrom?: number[];
+  compactSeconds?: number[];
+  contextLoads?: ContextLoad[];
+  // Rendered bytes the backend injected per attachment kind (Claude).
+  attachments?: Record<string, { count: number; bytes: number }>;
   prompts: Note[];
   updates: Note[];
   credits?: { first: number; last: number; windowFirst: number; windowLast: number };

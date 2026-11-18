@@ -114,8 +114,10 @@ facts.
 
 ## 4. Mac app on an Offstage Mac
 
-`.github/workflows/mac.yml` runs on `runs-on: offstage-macos`. That is a fresh
-macOS account per job with no root and no Homebrew. The workflow therefore uses
+`.github/workflows/mac.yml` runs on `runs-on: offstage-macos-gui`. A headless
+`offstage-macos` slot cannot reach `testmanagerd`, so `xcodebuild test` fails
+there before any test runs. Each job is a fresh macOS account with no root and
+no Homebrew. The workflow therefore uses
 the newest `/Applications/Xcode*.app` through `DEVELOPER_DIR`. It also fetches
 pinned, checksummed xcodegen, uv (for Python 3.12, which dmgbuild needs) and
 `gh` into `$RUNNER_TEMP`.

@@ -1,5 +1,6 @@
-# The Mac app on an offstage Mac (runs-on: offstage-macos, a fresh account per
-# job with no root, so pinned tools go in the job's own folder): every change
+# The Mac app on an offstage Mac (runs-on: offstage-macos-gui: a headless slot
+# cannot reach testmanagerd, so xcodebuild test needs the desktop slot; a fresh
+# account per job with no root, so pinned tools go in the job's own folder): every change
 # under mac/ is compiled and its
 # core tested (the Linux home machine cannot), and a manual run with
 # `release: true` archives, signs with Developer ID, notarizes and staples the
@@ -38,7 +39,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: offstage-macos
+    runs-on: offstage-macos-gui
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

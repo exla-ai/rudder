@@ -22671,6 +22671,10 @@ while IFS= read -r line; do
   case "$line" in
     *"pages the human"*)
       submit
+      # Codex redraws its status line the moment a turn starts, so Rudder
+      # sees output while the signal says working, not only the verdict
+      # printed a moment before the turn-end signal.
+      printf 'Working\n'
       sleep 1
       printf 'RUDDER_GAM_VERDICT_START\n'
       printf '{{"verdict":"accept","message":"satisfies the task"}}\n'
@@ -29382,6 +29386,10 @@ while IFS= read -r line; do
   case "$line" in
     *"pages the human"*)
       submit
+      # Codex redraws its status line the moment a turn starts, so Rudder
+      # sees output while the signal says working, not only the verdict
+      # printed a moment before the turn-end signal.
+      printf 'Working\n'
       sleep 1
       printf 'RUDDER_GAM_VERDICT_START\n'
       printf '{{"verdict":"accept","message":"satisfies the task"}}\n'

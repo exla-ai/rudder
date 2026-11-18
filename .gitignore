@@ -29,3 +29,4 @@ ios/fastlane/report.xml
 
 # Local scaler state (observability/scaler/state.mjs)
 observability/scaler/.state.json*
+offstage-out/

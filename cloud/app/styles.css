@@ -376,6 +376,16 @@ a { color: var(--accent); }
 .project.pinned .p-pin { color: var(--accent); }
 .project.pinned .p-pin svg path:nth-child(2) { fill: currentColor; }
 .project.tap:has(.p-pin:active) { transform: none; }
+/* Move up / Move down, right of the pin. */
+.project .p-more {
+  flex: none; width: 40px; height: 40px; margin: -10px -12px -10px 0;
+  display: grid; place-items: center; border: 0; border-radius: 12px; background: none;
+  color: var(--faint); -webkit-tap-highlight-color: transparent;
+}
+.project .p-more svg { width: 18px; height: 18px; }
+.project .p-more:active { background: var(--surface-2); }
+.project .p-pin:has(+ .p-more:not([hidden])) { margin-right: -10px; }
+.project.tap:has(.p-more:active) { transform: none; }
 
 .add-card { padding: 14px; }
 .add-card form { display: flex; gap: 8px; }
@@ -531,7 +541,8 @@ a { color: var(--accent); }
 .msg.system { text-align: center; }
 .msg.system .sys { display: inline-block; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border-radius: 10px; padding: 6px 12px; max-width: 92%; text-align: left; }
 .msg.system .sys p { margin: 0; }
-.compact { margin: 18px 0; }
+/* The compaction marker in a transcript (the model chip also has a compact class). */
+div.compact { margin: 18px 0; }
 .compact-row { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; padding: 8px 0; color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .compact-row[disabled] { cursor: default; color: var(--faint); }
 .compact-row .c-line { flex: 1; height: 1px; background: var(--line-strong); }

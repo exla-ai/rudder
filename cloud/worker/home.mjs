@@ -659,6 +659,12 @@ async function handleRpc(method, params) {
   if (method === "models") {
     return await listModels();
   }
+  if (method === "usage") {
+    // Plan usage for the app's sidebar: the providers' own meters for this
+    // machine's Claude and Codex sign-ins (src/usage.ts caches them).
+    const { fetchQuota } = await import("/opt/rudder/dist/usage.js");
+    return await fetchQuota({ force: params.refresh === true });
+  }
   if (method === "createRepo") {
     const created = await createGithubRepo(params);
     void refreshGithubRepos();

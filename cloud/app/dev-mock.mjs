@@ -7,13 +7,15 @@
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
-// /app/__mock/invite (prints a join link). Orgs, invites, Slack/Linear and a plan are mocked too,
+// /app/__mock/invite (prints a join link), /app/__mock/files/agent-edit (an agent rewrites README.md
+// in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack/Linear and a plan are mocked too,
 // and so is the team view (two teammates in Exla, one asleep; uses cloud/dist/team.js).
 // The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { digestRun } from "../worker/digest.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -109,6 +111,8 @@ const projects = [
     ports: [],
   },
 ];
+// No project has been moved yet (POST /api/app/project-order).
+for (const p of projects) p.sortOrder = null;
 
 
 // Morning digests: run records as the dashboard writes them, through the real
@@ -181,6 +185,20 @@ function baseTranscript(a) {
 // output) shown as the first agent's conversation.
 const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
 const transcripts = new Map();
+// The agent page's speed and context line (worker/transcripts.mjs `stats`).
+function mockStats(a) {
+  if (a.fresh || !["claude", "codex"].includes(a.backend)) return null;
+  const end = toMsMock(a.updatedAt);
+  const rows = a.backend === "codex" ? [[390, 5200], [1210, 16400], [156, 4100], [702, 9800], [1880, 22600]] : [[412, 5100], [1310, 14200], [236, 3900], [884, 9600], [1502, 16800]];
+  const responses = rows.map(([tokens, ms], i) => ({ tokens, ms, at: end - (rows.length - 1 - i) * 40_000 }));
+  const tokens = responses.reduce((n, r) => n + r.tokens, 0);
+  const ms = responses.reduce((n, r) => n + r.ms, 0);
+  const speed = { tokensPerSecond: Math.round((tokens / ms) * 10_000) / 10, responses };
+  return a.backend === "codex"
+    ? { model: a.model, speed, context: { used: 391_400, window: 475_000, modelWindow: 475_000, autoCompactWindow: null, at: end, compactedAt: end - 35 * MIN } }
+    : { model: "claude-opus-5-5", speed, context: { used: 153_502, window: 400_000, modelWindow: 1_000_000, autoCompactWindow: 400_000, at: end, compactedAt: null } };
+}
+const toMsMock = (t) => (typeof t === "number" ? t : Date.parse(t));
 function transcriptFor(ws, run) {
   const p = projects.find((x) => x.workspaceId === ws);
   const a = p?.agents.find((x) => x.id === run);
@@ -203,7 +221,13 @@ function readBody(req) {
 }
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
+// Built from cloud/src like server.ts serves them (build cloud first).
+const COMPILED = { "/app/terminal-recovery.js": "../dist/private-access/terminal-recovery.js", "/app/project-file-render.js": "../dist/project-files/browser-render.js" };
 function serveStatic(req, res, url) {
+  if (COMPILED[url.pathname]) {
+    res.writeHead(200, { "Content-Type": TYPES[".js"], "Cache-Control": "no-cache" });
+    return fs.createReadStream(path.join(DIR, COMPILED[url.pathname])).pipe(res);
+  }
   let rel = url.pathname.replace(/^\/app\/?/, "");
   const file = path.join(DIR, rel);
   const ok = rel && !rel.includes("..") && rel !== "dev-mock.mjs" && fs.existsSync(file) && fs.statSync(file).isFile();
@@ -477,6 +501,64 @@ function orgRoutes(req, res, p, url, body) {
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---------- Project files (files-panel.js) ----------
+// Two workspaces of wsp_rudder: the main checkout and run_a1's own fork.
+const PNG_DOT = "iVBORw0KGgoAAAANSUhEUgAAAPAAAABaCAIAAAAJsExNAAAB3klEQVR4nO3dsW0DQRRDwevI3bgIZUpcq7twYihW7PgILE0M8ApYfE6+1+v3R5rpOv4CKRjQmgpoTQW0pgJaUwGtqYDWVEBrKqA1FdCaCmhNBbSmAlpTAa2pgNZUQGsqoDUV0JoKaE0FtKYCWlMBramA1lRAayqgNdVd0B+f30sd38MKN1cAOnZKoBtWADp2SqAbVgA6dkqgG1YAOnZKoBtWADp2SqAbVgA6dkqgG1YAOnZKoBtWADp2SqAbVgA6dkqgG1YAOnZKoBtWADp2SqAbVgA6dkqgG1YAOnZKoBtWADp2SqAbVgA6dkqgG1YAOnZKoBtWADp2SqAbVgD6T1/Px3/s+N2yAR3rOE2ggU52nCbQQLec8mDH79azAtCxUwLdsALQsVMC3bAC0LFTAt2wAtCxUwLdsALQsVMC3bAC0LFTAt2wAtCxUwLdsALQsVMC3bAC0LFTAt2wAtCxUwLdsALQsVMC3bAC0LFTAt2wAtCxUwLdsALQsVMC3bAC0LFTAt2wAtCxUwLdsALQsVMC3bCCfwo1FdCaCmhNBbSmAlpTAa2pgNZUQGsqoDUV0JoKaE0FtKYCWlMBramA1lRAayqgNRXQmgpoTQW0pgJaUwGtqYDWVEBrKqA11RsfFgRxnxmPjgAAAABJRU5ErkJggg==";
+const readmeText = (extra = "") => `# rudder\n\nRudder runs Claude Code and Codex agents on your own machines. ${extra}\n\n![Architecture](docs/diagram.png)\n\n## Layout\n\n| Path | What it holds |\n|---|---|\n| \`src/\` | the CLI |\n| \`native/\` | the Rust dashboard |\n| \`cloud/\` | control plane and workers |\n\n## Try it\n\n\`\`\`sh\nnpm install -g @exla/rudder\nrudder "fix the flaky test"\n\`\`\`\n\nSee the [guide](docs/guide.md) for more.\n`;
+const mainTs = `import { runManager } from "./run-manager.js";\n\n// Start one agent and print where it runs.\nexport async function main(argv: string[]): Promise<number> {\n  const task = argv.join(" ").trim();\n  if (!task) {\n    console.error("Usage: rudder \\"task\\"");\n    return 2;\n  }\n  const run = await runManager.start({ task, backend: "claude" });\n  console.log(\`Started \${run.id} in \${run.workspace.path}\`);\n  return 0;\n}\n`;
+const fileTrees = {
+  checkout: {
+    "README.md": readmeText(),
+    "docs/guide.md": "# Guide\n\nStart with the [README](../README.md).\n\n- Agents work in their own workspace.\n- Finished work merges into main.\n",
+    "docs/diagram.png": Buffer.from(PNG_DOT, "base64"),
+    "src/main.ts": mainTs,
+    "src/run-manager.ts": "export const runManager = {\n  async start(options: { task: string; backend: string }) {\n    return { id: \"run-1\", workspace: { path: \"/tmp\" }, ...options };\n  },\n};\n",
+    "Cargo.toml": "[workspace]\nmembers = [\"native\", \"engine\"]\nresolver = \"2\"\n",
+    "package.json": "{\n  \"name\": \"@exla/rudder\",\n  \"version\": \"4.4.2\",\n  \"type\": \"module\"\n}\n",
+  },
+};
+fileTrees.run_a1 = { ...fileTrees.checkout, "README.md": readmeText("This line is the agent's own edit."), "src/files-panel.ts": "// Added by the agent in its own workspace.\nexport const panel = true;\n" };
+const fileScopes = (ws) => ws !== "wsp_rudder" ? [{ projectId: "prj_mock", workspaceId: "checkout", attemptId: "checkout", ownerEpoch: 3 }]
+  : ["checkout", "run_a1"].map((id) => ({ projectId: "prj_rudder", workspaceId: id, attemptId: id === "checkout" ? id : `${id}-attempt-1`, ownerEpoch: 3 }));
+const revisionOf = (value) => createHash("sha256").update(value).digest("hex");
+function fileDoc(rel, value, known) {
+  const ext = path.extname(rel).toLowerCase();
+  const revision = revisionOf(value);
+  const base = { path: rel, revision };
+  if (ext === ".png") return { ...base, kind: "image", mime: "image/png", ...(known === revision ? { unchanged: true } : { base64: value.toString("base64") }) };
+  const kind = ext === ".md" ? "markdown" : ext === ".html" ? "html" : "text";
+  const mime = kind === "markdown" ? "text/markdown" : kind === "html" ? "text/html" : ext === ".css" ? "text/css" : "text/plain";
+  return { ...base, kind, mime, ...(known === revision ? { unchanged: true } : { text: value }) };
+}
+function projectFiles(req, res, url, body) {
+  const q = body ?? Object.fromEntries(url.searchParams);
+  const scope = body ? body.scope : { workspaceId: q.workspaceId };
+  const tree = fileTrees[scope?.workspaceId] ?? (scope?.workspaceId === "checkout" ? fileTrees.checkout : null);
+  if (!tree) return json(res, 403, { error: "Refresh this project's file workspaces" });
+  const rel = q.path ?? "";
+  if (body) {
+    const current = tree[rel];
+    if (typeof current !== "string") return json(res, 404, { error: "The project file no longer exists" });
+    if (revisionOf(current) !== body.baseRevision) return json(res, 200, { path: rel, outcome: "conflict" });
+    tree[rel] = body.text;
+    return json(res, 200, { path: rel, outcome: "saved", revision: revisionOf(body.text) });
+  }
+  if (q.operation === "list") {
+    const prefix = rel ? `${rel}/` : "";
+    const seen = new Map();
+    for (const key of Object.keys(tree)) {
+      if (!key.startsWith(prefix)) continue;
+      const [name, ...rest] = key.slice(prefix.length).split("/");
+      seen.set(name, { name, path: prefix + name, kind: rest.length ? "folder" : "file" });
+    }
+    const entries = [...seen.values()].sort((a, b) => a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "folder" ? -1 : 1);
+    return json(res, 200, { path: rel, entries, truncated: false });
+  }
+  const value = tree[rel];
+  if (value === undefined) return json(res, 404, { error: "The project file no longer exists" });
+  return json(res, 200, fileDoc(rel, value, q.knownRevision));
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const p = url.pathname;
@@ -508,6 +590,11 @@ const server = http.createServer(async (req, res) => {
     computers.set(code, { deviceName: "Viraats-MacBook-Pro.local", expiresAt: now() + 5 * MIN });
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end(`code: ${code}\napprove: /app/approve?code=${code}\n`);
+  }
+  if (p === "/app/__mock/files/agent-edit") {
+    fileTrees.run_a1["README.md"] = readmeText(`The agent rewrote this at ${new Date().toLocaleTimeString()}.`);
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("run_a1 changed README.md\n");
   }
   if (p === "/app/__mock/onboard") { onboarding.completedAt = null; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/integrations/")) { integMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/settings" }); return res.end(); }
@@ -545,6 +632,12 @@ const server = http.createServer(async (req, res) => {
         orgs: orgList(),
       });
     }
+    if (p === "/api/app/project-file-scopes" && req.method === "GET") {
+      return json(res, 200, { scopes: fileScopes(url.searchParams.get("workspaceId")) });
+    }
+    if (p === "/api/app/project-files") {
+      return projectFiles(req, res, url, req.method === "POST" ? await readBody(req) : null);
+    }
     if (p === "/api/app/digests" && req.method === "GET") {
       return json(res, 200, { digests: digestStore.map(digestPreviewOf), timeZone: "America/Los_Angeles" });
     }
@@ -566,7 +659,19 @@ const server = http.createServer(async (req, res) => {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
       if (!t) return json(res, 404, { error: "Agent not found" });
       const limit = Number(url.searchParams.get("limit") || 300);
-      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit) });
+      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), stats: mockStats(t.a) });
+    }
+    // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
+    if (p === "/api/app/usage" && req.method === "GET") {
+      if (homeMode !== "running") return json(res, 503, { error: "The cloud machine is asleep", asleep: true });
+      const fetchedAt = iso(now() - 2 * MIN);
+      const win = (label, percent, inMin) => ({ label, percent, resetsAt: iso(now() + inMin * MIN) });
+      return json(res, 200, { fetchedAt, ttlSeconds: 300, accounts: [
+        { provider: "claude", email: "viraat@example.com", plan: "Max 20x", blocked: null, error: null, fetchedAt,
+          windows: [win("Session (5h)", 42, 134), win("Weekly", 61, 3 * 24 * 60 + 200), win("Weekly · Opus", 74, 3 * 24 * 60 + 200)] },
+        { provider: "codex", email: "viraat@example.com", plan: "Pro", blocked: null, error: null, fetchedAt,
+          windows: [win("Session (5h)", 18, 251), win("Weekly", 33, 5 * 24 * 60 + 30)] },
+      ] });
     }
     if (p === "/api/app/upload" && req.method === "POST") {
       let size = 0;
@@ -641,6 +746,13 @@ const server = http.createServer(async (req, res) => {
       if (!proj) return json(res, 404, { error: "project not found" });
       proj.pinnedAt = body.pinned === true ? proj.pinnedAt || iso(now()) : null;
       return json(res, 200, { workspaceId: proj.workspaceId, pinnedAt: proj.pinnedAt });
+    }
+    if (p === "/api/app/project-order") {
+      const ids = body.workspaces;
+      if (!Array.isArray(ids) || new Set(ids).size !== ids.length) return json(res, 400, { error: "workspaces must list project ids, each once" });
+      if (ids.some((id) => !projects.some((x) => x.workspaceId === id))) return json(res, 404, { error: "project not found" });
+      for (const x of projects) x.sortOrder = ids.includes(x.workspaceId) ? ids.indexOf(x.workspaceId) : null;
+      return json(res, 200, { workspaces: ids });
     }
     // Sign-ins: what logins.mjs on the machine answers. A machine that does
     // not exist yet is created first (503 until it is up, like the server).

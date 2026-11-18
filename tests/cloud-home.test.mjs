@@ -307,6 +307,18 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal((await fetch(`${base}/api/app/pin`, pinBody(true, "other-test"))).status, 404);
   assert.equal((await (await fetch(`${base}/api/app/pin`, pinBody(false))).json()).pinnedAt, null);
   assert.equal(await pinOf(), null);
+  // The project order is the account's too, and lists only its own projects.
+  const orderOf = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json())
+    .projects.find((p) => p.workspaceId === "libra-test").sortOrder;
+  const orderBody = (workspaces) => ({ method: "POST", headers: auth, body: JSON.stringify({ workspaces }) });
+  assert.equal(await orderOf(), null);
+  assert.equal((await fetch(`${base}/api/app/project-order`, orderBody(["libra-test"]))).status, 200);
+  assert.equal(await orderOf(), 0);
+  assert.equal((await fetch(`${base}/api/app/project-order`, orderBody(["libra-test", "other-test"]))).status, 404);
+  assert.equal((await fetch(`${base}/api/app/project-order`, orderBody(["libra-test", "libra-test"]))).status, 400);
+  assert.equal(await orderOf(), 0, "a refused order changes nothing");
+  assert.equal((await fetch(`${base}/api/app/project-order`, orderBody([]))).status, 200);
+  assert.equal(await orderOf(), null, "a project left out goes back to having no place");
   // (delete is a real action now: cloud-home-move.test.mjs covers it.)
   const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "reboot" }) });
   assert.equal(badAction.status, 400);
@@ -571,6 +583,100 @@ nodeTest("a compacted conversation shows one marker holding the summary, not a m
   const codexRepo = fixtureRepo({ id: "run-5", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
   const codex = readTranscript(codexRepo, "run-5", { limit: 50, home });
   assert.deepEqual(codex.messages.map((m) => [m.role, m.kind ?? null]), [["user", null], ["system", "compact"], ["assistant", null]]);
+});
+
+nodeTest("agent stats: output speed over the last five responses and context left, through a compaction", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const repos = [];
+  try {
+    const at = (s) => new Date(Date.parse("2026-10-20T10:00:00Z") + s * 1000).toISOString();
+    const jsonl = (lines) => `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`;
+    fs.mkdirSync(path.join(home, ".rudder"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".rudder", "models-dev.json"), JSON.stringify({ anthropic: { models: { "claude-opus-5-5": { limit: { context: 1_000_000 } } } } }));
+    fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".claude", "settings.json"), JSON.stringify({ modelSettings: { "claude-opus-5-5": { autoCompactWindow: 400_000 } } }));
+
+    // Claude: each response starts at its api-request (or the tool result
+    // before it) and ends at its last block; blocks repeat the usage.
+    const cwd = "/workspace/code/libra";
+    const sessionId = "33333333-2222-3333-4444-555555555555";
+    const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+    fs.mkdirSync(projectDir, { recursive: true });
+    const usage = (output, cacheRead = 1000) => ({ input_tokens: 2, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: 3000, output_tokens: output });
+    const reply = (id, end, output, cacheRead) => [
+      { type: "assistant", uuid: `${id}a`, timestamp: at(end - 1), message: { id, model: "claude-opus-5-5", role: "assistant", stop_reason: "tool_use", usage: usage(output, cacheRead), content: [{ type: "thinking", thinking: "" }] } },
+      { type: "assistant", uuid: `${id}b`, timestamp: at(end), message: { id, model: "claude-opus-5-5", role: "assistant", stop_reason: "tool_use", usage: usage(output, cacheRead), content: [{ type: "tool_use", id: `${id}t`, name: "Bash", input: { command: "ls" } }] } },
+      { type: "user", uuid: `${id}r`, timestamp: at(end + 0.5), message: { role: "user", content: [{ type: "tool_result", tool_use_id: `${id}t`, content: "ok" }] } },
+    ];
+    const request = (s) => ({ type: "api-request", timestamp: at(s), querySource: "repl_main_thread" });
+    const claudeFile = path.join(projectDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(claudeFile, jsonl([
+      { type: "user", uuid: "u1", timestamp: at(0), message: { role: "user", content: "fix the webhook" } },
+      request(0), ...reply("m1", 10, 100), // 10 tok/s, older than the last five
+      request(11), ...reply("m2", 16, 400), // 80
+      // A subagent's response and Claude Code's own error note are not the agent's output.
+      { type: "assistant", uuid: "side", isSidechain: true, timestamp: at(17), message: { id: "side", model: "claude-opus-5-5", stop_reason: "end_turn", usage: usage(9000), content: [] } },
+      { type: "assistant", uuid: "syn", timestamp: at(17), message: { id: "syn", model: "<synthetic>", stop_reason: "stop_sequence", usage: usage(0), content: [] } },
+      ...reply("m3", 26.5, 1200), // 120, timed from the tool result at 16.5 (no api-request entry)
+      request(27), ...reply("m4", 29, 200), // 100
+      request(30), ...reply("m5", 33, 300), // 100
+      request(34), ...reply("m6", 40, 500, 150_000), // 83
+    ]));
+    const claudeRepo = fixtureRepo({ id: "run-6", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
+    repos.push(claudeRepo);
+    const claude = readTranscript(claudeRepo, "run-6", { limit: 50, home }).stats;
+    assert.equal(claude.model, "claude-opus-5-5");
+    // Summed over the last five: 2600 tokens in 26 s, not the mean of the rates (96.7).
+    assert.equal(claude.speed.tokensPerSecond, 100);
+    assert.deepEqual(claude.speed.responses.map((r) => [r.tokens, r.ms]), [[400, 5000], [1200, 10000], [200, 2000], [300, 3000], [500, 6000]]);
+    // Context: the newest response's input and output, against the smaller of
+    // the model's window and the auto-compact window Claude Code was given.
+    assert.deepEqual(claude.context, { used: 2 + 150_000 + 3000 + 500, at: Date.parse(at(40)), window: 400_000, modelWindow: 1_000_000, autoCompactWindow: 400_000, compactedAt: null });
+
+    fs.appendFileSync(claudeFile, jsonl([
+      { type: "system", subtype: "compact_boundary", uuid: "cb", timestamp: at(60), compactMetadata: { trigger: "auto", preTokens: 367_000, postTokens: 21_000 } },
+    ]));
+    const compacted = readTranscript(claudeRepo, "run-6", { limit: 50, home }).stats;
+    assert.equal(compacted.context.used, 21_000, "drops to the compacted size at once");
+    assert.equal(compacted.context.compactedAt, Date.parse(at(60)));
+    fs.appendFileSync(claudeFile, jsonl([request(61), ...reply("m7", 65, 400, 18_000)]));
+    assert.equal(readTranscript(claudeRepo, "run-6", { limit: 50, home }).stats.context.used, 2 + 18_000 + 3000 + 400);
+
+    // Codex: a response runs from the newest input before its first output
+    // item to its token_usage_record; context is Codex's own token_count.
+    const codexId = "01a13ce1-6861-7893-b4a0-9fb8e889dd59";
+    const day = path.join(home, ".codex", "sessions", "2026", "10", "20");
+    fs.mkdirSync(day, { recursive: true });
+    const item = (s, payload) => ({ type: "response_item", timestamp: at(s), payload });
+    const record = (s, output) => ({ type: "token_usage_record", timestamp: at(s), payload: { usage: { input_tokens: 50_000, cached_input_tokens: 49_000, output_tokens: output } } });
+    const count = (s, total) => ({ type: "event_msg", timestamp: at(s), payload: { type: "token_count", info: { last_token_usage: { total_tokens: total }, model_context_window: 475_000 } } });
+    fs.writeFileSync(path.join(day, `rollout-2026-10-20T10-00-00-${codexId}.jsonl`), jsonl([
+      { type: "turn_context", timestamp: at(0), payload: { model: "gpt-6.2-sol" } },
+      item(0.1, { type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }),
+      item(2, { type: "reasoning", summary: [] }),
+      item(4, { type: "custom_tool_call", name: "exec", call_id: "c1", input: "x" }),
+      record(4.1, 390), // 4 s from the user message
+      item(5, { type: "custom_tool_call_output", call_id: "c1", output: "ok" }),
+      count(5.01, 50_390),
+      item(6, { type: "reasoning", summary: [] }),
+      item(8.5, { type: "function_call", name: "shell", call_id: "c2", arguments: "{}" }),
+      // Output of a tool started mid-response does not move that response's start.
+      item(8.8, { type: "function_call_output", call_id: "c2", output: "ok" }),
+      record(9, 410), // 4 s from the tool output at 5
+      count(9.01, 51_000),
+      { type: "compacted", timestamp: at(20), payload: { message: "" } },
+      count(20.02, 30_000),
+    ]));
+    const codexRepo = fixtureRepo({ id: "run-7", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
+    repos.push(codexRepo);
+    const codex = readTranscript(codexRepo, "run-7", { limit: 50, home }).stats;
+    assert.equal(codex.model, "gpt-6.2-sol");
+    assert.deepEqual(codex.speed.responses.map((r) => [r.tokens, r.ms]), [[390, 4000], [410, 4000]]);
+    assert.equal(codex.speed.tokensPerSecond, 100);
+    assert.deepEqual(codex.context, { used: 30_000, window: 475_000, at: Date.parse(at(20.02)), modelWindow: 475_000, autoCompactWindow: null, compactedAt: Date.parse(at(20)) });
+  } finally {
+    for (const dir of [home, ...repos]) fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 nodeTest("an agent with no session yet shows the prompts Rudder recorded", () => {

@@ -8,9 +8,11 @@ import {
   app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
-import { ProjectFiles } from "/app/project-files.js";
+import { AgentStats, PlanUsage } from "/app/agent-stats.js";
+import { filesButton, followFiles } from "/app/files-panel.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
+import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -576,13 +578,14 @@ document.addEventListener("click", (e) => {
   if (external && NATIVE) { e.preventDefault(); openExternal(a.href); }
   else if (external && a.target !== "_blank") { a.target = "_blank"; a.rel = "noopener noreferrer"; }
 });
-// A file dropped anywhere but a composer, or an agent dragged from the
-// sidebar dropped outside its drop zones, must not open in place of the app.
+// A file dropped anywhere but a composer, or an agent or project dragged from
+// the sidebar dropped outside its targets, must not open in place of the app.
 const AGENT_DRAG = "application/x-rudder-agent";
+const PROJECT_DRAG = "application/x-rudder-project";
 for (const type of ["dragover", "drop"]) {
   document.addEventListener(type, (e) => {
     const types = [...e.dataTransfer.types];
-    if (e.defaultPrevented || !(types.includes("Files") || types.includes(AGENT_DRAG))) return;
+    if (e.defaultPrevented || !["Files", AGENT_DRAG, PROJECT_DRAG].some((t) => types.includes(t))) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "none";
   });
@@ -658,6 +661,7 @@ function mountScreen(dir = "forward") {
   }
   screen.update?.();
   desktop?.update(route);
+  followFiles(route, findAgent);
 }
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
@@ -677,7 +681,7 @@ function DesktopShell() {
       <div class="ds-top"><a class="brand ds-brand" href="/app" data-link><img src="/app/icon.svg" alt=""><span>Rudder</span></a><button type="button" class="ds-side-btn ds-hide" aria-label="Hide sidebar">${icon("sidebar")}</button></div>
       <div class="ds-scroll">
         <div class="ds-sec ds-needs" hidden><button type="button" class="ds-h ds-htog" aria-expanded="true"><span class="ds-hl">${icon("chevron")}<span>Needs you</span></span><span class="ds-c"></span></button><div class="ds-list ds-needs-list"></div></div>
-        <div class="ds-sec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div></div>
+        <div class="ds-sec ds-psec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div><div class="ds-insert" hidden></div><span id="ds-move-hint" hidden></span></div>
       </div>
       <div class="ds-foot">
         <a class="ds-link ds-team" href="/app/team" data-link hidden>${icon("users")}<span>Team</span></a>
@@ -695,11 +699,15 @@ function DesktopShell() {
       </div>
     </div>
     <aside class="dsk-plan" hidden aria-label="Plan"></aside>
+    <aside class="dsk-files" hidden aria-label="Files"></aside>
     <div class="ds-grip" aria-hidden="true"></div>
     <button type="button" class="ds-side-btn ds-show" aria-label="Show sidebar">${icon("sidebar")}</button>
   </div>`);
   const main = el.querySelector(".dsk-main");
   const planCol = el.querySelector(".dsk-plan");
+  // Plan usage of the machine's Claude and Codex sign-ins (agent-stats.js).
+  const planUsage = PlanUsage();
+  el.querySelector(".ds-foot").prepend(planUsage.el);
   const projectsEl = el.querySelector(".ds-projects");
   const needsSec = el.querySelector(".ds-needs");
   const needsEl = el.querySelector(".ds-needs-list");
@@ -796,6 +804,7 @@ function DesktopShell() {
     paintSplit();
     screen.update?.();
     update(r);
+    followFiles(r, findAgent);
   }
   const onPaneEvent = (e) => {
     const i = panes.findIndex((p) => p.el.contains(e.target));
@@ -852,6 +861,77 @@ function DesktopShell() {
     dropEl.hidden = false;
   });
   document.addEventListener("dragend", hideDrop, { signal: life.signal });
+
+  // Reordering projects: drag a project's row (a line shows where it lands),
+  // or Alt+Up / Alt+Down on it. Pinned and other projects each keep to their
+  // own group. The order is the account's, so every device shows it.
+  const projSec = el.querySelector(".ds-psec");
+  const insertEl = el.querySelector(".ds-insert");
+  setText(el.querySelector("#ds-move-hint"), `Drag to move, or ${/Mac/.test(navigator.platform) ? "Option" : "Alt"}+Up and Down`);
+  const projRows = () => [...projectsEl.querySelectorAll(":scope > .ds-proj")];
+  const groupRows = (ws) => {
+    const pinned = projRows().find((r) => r.dataset.key === ws)?.classList.contains("pinned");
+    return projRows().filter((r) => r.classList.contains("pinned") === pinned);
+  };
+  let dragWs = null, dropAt = null;
+  const endProjectDrag = () => {
+    insertEl.hidden = true;
+    projRows().find((r) => r.dataset.key === dragWs)?.classList.remove("dragging");
+    dragWs = null; dropAt = null;
+  };
+  projectsEl.addEventListener("dragstart", (e) => {
+    const row = e.target instanceof Element ? e.target.closest(".ds-prow") : null;
+    if (!row) return;
+    const pEl = row.closest(".ds-proj");
+    dragWs = pEl.dataset.key;
+    // Only this drag's own type: no link to drop into another app or tab.
+    e.dataTransfer.clearData();
+    e.dataTransfer.setData(PROJECT_DRAG, dragWs);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setDragImage(row, 24, row.offsetHeight / 2);
+    pEl.classList.add("dragging");
+  });
+  projSec.addEventListener("dragover", (e) => {
+    if (!dragWs || ![...e.dataTransfer.types].includes(PROJECT_DRAG)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    // Before the first row of its group whose name is below the pointer.
+    const rows = groupRows(dragWs);
+    const i = rows.findIndex((r) => { const b = r.querySelector(".ds-prow").getBoundingClientRect(); return e.clientY < b.top + b.height / 2; });
+    dropAt = i < 0 ? rows.length : i;
+    const y = dropAt < rows.length ? rows[dropAt].getBoundingClientRect().top : rows[rows.length - 1].getBoundingClientRect().bottom;
+    insertEl.style.top = `${y - projSec.getBoundingClientRect().top}px`;
+    insertEl.hidden = false;
+  });
+  projSec.addEventListener("dragleave", (e) => {
+    const b = projSec.getBoundingClientRect();
+    if (e.clientX < b.left || e.clientX >= b.right || e.clientY < b.top || e.clientY >= b.bottom) { insertEl.hidden = true; dropAt = null; }
+  });
+  projSec.addEventListener("drop", (e) => {
+    if (!dragWs || dropAt === null || ![...e.dataTransfer.types].includes(PROJECT_DRAG)) return;
+    e.preventDefault();
+    const ws = dragWs;
+    const from = groupRows(ws).findIndex((r) => r.dataset.key === ws);
+    const to = dropAt > from ? dropAt - 1 : dropAt;
+    endProjectDrag();
+    const m = moveProject(ws, to);
+    if (m && m.at !== m.from) announce(moveSaid(m, m.at < m.from));
+  });
+  document.addEventListener("dragend", endProjectDrag, { signal: life.signal });
+  projectsEl.addEventListener("keydown", (e) => {
+    if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    const row = e.target instanceof Element ? e.target.closest(".ds-prow") : null;
+    if (!row) return;
+    e.preventDefault();
+    const ws = row.closest(".ds-proj").dataset.key;
+    const up = e.key === "ArrowUp";
+    const from = groupRows(ws).findIndex((r) => r.dataset.key === ws);
+    const m = moveProject(ws, from + (up ? -1 : 1));
+    // The repaint moved the row, which drops focus: put it back.
+    e.target.focus();
+    if (m) announce(moveSaid(m, up));
+  });
+
   for (const z of zones) {
     const over = (e) => {
       if (!carriesAgent(e)) return;
@@ -928,6 +1008,7 @@ function DesktopShell() {
   function update(r) {
     if (r) route = r;
     const s = store.state;
+    planUsage.update(s);
     setText(el.querySelector(".avatar"), (s?.email || "?").slice(0, 1));
     setText(el.querySelector(".ds-email"), s?.email || "Settings");
     const orgId = ls.get("rudder.org") || "";
@@ -945,12 +1026,7 @@ function DesktopShell() {
     needsEl.hidden = !needsOpen;
     reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
 
-    const projects = (s?.projects || []).slice().sort((a, b) => {
-      const pa = pinnedAt(a), pb = pinnedAt(b);
-      if (!!pa !== !!pb) return pa ? -1 : 1;
-      if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
-      return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
-    });
+    const projects = sortProjects(s?.projects || []);
     // Arriving on a project or one of its agents opens that project once.
     // Every refresh repaints too, so opening it on each paint would undo the
     // chevron for the project on screen.
@@ -961,7 +1037,7 @@ function DesktopShell() {
     // reconcile keeps unkeyed children, so the "Loading…" placeholder goes by hand.
     if (projects.length) projectsEl.querySelector(":scope > .ds-none")?.remove();
     reconcile(projectsEl, projects, (p) => p.workspaceId,
-      () => h(`<div class="ds-proj"><div class="ds-prow"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link><span class="ds-pname"></span><span class="ds-pc"></span></a><button type="button" class="ds-pin" aria-pressed="false">${icon("pin")}</button></div><div class="ds-agents" role="list"></div></div>`),
+      () => h(`<div class="ds-proj"><div class="ds-prow" draggable="true"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link aria-describedby="ds-move-hint"><span class="ds-pname"></span><span class="ds-pc"></span></a><button type="button" class="ds-pin" aria-pressed="false">${icon("pin")}</button></div><div class="ds-agents" role="list"></div></div>`),
       (pEl, p) => {
         const ws = p.workspaceId;
         const open = openSet.has(ws);
@@ -991,7 +1067,7 @@ function DesktopShell() {
         if (onProject) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
         const list = pEl.querySelector(".ds-agents");
         list.hidden = !open;
-        if (!open) { list.replaceChildren(); return; }
+        if (!open) { list.replaceChildren(); pEl.querySelector(".ds-more")?.remove(); return; }
         // Live and recent agents; the project screen has the rest.
         const agents = (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
           .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
@@ -1030,6 +1106,7 @@ function DesktopShell() {
     show,
     destroy() {
       life.abort();
+      planUsage.destroy();
       for (const p of panes) p.screen?.destroy?.();
       el.remove();
       document.body.classList.remove("desktop", "side-closed");
@@ -2306,16 +2383,14 @@ function HomeScreen() {
     setText(needsSec.querySelector(".count"), needs.length ? String(needs.length) : "");
     reconcile(needsListEl, needs, (x) => `${x.p.workspaceId}|${x.a.id}`, agentRow({ showProject: true }), updateAgentRow);
 
-    // Projects: pinned ones first, in the order they were pinned, then the
-    // rest by last activity.
-    const projects = (s.projects || []).slice().sort((a, b) => {
-      const pa = pinnedAt(a), pb = pinnedAt(b);
-      if (!!pa !== !!pb) return pa ? -1 : 1;
-      if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
-      return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
-    });
+    const projects = sortProjects(s.projects || []);
     setText(projectsSec.querySelector(".count"), projects.length ? String(projects.length) : "");
-    reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, updateProjectCard);
+    // Moving needs a neighbour in the same group (pinned or not).
+    const groupSize = (p) => projects.filter((x) => !!pinnedAt(x) === !!pinnedAt(p)).length;
+    reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, (cEl, p) => {
+      updateProjectCard(cEl, p);
+      cEl.querySelector(".p-more").hidden = groupSize(p) < 2;
+    });
 
     if (!projects.length) {
       const body = "Add a project, then start agents on it from here. They run on your own cloud machine, so they keep going with your phone locked and your laptop closed.";
@@ -2356,10 +2431,121 @@ async function setPinned(ws, pinned) {
   updateScreen();
 }
 
+// The project list: pinned ones first, then the rest. Each group is in the
+// order the account put it (the sidebar's drag, Alt+Up/Down, a card's menu),
+// and a project never moved sits at the top of its group: pinned ones in pin
+// order, the rest by last activity. A move shows at once and stays until the
+// save is through; a failed save puts the server's order back.
+let orderOverride = null; // workspace ids in the order last set here
+let orderSeq = 0;
+const placeIn = (ids, ws) => { const i = ids.indexOf(ws); return i < 0 ? null : i; };
+function sortProjects(list) {
+  const placeOf = (p) => (orderOverride ? placeIn(orderOverride, p.workspaceId) : p.sortOrder);
+  return list.slice().sort((a, b) => {
+    const pa = pinnedAt(a), pb = pinnedAt(b);
+    if (!!pa !== !!pb) return pa ? -1 : 1;
+    const oa = placeOf(a), ob = placeOf(b);
+    if ((oa === null) !== (ob === null)) return oa === null ? -1 : 1;
+    if (oa !== ob) return oa - ob;
+    if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
+    return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
+  });
+}
+// Moves a project to position `to` of its group and saves the whole list.
+function moveProject(ws, to) {
+  const all = sortProjects(store.state?.projects || []);
+  const p = all.find((x) => x.workspaceId === ws);
+  if (!p) return null;
+  const pinned = !!pinnedAt(p);
+  const group = all.filter((x) => !!pinnedAt(x) === pinned);
+  const from = group.indexOf(p);
+  const at = Math.max(0, Math.min(group.length - 1, to));
+  const out = { name: p.name || p.repo || "Project", pinned, from, at, count: group.length };
+  if (at === from) return out;
+  group.splice(from, 1);
+  group.splice(at, 0, p);
+  const rest = all.filter((x) => !!pinnedAt(x) !== pinned);
+  setProjectOrder((pinned ? [...group, ...rest] : [...rest, ...group]).map((x) => x.workspaceId));
+  return out;
+}
+async function setProjectOrder(ids) {
+  const mine = ++orderSeq;
+  orderOverride = ids;
+  updateScreen();
+  try {
+    await api("/api/app/project-order", { method: "POST", body: { workspaces: ids } });
+    // A poll sent before the save would bring the old order back for a moment.
+    await stateInflight;
+    if (mine !== orderSeq) return;
+    for (const p of store.state?.projects || []) p.sortOrder = placeIn(ids, p.workspaceId);
+    orderOverride = null;
+  } catch (err) {
+    if (mine !== orderSeq) return;
+    orderOverride = null;
+    if (err.status !== 401) toast(err.message, { error: true });
+  }
+  updateScreen();
+}
+// What a screen reader hears after a move, which it would not otherwise notice.
+function moveSaid(m, up) {
+  const group = m.pinned ? " pinned projects" : "";
+  if (m.at === m.from) return `${m.name} is already ${up ? "first" : "last"}${m.pinned ? " of the pinned projects" : ""}`;
+  return `${m.name} moved to ${m.at + 1} of ${m.count}${group}`;
+}
+const liveEl = document.body.appendChild(h(`<div class="sr-only" aria-live="polite"></div>`));
+function announce(text) {
+  liveEl.textContent = "";
+  setTimeout(() => { liveEl.textContent = text; }, 50);
+}
+
+// A project card's menu, for moving it where there is no sidebar to drag in.
+function openProjectMenu(anchor, ws) {
+  const all = sortProjects(store.state?.projects || []);
+  const p = all.find((x) => x.workspaceId === ws);
+  if (!p) return;
+  const group = all.filter((x) => !!pinnedAt(x) === !!pinnedAt(p));
+  const at = group.indexOf(p);
+  const wrap = h(`<div><div class="scrim"></div><div class="menu" role="menu"></div></div>`);
+  const menu = wrap.querySelector(".menu");
+  menu.setAttribute("aria-label", p.name || "Project");
+  const close = () => {
+    wrap.remove();
+    anchor.setAttribute("aria-expanded", "false");
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); anchor.focus(); } };
+  for (const [label, ic, to, off] of [["Move up", "up", at - 1, at === 0], ["Move down", "down", at + 1, at === group.length - 1]]) {
+    const b = h(`<button type="button" role="menuitem">${icon(ic)}<span></span></button>`);
+    b.querySelector("span").textContent = label;
+    b.disabled = off;
+    b.addEventListener("click", () => {
+      close();
+      const m = moveProject(ws, to);
+      if (m) announce(moveSaid(m, to < at));
+      anchor.focus();
+    });
+    menu.appendChild(b);
+  }
+  wrap.querySelector(".scrim").addEventListener("click", close);
+  // Under the button, or above it when the card is near the bottom.
+  const r = anchor.getBoundingClientRect();
+  const below = r.bottom + 120 < innerHeight;
+  Object.assign(menu.style, {
+    position: "fixed", right: `${innerWidth - r.right}px`,
+    top: below ? `${r.bottom + 4}px` : "auto", bottom: below ? "auto" : `${innerHeight - r.top + 4}px`,
+    transformOrigin: below ? "top right" : "bottom right",
+  });
+  document.body.appendChild(wrap);
+  anchor.setAttribute("aria-expanded", "true");
+  document.addEventListener("keydown", onKey, true);
+  menu.querySelector("button:not([disabled])")?.focus();
+}
+
 function createProjectCard() {
   const el = h(`<a class="card project tap" data-link>
     <div class="p-top"><span class="p-name"></span><span class="pill p-dash"></span><span class="dot live s-working p-live"></span>
-      <button type="button" class="p-pin" aria-pressed="false">${icon("pin")}</button></div>
+      <button type="button" class="p-pin" aria-pressed="false">${icon("pin")}</button>
+      <button type="button" class="p-more" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button></div>
     <div class="p-repo"></div>
     <div class="p-stats">
       <span class="stat st-w s-working"><span class="dot"></span><b></b> working</span>
@@ -2373,6 +2559,11 @@ function createProjectCard() {
     e.preventDefault();
     e.stopPropagation();
     setPinned(el.dataset.key, !el.classList.contains("pinned"));
+  });
+  el.querySelector(".p-more").addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openProjectMenu(e.currentTarget, el.dataset.key);
   });
   return el;
 }
@@ -2407,6 +2598,7 @@ function updateProjectCard(el, p) {
   const pin = el.querySelector(".p-pin");
   pin.setAttribute("aria-pressed", String(pinned));
   pin.setAttribute("aria-label", pinned ? `Unpin ${p.name || "project"}` : `Pin ${p.name || "project"} to the top`);
+  el.querySelector(".p-more").setAttribute("aria-label", `Move ${p.name || "project"}`);
   const err = el.querySelector(".p-err");
   setText(err, p.failureReason || ""); err.hidden = !p.failureReason;
   el.setAttribute("aria-label", `${p.name}, ${w} working, ${n} need you, ${d} done`);
@@ -2699,14 +2891,13 @@ function ProjectScreen(ws) {
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
-  const files = ProjectFiles(ws);
-  scroller.appendChild(files.el);
   el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
   // The model new agents start on, in the header too (the task box has its chip).
   const headModel = modelChip(ws, { compact: true });
   headModel.el.classList.add("head-model");
   bar.appendChild(headModel.el);
   bar.appendChild(refreshButton(refreshState));
+  bar.appendChild(filesButton({ ws, findAgent }));
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
 
@@ -2868,7 +3059,7 @@ function ProjectScreen(ws) {
       }
     } else emptySlot.replaceChildren();
   }
-  return { el, update, destroy() { files.destroy(); } };
+  return { el, update };
 }
 
 /* ------------------------------------------------------------------ */
@@ -3126,6 +3317,9 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
       <button type="button" class="new-pill">${icon("down")}<span>New messages</span></button>
     </div></section>`);
   const bar = el.querySelector(".topbar");
+  // This pane's speed and context line (agent-stats.js), from the transcript.
+  const agentStats = AgentStats();
+  el.querySelector(".subtitle").appendChild(agentStats.el);
   const scroller = el.querySelector(".scroller");
   const msgsEl = el.querySelector(".msgs");
   const typing = el.querySelector(".typing");
@@ -3136,6 +3330,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   back.setAttribute("aria-label", ro ? "Back to team" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
   if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
+  else bar.appendChild(filesButton({ ws, run, findAgent }));
   // The right of two panes: history belongs to the left one, so it closes instead.
   if (onClose) {
     back.hidden = true;
@@ -3157,6 +3352,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   const chatTools = h(`<div class="c-tools"></div>`);
   composer.el.querySelector("form").before(chatTools);
   const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
+  // Claude Code's suggested next prompt: dim in the empty box, Tab or the chip fills it (prompt-suggest.js).
+  const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -3477,6 +3674,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
 
   let seq = 0;
   async function send(text, files = [], retryOf = null) {
+    suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })) };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
@@ -3573,6 +3771,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     const bk = backendLabel(a || { backend: t?.backend });
     setText(sub.querySelector(".bk"), bk);
     sub.querySelector(".sep").hidden = !bk;
+    agentStats.update(t?.stats);
     return status;
   }
 
@@ -3580,6 +3779,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     const status = header();
     paintAsk();
     interruptBtn.hidden = ro || !isRunning(status);
+    suggestion?.update({ suggestion: store.transcripts.get(key)?.suggestion, idle: !isRunning(status) && !pendingAsks(agentNow()).length });
     const t = store.transcripts.get(key);
     if (!t) {
       if (!msgsEl.firstElementChild) {
@@ -3791,6 +3991,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
       fastPolls.delete(fastPoll);
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
+      agentStats.destroy();
       if (screen?.el === el) document.title = "Rudder";
     },
   };

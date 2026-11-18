@@ -123,6 +123,9 @@ type Workspace = {
   failureReason?: string;
   // Set on "home-repo" rows the user pinned to the top of the phone app.
   pinnedAt?: string;
+  // "home-repo" rows: where the user put the project in their list (0 first).
+  // Unset until they move one; unset rows sit at the top of their group.
+  sortOrder?: number;
   // "home" rows: where the home runs (home-host.ts). Fly unless switched.
   hostKind?: HomeHostKind;
   // "home" rows: why the last image update failed on the host, until one works.
@@ -352,6 +355,7 @@ ensureColumn("rudder_workspaces", "home_id", "text");
 ensureColumn("rudder_workspaces", "failure_reason", "text");
 ensureColumn("rudder_sails", "failure_reason", "text");
 ensureColumn("rudder_workspaces", "pinned_at", "text");
+ensureColumn("rudder_workspaces", "sort_order", "integer");
 // A home on an external host (cloud/host/) instead of a Fly machine: null or
 // 'fly' is the original shape, 'external' means never call Fly for it.
 ensureColumn("rudder_workspaces", "host_kind", "text");
@@ -4306,6 +4310,7 @@ function rowToWorkspace(row: unknown): Workspace {
     homeId: optionalString(value.home_id),
     failureReason: optionalString(value.failure_reason),
     pinnedAt: optionalString(value.pinned_at),
+    sortOrder: typeof value.sort_order === "number" ? value.sort_order : undefined,
     hostKind: homeHostKind(value.host_kind),
     updateError: optionalString(value.update_error),
     lastActivityAt: optionalString(value.last_activity_at),
@@ -5378,6 +5383,12 @@ const listHomeRepoRows = database.prepare(
 const setHomeRepoPinned = database.prepare(
   "update rudder_workspaces set pinned_at = @pinnedAt where id = @id and account_id = @accountId",
 );
+const setHomeRepoSortOrder = database.prepare(
+  "update rudder_workspaces set sort_order = @sortOrder where id = @id and account_id = @accountId",
+);
+const saveHomeRepoOrder = database.transaction((accountId: string, rows: { id: string; sortOrder: number | null }[]) => {
+  for (const row of rows) setHomeRepoSortOrder.run({ ...row, accountId });
+});
 const setHomeRepoStatus = database.prepare(`
   update rudder_workspaces set status = @status, updated_at = @updatedAt
   where home_id = @homeId and source_kind = 'home-repo' and status not in ('deleting')
@@ -6901,6 +6912,7 @@ function homeProjects(home: Workspace): JsonRecord[] {
       plan: (project?.plan ?? null) as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,
+      sortOrder: row.sortOrder ?? null,
       lastActivityAt: row.lastActivityAt ?? null,
     };
   });
@@ -7534,6 +7546,21 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, { ...result, message: result.updates.length ? voiceUpdateMessage(result.updates) : null });
     return;
   }
+  // Plan usage for the sidebar meter (cloud/app/agent-stats.js): the 5-hour
+  // and weekly windows of the home's Claude and Codex sign-ins. Polled, so it
+  // never wakes a sleeping home or counts as activity.
+  if (req.method === "GET" && url.pathname === "/api/app/usage") {
+    if (!home) {
+      sendJson(res, 404, { error: "no home machine yet" });
+      return;
+    }
+    if (!isOpen(homeControls.get(home.id))) {
+      sendJson(res, 503, { error: "The cloud machine is asleep", asleep: true });
+      return;
+    }
+    sendJson(res, 200, await homeRpc(home.id, "usage", { refresh: url.searchParams.get("refresh") === "1" }, 40_000));
+    return;
+  }
   if (!home) {
     sendJson(res, 404, { error: "no home machine yet; run `rudder cloud` in a repo, or add a project" });
     return;
@@ -7656,6 +7683,24 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const pinnedAt = pinned ? repo.pinnedAt ?? new Date().toISOString() : null;
     setHomeRepoPinned.run({ id: repo.id, accountId: account.accountId, pinnedAt });
     sendJson(res, 200, { workspaceId: repo.id, pinnedAt });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/project-order") {
+    // The order of the account's project list, top first (pinned ones still
+    // sit above the rest). Kept on the rows like pins, so every device shows
+    // the same list. A project left out has no place: it goes to the top.
+    const body = await readJsonBody(req);
+    const ids = body && typeof body === "object" && !Array.isArray(body) ? body.workspaces : undefined;
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string") || new Set(ids).size !== ids.length) {
+      throw badRequest("workspaces must list project ids, each once");
+    }
+    if (!home) throw Object.assign(new Error("home machine not found"), { status: 404 });
+    const repos = homeRepos(home.id);
+    const known = new Set(repos.map((repo) => repo.id));
+    if (ids.some((id) => !known.has(id as string))) throw Object.assign(new Error("project not found"), { status: 404 });
+    const place = new Map(ids.map((id, i) => [id as string, i]));
+    saveHomeRepoOrder(account.accountId, repos.map((repo) => ({ id: repo.id, sortOrder: place.get(repo.id) ?? null })));
+    sendJson(res, 200, { workspaces: ids });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {

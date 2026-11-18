@@ -364,6 +364,9 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 
   const screen = async () => (await t("capture-pane", "-p", "-t", "menu")).stdout;
   const deadline = Date.now() + timeoutMs;
   const pause = () => new Promise((resolve) => setTimeout(resolve, 250));
+  // The pane's process leads its own process group (tmux starts it in a new
+  // session); Claude's MCP servers run in it too.
+  let group = null;
   try {
     // remain-on-exit keeps a Claude that quit on screen, so its error is read.
     await t("set-option", "-g", "remain-on-exit", "on", ";",
@@ -371,6 +374,9 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 
       // Rudder starts every Claude agent with the inline renderer (launch.rs).
       "env", "-u", "TMUX", "-u", "TMUX_PANE", "TERM=xterm-256color", "CLAUDE_CODE_NO_FLICKER=0",
       bin, "--settings", JSON.stringify({ disableAllHooks: true }), ...(model ? ["--model", model] : []));
+    const panePid = (await t("display-message", "-p", "-t", "menu", "#{pane_pid}")).stdout.trim();
+    if (!/^\d+$/.test(panePid)) throw new Error(`tmux gave no process id for Claude Code's pane: "${panePid}"`);
+    group = Number(panePid);
     let text = "";
     for (;;) {
       text = await screen();
@@ -404,9 +410,37 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 
       }
     }
   } finally {
-    await t("kill-server").catch(() => {});
+    // No pane means new-session failed and there is no server to stop.
+    if (group === null) await t("kill-server").catch(() => {});
+    else {
+      await t("kill-server");
+      // kill-server returns before Claude exits; it and its MCP servers still
+      // write to its config while they shut down. Return only once they are gone.
+      await reapGroup(group);
+    }
     fs.rmSync(socket, { force: true });
   }
+}
+
+function groupAlive(group) {
+  try {
+    process.kill(-group, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function reapGroup(group) {
+  const settle = async (ms) => {
+    const until = Date.now() + ms;
+    while (groupAlive(group) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+    return !groupAlive(group);
+  };
+  if (await settle(5_000)) return;
+  process.kill(-group, "SIGKILL");
+  if (!(await settle(2_000))) throw new Error(`Claude Code's menu probe (process group ${group}) did not exit`);
 }
 
 // What Claude inserts for an MCP prompt, shown as "server:prompt (MCP)".

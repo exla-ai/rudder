@@ -2969,11 +2969,19 @@ function createAskCard(ask, { onAnswer }) {
       openLabel: "Revise…", openCls: "", placeholder: "What should change in the plan?", sendLabel: "Send revision",
       required: true, build: (message) => ({ approve: false, message }),
     });
+    // Copy the plan's Markdown as the agent wrote it.
+    const copyButton = () => {
+      const b = h(`<button type="button" class="btn small ask-expand">${icon("copy")}<span>Copy</span></button>`);
+      b.setAttribute("aria-label", "Copy the plan");
+      b.addEventListener("click", async () => { if (await copyText(planText)) toast("Plan copied"); });
+      return b;
+    };
     // The whole plan in a large reader, with the same two answers.
     const expand = h(`<button type="button" class="btn small ask-expand">${icon("expand")}<span>Expand</span></button>`);
     expand.setAttribute("aria-label", "Read the full plan");
     expand.addEventListener("click", () => {
       const sheet = openSheet({ title: "Plan", className: "plan-sheet" });
+      sheet.dlg.querySelector(".add-head h3").after(copyButton());
       const full = h(`<div class="plan-read md"></div>`);
       renderMarkdown(full, planText);
       const bar = h(`<div class="ask-actions"></div>`);
@@ -2983,7 +2991,7 @@ function createAskCard(ask, { onAnswer }) {
       );
       sheet.body.append(full, bar);
     });
-    el.querySelector(".ask-head").appendChild(expand);
+    el.querySelector(".ask-head").append(copyButton(), expand);
     actions.append(revise, btn("Approve", "accent", () => answer({ approve: true }), "Approve the plan"));
     return el;
   }

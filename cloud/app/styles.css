@@ -864,6 +864,8 @@ dialog.sheet.plan-sheet { max-width: 880px; }
 dialog.plan-sheet .dialog { height: 92vh; max-height: 92vh; }
 .plan-read { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 2px 8px 16px; font-size: 15.5px; line-height: 1.6; }
 .plan-read ol, .ask-plan ol { padding-left: 2.2em; }
+.plan-sheet .add-head h3 { flex: 1; }
+.plan-sheet .add-head .ask-expand { margin-right: 6px; }
 .plan-sheet .ask-actions { flex: none; margin-top: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .ask-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .ask-actions .btn { min-height: 40px; }

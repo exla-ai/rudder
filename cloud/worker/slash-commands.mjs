@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const MAX_DESCRIPTION = 400;
@@ -775,7 +776,8 @@ function which(name, env) {
 }
 
 // mtime and size of each file under `dir` (a few levels), as one string.
-function treeStamp(dir, depth = 4, out = []) {
+// `skip` is a path under `dir` left out.
+function treeStamp(dir, depth = 4, out = [], skip = null) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -785,6 +787,7 @@ function treeStamp(dir, depth = 4, out = []) {
   }
   for (const entry of entries) {
     const file = path.join(dir, entry.name);
+    if (file === skip) continue;
     if (entry.isDirectory() || entry.isSymbolicLink()) {
       out.push(fileStamp(file));
       if (depth > 0) treeStamp(file, depth - 1, out);
@@ -813,7 +816,9 @@ function claudeStamp({ bin, cwd, env }) {
     parts.push(fileStamp(path.join(config, name)));
   }
   treeStamp(path.join(config, "commands"), 4, parts);
-  treeStamp(path.join(config, "skills"), 2, parts);
+  const skills = path.join(config, "skills");
+  treeStamp(skills, 2, parts, path.join(skills, "synced"));
+  syncedSkillsStamp(path.join(skills, "synced"), parts);
   // Project commands, skills and settings, here and in each parent.
   for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
     const claude = path.join(dir, ".claude");
@@ -828,6 +833,36 @@ function claudeStamp({ bin, cwd, env }) {
   }
   parts.push(claudeGlobalStamp(env, path.resolve(cwd)));
   return parts.join("\n");
+}
+
+// claude.ai skills (skills/synced/<account>/). Each Claude Code sync round
+// rewrites the account's manifest.json, unchanged, and a round marker: about
+// every 10 minutes on a home with agents working. Stamped by mtime, every
+// round would restart Claude Code for every list, so the manifest's content
+// is the stamp.
+function syncedSkillsStamp(dir, out) {
+  let accounts;
+  try {
+    accounts = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return;
+    throw error;
+  }
+  for (const account of accounts) {
+    if (!account.isDirectory()) continue;
+    const manifest = path.join(dir, account.name, "manifest.json");
+    let body;
+    try {
+      body = fs.readFileSync(manifest);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        out.push(`${manifest}:-`);
+        continue;
+      }
+      throw error;
+    }
+    out.push(`${manifest}:${createHash("sha256").update(body).digest("hex")}`);
+  }
 }
 
 // The parts of Claude's global config the menu shows: the most used skills
@@ -903,19 +938,50 @@ function readRun(repoDir, runId) {
 }
 
 /**
+ * One build at a time, so a start with many agents does not stack processes.
+ * A build the app waits on runs before warm-up builds: a home that just
+ * started queues one Claude Code start (about 5s) per recent agent, and the
+ * app's request gives up after 20s. `add(fn, now)` returns { promise, hurry };
+ * hurry() moves a queued warm-up build ahead of the others.
+ */
+export function buildQueue() {
+  const urgent = [];
+  const later = [];
+  let busy = false;
+  const next = () => {
+    if (busy) return;
+    const job = urgent.shift() ?? later.shift();
+    if (!job) return;
+    busy = true;
+    Promise.resolve().then(job.fn).then(job.resolve, job.reject).finally(() => {
+      busy = false;
+      next();
+    });
+  };
+  return {
+    add(fn, now) {
+      const job = { fn };
+      const promise = new Promise((resolve, reject) => Object.assign(job, { resolve, reject }));
+      (now ? urgent : later).push(job);
+      next();
+      const hurry = () => {
+        const at = later.indexOf(job);
+        if (at >= 0) urgent.push(...later.splice(at, 1));
+      };
+      return { promise, hurry };
+    },
+  };
+}
+
+/**
  * The home's "/" lists. `projectDirs()` names the open projects; their recent
  * agents get a list at start. `forRun(repoDir, runId)` answers the app.
  */
 export function createSlashCommands({ env, log, projectDirs }) {
-  const lists = new Map(); // key -> { stamp, value, error, builtAt, checkedAt, building }
+  const lists = new Map(); // key -> { stamp, value, error, builtAt, checkedAt, building, hurry }
   const binaryCache = new Map(); // claude realpath -> Promise<Map>
-  let queue = Promise.resolve();
-  // One build at a time: a start with many agents does not stack processes.
-  const serial = (fn) => {
-    const next = queue.then(fn, fn);
-    queue = next.catch(() => {});
-    return next;
-  };
+  // Codex reads its state in milliseconds; it does not wait behind Claude.
+  const queues = { claude: buildQueue(), codex: buildQueue() };
 
   const claudeBinary = (bin) => {
     const real = fs.realpathSync(bin);
@@ -956,7 +1022,10 @@ export function createSlashCommands({ env, log, projectDirs }) {
     let entry = lists.get(key);
     const now = Date.now();
     if (entry?.building) {
-      if (wait && !entry.value) await entry.building;
+      if (wait && !entry.value) {
+        entry.hurry();
+        await entry.building;
+      }
       return entry;
     }
     // A failed build is not served for long: a request tries again.
@@ -968,9 +1037,12 @@ export function createSlashCommands({ env, log, projectDirs }) {
       entry.checkedAt = now;
       return entry;
     }
-    entry = entry ?? { stamp: null, value: null, error: null, builtAt: 0, checkedAt: 0, building: null };
+    entry = entry ?? { stamp: null, value: null, error: null, builtAt: 0, checkedAt: 0, building: null, hurry: null };
     lists.set(key, entry);
-    entry.building = serial(() => source.build(input)).then(
+    // A rebuild of a list already served is not urgent: it keeps serving.
+    const job = queues[backend].add(() => source.build(input), wait && !entry.value);
+    entry.hurry = job.hurry;
+    entry.building = job.promise.then(
       (value) => Object.assign(entry, { value, error: null, stamp, builtAt: Date.now(), checkedAt: Date.now() }),
       (error) => {
         log(`slash commands (${backend}, ${input.cwd}): ${error.message}`);

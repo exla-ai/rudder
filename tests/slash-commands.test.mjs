@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, claudeInitialize, codexHasVoice,
+  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, codexHasVoice,
   codexPackageDir, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
 import { rank } from "../cloud/app/slash-rank.js";
@@ -84,6 +84,19 @@ function writeFixture(root) {
 test("the worker image pins the Codex whose '/' commands Rudder lists", () => {
   const dockerfile = fs.readFileSync(new URL("../cloud/worker/Dockerfile", import.meta.url), "utf8");
   assert.equal(/^ARG CODEX_VERSION=(\S+)$/m.exec(dockerfile)?.[1], CODEX_VERSION);
+});
+
+test("a list the app waits on is built before warm-up lists", async () => {
+  // A home that just started queues a Claude Code start per recent agent;
+  // the app's request must not wait behind all of them.
+  const queue = buildQueue();
+  const ran = [];
+  const job = (name) => () => { ran.push(name); };
+  const warm = ["w1", "w2", "w3", "w4"].map((name) => queue.add(job(name), false));
+  const asked = queue.add(job("asked"), true);
+  warm[3].hurry();
+  await Promise.all([asked.promise, ...warm.map((w) => w.promise)]);
+  assert.deepEqual(ran, ["w1", "asked", "w4", "w2", "w3"]);
 });
 
 test("Claude Code's popup is read off its screen", () => {

@@ -664,7 +664,7 @@ function DesktopShell() {
     <nav class="dsk-side" aria-label="Projects and agents">
       <div class="ds-top"><a class="brand ds-brand" href="/app" data-link><img src="/app/icon.svg" alt=""><span>Rudder</span></a><button type="button" class="ds-side-btn ds-hide" aria-label="Hide sidebar">${icon("sidebar")}</button></div>
       <div class="ds-scroll">
-        <div class="ds-sec ds-needs" hidden><div class="ds-h"><span>Needs you</span><span class="ds-c"></span></div><div class="ds-list ds-needs-list"></div></div>
+        <div class="ds-sec ds-needs" hidden><button type="button" class="ds-h ds-htog" aria-expanded="true"><span class="ds-hl">${icon("chevron")}<span>Needs you</span></span><span class="ds-c"></span></button><div class="ds-list ds-needs-list"></div></div>
         <div class="ds-sec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div></div>
       </div>
       <div class="ds-foot">
@@ -683,6 +683,10 @@ function DesktopShell() {
   const projectsEl = el.querySelector(".ds-projects");
   const needsSec = el.querySelector(".ds-needs");
   const needsEl = el.querySelector(".ds-needs-list");
+  // "Needs you" folds away like a project; the count stays in its header.
+  const needsToggle = el.querySelector(".ds-htog");
+  let needsOpen = ls.get("rudder.needsOpen", true);
+  needsToggle.addEventListener("click", () => { needsOpen = !needsOpen; ls.set("rudder.needsOpen", needsOpen); update(); });
   el.querySelector(".ds-add").addEventListener("click", () => openAddProject());
   const openSet = new Set(ls.get("rudder.sideOpen", []));
   const saveOpen = () => ls.set("rudder.sideOpen", [...openSet]);
@@ -694,7 +698,8 @@ function DesktopShell() {
   // The sidebar's edge drags to resize it; past half its narrowest width it
   // hides. Dragging from the window's left edge, the show button or Ctrl+Cmd+S
   // brings it back. Width and hidden state belong to this viewer.
-  const SIDE_MIN = 200, SIDE_MAX = 440;
+  // 240 keeps the longest status line ("Paused · last seen 23h ago") whole.
+  const SIDE_MIN = 240, SIDE_MAX = 440;
   const nav = el.querySelector(".dsk-side");
   const grip = el.querySelector(".ds-grip");
   const hideBtn = el.querySelector(".ds-hide");
@@ -783,6 +788,8 @@ function DesktopShell() {
     const needs = needsList();
     needsSec.hidden = !needs.length;
     setText(needsSec.querySelector(".ds-c"), needs.length ? String(needs.length) : "");
+    needsToggle.setAttribute("aria-expanded", String(needsOpen));
+    needsEl.hidden = !needsOpen;
     reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
 
     const projects = (s?.projects || []).slice().sort((a, b) => {

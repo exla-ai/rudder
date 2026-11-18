@@ -294,6 +294,10 @@ body.desktop .toasts { left: var(--side); }
 .ds-sec + .ds-sec { margin-top: 18px; }
 .ds-h { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 6px 10px; font-size: 12px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .ds-c { color: var(--needs); font-weight: 700; }
+.ds-htog { width: 100%; border: 0; border-radius: 8px; background: none; padding-left: 6px; font-family: inherit; text-align: left; }
+.ds-hl { display: inline-flex; align-items: center; gap: 4px; }
+.ds-htog svg { width: 12px; height: 12px; color: var(--faint); transition: transform 140ms; }
+.ds-htog[aria-expanded="true"] svg { transform: rotate(90deg); }
 .ds-add { width: 28px; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--muted); display: grid; place-items: center; }
 .ds-add svg { width: 17px; height: 17px; }
 .ds-list, .ds-agents { display: flex; flex-direction: column; gap: 1px; }
@@ -339,6 +343,7 @@ body.desktop .toasts { left: var(--side); }
   .ds-add:hover { background: var(--surface-2); color: var(--ink); }
   .ds-agent:hover { background: var(--surface-2); }
   .ds-tw:hover { background: var(--surface-2); color: var(--ink-2); }
+  .ds-htog:hover { background: var(--surface-2); color: var(--ink-2); }
   .ds-side-btn:hover { background: var(--surface-2); color: var(--ink); }
   .ds-grip:hover::after { opacity: 0.6; transition-delay: 150ms; }
   .ds-pn:hover { background: var(--surface-2); }

@@ -68,6 +68,11 @@ Messages, sent with `window.webkit.messageHandlers.rudder.postMessage(msg)`
 | `localStatus` | `id?` | `window.rudderLocalStatus({id, rudder, claude, codex, rudderVersion?})` |
 | `openLocal` | `id`, `runId`, `repo` (`owner/name`) | `window.rudderLocal({id, runId, ok, path?, title?, checkout?, error?, cancelled?})` |
 | `openPath` | `path`, `app` (`dashboard`, `terminal`, `finder`, `xcode`) | `window.rudderOpenedPath({path, app, ok})` |
+| `appearance` | `value` (`system`, `light`, `dark`) | none; the whole app follows it and keeps it for the next launch |
+
+The other way, the app opens a page (a notification, the menu bar, Cmd+,)
+by calling `window.rudderOpenPath({path})` when an app page is loaded, so
+the page moves within itself instead of reloading.
 
 `openLocal` in detail:
 

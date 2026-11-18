@@ -49,7 +49,15 @@ final class AppModel {
     func open(path: String?) {
         let url = RudderLinks.pageURL(session.server, path: path ?? "/app") ?? session.appURL
         if let webView {
-            webView.load(URLRequest(url: url))
+            // On a loaded app page, the page moves itself (`rudderOpenPath`):
+            // a page load would redraw the whole app.
+            if case .ready = webState, let current = webView.url, RudderLinks.isInApp(current, server: session.server),
+               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let script = Bridge.callbackScript("rudderOpenPath", ["path": parts.percentEncodedPath + (parts.percentEncodedQuery.map { "?\($0)" } ?? "")]) {
+                webView.evaluateJavaScript(script, completionHandler: nil)
+            } else {
+                webView.load(URLRequest(url: url))
+            }
         } else {
             pendingURL = url
         }

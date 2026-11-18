@@ -3049,7 +3049,17 @@ pub(crate) fn diff_short_summary_at(cwd: &Path) -> Option<String> {
 /// change ("3 files changed, 10 insertions(+), 2 deletions(-)"). None when the
 /// change is empty or jj fails.
 fn jj_diff_short_summary(cwd: &Path) -> Option<String> {
-    let stdout = run_jj_with_stale_recovery(cwd, &["diff", "--stat", "--no-pager"])?;
+    jj_stat_roll_up(&run_jj_with_stale_recovery(cwd, &["diff", "--stat", "--no-pager"])?)
+}
+
+/// The same roll-up for one change, read from the workspace at `cwd`. A merged
+/// run's workspace sits on a fresh empty change after the merge (src/jj.ts
+/// `sealRunWorkspace`), so its work is the change it recorded, not `@`.
+pub(crate) fn change_diff_short_summary(cwd: &Path, change: &str) -> Option<String> {
+    jj_stat_roll_up(&run_jj_with_stale_recovery(cwd, &["diff", "--stat", "--no-pager", "-r", change])?)
+}
+
+fn jj_stat_roll_up(stdout: &str) -> Option<String> {
     let summary = stdout
         .lines()
         .rev()

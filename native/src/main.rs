@@ -4028,7 +4028,7 @@ impl App {
     /// for the rest of the session; only live rows re-ask on the TTL. Before this,
     /// every row re-spawned two git processes every 1.5s: measured at 200 rows, boot
     /// took 61s and keystrokes 61ms, against 0.4s and 2.3ms on an empty repo.
-    fn cached_diff_summary(&mut self, id: &str, cwd: &Path, live: bool) -> Option<String> {
+    fn cached_diff_summary(&mut self, id: &str, cwd: &Path, live: bool, change: Option<&str>) -> Option<String> {
         const TTL: Duration = Duration::from_millis(1500);
         let now = Instant::now();
         if let Some((stamp, value)) = self.diff_summary_cache.get(id) {
@@ -4060,10 +4060,14 @@ impl App {
         self.diff_summary_inflight.insert(id.to_string());
         let key = id.to_string();
         let path = cwd.to_path_buf();
+        let change = change.map(str::to_string);
         std::thread::Builder::new()
             .name("rudder-diff-summary".to_string())
             .spawn(move || {
-                let value = diff_short_summary_at(&path);
+                let value = match change {
+                    Some(change) => change_diff_short_summary(&path, &change),
+                    None => diff_short_summary_at(&path),
+                };
                 let _ = tx.send((key, value));
             })
             .ok();

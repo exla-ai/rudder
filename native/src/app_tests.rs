@@ -20871,7 +20871,7 @@ fn a_diff_summary_miss_never_blocks_the_frame() {
     app.cwd = repo.clone();
 
     let started = std::time::Instant::now();
-    let first = app.cached_diff_summary("row-1", &repo, true);
+    let first = app.cached_diff_summary("row-1", &repo, true, None);
     let elapsed = started.elapsed();
     assert!(first.is_none(), "nothing cached yet, so nothing to show");
     assert!(
@@ -20884,7 +20884,7 @@ fn a_diff_summary_miss_never_blocks_the_frame() {
     );
 
     // A second ask while it is still running must NOT spawn another subprocess.
-    let _ = app.cached_diff_summary("row-1", &repo, true);
+    let _ = app.cached_diff_summary("row-1", &repo, true, None);
     assert_eq!(
         app.diff_summary_inflight.len(),
         1,
@@ -20921,7 +20921,7 @@ fn a_settled_row_is_answered_from_cache_without_recomputing() {
         ),
     );
 
-    let value = app.cached_diff_summary("settled", &repo, false);
+    let value = app.cached_diff_summary("settled", &repo, false, None);
     assert_eq!(
         value.as_deref(),
         Some("+3 -1"),
@@ -20931,6 +20931,38 @@ fn a_settled_row_is_answered_from_cache_without_recomputing() {
         app.diff_summary_inflight.is_empty(),
         "and nothing was recomputed for it"
     );
+}
+
+/// After a merge the worker's workspace sits on a fresh empty change (src/jj.ts
+/// `sealRunWorkspace`), so `@` says nothing; a merged row's stat is the change
+/// it recorded.
+#[test]
+fn a_merged_rows_stat_is_the_change_it_landed() {
+    let repo = unique_test_repo("merged-stat");
+    fs::create_dir_all(&repo).unwrap();
+    let jj = |dir: &std::path::Path, args: &[&str]| {
+        let output = Command::new(jj_program())
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run jj");
+        assert!(output.status.success(), "jj {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    jj(&repo, &["git", "init"]);
+    fs::write(repo.join("app.txt"), "base\n").unwrap();
+    jj(&repo, &["commit", "-m", "base"]);
+    let ws = repo.join("worker-ws");
+    jj(&repo, &["workspace", "add", ws.to_str().unwrap(), "--name", "worker", "-r", "@-"]);
+    let change = jj(&ws, &["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+    fs::write(ws.join("app.txt"), "base\nmore\n").unwrap();
+    jj(&ws, &["new"]);
+
+    assert_eq!(diff_short_summary_at(&ws), None, "the sealed workspace's own change is empty");
+    let landed = change_diff_short_summary(&ws, &change).expect("the landed change has a stat");
+    assert!(landed.starts_with("1 file changed, 1 insertion(+)"), "{landed}");
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]

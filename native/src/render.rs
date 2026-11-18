@@ -2049,7 +2049,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         if let Some(bucket) = app.drawer_open() {
             drawn.extend(drawer_members(&app.agents, bucket));
         }
-        let keys: Vec<(String, PathBuf, bool, bool)> = app
+        let keys: Vec<(String, PathBuf, bool, bool, Option<String>)> = app
             .agents
             .iter()
             .enumerate()
@@ -2060,15 +2060,20 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                     a.is_main() || a.is_pinned_planner() || !drawn.contains(&index),
                     // Only a row whose workspace can still change needs re-asking.
                     matches!(a.status, AgentStatus::Running | AgentStatus::Paused),
+                    // A merged worker's work is the change it landed; its
+                    // workspace moved on to an empty change after the merge.
+                    (a.status == AgentStatus::Merged && a.workspace_name.is_some())
+                        .then(|| a.jj_change_id.clone())
+                        .flatten(),
                 )
             })
             .collect();
         keys.iter()
-            .map(|(id, cwd, skip, live)| {
+            .map(|(id, cwd, skip, live, change)| {
                 if *skip {
                     None
                 } else {
-                    app.cached_diff_summary(id, cwd, *live)
+                    app.cached_diff_summary(id, cwd, *live, change.as_deref())
                 }
             })
             .collect()

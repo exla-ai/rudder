@@ -69,11 +69,14 @@ async function finishedAgent(repo, id, task, files) {
     workspacePath: workspace.path,
     workspaceName: workspace.workspaceName,
   });
-  return { record, path: workspace.path };
+  const change = jj(workspace.path, ["log", "--no-graph", "-r", "@", "-T", "change_id"]);
+  return { record, path: workspace.path, change };
 }
 
-/** The agent's commit as it stands now (landing re-describes it). */
-const commitOf = (agent) => jj(agent.path, ["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+/** The agent's commit as it stands now (landing re-describes it, and moves the
+ * workspace's `@` to a new change on top of main). */
+const commitOf = (agent) =>
+  jj(agent.path, ["--ignore-working-copy", "log", "--no-graph", "-r", agent.change, "-T", "commit_id"]);
 
 const parents = (repo, rev) => git(repo, ["log", "-1", "--format=%P", rev]).split(" ");
 const subjects = (repo) => git(repo, ["log", "--format=%s", "main"]).split("\n");
@@ -166,4 +169,26 @@ test("automatic integration restores the pre-merge state on conflict", { skip: !
   assert.equal(git(repo, ["rev-parse", "main"]), commitOf(first));
   assert.equal(jj(repo, ["log", "--no-graph", "-r", "@", "-T", "commit_id"]), checkout);
   assert.equal(jj(repo, ["log", "--no-graph", "-r", "conflicts()", "-T", "commit_id"]), "");
+});
+
+test("a merged agent's workspace moves off main, so later edits there never rewrite it", { skip: !haveJj() }, async (t) => {
+  const repo = await userRepo(t);
+  const agent = await finishedAgent(repo, "add-b-k5p6q", "add b", { "b.txt": "b\n" });
+  await mergeJjRunIntoCurrentWorkspace(agent.record, true);
+  const main = git(repo, ["rev-parse", "main"]);
+
+  // A resumed agent edits; any jj command run there snapshots the edit.
+  await fsp.writeFile(path.join(agent.path, "late.txt"), "late\n");
+  jj(agent.path, ["status"]);
+
+  assert.equal(
+    jj(repo, ["--ignore-working-copy", "log", "--no-graph", "-r", "main", "-T", "commit_id"]),
+    main,
+    "main's commit is not rewritten",
+  );
+  assert.equal(commitOf(agent), main);
+  assert.deepEqual(jj(repo, ["--ignore-working-copy", "file", "list", "-r", "main"]).split("\n"), ["a.txt", "b.txt"]);
+  assert.equal(jj(agent.path, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), main);
+  assert.equal(jj(agent.path, ["diff", "--name-only"]), "late.txt", "the edit is a new change on top of main");
+  assert.equal(gitStatus(repo), "## main");
 });

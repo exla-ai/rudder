@@ -472,8 +472,9 @@ export function workspaceNameFor(id: string): string {
  *   later call finalizes it. `abortOnConflict` restores the pre-merge operation
  *   instead.
  *
- * Landing rebases the checkout's own edits onto the new main and attaches Git's
- * HEAD to the bookmark (see `attachGitHead`).
+ * Landing rebases the checkout's own edits onto the new main, moves the run's
+ * workspace onto a fresh change on top of it (see `sealRunWorkspace`) and
+ * attaches Git's HEAD to the bookmark (see `attachGitHead`).
  */
 export async function mergeJjRunIntoCurrentWorkspace(
   run: RunRecord,
@@ -621,6 +622,13 @@ async function finalizeJjIntegration(run: RunRecord, head: string, undoOp: strin
   const targetBookmark = await integrationBookmark(run.repoRoot, run.targetBranch);
   const base = await integrationBase(run.repoRoot, targetBookmark);
   await createBookmark(run.repoRoot, targetBookmark, head);
+  const sealError = await sealRunWorkspace(run, targetBookmark);
+  if (sealError) {
+    if (undoOp) await undoToOp(run.repoRoot, undoOp);
+    const error = `could not move the agent's workspace off the change that landed on ${targetBookmark}: ${sealError}`;
+    await markMergeFailed(run, error);
+    throw new Error(error);
+  }
   await moveCheckoutOnto(run.repoRoot, targetBookmark, base);
   // A conflict here is new: the merge refuses to start on a conflicted checkout.
   const overlap = await jjConflictedFiles(run.repoRoot);
@@ -656,6 +664,20 @@ async function finalizeJjIntegration(run: RunRecord, head: string, undoOp: strin
     /* a warm snapshot is an optimization */
   }
   return run;
+}
+
+/**
+ * Put the run's workspace on a new empty change on top of the bookmark that just
+ * landed its work. The workspace stays after a merge (the run can be resumed,
+ * and the dashboard runs `jj diff` there), and its `@` was the change now on main:
+ * any later snapshot there rewrote main's commit, and the bookmark followed the
+ * rewrite. Neither jj's immutable heads cover it: with no remote `trunk()` is the
+ * root, and an unpushed main is mutable either way. Returns jj's error, or "".
+ */
+async function sealRunWorkspace(run: RunRecord, bookmark: string): Promise<string> {
+  const sealed = await jjWriteWithStaleRecovery(run.workspace.path, ["new", bookmarkRevset(bookmark)]);
+  if (sealed.code === 0) return "";
+  return sealed.stderr.trim() || sealed.stdout.trim() || `jj new exited ${sealed.code}`;
 }
 
 export async function closestLocalBookmark(repoRoot: string): Promise<string> {

@@ -15990,6 +15990,8 @@ Address the objection directly. If you disagree, say why inside \
                 // The home machine's cleanup putting an idle agent to sleep;
                 // the instruction is the reason the card shows.
                 "park" => self.deliver_park_request(&task_id, &instruction),
+                // The chat's model control: `<model> <effort|auto>` for one agent.
+                "model" => self.deliver_model_request(&task_id, &instruction),
                 "steer" | "task" => self.deliver_steer_request(&task_id, &instruction),
                 // A kind from a newer sender must not reach an agent as typed
                 // text ("park"'s reason once would have been a prompt).
@@ -16302,6 +16304,109 @@ Address the objection directly. If you disagree, say why inside \
             serde_json::json!({ "run": run_id }),
         );
         self.push_activity(format!("asleep: {label} ({})", note.reason));
+        self.dirty = true;
+        SteerDelivery::Delivered
+    }
+
+    /// One agent's model and effort, from the model control in its chat. The
+    /// backend stays: a conversation cannot move between providers. A live
+    /// session sitting at its prompt is relaunched on the same conversation
+    /// with the new flags (`claude --resume`, `codex resume`), so its next turn
+    /// runs on them. A row with no process takes them when it next resumes.
+    /// Mid-turn it is refused: relaunching would throw that turn away.
+    fn deliver_model_request(&mut self, task_id: &str, spec: &str) -> SteerDelivery {
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        let mut parts = spec.split_whitespace();
+        let (Some(model), Some(effort_arg), None) = (parts.next(), parts.next(), parts.next()) else {
+            return SteerDelivery::Failed("expected <model> <effort|auto>".to_string());
+        };
+        let effort = parse_effort_arg(effort_arg);
+        if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
+            return SteerDelivery::Failed(format!("unknown effort: {effort_arg}"));
+        }
+        let run = &mut self.agents[index];
+        let backend = run.backend;
+        if run.is_orchestrator() || run.gam.is_some() || run.plain_process || is_cloud_owned_agent(run) {
+            return SteerDelivery::Failed("this agent keeps the model it was started with".to_string());
+        }
+        if let Some(other) = known_model_backend(model).filter(|other| *other != backend) {
+            return SteerDelivery::Failed(format!(
+                "{model} is a {} model and this chat runs on {}",
+                other.as_str(),
+                backend.as_str()
+            ));
+        }
+        if !effort_options_for(backend, model).contains(&effort) {
+            return SteerDelivery::Failed(format!("{model} has no {effort_arg} effort"));
+        }
+        if let Some(refusal) = openrouter_key_refusal(backend, model) {
+            return SteerDelivery::Failed(refusal.to_string());
+        }
+        let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
+        if live && run.status == AgentStatus::Running && !run.needs_user_input {
+            return SteerDelivery::Failed(
+                "it is in the middle of a turn; switch when it finishes".to_string(),
+            );
+        }
+        if live && backend == Backend::Codex && run.session_id.is_none() {
+            run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
+        }
+        let session = run.session_id.clone().filter(|id| !id.trim().is_empty());
+        if live && session.is_none() {
+            return SteerDelivery::Failed("this chat has no saved session to continue".to_string());
+        }
+        run.model = model.to_string();
+        run.effort = effort;
+        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
+        if let Some(session) = session.filter(|_| live) {
+            let mut command = match backend {
+                Backend::Claude => claude_resume_command(run, &session),
+                Backend::Codex => codex_resume_command(run, &session),
+                Backend::Opencode => opencode_resume_command(run, &session),
+            };
+            if run.is_main() && run.execution_profile.is_none() {
+                signals::augment_worker_command(&mut command, backend, run.mode, &run.id);
+            } else {
+                signals::augment_existing_worker_command(
+                    &mut command,
+                    backend,
+                    run.mode,
+                    &run.id,
+                    run.execution_profile.as_deref(),
+                );
+            }
+            let options = TerminalPaneOptions {
+                size: run.terminal_size.unwrap_or_default(),
+                cwd: Some(run.cwd.clone()),
+                ..TerminalPaneOptions::default()
+            };
+            // Dropping the pane ends the old process before its session reopens.
+            run.terminal = None;
+            match TerminalPane::spawn_shell_or_command(Some(command), options) {
+                Ok(mut terminal) => {
+                    let _ = terminal.drain_output();
+                    Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                    let run = &mut self.agents[index];
+                    run.execution_profile = terminal.execution_profile().map(str::to_string);
+                    run.terminal = Some(terminal);
+                    run.last_output_at = Instant::now();
+                }
+                Err(error) => {
+                    let run = &mut self.agents[index];
+                    run.status = AgentStatus::Failed;
+                    run.last_error = Some(error.to_string());
+                    let _ = save_native_run_record(&self.cwd, run);
+                    return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
+                }
+            }
+        }
+        let run = &self.agents[index];
+        let _ = save_native_run_record(&self.cwd, run);
+        let note = format!("{label} now on {}", agent_model_label(backend, &run.model, run.effort));
+        self.push_activity(note);
+        self.mirror_graph();
         self.dirty = true;
         SteerDelivery::Delivered
     }

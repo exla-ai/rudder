@@ -660,7 +660,9 @@ async function handleRpc(method, params) {
     return await listModels();
   }
   if (method === "createRepo") {
-    return await createGithubRepo(params);
+    const created = await createGithubRepo(params);
+    void refreshGithubRepos();
+    return created;
   }
   if (method === "adopt") {
     // Before the project lookup below: a laptop moving agents may have just
@@ -740,6 +742,10 @@ async function handleRpc(method, params) {
   }
   if (method === "keys") {
     return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
+  }
+  if (method === "agentModel") {
+    // One chat's model and effort (native deliver_model_request).
+    return await steer(project, { kind: "model", taskId: String(params.runId || ""), instruction: `${params.model} ${params.effort}` });
   }
   if (method === "previewRegister") {
     const service = await privatePreviewService();
@@ -1018,46 +1024,105 @@ function captureAll(command, args, { env, cwd, timeoutMs }) {
 
 // `/model` on the phone: what the dashboard's own picker would offer (the
 // models.dev and Codex caches, read by `rudder __models`), plus the current
-// default. Cached briefly: the lists move on the order of days.
-let modelsCache = null;
+// default. Discovery spawns the CLI, so it runs ahead of the picker: once at
+// start and every MODELS_REFRESH_MS after, and the RPC answers from the last
+// run. A served list is at most one interval old. A failed run is not served
+// around: the next request runs discovery again and returns that run's result
+// or its error.
+const MODELS_REFRESH_MS = 10 * 60_000;
+let models = null; // { value } or { error } from the last finished run
+let modelsRun = null;
+function refreshModels() {
+  modelsRun ??= discoverModels().then(
+    (value) => { models = { value }; },
+    (error) => { models = { error }; log(`models: ${error.message}`); },
+  ).finally(() => { modelsRun = null; });
+  return modelsRun;
+}
 async function listModels() {
-  if (modelsCache && Date.now() - modelsCache.at < 10 * 60_000) {
-    return modelsCache.value;
+  if (!models || models.error) {
+    await refreshModels();
   }
+  if (models.error) {
+    throw models.error;
+  }
+  return models.value;
+}
+async function discoverModels() {
   const result = await captureAll("rudder", ["__models"], { env: { ...baseChildEnv }, cwd: HOME, timeoutMs: 30_000 });
   const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
   if (result.code !== 0 || !line) {
     throw new Error(firstLine(result.stderr || result.stdout) || "could not list models");
   }
-  const value = JSON.parse(line);
-  modelsCache = { at: Date.now(), value };
-  return value;
+  return JSON.parse(line);
 }
+void refreshModels();
+setInterval(() => void refreshModels(), MODELS_REFRESH_MS);
 
 // "Add project" on the phone: the repos this GitHub login can open (its own,
 // collaborations and its orgs'), newest first, plus where a new one can go.
+// Fetching them takes GitHub about a second, so the list is ready before the
+// dialog asks: fetched at start, every REPOS_REFRESH_MS, when a GitHub token
+// arrives and after a repo is created here. A served list is at most one
+// interval old; a repo made elsewhere since then still opens by typing its
+// owner/name. A failed fetch is not served around: the next request fetches
+// again and returns that result or its error.
+const REPOS_REFRESH_MS = 5 * 60_000;
+const REPOS_SHOWN = 300;
+let githubRepos = null; // { value } or { error } from the last finished fetch
+let githubReposRun = null;
+function refreshGithubRepos() {
+  githubReposRun ??= fetchGithubRepos().then(
+    (value) => { githubRepos = { value }; },
+    (error) => { githubRepos = { error }; log(`repos: ${error.message}`); },
+  ).finally(() => { githubReposRun = null; });
+  return githubReposRun;
+}
 async function listGithubRepos() {
+  if (!githubRepos || githubRepos.error) {
+    await refreshGithubRepos();
+  }
+  if (githubRepos.error) {
+    throw githubRepos.error;
+  }
+  const open = new Set(Array.from(projects.values()).map((project) => project.descriptor.repo.toLowerCase()));
+  const { owners, repos } = githubRepos.value;
+  return { owners, repos: repos.map((repo) => ({ ...repo, open: open.has(String(repo.repo).toLowerCase()) })) };
+}
+// The shown repos are the newest REPOS_SHOWN, so only those pages are fetched,
+// all at once (gh --paginate walks every page one after another).
+async function fetchGithubRepos() {
   const env = { ...baseChildEnv };
-  const [user, orgs, repos] = await Promise.all([
+  const page = (n) => capture("gh", ["api", `user/repos?per_page=100&page=${n}&sort=updated&affiliation=owner,collaborator,organization_member`,
+    "--jq", ".[] | {repo: .full_name, description: .description, private: .private, updatedAt: .pushed_at, archived: .archived}"], { env, timeoutMs: 30_000 });
+  const [user, orgs, ...pages] = await Promise.all([
     capture("gh", ["api", "user", "--jq", ".login"], { env, timeoutMs: 20_000 }),
     capture("gh", ["api", "user/orgs", "--jq", ".[].login"], { env, timeoutMs: 20_000 }),
-    capture("gh", ["api", "--paginate", "user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
-      "--jq", ".[] | {repo: .full_name, description: .description, private: .private, updatedAt: .pushed_at, archived: .archived}"], { env, timeoutMs: 60_000 }),
+    ...Array.from({ length: REPOS_SHOWN / 100 }, (_, i) => page(i + 1)),
   ]);
   if (user.code !== 0) {
     throw new Error(githubCredentials ? `GitHub said: ${firstLine(user.stderr)}` : "the cloud vault has no GitHub token; run `rudder cloud` in a repo on your laptop to add one");
   }
-  const open = new Set(Array.from(projects.values()).map((project) => project.descriptor.repo.toLowerCase()));
-  const list = repos.stdout.split("\n").filter(Boolean).map((line) => {
-    try {
-      return JSON.parse(line);
-    } catch {
-      return null;
+  for (const result of [orgs, ...pages]) {
+    if (result.code !== 0) {
+      throw new Error(`GitHub said: ${firstLine(result.stderr || result.stdout)}`);
     }
-  }).filter((repo) => repo && !repo.archived).slice(0, 300).map((repo) => ({ ...repo, open: open.has(String(repo.repo).toLowerCase()) }));
+  }
+  const repos = pages.flatMap((result) => result.stdout.split("\n").filter(Boolean).map((line) => JSON.parse(line)))
+    .filter((repo) => !repo.archived);
   const owners = [user.stdout.trim(), ...orgs.stdout.split("\n").map((line) => line.trim()).filter(Boolean)];
-  return { owners, repos: list };
+  return { owners, repos };
 }
+// Without a GitHub login there is nothing to fetch ahead; a request still
+// fetches and returns the reason.
+if (githubCredentials) {
+  void refreshGithubRepos();
+}
+setInterval(() => {
+  if (githubCredentials) {
+    void refreshGithubRepos();
+  }
+}, REPOS_REFRESH_MS);
 
 async function createGithubRepo(params) {
   const owner = String(params.owner || "").trim();
@@ -1272,6 +1337,8 @@ function agentSummary(record, options = {}) {
     ...statusFields(record, options),
     backend: record.backend ?? "claude",
     model: record.model ?? null,
+    // null: the agent decides (the dashboard's "auto").
+    effort: record.effort ?? null,
     mode: record.mode ?? null,
     createdAt: toMillis(record.createdAt),
     updatedAt,
@@ -1834,9 +1901,14 @@ async function refreshVaultRepoFiles() {
   acceptClaudeDialogs([]);
   // A GitHub token added since boot takes effect now; failed clones retry when
   // the repo list is reconciled right after this.
+  const githubBefore = `${githubCredentials}:${process.env.GH_TOKEN}`;
   configureGitCredentials(fresh);
   // Same filtering as at boot (no machine credentials reach agents).
   Object.assign(baseChildEnv, buildChildEnv(fresh.env ?? {}));
+  // After the env: the fetch runs gh with it.
+  if (`${githubCredentials}:${process.env.GH_TOKEN}` !== githubBefore) {
+    void refreshGithubRepos();
+  }
   void checkCredentials();
   for (const project of projects.values()) {
     if (fs.existsSync(path.join(project.dir, ".git"))) {

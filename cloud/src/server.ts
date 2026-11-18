@@ -7613,6 +7613,22 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "keys", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", keys }));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-model") {
+    // The model control in a chat: one agent's model and effort. The dashboard
+    // reopens its session on them (native deliver_model_request).
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const model = (stringField(body, "model") ?? "").trim();
+    const effort = (stringField(body, "effort") ?? "").trim();
+    if (!/^[A-Za-z0-9._:/[\]-]{1,120}$/.test(model)) {
+      throw badRequest("model is required");
+    }
+    if (!["auto", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
+      throw badRequest("effort must be auto, low, medium, high, xhigh or max");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/answer") {
     // The phone answering a prompt an agent is blocked on: a tool approval,
     // Claude's questions, or a plan (cloud/worker/asks.mjs builds the decision).

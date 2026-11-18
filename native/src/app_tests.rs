@@ -30918,3 +30918,41 @@ fn agent_pin_keeps_a_planned_conversation_awake_and_out_of_automatic_review() {
     app.agents[0].terminal = None;
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(not(windows))]
+#[test]
+fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
+    let _env = env_guard();
+    let dir = unique_test_repo("chat-model-switch");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("chat-run", "keep going");
+    run.cwd = dir.clone();
+    run.backend = Backend::Claude;
+    run.model = "opus".to_string();
+    run.effort = Some(EffortLevel::High);
+    run.status = AgentStatus::Paused;
+    app.agents.push(run);
+
+    // No process: the next resume launches with the new flags.
+    assert!(matches!(app.deliver_model_request("chat-run", "sonnet low"), SteerDelivery::Delivered));
+    assert_eq!((app.agents[0].model.as_str(), app.agents[0].effort), ("sonnet", Some(EffortLevel::Low)));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku auto"), SteerDelivery::Delivered));
+    assert_eq!(app.agents[0].effort, None);
+
+    // A conversation cannot change providers, and a model without an effort
+    // dial takes only auto.
+    assert!(matches!(app.deliver_model_request("chat-run", "gpt-6.1-sol high"), SteerDelivery::Failed(reason) if reason.contains("codex model")));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku high"), SteerDelivery::Failed(reason) if reason.contains("no high effort")));
+
+    // Mid-turn: relaunching would throw the turn away.
+    app.agents[0].status = AgentStatus::Running;
+    app.agents[0].terminal = Some(TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "cat"])),
+        TerminalPaneOptions::default(),
+    ).unwrap());
+    assert!(matches!(app.deliver_model_request("chat-run", "opus high"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
+    assert_eq!(app.agents[0].model, "haiku");
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}

@@ -64,6 +64,41 @@ function accountLine(backend) {
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
 }
 
+/** The model rows of `opts`, `model` checked and `current` badged. */
+function paintModels(modelsEl, opts, { model, current, backend, onPick }) {
+  modelsEl.replaceChildren();
+  for (const o of opts) {
+    const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"></span><span class="mp-radio">${icon("check")}</span></button>`);
+    setText(b.querySelector(".mp-name"), o.label || o.value);
+    b.querySelector(".mp-badge").hidden = o.value !== current;
+    const detail = [o.detail, o.value !== o.label ? o.value : null].filter(Boolean).join(" · ");
+    setText(b.querySelector(".mp-detail"), detail);
+    b.setAttribute("aria-checked", String(o.value === model));
+    b.addEventListener("click", () => onPick(o.value));
+    modelsEl.appendChild(b);
+  }
+  if (!opts.length) {
+    const note = h(`<div class="repo-note"></div>`);
+    note.textContent = `No ${providerLabel(backend)} models found on the cloud machine.`;
+    modelsEl.appendChild(note);
+  }
+}
+
+/** The effort chips when `model` has an effort dial. Returns whether it has one. */
+function paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick }) {
+  const dial = !!model && reasons(backend, model);
+  effortWrap.hidden = !dial;
+  effortsEl.replaceChildren(...effortsFor(backend).map((e) => {
+    const b = h(`<button type="button" role="radio" class="mp-effort"><span></span></button>`);
+    setText(b.querySelector("span"), e.label);
+    b.title = e.detail;
+    b.setAttribute("aria-checked", String(e.id === effort));
+    b.addEventListener("click", () => onPick(e.id));
+    return b;
+  }));
+  return dial;
+}
+
 /**
  * A chip that names the model new agents start on and opens the picker.
  * Returns { el, refresh() }.
@@ -128,33 +163,9 @@ export function openModelPicker(ws, { onPicked } = {}) {
     const opts = options();
     if (model && !opts.some((o) => o.value === model)) model = opts[0]?.value || null;
     if (!model) model = opts[0]?.value || null;
-    modelsEl.replaceChildren();
-    for (const o of opts) {
-      const current = data.current?.backend === backend && data.current?.model === o.value;
-      const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"></span><span class="mp-radio">${icon("check")}</span></button>`);
-      setText(b.querySelector(".mp-name"), o.label || o.value);
-      b.querySelector(".mp-badge").hidden = !current;
-      const detail = [o.detail, o.value !== o.label ? o.value : null].filter(Boolean).join(" · ");
-      setText(b.querySelector(".mp-detail"), detail);
-      b.setAttribute("aria-checked", String(o.value === model));
-      b.addEventListener("click", () => { model = o.value; render(); });
-      modelsEl.appendChild(b);
-    }
-    if (!opts.length) {
-      const note = h(`<div class="repo-note"></div>`);
-      note.textContent = `No ${providerLabel(backend)} models found on the cloud machine.`;
-      modelsEl.appendChild(note);
-    }
-    const dial = !!model && reasons(backend, model);
-    effortWrap.hidden = !dial;
-    effortsEl.replaceChildren(...effortsFor(backend).map((e) => {
-      const b = h(`<button type="button" role="radio" class="mp-effort"><span></span></button>`);
-      setText(b.querySelector("span"), e.label);
-      b.title = e.detail;
-      b.setAttribute("aria-checked", String(e.id === effort));
-      b.addEventListener("click", () => { effort = e.id; render(); });
-      return b;
-    }));
+    const cur = data.current?.backend === backend ? data.current.model : null;
+    paintModels(modelsEl, opts, { model, current: cur, backend, onPick: (v) => { model = v; render(); } });
+    const dial = paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick: (v) => { effort = v; render(); } });
     useBtn.disabled = !model;
     const label = opts.find((o) => o.value === model)?.label || model;
     setText(useBtn, model ? `Use ${providerLabel(backend)} · ${label}${dial && effort !== "auto" ? ` · ${effortLabel(effort).toLowerCase()}` : ""}` : "Use this model");
@@ -194,6 +205,112 @@ export function openModelPicker(ws, { onPicked } = {}) {
     }
     render();
   }).catch((err) => {
+    modelsEl.replaceChildren(h(`<div class="repo-note err"></div>`));
+    modelsEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
+  });
+}
+
+/* The model control in an agent's chat --------------------------------- */
+
+const chatLabel = (a) => [a.model, a.effort && reasons(a.backend, a.model) ? effortLabel(a.effort).toLowerCase() : null].filter(Boolean).join(" · ");
+
+/**
+ * The model and effort one agent's chat runs on, next to its composer, and a
+ * sheet to switch them for that chat only. The dashboard reopens the same
+ * conversation on the new ones (POST /api/app/agent-model, native
+ * deliver_model_request), so the agent's next turn uses them. It stays on its
+ * provider, and it does not switch in the middle of a turn.
+ * `agent()` returns the agent's current row. Call refresh() when it changes.
+ */
+export function mountChatModelControl(container, { workspace, run, agent }) {
+  const el = h(`<button type="button" class="model-chip compact" aria-haspopup="dialog">${icon("spark")}<span class="mc-l"></span>${icon("chevron").replace("<svg", '<svg class="mc-caret"')}</button>`);
+  const refresh = () => {
+    const a = agent();
+    el.hidden = !a?.model || !PROVIDERS.some((p) => p.id === a.backend);
+    if (el.hidden) return;
+    setText(el.querySelector(".mc-l"), chatLabel(a));
+    el.setAttribute("aria-label", `This chat runs on ${providerLabel(a.backend)} ${chatLabel(a)}. Change`);
+    el.title = `This chat runs on ${providerLabel(a.backend)} · ${chatLabel(a)}`;
+  };
+  el.addEventListener("click", () => openChatModelPicker({ workspace, run, agent, onSwitched: refresh }));
+  container.appendChild(el);
+  refresh();
+  return { el, refresh };
+}
+
+function openChatModelPicker({ workspace, run, agent, onSwitched }) {
+  const start = agent();
+  const backend = start.backend;
+  const dlg = h(`<dialog class="sheet add-sheet model-sheet" aria-label="Model for this chat"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Model for this chat</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="mp-account"></div>
+    <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
+    <div class="mp-effort-wrap">
+      <div class="field-label" id="cm-effort-l">Effort</div>
+      <div class="mp-efforts" role="radiogroup" aria-labelledby="cm-effort-l"></div>
+    </div>
+    <button type="button" class="btn accent block mp-use" disabled>Switch</button>
+    <div class="create-note"></div>
+  </div></dialog>`);
+  const modelsEl = dlg.querySelector(".mp-models");
+  const effortWrap = dlg.querySelector(".mp-effort-wrap");
+  const effortsEl = dlg.querySelector(".mp-efforts");
+  const useBtn = dlg.querySelector(".mp-use");
+  const note = dlg.querySelector(".create-note");
+  let data = modelsCache?.data || null;
+  let model = start.model;
+  let effort = start.effort || "auto";
+
+  // This backend's list, with the model the agent runs on now even when the
+  // list does not name it (an id it was started with by hand).
+  const options = () => {
+    const opts = (data?.[backend] || []).filter((o) => o && o.value);
+    return opts.some((o) => o.value === start.model) ? opts : [{ value: start.model, label: start.model }, ...opts];
+  };
+  function render() {
+    const a = agent() || start;
+    const busy = a.status === "working";
+    setText(dlg.querySelector(".mp-account"), `${providerLabel(backend)} · ${accountLine(backend)}`);
+    setText(note, busy
+      ? "It is working right now. Switch when this turn ends."
+      : "The conversation carries on. Its next reply uses the new model.");
+    if (!data) return;
+    const opts = options();
+    paintModels(modelsEl, opts, { model, current: a.model, backend, onPick: (v) => { model = v; render(); } });
+    const dial = paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick: (v) => { effort = v; render(); } });
+    const eff = dial ? effort : "auto";
+    const same = model === a.model && eff === (a.effort || "auto");
+    useBtn.disabled = busy || same;
+    const label = opts.find((o) => o.value === model)?.label || model;
+    setText(useBtn, same ? "Current model" : `Switch to ${label}${eff !== "auto" ? ` · ${effortLabel(eff).toLowerCase()}` : ""}`);
+  }
+
+  useBtn.addEventListener("click", async () => {
+    const eff = reasons(backend, model) ? effort : "auto";
+    useBtn.disabled = true;
+    try {
+      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: eff } });
+      track("chat_model_switched", { backend, model, effort: eff });
+      // The dashboard took it (or will within seconds): show it now, the next
+      // state refresh carries the real row.
+      const a = agent();
+      if (a) { a.model = model; a.effort = eff === "auto" ? null : eff; }
+      dlg.close();
+      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${model}`);
+      onSwitched();
+      app.refreshState();
+    } catch (err) { showError(err); render(); }
+  });
+
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
+  });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  render();
+  loadModels().then((res) => { data = res; render(); }).catch((err) => {
     modelsEl.replaceChildren(h(`<div class="repo-note err"></div>`));
     modelsEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
   });

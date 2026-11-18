@@ -20018,8 +20018,11 @@ fn fleet_note_app(repo: &std::path::Path) -> (EnvGuard, App) {
     fs::create_dir_all(&home).unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("RUDDER_HOME", &home);
+    // Each launch records the folder it ran in. Tests run in parallel and the
+    // provider path is process-wide env, so another test's agent can run this
+    // fake from its own folder; only launches in this repo are this test's.
     let provider = repo.join("fake-provider.sh");
-    write_fake_bin(&provider, "#!/bin/sh\nprintf started > \"$0.called\"\nsleep 5\n");
+    write_fake_bin(&provider, "#!/bin/sh\nprintf 'started %s\\n' \"$(pwd -P)\" >> \"$0.called\"\nsleep 5\n");
     std::env::set_var("RUDDER_CLAUDE_BIN", &provider);
     std::env::set_var("RUDDER_CODEX_BIN", &provider);
     let cli = repo.join("fake-cli.sh");
@@ -20029,6 +20032,17 @@ fn fleet_note_app(repo: &std::path::Path) -> (EnvGuard, App) {
     let mut app = App::new();
     app.cwd = repo.to_path_buf();
     (guard, app)
+}
+
+/// Launches of `fleet_note_app`'s fake provider that ran inside `repo`.
+fn fleet_provider_launches(repo: &std::path::Path) -> usize {
+    let root = fs::canonicalize(repo).unwrap();
+    fs::read_to_string(repo.join("fake-provider.sh.called"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("started "))
+        .filter(|dir| std::path::Path::new(dir).starts_with(&root))
+        .count()
 }
 
 fn fleet_note_state(app: &App) -> serde_json::Value {
@@ -20098,7 +20112,7 @@ fn fleet_nudge_status_and_keep_going_preserve_unavailable_runs_until_explicit_re
     assert_eq!(fleet_note_state(&app), before, "a generic message cannot resume or rewrite history");
     assert_eq!(app.build_mirror_payload(), status);
     assert!(app.pending_enters.is_empty());
-    assert!(!provider.with_extension("sh.called").exists(), "no provider process was started");
+    assert_eq!(fleet_provider_launches(&repo), 0, "no provider process was started");
     for (path, bytes) in files {
         assert_eq!(fs::read(path).unwrap(), bytes, "saved run bytes must be retained");
     }
@@ -20111,7 +20125,13 @@ fn fleet_nudge_status_and_keep_going_preserve_unavailable_runs_until_explicit_re
     assert_eq!(resumed.status, AgentStatus::Running);
     assert_eq!(resumed.current_prompt, "authorized continuation");
     assert!(resumed.terminal.as_mut().is_some_and(|terminal| matches!(terminal.try_wait(), Ok(None))));
-    assert_eq!(wait_for_log(&repo, "fake-provider.sh.called", "started"), "started");
+    for _ in 0..50 {
+        if fleet_provider_launches(&repo) > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    assert_eq!(fleet_provider_launches(&repo), 1, "the explicit resume started its provider once");
     resumed.terminal = None;
     for run in &app.agents {
         if run.id != "fleet-stopped" {

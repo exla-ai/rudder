@@ -9,7 +9,8 @@ __pycache__/
 .rudder/
 .ledger/
 .rudder-worktrees/
-.claude/
+.claude/*
+!.claude/skills/
 npm-debug.log*
 .DS_Store
 RUDDER.md

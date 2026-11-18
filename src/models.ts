@@ -645,22 +645,35 @@ function formatNumber(value: number): string {
   return String(value);
 }
 
-async function collectClaudeProjectModels(dir: string, counts: Map<string, number>, depth = 0): Promise<void> {
-  if (depth > 2 || !fs.existsSync(dir)) {
+// The Claude Code models this machine used lately: the tail of the newest
+// session logs. A new model shows up in new sessions, and reading the whole
+// history instead cost 11 s and 4 GB on a busy machine on every discovery.
+const CLAUDE_HISTORY_FILES = 100;
+const CLAUDE_HISTORY_TAIL_BYTES = 64 * 1024;
+
+async function collectClaudeProjectModels(root: string, counts: Map<string, number>): Promise<void> {
+  if (!fs.existsSync(root)) {
     return;
   }
-  const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries.slice(0, 700)) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await collectClaudeProjectModels(fullPath, counts, depth + 1);
+  const logs: Array<{ file: string; mtimeMs: number; size: number }> = [];
+  await listClaudeSessionLogs(root, logs, 0);
+  logs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const log of logs.slice(0, CLAUDE_HISTORY_FILES)) {
+    const length = Math.min(log.size, CLAUDE_HISTORY_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const handle = await fsp.open(log.file, "r").catch(ignoreMissing);
+    if (!handle) {
       continue;
     }
-    if (!entry.name.endsWith(".jsonl")) {
-      continue;
+    try {
+      await handle.read(buffer, 0, length, log.size - length);
+    } finally {
+      await handle.close();
     }
-    const raw = await fsp.readFile(fullPath, "utf8").catch(() => "");
-    const lines = raw.split(/\r?\n/).slice(-250);
+    const lines = buffer.toString("utf8").split(/\r?\n/);
+    if (length < log.size) {
+      lines.shift(); // starts mid-row
+    }
     for (const line of lines) {
       if (!line.trim()) {
         continue;
@@ -672,6 +685,33 @@ async function collectClaudeProjectModels(dir: string, counts: Map<string, numbe
       }
     }
   }
+}
+
+async function listClaudeSessionLogs(dir: string, logs: Array<{ file: string; mtimeMs: number; size: number }>, depth: number): Promise<void> {
+  if (depth > 2) {
+    return;
+  }
+  const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(ignoreMissing) ?? [];
+  await Promise.all(entries.map(async (entry) => {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await listClaudeSessionLogs(file, logs, depth + 1);
+    } else if (entry.name.endsWith(".jsonl")) {
+      const stat = await fsp.stat(file).catch(ignoreMissing);
+      if (stat) {
+        logs.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
+      }
+    }
+  }));
+}
+
+// Claude Code deletes old session logs while a scan runs; a vanished file is
+// simply not part of the history any more.
+function ignoreMissing(error: NodeJS.ErrnoException): undefined {
+  if (error.code === "ENOENT") {
+    return undefined;
+  }
+  throw error;
 }
 
 function collectModelFields(value: unknown, counts: Map<string, number>, depth = 0): void {

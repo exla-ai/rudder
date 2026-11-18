@@ -861,7 +861,9 @@ async function maybeOnboard(): Promise<void> {
 }
 
 async function openDashboard(parsed: Parsed): Promise<void> {
-  await refreshModelCache();
+  // The model cache refreshes behind the dashboard, which never waits on that
+  // network discovery: the native picker re-reads the file when it changes.
+  void refreshModelCache();
   if (await attachSocketLive()) {
     await runNativeCommand(["attach", "--dashboard"]);
     return;

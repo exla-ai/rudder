@@ -218,7 +218,13 @@ gone from the screen); refusals show as errors; paused and merged rows keep
 their +N -M. The "/" menu probe now waits for Claude's process group to exit.
 Open: the phone card for a Codex plan dismissed with Esc only, the scheduler's
 legacy node merge (`mergeNodeIntoIntegration`) still merges into `@`, a
-Codex-only Mac defaults to Claude, and the signed Mac app (still 1.0.2).
+Codex-only Mac defaults to Claude.
+
+Rudder for Mac 1.1.0 (4) is the latest Mac release (`mac-v1.1.0-4`, 2026-11-18),
+Developer ID signed, notarized and stapled; `/download/mac` serves it. Xcode
+hung on the MacBook (macOS pipe buffers shrunk to 512 bytes after 12 days up,
+so the build service deadlocks on clang's probe), so an offstage Mac built the
+unsigned Release archive and the MacBook signed, notarized and packaged it.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

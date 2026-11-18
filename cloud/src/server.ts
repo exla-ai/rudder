@@ -1533,7 +1533,7 @@ async function requestDeletion(
     const homeId = row ? optionalString(row.home_id) : undefined;
     if (row && optionalString(row.source_kind) === "home") {
       // Deleting the home machine deletes every repo on it.
-      for (const repo of homeRepos(id)) {
+      for (const repo of allHomeRepos(id)) {
         markWorkspaceDeleting.run({ id: repo.id, accountId, tombstoneKey: `deleted:${repo.id}`, updatedAt: now });
         closeChannel("workspace", repo.id);
       }
@@ -1683,7 +1683,7 @@ async function sweepIdleWorkspaces(): Promise<void> {
       continue;
     }
     // The home machine is idle only when nobody is attached to ANY of its repos.
-    if (isHome && homeRepos(workspace.id).some((repo) => Array.from(workspaceChannels.get(repo.id)?.clients ?? []).some(isOpen))) {
+    if (isHome && allHomeRepos(workspace.id).some((repo) => Array.from(workspaceChannels.get(repo.id)?.clients ?? []).some(isOpen))) {
       continue;
     }
     // BUSY EXEMPTION: agents are actively working in this machine (reported by
@@ -2892,7 +2892,8 @@ async function handleWorkspaceApi(req: IncomingMessage, res: ServerResponse, url
   const authContext = requireBearer(req);
   if (req.method === "GET" && url.pathname === "/api/rudder/workspace") {
     sendJson(res, 200, {
-      workspaces: listAccountWorkspaces(authContext.accountId).map(annotateWorkspaceClients),
+      // The app's "All agents" project is not one to list or attach to.
+      workspaces: listAccountWorkspaces(authContext.accountId).filter((row) => !isCoordinatorRow(row)).map(annotateWorkspaceClients),
     });
     return;
   }
@@ -5412,7 +5413,16 @@ function homeRepoKey(slug: string): string {
   return `home:${slug.toLowerCase()}`;
 }
 
+// The user's projects on a home. The "All agents" chat's hidden project
+// (isCoordinatorRow) is never one of them: it is listed, matched, synced,
+// digested and notified nowhere. Only the machine's own bookkeeping (pushing
+// repos to the supervisor, deleting, fencing, dir names, client counts) reads
+// every row, through allHomeRepos.
 function homeRepos(homeId: string): Workspace[] {
+  return allHomeRepos(homeId).filter((row) => !isCoordinatorRow(row));
+}
+
+function allHomeRepos(homeId: string): Workspace[] {
   return (listHomeRepoRows.all(homeId) as Record<string, unknown>[]).map(rowToWorkspace);
 }
 
@@ -5667,7 +5677,7 @@ function closeHomeControl(homeId: string): void {
 // new sockets; this drops the ones it already holds.
 function fenceHomeHost(homeId: string): void {
   closeHomeControl(homeId);
-  for (const repo of homeRepos(homeId)) {
+  for (const repo of allHomeRepos(homeId)) {
     try { workspaceChannels.get(repo.id)?.worker?.close(4001, "home host changed"); } catch { /* already closed */ }
   }
 }
@@ -6340,6 +6350,9 @@ async function openLocalProjectOnHome(accountId: string, rawName: string): Promi
   if (!LOCAL_NAME_RE.test(name) || name.endsWith(".git")) {
     throw badRequest("name can use letters, numbers, dashes, dots and underscores");
   }
+  if (name.toLowerCase() === COORDINATOR_NAME) {
+    throw badRequest(`${COORDINATOR_NAME} is the All agents chat's project; pick another name`);
+  }
   const home = await ensureHomeRunning(accountId);
   if (homeRepos(home.id).some((row) => row.repoName?.toLowerCase() === name.toLowerCase())) {
     throw Object.assign(new Error(`a project called ${name} is already on your cloud machine`), { status: 409 });
@@ -6348,6 +6361,24 @@ async function openLocalProjectOnHome(accountId: string, rawName: string): Promi
   pushHomeRepos(home.id);
   schedulePersistDatabase();
   return { home: home as unknown as JsonRecord, workspace: repo as unknown as JsonRecord };
+}
+
+// The app's "All agents" chat: a local project of its own on the home, opened
+// on first use and left out of every project list. Its agents get tools over
+// every other project's agents (cloud/worker/coordinator.mjs).
+const COORDINATOR_SLUG = "~rudder/rudder-all-agents";
+const COORDINATOR_NAME = "rudder-all-agents";
+const isCoordinatorRow = (row: Workspace): boolean => row.workspaceKey === homeRepoKey(COORDINATOR_SLUG);
+
+async function openCoordinatorOnHome(accountId: string): Promise<JsonRecord> {
+  const home = await ensureHomeRunning(accountId);
+  if (homeRepos(home.id).some((row) => !isCoordinatorRow(row) && row.repoName?.toLowerCase() === COORDINATOR_NAME)) {
+    throw Object.assign(new Error(`a project called ${COORDINATOR_NAME} is already on your cloud machine; rename it to use All agents`), { status: 409 });
+  }
+  const repo = ensureHomeRepoRow(home, COORDINATOR_SLUG, undefined, `${LOCAL_REPO_PREFIX}${COORDINATOR_NAME}`);
+  pushHomeRepos(home.id);
+  schedulePersistDatabase();
+  return { workspace: repo.id };
 }
 
 function repoSlugFromUrl(url: string | undefined): string {
@@ -6362,6 +6393,7 @@ function homeRepoDescriptor(row: Workspace): JsonRecord {
     repo: repoSlugFromUrl(row.repoUrl),
     remote: row.repoUrl ?? "",
     ref: row.gitRef ?? null,
+    ...(isCoordinatorRow(row) ? { coordinator: true } : {}),
   };
 }
 
@@ -6380,7 +6412,7 @@ async function openRepoOnHome(accountId: string, body: Json): Promise<JsonRecord
   const project = (stringField(body, "project") ?? "").trim().toLowerCase();
   if (project) {
     const existing = findHomeRow(accountId);
-    const row = existing ? homeRepos(existing.id).find((r) => (r.repoName ?? "").toLowerCase() === project) : undefined;
+    const row = existing ? homeRepos(existing.id).find((r) => !isCoordinatorRow(r) && (r.repoName ?? "").toLowerCase() === project) : undefined;
     if (!row) {
       throw Object.assign(new Error(`no project named ${project} on your cloud machine`), { status: 404 });
     }
@@ -6882,14 +6914,15 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
   };
 }
 
-// Repo rows merged with what the supervisor last reported for each.
-function homeProjects(home: Workspace): JsonRecord[] {
+// Repo rows merged with what the supervisor last reported for each. The
+// "All agents" project is only ever the app's `coordinator`, never a project.
+function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord[] {
   const state = homeStates.get(home.id);
   const live = new Map((state?.projects ?? []).map((project) => [project.workspaceId, project]));
   // Asleep or disconnected: live rows are frozen as paused, never "Working".
   const stateLive = homeStateLive(home.id);
   const lastSeen = state ? Date.parse(state.updatedAt) || null : null;
-  return homeRepos(home.id).map((row) => {
+  return homeRepos(home.id).filter((row) => isCoordinatorRow(row) === coordinator).map((row) => {
     const project = live.get(row.id);
     // Each agent says whether teammates may see it (team.ts), and whether it
     // needs you and why (agent-status.ts).
@@ -6997,7 +7030,7 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
       .filter((slug): slug is string => typeof slug === "string" && REPO_SLUG_RE.test(slug))
       .map((slug) => slug.toLowerCase());
     const home = await homeWithControl(authContext.accountId);
-    const repos = homeRepos(home.id).filter((row) => wanted.length === 0 || wanted.includes(repoSlugFromUrl(row.repoUrl).toLowerCase()));
+    const repos = homeRepos(home.id).filter((row) => !isCoordinatorRow(row) && (wanted.length === 0 || wanted.includes(repoSlugFromUrl(row.repoUrl).toLowerCase())));
     const results: JsonRecord[] = [];
     for (const repo of repos) {
       const slug = repoSlugFromUrl(repo.repoUrl);
@@ -7217,8 +7250,13 @@ async function serveAppFile(req: IncomingMessage, res: ServerResponse, pathname:
   const insideApp = resolved === appDir || resolved.startsWith(`${appDir}${path.sep}`);
   const shell = path.join(appDir, "index.html");
   let target = insideApp ? resolved : shell;
-  // Client-side routes (/app/p/<id>) fall back to the shell.
-  if (!(await fs.stat(target).then((stat) => stat.isFile(), () => false))) {
+  // Client-side routes (/app/p/<id>) name no file: they get the shell. Any
+  // other stat failure is a real error.
+  const stat = await fs.stat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  });
+  if (!stat?.isFile()) {
     target = shell;
   }
   // The shell and the service worker must revalidate so a deploy shows up on
@@ -7398,6 +7436,8 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       email: account.email ?? null,
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
+      // The "All agents" chat's project, once it was opened.
+      coordinator: (home ? homeProjects(home, { coordinator: true })[0] ?? null : null) as Json,
       onboarding: onboardingStore.onboardingSummary(account.accountId) as unknown as Json,
       orgs: orgStore.listOrgsForAccount(account.accountId) as unknown as Json,
       github: vaultGithubStatus(account.accountId),
@@ -7445,6 +7485,10 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   }
   if (req.method === "POST" && url.pathname === "/api/app/open") {
     sendJson(res, 200, await openRepoOnHome(account.accountId, await readJsonBody(req)));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/coordinator") {
+    sendJson(res, 200, await openCoordinatorOnHome(account.accountId));
     return;
   }
   // Add project: the GitHub repos the home machine's login can open, and
@@ -7704,15 +7748,20 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/agent-edit") {
-    // Edit a chat's latest prompt: the dashboard takes the conversation back
-    // to just before it and runs the new text (native chat_edit.rs). `entry`
-    // is the prompt's id in the session file, from the transcript's `edit`.
+    // Edit a prompt in a chat: the dashboard takes the conversation back to
+    // just before it and runs the new text (native chat_edit.rs). `entry` is
+    // the prompt's id in the session file and `latest` the chat's latest
+    // prompt as shown, both from the transcript's `edits`.
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const entry = (stringField(body, "entry") ?? "").trim();
+    const latest = (stringField(body, "latest") ?? "").trim();
     const text = (stringField(body, "text") ?? "").trim();
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(entry)) {
       throw badRequest("entry is required");
+    }
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(latest)) {
+      throw badRequest("latest is required");
     }
     if (!text) {
       throw badRequest("text is required");
@@ -7721,6 +7770,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       workspaceId: repo.id,
       runId: stringField(body, "run") ?? "",
       entry,
+      latest,
       text: text.slice(0, 16_000),
     });
     captureProductEvent(account.accountId, "message_edited", { platform: requestPlatform(req) });

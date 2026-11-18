@@ -18,12 +18,13 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
-import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
-import { readAsks, askDecision, isAskId } from "./asks.mjs";
+import { readTranscript, lastAssistantText, userTask, transcriptFile } from "./transcripts.mjs";
+import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps } from "./asks.mjs";
 import { statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
@@ -39,6 +40,7 @@ import { ensureCodexTrust } from "./codex-trust.mjs";
 import { createSlashCommands } from "./slash-commands.mjs";
 import { createVibeprintHosts } from "./vibeprint-host.mjs";
 import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
+import { createCoordinatorTools, startCoordinatorBroker, writeCoordinatorFiles } from "./coordinator.mjs";
 
 let projectFiles;
 async function fileService() {
@@ -80,6 +82,8 @@ const TOOLS_DIR = path.join(VOLUME, "tools");
 const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
 // Where `rudder-burst` reaches this supervisor for build pool leases.
 const BURST_SOCKET = process.env.RUDDER_BURST_SOCKET || path.join(os.tmpdir(), "rudder-burst.sock");
+// Where the "All agents" chat's MCP server reaches this supervisor (coordinator.mjs).
+const COORDINATOR_SOCKET = path.join(os.tmpdir(), "rudder-all-agents.sock");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
 // "Update now" (Alt+r in a dashboard here): status.json and request, home-host.mjs.
@@ -111,6 +115,7 @@ let homeUpdateRequestedAt = 0;
 let hostFailureShown = null;
 let hostFailureReported = null;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
+const previewErrors = new Map(); // runId -> the last preview error logged
 let privatePreviews;
 async function privatePreviewService() {
   if (!privatePreviews) {
@@ -218,6 +223,12 @@ createCleanupJob({ env: cleanupEnv, log, onRun: (run) => telemetry.recordCleanup
 // Build pool leases for `rudder-burst`; the control plane answers 404 until
 // the pool is enabled there.
 startBurstBroker({ socketPath: BURST_SOCKET, cloudUrl, homeId, workerToken, log });
+// The "All agents" chat's tools: every project's agents, through the same RPCs the app uses.
+startCoordinatorBroker({
+  socketPath: COORDINATOR_SOCKET,
+  tools: createCoordinatorTools({ projects: () => [...projects.values()], rpc: handleRpc, home: HOME }),
+  log,
+});
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
@@ -280,6 +291,13 @@ class Project {
       return;
     }
     writeDeferredRepoFiles(this.name, this.dir);
+    if (this.coordinator) {
+      writeCoordinatorFiles(this.dir, {
+        node: process.execPath,
+        mcpScript: fileURLToPath(new URL("./coordinator-mcp.mjs", import.meta.url)),
+        socketPath: COORDINATOR_SOCKET,
+      });
+    }
     acceptClaudeDialogs([this.dir]);
     this.connect();
     this.spawnDashboard();
@@ -289,6 +307,11 @@ class Project {
   // fresh git repo with one empty commit for jj and the dashboard to stand on.
   get local() {
     return String(this.descriptor.remote || "").startsWith("local:");
+  }
+
+  // The hidden local project behind the app's "All agents" chat (coordinator.mjs).
+  get coordinator() {
+    return this.descriptor.coordinator === true;
   }
 
   async ensureClone() {
@@ -726,7 +749,8 @@ async function handleRpc(method, params) {
     const since = Number(params.since) || until - 24 * 3600_000;
     const list = [];
     for (const project of projects.values()) {
-      if (project.status === "cloning") {
+      // The "All agents" chat reports on the others; it is not a project's work.
+      if (project.status === "cloning" || project.coordinator) {
         continue;
       }
       list.push({
@@ -800,13 +824,15 @@ async function handleRpc(method, params) {
     return await steer(project, { kind: "branch", taskId: String(params.runId || ""), instruction: text ? `branch\n${text}` : "branch" });
   }
   if (method === "agentEdit") {
-    // Edit the chat's latest prompt (native chat_edit.rs): the conversation
-    // goes back to just before it and the new text runs in its place.
+    // Edit a prompt in the chat (native chat_edit.rs): the conversation goes
+    // back to just before it and the new text runs in its place. `latest` is
+    // the chat's latest prompt as shown; a newer one makes the edit refused.
     const entry = String(params.entry || "");
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(entry)) {
+    const latest = String(params.latest || "");
+    if (![entry, latest].every((id) => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
       throw new Error("not a message id");
     }
-    return await steer(project, { kind: "edit", taskId: String(params.runId || ""), instruction: `${entry}\n${String(params.text || "")}` });
+    return await steer(project, { kind: "edit", taskId: String(params.runId || ""), instruction: `${entry} ${latest}\n${String(params.text || "")}` });
   }
   if (method === "previewRegister") {
     const service = await privatePreviewService();
@@ -1388,8 +1414,13 @@ function agentSummary(record, options = {}) {
       lastMessage = text.text;
       remoteUrl = text.remoteUrl ?? null;
     }
-  } catch {
-    // a preview is a nicety
+  } catch (error) {
+    // A preview is not worth failing the agent list over; say why once.
+    const message = error instanceof Error ? error.message : String(error);
+    if (previewErrors.get(record.id) !== message) {
+      previewErrors.set(record.id, message);
+      log(`preview ${record.id}: ${message}`);
+    }
   }
   return {
     id: record.id,
@@ -1412,7 +1443,7 @@ function agentSummary(record, options = {}) {
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
     remoteUrl,
-    asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
+    asks: agentAsks(record),
   };
 }
 
@@ -1426,11 +1457,35 @@ function asksDir(runId) {
   return path.join(HOME, ".rudder", "signals", `${runId}.asks`);
 }
 
+// Codex has no hook for its prompts: they are read from its rollout.
+function agentAsks(record) {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(record.id))) {
+    return [];
+  }
+  return record.backend === "codex" ? codexAsks(record, transcriptFile(record, HOME)) : readAsks(asksDir(record.id));
+}
+
 async function answerAsk(project, params) {
   const runId = String(params.runId || "");
   const askId = String(params.askId || "");
   if (!/^[A-Za-z0-9._-]+$/.test(runId) || !isAskId(askId)) {
     throw new Error("unknown prompt");
+  }
+  const record = readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json"));
+  if (record?.backend === "codex") {
+    // The rollout moves on once the keys land, and the card goes with it.
+    const ask = agentAsks(record).find((candidate) => candidate.id === askId);
+    if (!ask) {
+      throw new Error("that prompt was already answered");
+    }
+    let delivered = null;
+    for (const step of codexAskSteps(ask, params.answer)) {
+      delivered = await steer(project, { ...step, taskId: runId });
+      if (delivered.status !== "delivered") {
+        break;
+      }
+    }
+    return delivered;
   }
   const dir = asksDir(runId);
   let request;
@@ -1599,9 +1654,10 @@ async function checkCodex(env) {
   if (status.code !== 0) {
     return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
   }
-  // The cheapest model at low effort: the user's config.toml default (often max
-  // effort on the flagship) is for agents, not for a sign-in check.
-  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "-m", "gpt-6-luna", "-c", 'model_reasoning_effort="low"', "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  // The account's own default model (any account can use it) at low effort:
+  // the user's config.toml effort (often max) is for agents, not for a
+  // sign-in check.
+  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "-c", 'model_reasoning_effort="low"', "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
     return { ok: true, account, plan, detail: null };
   }
@@ -2057,7 +2113,6 @@ function buildChildEnv(vaultEnv) {
     RUDDER_DISABLE_AUTO_UPDATE: "1",
     RUDDER_DISABLE_UPDATE_CHECK: "1",
     RUDDER_DISABLE_ONBOARD_INSTALL: "1",
-    RUDDER_CODEX_BIN: process.env.RUDDER_CODEX_BIN || "codex",
     RUDDER_BURST_SOCKET: BURST_SOCKET,
     RUDDER_HOME_UPDATE_DIR: HOME_UPDATE_DIR,
   };

@@ -2020,7 +2020,13 @@ impl TerminalPane {
             AnsiTrackState::Ground => AnsiTrackState::Ground,
             AnsiTrackState::Escape if byte == b'[' => AnsiTrackState::Csi(Vec::new()),
             AnsiTrackState::Escape if byte == 0x1b => AnsiTrackState::Escape,
-            AnsiTrackState::Escape => AnsiTrackState::Ground,
+            AnsiTrackState::Escape => {
+                // ESC c (full reset) clears the parser's region too.
+                if byte == b'c' {
+                    self.tracked_scroll_region = None;
+                }
+                AnsiTrackState::Ground
+            }
             AnsiTrackState::Csi(mut bytes) => {
                 bytes.push(byte);
                 if (0x40..=0x7e).contains(&byte) {
@@ -2038,10 +2044,6 @@ impl TerminalPane {
             return;
         }
         let params = &bytes[..bytes.len().saturating_sub(1)];
-        if params.is_empty() {
-            self.tracked_scroll_region = None;
-            return;
-        }
         if params
             .iter()
             .any(|byte| !byte.is_ascii_digit() && *byte != b';')
@@ -2049,25 +2051,18 @@ impl TerminalPane {
             return;
         }
 
+        // Exactly vt100's DECSTBM: a missing or zero top is row 1, a missing or
+        // zero bottom is the last row, and a region of fewer than two rows
+        // resets to the full screen. Any other reading captures rows the parser
+        // never scrolled (Codex's `ESC[1;1r` stacked copies of the top row).
         let text = String::from_utf8_lossy(params);
         let mut parts = text.split(';');
-        let top = parts
-            .next()
-            .and_then(|part| part.parse::<u16>().ok())
-            .unwrap_or(1);
-        let bottom = parts
-            .next()
-            .and_then(|part| part.parse::<u16>().ok())
-            .unwrap_or(self.size.rows);
-        if top == 0 || bottom == 0 || top > bottom {
-            return;
-        }
-
-        let top = top.saturating_sub(1).min(self.size.rows.saturating_sub(1));
-        let bottom = bottom
-            .saturating_sub(1)
-            .min(self.size.rows.saturating_sub(1));
-        self.tracked_scroll_region = Some((top, bottom));
+        let mut param = || parts.next().and_then(|part| part.parse::<u16>().ok()).unwrap_or(0);
+        let (top, bottom) = (param(), param());
+        let top = top.max(1) - 1;
+        let bottom = if bottom == 0 { self.size.rows } else { bottom };
+        let bottom = (bottom - 1).min(self.size.rows.saturating_sub(1));
+        self.tracked_scroll_region = (top < bottom).then_some((top, bottom));
     }
 
     fn capture_alternate_snapshot(&mut self) {
@@ -3028,6 +3023,40 @@ mod tests {
         let output = pane.visible_lines_snapshot().join("\n");
         assert!(output.contains("history001"), "output was {output:?}");
         assert!(output.contains("history005"), "output was {output:?}");
+    }
+
+    /// Codex inserts history with `ESC[1;<viewport top>r`. With its viewport on
+    /// row 1 that is a one-row region, which the parser refuses, so nothing
+    /// scrolls; capturing anyway stacked copies of the stale top row.
+    #[cfg(unix)]
+    #[test]
+    fn region_scrollback_follows_the_parsers_scroll_region() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])),
+            TerminalPaneOptions { size: TerminalSize { rows: 6, cols: 20 }, scrollback_lines: 100, ..Default::default() },
+        )
+        .unwrap();
+        let history = |pane: &TerminalPane| -> Vec<String> {
+            pane.region_scrollback
+                .iter()
+                .map(|row| row.iter().map(|cell| cell.contents.as_str()).collect::<String>().trim_end().to_string())
+                .collect()
+        };
+
+        pane.process_output_chunk(b"\x1b[1;1Hstale top");
+        for line in ["one", "two", "three"] {
+            pane.process_output_chunk(format!("\x1b[1;1r\x1b[1;1H\r\n{line}\x1b[r").as_bytes());
+        }
+        assert_eq!(history(&pane), Vec::<String>::new());
+
+        // A zero top margin means row 1, so this region is real and scrolls
+        // (blank rows are not kept as history).
+        pane.process_output_chunk(b"\x1b[0;3r\x1b[3;1H\r\nh1\r\nh2\r\nh3\r\nh4\x1b[r");
+        assert_eq!(history(&pane), ["stale top", "three", "h1"]);
+
+        // A full reset drops the region too.
+        pane.process_output_chunk(b"\x1b[1;3r\x1bcafter reset\x1b[3;1H\r\nx");
+        assert_eq!(history(&pane).len(), 3);
     }
 
     #[test]

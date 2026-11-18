@@ -12,7 +12,7 @@
 // own page through its relay, signed in with the token in the link's fragment
 // (frames get no cookies).
 import { api, confirmDialog, toast, ls } from "/app/core.js";
-import { h, icon, copyText } from "/app/render.js";
+import { h, icon, copyText, escapeHtml } from "/app/render.js";
 
 const STARTING_POLL_MS = 1500;
 const RUNNING_POLL_MS = 30000;
@@ -53,7 +53,10 @@ linkBtn.addEventListener("click", () => {
   const v = state.view;
   if (v?.state !== "running") return;
   // ?t= signs the iPad in once (a cookie); then Share > Add to Home Screen.
-  void copyText(`${v.url}?t=${encodeURIComponent(v.token)}`).then(() => toast("Copied the canvas link. Open it on the iPad."));
+  void copyText(`${v.url}?t=${encodeURIComponent(v.token)}`).then((ok) => {
+    if (ok) toast("Copied the canvas link. Open it on the iPad.");
+    else toast("Couldn't copy the canvas link", { error: true });
+  });
 });
 offBtn.addEventListener("click", () => { void turnOff(); });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.open) void refresh(); });
@@ -152,19 +155,20 @@ function retarget(target) {
 
 async function refresh() {
   clearTimeout(state.timer);
-  const ws = state.target?.ws;
-  if (!state.open || !ws) return;
+  const t = state.target;
+  if (!state.open || !t?.ws) return;
   let view;
   try {
-    view = await api(`/api/app/vibeprint?${new URLSearchParams({ workspace: ws, ...(state.target.run ? { run: state.target.run } : {}) })}`);
+    view = await api(`/api/app/vibeprint?${new URLSearchParams({ workspace: t.ws, ...(t.run ? { run: t.run } : {}) })}`);
   } catch (e) {
-    if (state.target?.ws !== ws) return;
     view = { state: "failed", error: e?.message || "The canvas is unavailable" };
   }
-  if (!state.open || state.target?.ws !== ws) return;
+  // A newer target (another agent of the same project too) has its own answer coming.
+  if (!state.open || state.target !== t) return;
   show(view);
   const wait = view.state === "starting" ? STARTING_POLL_MS : view.state === "running" ? RUNNING_POLL_MS : 0;
-  if (wait) state.timer = setTimeout(() => { if (document.visibilityState === "visible") void refresh(); else state.timer = setTimeout(refresh, wait); }, wait);
+  // A hidden page skips the poll; visibilitychange refreshes when it shows again.
+  if (wait) state.timer = setTimeout(() => { if (document.visibilityState === "visible") void refresh(); }, wait);
 }
 
 async function request(op, extra = {}) {
@@ -200,8 +204,10 @@ async function turnOn() {
 async function turnOff() {
   const ok = await confirmDialog({ title: "Turn the canvas off?", body: "The canvas stops on the home and its iPad link stops working until you turn it on again. Your drawing is kept.", confirm: "Turn off" });
   if (!ok) return;
-  try { await request("stop"); } catch (e) { toast(e?.message || "Could not turn the canvas off", { error: true }); return; }
-  show({ state: "off" });
+  let view;
+  try { view = await request("stop"); } catch (e) { toast(e?.message || "Could not turn the canvas off", { error: true }); return; }
+  // null: another canvas request was still running, so nothing was sent.
+  if (view) show(view);
 }
 
 function show(view) {
@@ -223,7 +229,7 @@ function show(view) {
   }
   state.frameKey = "";
   if (view.state === "starting") {
-    bodyEl.replaceChildren(h(`<div class="cv-empty"><span class="cv-spin" aria-hidden="true"></span><span>Starting the canvas${view.note ? `. ${escape(view.note)}` : ""}</span></div>`));
+    bodyEl.replaceChildren(h(`<div class="cv-empty"><span class="cv-spin" aria-hidden="true"></span><span>Starting the canvas${view.note ? `. ${escapeHtml(view.note)}` : ""}</span></div>`));
     return;
   }
   if (view.state === "failed") {
@@ -240,12 +246,6 @@ function show(view) {
   </div>`);
   card.querySelector("button").addEventListener("click", () => { void turnOn(); });
   bodyEl.replaceChildren(card);
-}
-
-function escape(text) {
-  const d = document.createElement("div");
-  d.textContent = text;
-  return d.innerHTML;
 }
 
 function agentName() {

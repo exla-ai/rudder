@@ -122,28 +122,66 @@ function popover(anchor, { label, render, place = "below" }) {
 /* Agent stats: header line + popover ------------------------------------- */
 
 /**
- * The agent page's speed and context line. Mount `el` in the header's
- * subtitle and call `update(transcript.stats)` after each transcript load.
- * Hidden while the transcript has no numbers (a new agent, a backend without
- * session logs, or a teammate's agent).
+ * The agent page's speed and context, at the end of the header's subtitle
+ * `line` ("Working · Claude · opus"). Call `update(transcript.stats)` after
+ * each paint of the line. Hidden while the transcript has no numbers (a new
+ * agent, a backend without session logs, or a teammate's agent). When the
+ * home could not work them out (`stats.error`), it says so and the popover
+ * gives the reason.
  */
-export function AgentStats() {
+export function AgentStats(line) {
   const el = h(`<button type="button" class="as-chip" hidden>
     <span class="as-sep" aria-hidden="true">·</span><span class="as-ctx"></span><span class="as-sep as-mid" aria-hidden="true">·</span><span class="as-tps"></span>
   </button>`);
+  line.appendChild(el);
   const ctxEl = el.querySelector(".as-ctx");
   const tpsEl = el.querySelector(".as-tps");
   const midSep = el.querySelector(".as-mid");
   let stats = null;
+  let problem = null;
 
-  const pop = popover(el, { label: "Agent speed and context", render: () => renderAgentPop(stats) });
+  const pop = popover(el, { label: "Agent speed and context", render: () => renderAgentPop(stats, problem) });
+
+  // When the line has no room, whole parts give way instead of being cut
+  // mid-word: the word "left", then the agent and model (the composer's
+  // model chip names it too), then the speed. The status and the context
+  // stay. The steps are classes on the chip (agent-stats.css): the page
+  // sets the line's own classes on each paint.
+  const STEPS = ["fit-left", "fit-bk", "fit-tps"];
+  function fit() {
+    el.classList.remove(...STEPS);
+    if (el.hidden || !line.clientWidth) return;
+    el.classList.add("as-measure");
+    for (const step of problem ? STEPS.slice(0, 2) : STEPS) {
+      if (line.scrollWidth <= line.clientWidth) break;
+      el.classList.add(step);
+    }
+    el.classList.remove("as-measure");
+  }
+  const resize = new ResizeObserver(fit);
+  resize.observe(line);
 
   function update(next) {
-    stats = next && !next.error ? next : null;
+    paint(next);
+    fit();
+  }
+
+  function paint(next) {
+    problem = next?.error || null;
+    stats = next && !problem ? next : null;
     const ctx = contextView(stats?.context);
     const speed = stats?.speed;
-    el.hidden = !ctx && !speed;
+    el.hidden = !ctx && !speed && !problem;
     if (el.hidden) { pop.close(); return; }
+    if (problem) {
+      ctxEl.hidden = true;
+      midSep.hidden = true;
+      setText(tpsEl, "Stats unavailable");
+      tpsEl.hidden = false;
+      el.setAttribute("aria-label", "Speed and context unavailable. Show why");
+      if (pop.open) pop.paint();
+      return;
+    }
     const ctxSig = ctx ? `${ctx.pct ?? ""}|${ctx.label}|${ctx.level}` : "";
     if (ctxEl.dataset.sig !== ctxSig) {
       ctxEl.dataset.sig = ctxSig;
@@ -159,7 +197,7 @@ export function AgentStats() {
     if (pop.open) pop.paint();
   }
 
-  return { el, update, destroy: () => pop.destroy() };
+  return { el, update, destroy: () => { resize.disconnect(); pop.destroy(); } };
 }
 
 // What the header shows for the context: percent left of the window, or the
@@ -173,8 +211,14 @@ function contextView(c) {
   return { pct: usedPct, label: `${left}%`, level: level(usedPct), aria: `${left}% of the context window left` };
 }
 
-function renderAgentPop(stats) {
+function renderAgentPop(stats, problem) {
   const box = h(`<div class="st-body"></div>`);
+  if (problem) {
+    const sec = h(`<section class="st-sec"><div class="st-h"><span>Speed and context</span></div><p class="st-note"></p></section>`);
+    setText(sec.querySelector(".st-note"), `The cloud machine could not work them out: ${problem}`);
+    box.appendChild(sec);
+    return box;
+  }
   if (!stats) return box;
   const speed = stats.speed;
   if (speed) {

@@ -328,7 +328,7 @@ export function FilesHubScreen({ projects }) {
     try {
       const [guide, scopes] = await Promise.all([
         api(`/api/app/project-guide?${new URLSearchParams({ workspaceId: ws })}`),
-        projectFileScopes(ws).catch(() => []),
+        projectFileScopes(ws),
       ]);
       st.guide = guide;
       st.scopesAt = Date.now();

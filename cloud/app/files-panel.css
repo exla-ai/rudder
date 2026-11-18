@@ -64,12 +64,14 @@ body.desktop { --files-w: min(46vw, 760px); }
 .fp-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 14px; border-bottom: 1px solid var(--line); min-height: 52px; }
 .fp-title { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 15px; margin-right: 4px; }
 .fp-title svg { color: var(--muted); }
+/* The workspace picker: the app's dropdown (select.js). With one workspace
+   there is nothing to pick, so it reads as a label. */
 .fp-ws {
-  flex: 1 1 auto; min-width: 0; max-width: 280px; height: 34px; padding: 0 28px 0 10px; border-radius: 9px;
+  flex: 1 1 auto; min-width: 0; max-width: 280px; height: 34px; padding: 0 8px 0 10px; border-radius: 9px;
   border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); font: inherit; font-size: 14px;
-  text-overflow: ellipsis;
 }
 .fp-ws:disabled { opacity: 1; color: var(--ink-2); }
+.fp-ws:disabled .dd-chev { display: none; }
 .fp-head .icon-btn { width: 38px; height: 38px; margin-left: auto; }
 .fp-head .fp-refresh { margin-left: auto; }
 .fp-head .fp-close { margin-left: 0; }

@@ -5,7 +5,10 @@ let libs = null;
 let libsPromise = null;
 const listeners = new Set();
 
-export function onMarkdownReady(fn) { listeners.add(fn); }
+// Runs `fn` once, when the libraries load. Once they have, there is nothing
+// to wait for, and holding `fn` (an agent screen's repaint) would keep that
+// screen alive for good.
+export function onMarkdownReady(fn) { if (!libs) listeners.add(fn); }
 export function markdownReady() { return !!libs; }
 
 export function loadMarkdown() {
@@ -24,7 +27,9 @@ export function loadMarkdown() {
       }
     });
     libs = { marked, purify, hljs: h.default };
-    for (const fn of listeners) { try { fn(); } catch (e) { console.error(e); } }
+    const waiting = [...listeners];
+    listeners.clear();
+    for (const fn of waiting) { try { fn(); } catch (e) { console.error(e); } }
   }).catch((err) => {
     console.warn("markdown libraries unavailable, using plain text", err);
     libsPromise = null;
@@ -120,6 +125,7 @@ const P = {
   tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L4 16.8V20h3.2l5.3-5.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.8-.7-.7-2.8z"/>',
   web: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>',
   task: '<path d="M9 11l3 3 8-8"/><path d="M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11"/>',
+  agents: '<circle cx="12" cy="5" r="2.3"/><circle cx="6" cy="19" r="2.3"/><circle cx="18" cy="19" r="2.3"/><path d="M12 7.3v4.2M6 16.7V13a1.5 1.5 0 0 1 1.5-1.5h9A1.5 1.5 0 0 1 18 13v3.7"/>',
   clip: '<path d="M20.5 11.5l-8.3 8.3a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
   pin: '<path d="M9 3h6"/><path d="M10 3v5.5L7 13h10l-3-4.5V3z"/><path d="M12 13v8"/>',

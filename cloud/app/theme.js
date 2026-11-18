@@ -17,8 +17,9 @@
     document.documentElement.dataset.theme = theme;
     document.querySelector('meta[name="theme-color"]').setAttribute("content", theme === "dark" ? "#111214" : "#f6f4ef");
   };
+  // Outside the Mac shell there is no handler, and nothing to tell.
   const tellShell = () => {
-    try { window.webkit?.messageHandlers?.rudder?.postMessage({ type: "appearance", value: pick }); } catch { /* not in the shell */ }
+    window.webkit?.messageHandlers?.rudder?.postMessage({ type: "appearance", value: pick });
   };
 
   systemDark.addEventListener("change", () => { if (pick === "system") apply(); });

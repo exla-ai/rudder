@@ -17,12 +17,14 @@ import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-pi
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
+import { paintSubagent } from "/app/subagents.js";
 import { applyAgentEdits, branchAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
+import { ALL_PATH, AllAgentsScreen, allAgentPath, allAgentsButton, coordinatorTool } from "/app/all-agents.js";
 
 function dayLabel(ms) {
   const d = new Date(ms), now = new Date();
@@ -117,7 +119,11 @@ const agentStatus = (a) => {
 const BACKEND = { claude: "Claude", codex: "Codex", opencode: "opencode" };
 const backendLabel = (a) => [BACKEND[a.backend] || a.backend, a.model].filter(Boolean).join(" · ");
 
-function findProject(ws) { return store.state?.projects?.find((p) => p.workspaceId === ws) || null; }
+// The "All agents" chat's hidden project (all-agents.js) is found too, never listed.
+function findProject(ws) {
+  const coordinator = store.state?.coordinator;
+  return store.state?.projects?.find((p) => p.workspaceId === ws) || (coordinator?.workspaceId === ws ? coordinator : null);
+}
 function findAgent(ws, run) { return findProject(ws)?.agents?.find((a) => a.id === run) || null; }
 function needsList() {
   const out = [];
@@ -542,6 +548,9 @@ function parseRoute(path) {
   }
   if (parts[1] === "team") return { name: "team", path: `/app/team${location.search}` };
   if (parts[1] === "welcome") return { name: "welcome", path: "/app/welcome" };
+  // "All agents": /app/all (the newest chat), /app/all/new, /app/all/<ws>/<run>.
+  if (parts[1] === "all" && parts[2] && parts[3]) return { name: "all-agent", ws: decodeURIComponent(parts[2]), run: decodeURIComponent(parts[3]), path };
+  if (parts[1] === "all") return { name: "all", fresh: parts[2] === "new", path: parts[2] ? `${ALL_PATH}/new` : ALL_PATH };
   if (parts[1] === "join" && parts[2]) return { name: "join", token: decodeURIComponent(parts[2]), path, needsAccount: true };
   if (parts[1] === "link" && parts[2] === "slack" && parts[3]) return { name: "slack-link", code: decodeURIComponent(parts[3]), path, needsAccount: true };
   if (parts[1] === "p" && parts[2]) {
@@ -632,6 +641,8 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "files") return FilesHubScreen({ projects: () => store.state?.projects || [] });
   if (route.name === "team") return TeamScreen();
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
+  if (route.name === "all") return AllAgentsScreen({ fresh: route.fresh, store, createComposer, navigate, goBack, refreshState });
+  if (route.name === "all-agent") return AgentScreen(route.ws, route.run, { allAgents: true });
   if (route.name === "welcome") return OnboardingScreen({ again: !onboardingDue(store.state) });
   if (route.name === "join") return JoinScreen(route.token);
   if (route.name === "slack-link") return SlackLinkScreen(route.code);
@@ -717,6 +728,9 @@ function DesktopShell() {
   </div>`);
   const main = el.querySelector(".dsk-main");
   const planCol = el.querySelector(".dsk-plan");
+  // One chat with every agent (all-agents.js), at the top of the sidebar.
+  const allBtn = allAgentsButton({ variant: "ds" });
+  el.querySelector(".ds-top").after(allBtn.el);
   // Plan usage of the machine's Claude and Codex sign-ins (agent-stats.js).
   const planUsage = PlanUsage();
   el.querySelector(".ds-foot").prepend(planUsage.el);
@@ -1142,6 +1156,7 @@ function DesktopShell() {
     el.querySelector(".ds-settings").classList.toggle("on", route?.name === "settings");
     el.querySelector(".ds-digest").classList.toggle("on", route?.name === "digest");
     el.querySelector(".ds-files").classList.toggle("on", route?.name === "files");
+    allBtn.paint(s, route?.name === "all" || route?.name === "all-agent");
     el.querySelector(".ds-team").hidden = !hasTeam(s);
     el.querySelector(".ds-team").classList.toggle("on", route?.name === "team" || route?.name === "team-agent");
 
@@ -1578,9 +1593,9 @@ function agentRow({ showProject = false } = {}) {
   };
 }
 
-// Swipe a row left to delete its agent (the same delete as dd on the
+// Swipe a row left to close its agent (the same delete as dd on the
 // dashboard, which takes it off every screen). Past the threshold the red edge
-// says Delete; letting go there asks first, anywhere else snaps back.
+// says Close; letting go there asks first, anywhere else snaps back.
 const SWIPE_DELETE_PX = 90;
 function enableSwipeDelete(el) {
   let x0 = 0, y0 = 0, dx = 0, tracking = false, swiping = false;
@@ -1621,10 +1636,12 @@ function enableSwipeDelete(el) {
 
 async function deleteAgent(ws, a, { after } = {}) {
   const live = a.status === "working" || a.status === "waiting";
+  // "Close" everywhere (both menus, the swipe): the dashboard's dd. Its
+  // workspace is snapshotted into jj before it goes (native delete_agent_now).
   const ok = await confirmDialog({
-    title: "Delete this agent?",
-    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your cloud machine and every screen. Changes it made that are not merged stay in the project's jj history. This cannot be undone.`,
-    confirm: "Delete",
+    title: "Close this agent?",
+    body: `"${a.title || "This agent"}" ${live ? "stops and is" : "is"} deleted, with its workspace and conversation, from your cloud machine and every screen. Edits it made that are not merged stay in the project's jj history. This cannot be undone.`,
+    confirm: "Close",
     danger: true,
   });
   if (!ok) return false;
@@ -1633,7 +1650,7 @@ async function deleteAgent(ws, a, { after } = {}) {
     // Gone now: the dashboard deleted its record, so the next state agrees.
     const p = findProject(ws);
     if (p?.agents) p.agents = p.agents.filter((x) => x.id !== a.id);
-    toast("Agent deleted");
+    toast("Agent closed");
     after?.();
     updateScreen();
     refreshState();
@@ -2387,6 +2404,9 @@ function HomeScreen() {
   const avatarBtn = h(`<button type="button" class="icon-btn" aria-label="Settings"><span class="avatar"></span></button>`);
   avatarBtn.addEventListener("click", openSettings);
   acts.appendChild(avatarBtn);
+  // One chat with every agent (all-agents.js), top left next to the name.
+  const allBtn = allAgentsButton({ variant: "tb" });
+  bar.querySelector(".brand").after(allBtn.el);
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
 
@@ -2416,6 +2436,10 @@ function HomeScreen() {
   const wakeBtn = machine.querySelector(".wake");
   // Who Claude Code and Codex sign in as on the machine, and Sign in buttons.
   const accounts = AccountsCard();
+  // Their plan usage (agent-stats.js) under them. The desktop sidebar has its own.
+  const usage = isDesktop() ? null : PlanUsage();
+  const usageCard = usage ? h(`<div class="card pu-card"></div>`) : null;
+  usageCard?.appendChild(usage.el);
   wakeBtn.addEventListener("click", async () => {
     wakeBtn.disabled = true;
     try {
@@ -2439,6 +2463,7 @@ function HomeScreen() {
   function update() {
     const s = store.state;
     setText(avatarBtn.querySelector(".avatar"), (s?.email || "?").slice(0, 1));
+    allBtn.paint(s, false);
     teamBtn.hidden = !hasTeam(s);
     if (!s) {
       if (!machineSlot.firstElementChild) {
@@ -2459,8 +2484,9 @@ function HomeScreen() {
     // Machine
     const home = s.home;
     if (home) {
-      if (machineSlot.firstElementChild !== machine) machineSlot.replaceChildren(machine, accounts.el);
+      if (machineSlot.firstElementChild !== machine) machineSlot.replaceChildren(machine, accounts.el, ...(usageCard ? [usageCard] : []));
       accounts.update(home);
+      usage?.update(s);
       const ml = machineLabel(home);
       const pill = machine.querySelector(".pill");
       pill.className = `pill ${ml.cls}`;
@@ -2527,7 +2553,7 @@ function HomeScreen() {
     renderAdd();
   }
 
-  return { el, update };
+  return { el, update, destroy: () => usage?.destroy() };
 }
 
 // A pin tapped on this phone wins until the server's state agrees: a poll
@@ -3406,7 +3432,7 @@ function createAskCard(ask, { onAnswer }) {
 
 const OUT_LIMIT = 2400;
 
-function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
+function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false } = {}) {
   // `member`: a teammate's agent (team.js), read only. No composer, prompts,
   // terminal or actions, and its transcript comes through the team route.
   const ro = !!member;
@@ -3414,7 +3440,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   const agentNow = () => (ro ? teamAgent(member, ws, run)?.agent : findAgent(ws, run)) || null;
   track("agent_panel_opened", { layout: isDesktop() ? "desktop" : "phone" });
   const el = h(`<section class="screen">
-    <header class="topbar">
+    <header class="topbar agent-bar">
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>
       <div class="titles"><div class="title"></div>
         <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
@@ -3440,8 +3466,9 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     </div></section>`);
   const bar = el.querySelector(".topbar");
   // The title renames the agent in place: click it, or Enter on it.
+  // `allAgents`: the "All agents" chat (all-agents.js), always named that.
   const titleEl = el.querySelector(".title");
-  if (!ro) {
+  if (!ro && !allAgents) {
     titleEl.tabIndex = 0;
     titleEl.setAttribute("role", "button");
     titleEl.title = "Rename";
@@ -3461,19 +3488,22 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     });
   }
   // This pane's speed and context line (agent-stats.js), from the transcript.
-  const agentStats = AgentStats();
-  el.querySelector(".subtitle").appendChild(agentStats.el);
+  const agentStats = AgentStats(el.querySelector(".subtitle"));
   const scroller = el.querySelector(".scroller");
   const msgsEl = el.querySelector(".msgs");
   const typing = el.querySelector(".typing");
   const pill = el.querySelector(".new-pill");
   const back = el.querySelector(".back");
-  const backTo = ro ? teamPath() : projectPath(ws);
+  const backTo = ro ? teamPath() : allAgents ? "/app" : projectPath(ws);
   back.href = backTo;
-  back.setAttribute("aria-label", ro ? "Back to team" : "Back to project");
+  back.setAttribute("aria-label", ro ? "Back to team" : allAgents ? "Back to projects" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
   if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
-  else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }));
+  else if (allAgents) {
+    // Its project is hidden and holds no work: no files, canvas or Mac copy.
+    el.querySelector(".mac-copy")?.remove();
+    bar.append(h(`<a class="icon-btn" href="${ALL_PATH}/new" data-link aria-label="New chat" title="New chat">${icon("plus")}</a>`));
+  } else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }));
   // The right of two panes: history belongs to the left one, so it closes instead.
   if (onClose) {
     back.hidden = true;
@@ -3484,12 +3514,18 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   topbarScrollShadow(scroller, bar);
 
   const composer = createComposer({
-    placeholder: "Message the agent",
+    placeholder: allAgents ? "Message all your agents" : "Message the agent",
     draftKey: `msg:${key}`,
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
     attachments: true,
     onSubmit: (text, files) => { send(text, files); return true; },
   });
+  // With the sidebar (DesktopShell), Alt+[ and Alt+] step between agents. The
+  // hint says so when the pane has room for it (desktop.css .c-steps).
+  if (!coarse && isDesktop()) {
+    const alt = /Mac/.test(navigator.platform) ? "Option" : "Alt";
+    composer.el.querySelector(".c-hint").append(h(`<span class="c-steps">· ${alt}+[ and ${alt}+] for other agents</span>`));
+  }
   el.querySelector(".chat-wrap").after(composer.el);
   // The model and effort this chat runs on, and switching them (model-picker.js).
   const chatTools = h(`<div class="c-tools"></div>`);
@@ -3497,7 +3533,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
   // Claude Code's suggested next prompt: dim in the empty box, Tab or the chip fills it (prompt-suggest.js).
   const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
-  // Edit on the latest prompt: rewinds the conversation to it (chat-edit.js).
+  // Edit on any prompt but the first: rewinds the conversation to it (chat-edit.js).
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript() });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
@@ -3517,7 +3553,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   const lockBtn = el.querySelector(".lock-toggle");
   const paintLock = () => {
     const a = agentNow();
-    const show = !ro && hasTeam(store.state) && !!a && !a.pending;
+    // The "All agents" chat is never shown to teammates (server.ts homeProjects).
+    const show = !ro && !allAgents && hasTeam(store.state) && !!a && !a.pending;
     lockBtn.hidden = !show;
     if (!show) return;
     const priv = a.visibility === "private";
@@ -3758,10 +3795,20 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     const a = agentNow();
     const status = a?.status || store.transcripts.get(key)?.status;
     const canStop = !["stopped", "merged", "failed", "orphaned"].includes(status);
-    const canMerge = status === "done" || status === "review";
+    const canMerge = !allAgents && (status === "done" || status === "review");
     menuEl = h(`<div><div class="scrim"></div><div class="menu" role="menu"></div></div>`);
     const menu = menuEl.querySelector(".menu");
     const add = (html, fn) => { const b = h(html); b.addEventListener("click", () => { closeMenu(); fn(); }); menu.appendChild(b); };
+    // The header buttons a narrow bar hides (.agent-bar in agent-stats.css) lead the menu.
+    const priv = lockBtn.classList.contains("on");
+    const tucked = [
+      [termToggle, "Show terminal"],
+      [bar.querySelector(".fp-toggle"), "Files"],
+      [bar.querySelector(".cv-toggle"), "Canvas"],
+      [lockBtn, priv ? "Share with your team" : "Make private", icon(priv ? "unlock" : "lock")],
+    ].filter(([b]) => b && !b.hidden && !b.getClientRects().length);
+    for (const [b, label, ic] of tucked) add(`<button type="button" role="menuitem">${ic || b.innerHTML}<span>${escapeHtml(label)}</span></button>`, () => b.click());
+    if (tucked.length) menu.appendChild(h("<hr>"));
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
     if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>Open in Claude</span></button>`, () => openExternal(a.remoteUrl));
     if (canOpenOnMac() && findProject(ws)?.repo) add(`<button type="button" role="menuitem">${MAC_ICON}<span>Open a copy on this Mac</span></button>`, copyHere);
@@ -3770,8 +3817,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     if (canStop) {
       add(`<button type="button" role="menuitem" class="danger">${icon("stop")}<span>Stop agent</span></button>`, () => act("stop"));
     }
-    add(`<button type="button" role="menuitem" class="danger">${icon("trash")}<span>Delete agent</span></button>`,
-      () => deleteAgent(ws, a || { id: run, title: store.transcripts.get(key)?.title, status }, { after: onClose || (() => goBack(projectPath(ws))) }));
+    add(`<button type="button" role="menuitem" class="danger">${icon("trash")}<span>Close</span></button>`,
+      () => deleteAgent(ws, a || { id: run, title: store.transcripts.get(key)?.title, status }, { after: onClose || (() => goBack(backTo)) }));
     menuEl.querySelector(".scrim").addEventListener("click", closeMenu);
     el.appendChild(menuEl);
     moreBtn.setAttribute("aria-expanded", "true");
@@ -3873,9 +3920,9 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     chatModel?.refresh();
     const a = agentNow();
     const t = store.transcripts.get(key);
-    const title = a?.title || t?.title || "Agent";
+    const title = allAgents ? "All agents" : a?.title || t?.title || "Agent";
     if (!isRenaming(titleEl)) setText(titleEl, title);
-    if (!ro) titleEl.setAttribute("aria-label", `${title}. Rename`);
+    if (!ro && !allAgents) titleEl.setAttribute("aria-label", `${title}. Rename`);
     // Of two agents side by side, the focused one names the window.
     if (screen?.el === el) document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
     const status = a?.status || t?.status;
@@ -3920,7 +3967,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
         const d = new Date(m.ts).toDateString();
         if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; steps = null; }
       }
-      if (m.role === "tool") {
+      if (m.role === "tool" && !m.subagent) {
         if (!steps) { steps = { kind: "steps", id: `steps-${m.id}`, tools: [] }; items.push(steps); }
         steps.tools.push(m);
         continue;
@@ -4032,6 +4079,13 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary); sum.dataset.sig = sig; }
   }
 
+  // A tool card's name and one-line input. The "All agents" chat names its own tools (all-agents.js).
+  function toolShown(tool) {
+    const coordinator = allAgents ? coordinatorTool(tool) : null;
+    if (coordinator) return { ...coordinator, icon: "agents" };
+    return { name: tool.name || "Tool", input: (tool.input || "").replace(/\s+/g, " ").trim(), icon: toolIcon(tool.name) };
+  }
+
   function paintSteps(node, x) {
     const open = store.expanded.has(`${key}|${x.id}`);
     node._steps = x;
@@ -4039,10 +4093,10 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     const row = node.querySelector(".steps-row");
     row.setAttribute("aria-expanded", String(open));
     const failed = x.tools.filter((m) => m.tool?.isError).length;
-    const last = x.tools[x.tools.length - 1].tool || {};
+    const last = toolShown(x.tools[x.tools.length - 1].tool || {});
     row.querySelector(".t-icon").innerHTML = icon(failed ? "alert" : "check");
     setText(row.querySelector(".t-name"), `Worked · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`);
-    setText(row.querySelector(".t-input"), open ? "" : `${last.name || "Tool"} ${(last.input || "").replace(/\s+/g, " ").trim()}`);
+    setText(row.querySelector(".t-input"), open ? "" : `${last.name} ${last.input}`);
     const list = node.querySelector(".steps-list");
     list.hidden = !open;
     if (!open) { list.replaceChildren(); return; }
@@ -4050,6 +4104,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   }
 
   function paintTool(box, m) {
+    if (m.subagent) return paintSubagent(box, m, store.expanded.has(`${key}|${box.dataset.key}`));
     const tool = m.tool || {};
     const k = `${key}|${box.dataset.key}`;
     const open = store.expanded.has(k);
@@ -4060,10 +4115,11 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
     box.classList.toggle("open", open);
     const row = box.querySelector(".tool-row");
     row.setAttribute("aria-expanded", String(open));
-    row.querySelector(".t-icon").innerHTML = icon(tool.isError ? "alert" : toolIcon(tool.name));
-    setText(row.querySelector(".t-name"), tool.name || "Tool");
-    setText(row.querySelector(".t-input"), (tool.input || "").replace(/\s+/g, " ").trim());
-    row.setAttribute("aria-label", `${tool.name || "Tool"}${tool.isError ? " (error)" : ""}: ${tool.input || ""}. ${open ? "Collapse" : "Expand"} output`);
+    const shown = toolShown(tool);
+    row.querySelector(".t-icon").innerHTML = icon(tool.isError ? "alert" : shown.icon);
+    setText(row.querySelector(".t-name"), shown.name);
+    setText(row.querySelector(".t-input"), shown.input);
+    row.setAttribute("aria-label", `${shown.name}${tool.isError ? " (error)" : ""}: ${shown.input}. ${open ? "Collapse" : "Expand"} output`);
     let out = box.querySelector(".tool-out");
     if (!open) { out?.remove(); return; }
     if (!out) { out = h(`<div class="tool-out"></div>`); box.appendChild(out); }
@@ -4171,7 +4227,6 @@ function approvePendingComputer() {
   if (code) openComputerSignIn(code);
 }
 
-onMarkdownReady(() => { /* agent screen repaints itself */ });
 loadMarkdown();
 
 function restoreLastRoute() {

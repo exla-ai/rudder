@@ -6,7 +6,7 @@
 // cleanup that deletes agents nobody touched for a day. Close is the app's
 // one delete (deleteAgent in app.js).
 import { h, icon } from "/app/render.js";
-import { app, api, openSheet, toast, track } from "/app/core.js";
+import { app, api, openSheet, toast } from "/app/core.js";
 
 /** The longest name the dashboard keeps (native AGENT_TITLE_MAX_CHARS). */
 export const TITLE_MAX = 200;
@@ -127,13 +127,16 @@ export function branchAgent({ ws, run, title }) {
     const text = textarea.value.trim();
     try {
       const res = await api("/api/app/agent-branch", { method: "POST", body: { workspace: ws, run, text } });
-      track("agent_branched");
       close();
       // Making its workspace can outlast the wait for an answer.
       toast(res?.status === "queued" ? "Branching. The new agent shows up in a moment" : "Branched into a new agent");
       app.refreshState();
     } catch (err) {
-      if (!dlg.open) return;
+      // Closed while it was sending: the sheet is gone, so say it here.
+      if (!dlg.open) {
+        if (err.status !== 401) toast(`Couldn't branch it: ${err.message}`, { error: true });
+        return;
+      }
       error.textContent = err.message || "Couldn't branch it";
       error.hidden = false;
       sending = false;

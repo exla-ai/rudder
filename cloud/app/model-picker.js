@@ -259,15 +259,24 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   const useBtn = dlg.querySelector(".mp-use");
   const note = dlg.querySelector(".create-note");
   let data = modelsCache?.data || null;
-  let model = start.model;
+  let model = null; // the picked row's value; until a pick, the row the agent runs on
   let effort = start.effort || "auto";
 
-  // This backend's list, with the model the agent runs on now even when the
-  // list does not name it (an id it was started with by hand).
+  // The row of the list a model the agent runs on is: the same id, or for a
+  // family alias Claude Code resolves itself (`sonnet`), that family's first
+  // row (the list puts each family's newest first), the way native
+  // observed_model_update matches them. Null when no row is it.
+  const rowOf = (opts, m) => (opts.find((o) => o.value === m)
+    || (backend === "claude" && /^(fable|opus|sonnet|haiku)$/.test(m) ? opts.find((o) => o.value.startsWith("claude-") && o.value.includes(m)) : null))?.value ?? null;
+  // This backend's list, led by the model the agent runs on when no row is it
+  // (an id it was started with by hand).
   const options = () => {
     const opts = (data?.[backend] || []).filter((o) => o && o.value);
-    return opts.some((o) => o.value === start.model) ? opts : [{ value: start.model, label: start.model }, ...opts];
+    return rowOf(opts, start.model) ? opts : [{ value: start.model, label: start.model }, ...opts];
   };
+  // What to send for the picked row: the agent's own name for its row (an
+  // alias stays an alias when only the effort changes).
+  const sendValue = () => (model === rowOf(options(), (agent() || start).model) ? (agent() || start).model : model);
   function render() {
     const a = agent() || start;
     const busy = a.status === "working";
@@ -277,10 +286,12 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
       : "The conversation carries on. Its next reply uses the new model.");
     if (!data) return;
     const opts = options();
-    paintModels(modelsEl, opts, { model, current: a.model, backend, onPick: (v) => { model = v; render(); } });
+    const current = rowOf(opts, a.model);
+    model ??= rowOf(opts, start.model);
+    paintModels(modelsEl, opts, { model, current, backend, onPick: (v) => { model = v; render(); } });
     const dial = paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick: (v) => { effort = v; render(); } });
     const eff = dial ? effort : "auto";
-    const same = model === a.model && eff === (a.effort || "auto");
+    const same = model === current && eff === (a.effort || "auto");
     useBtn.disabled = busy || same;
     const label = opts.find((o) => o.value === model)?.label || model;
     setText(useBtn, same ? "Current model" : `Switch to ${label}${eff !== "auto" ? ` · ${effortLabel(eff).toLowerCase()}` : ""}`);
@@ -288,16 +299,17 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
 
   useBtn.addEventListener("click", async () => {
     const eff = reasons(backend, model) ? effort : "auto";
+    const value = sendValue();
     useBtn.disabled = true;
     try {
-      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: eff } });
-      track("chat_model_switched", { backend, model, effort: eff });
+      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model: value, effort: eff } });
+      track("chat_model_switched", { backend, model: value, effort: eff });
       // The dashboard took it (or will within seconds): show it now, the next
       // state refresh carries the real row.
       const a = agent();
-      if (a) { a.model = model; a.effort = eff === "auto" ? null : eff; }
+      if (a) { a.model = value; a.effort = eff === "auto" ? null : eff; }
       dlg.close();
-      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${model}`);
+      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${value}`);
       onSwitched();
       app.refreshState();
     } catch (err) { showError(err); render(); }

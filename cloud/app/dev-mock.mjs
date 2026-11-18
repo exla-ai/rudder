@@ -42,6 +42,8 @@ let githubFlow = null;
 // Computers waiting on `rudder login`: code -> { deviceName, expiresAt }.
 const computers = new Map();
 let freshProjects = null;
+// The "All agents" chat's hidden project: null until the app opens it.
+let coordinator = null;
 const T0 = now();
 
 const home = () => homeMode === "none" ? null : ({
@@ -181,6 +183,94 @@ function baseTranscript(a) {
   return msgs;
 }
 
+// Subagents (worker/transcripts.mjs `subagent`, cloud/app/subagents.js): a
+// Claude agent (run_b1) and a Codex agent (run_a7) with subagents done, failed
+// and running. A running one gains a step every few seconds, as a live one would.
+const subTool = (id, ts, name, input, output, isError = false) => ({ id, role: "tool", ts, text: "", tool: { name, input, output, isError } });
+const subSay = (id, ts, text, role = "assistant") => ({ id, role, ts, text });
+function liveSubagent(fixed, steps, { every = 5_000, start }) {
+  const shown = Math.min(steps.length, 2 + Math.floor((now() - T0) / every));
+  const messages = steps.slice(0, shown);
+  const done = shown === steps.length && fixed.finishes;
+  return {
+    ...fixed,
+    status: done ? "done" : "running",
+    startedAt: start,
+    endedAt: done ? messages[messages.length - 1].ts : null,
+    toolCalls: messages.filter((m) => m.role === "tool").length,
+    result: done ? messages[messages.length - 1].text : null,
+    messages,
+    earlier: 0,
+  };
+}
+function subagentTranscript(a) {
+  const t = now() - 6 * MIN;
+  if (a.backend === "codex") {
+    const procSteps = [
+      subTool("p1", t + 12_000, "exec_command", "sed -n 1,40p /proc/net/tcp6", "  sl  local_address                         rem_address                         st tx_queue rx_queue\n   0: 00000000000000000000000000000000:0BB8 00000000000000000000000000000000:0000 0A 00000000:00000000"),
+      subTool("p2", t + 20_000, "exec_command", "rg -n \"inode\" src/ports.rs", "src/ports.rs:41:    let inode = fields[9].parse::<u64>()?;"),
+      subSay("p3", t + 31_000, "Listening sockets are state `0A`. The owning pid comes from matching the socket inode against `/proc/<pid>/fd/*` links."),
+      subTool("p4", t + 40_000, "exec_command", "cargo test -p ports listen", "running 3 tests\ntest listen_v4 ... ok\ntest listen_v6 ... ok\ntest owner_pid ... ok\n\ntest result: ok. 3 passed"),
+      subTool("p5", t + 47_000, "apply_patch", "src/ports.rs", "Success. Updated src/ports.rs"),
+      subSay("p6", t + 58_000, "**Parsing works for IPv4 and IPv6.** State `0A` is LISTEN; the inode maps to a pid through `/proc/<pid>/fd`. Three tests pass, including the owner lookup."),
+    ];
+    const serveSteps = [
+      subTool("s1", t + 15_000, "exec_command", "tailscale --socket /tmp/tailscaled.sock serve status --json", "{\n  \"TCP\": { \"3000\": { \"HTTPS\": true } },\n  \"Web\": { \"rudder-home.tail4c2e1.ts.net:3000\": {} }\n}"),
+      subSay("s2", t + 26_000, "Serve config is keyed by port, so each scanned port maps to one HTTPS entry."),
+      subTool("s3", t + 35_000, "exec_command", "rg -n \"serve\" cloud/worker/tailscale-previews.mjs", "cloud/worker/tailscale-previews.mjs:88:  await runTailnetCommand([\"serve\", \"--bg\", `--https=${port}`, String(port)]);"),
+      subTool("s4", t + 50_000, "exec_command", "node --test tests/tailscale-previews.test.mjs", "✔ maps a listening port to its serve URL (4.1ms)\n✔ drops a port that stopped listening (1.9ms)"),
+      subTool("s5", t + 61_000, "apply_patch", "cloud/worker/tailscale-previews.mjs", "Success. Updated cloud/worker/tailscale-previews.mjs"),
+      subTool("s6", t + 70_000, "exec_command", "node --test tests/tailscale-previews.test.mjs", "✔ maps a listening port to its serve URL (3.8ms)\n✔ drops a port that stopped listening (2.0ms)\n✔ keeps HTTPS for a port that comes back (2.4ms)"),
+    ];
+    return [
+      subSay("x1", t, a.task + ". Use subagents for the two halves.", "user"),
+      subSay("x2", t + 5_000, "I'll have one subagent parse `/proc/net` and another map ports to `tailscale serve`, then join the two."),
+      { ...subTool("call_proc", t + 8_000, "spawn_agent", "proc_net_parsing", "{\n  \"task_name\": \"/root/proc_net_parsing\"\n}"),
+        subagent: { id: "01a1ee20-0000-7000-8000-000000000001", backend: "codex", kind: null, name: "Turing", description: "proc net parsing", prompt: null, status: "done", startedAt: t + 8_000, endedAt: t + 58_000, toolCalls: 4, result: procSteps[5].text, messages: procSteps, earlier: 0 } },
+      { ...subTool("call_serve", t + 9_000, "spawn_agent", "serve_mapping", "{\n  \"task_name\": \"/root/serve_mapping\"\n}"),
+        get subagent() { return liveSubagent({ id: "01a1ee20-0000-7000-8000-000000000002", backend: "codex", kind: null, name: "Hopper", description: "serve mapping", prompt: null }, serveSteps, { start: t + 9_000, every: 6_000 }); } },
+      { ...subTool("call_docker", t + 10_000, "spawn_agent", "docker_ports", "agent limit reached: at most 2 subagents can run at once", true),
+        subagent: { id: null, backend: "codex", kind: null, name: null, description: "docker ports", prompt: null, status: "failed", startedAt: t + 10_000, endedAt: null, toolCalls: 0, result: "agent limit reached: at most 2 subagents can run at once", messages: [], earlier: 0 } },
+      subTool("x6", t + 62_000, "wait", "/root/proc_net_parsing", "{\n  \"status\": \"completed\"\n}"),
+      subSay("x7", t + 70_000, "The parser is done. Waiting on the serve mapping before I wire them together."),
+    ];
+  }
+  const mapSteps = [
+    subTool("m1", t + 14_000, "Grep", "resolveMarket  in src", "src/markets/resolve.ts:12:export async function resolveMarket(id: string, outcome: Outcome) {\nsrc/jobs/poll-oracles.ts:57:      await resolveMarket(market.id, result.outcome);"),
+    subTool("m2", t + 18_000, "Read", "src/markets/resolve.ts", "  12  export async function resolveMarket(id: string, outcome: Outcome) {\n  13    const market = await db.market.update({ where: { id }, data: { status: \"resolved\", outcome } });\n  14    await emit(\"market.resolved\", market);\n  15  }"),
+    subTool("m3", t + 22_000, "Grep", "\"market.resolved\"  in src", "src/markets/resolve.ts:14:    await emit(\"market.resolved\", market);"),
+    subSay("m4", t + 30_000, "Nothing listens for `market.resolved` yet, so bets stay open after a market resolves."),
+    subTool("m5", t + 34_000, "Read", "src/bets/model.ts", "   1  export type Bet = { id: string; marketId: string; side: Side; stakeCents: number; status: \"open\" | \"won\" | \"lost\" | \"void\" };"),
+    subSay("m6", t + 41_000, "**Resolution never reaches bets.** `resolveMarket` (src/markets/resolve.ts:12) marks the market resolved and emits `market.resolved`, but nothing subscribes to it.\n\n- Oracles call it from `src/jobs/poll-oracles.ts:57`\n- A bet's `status` is `open | won | lost | void`; settlement only needs to flip it and credit `stakeCents` times the odds\n\nThe natural hook is a `market.resolved` subscriber."),
+  ];
+  const payoutSteps = [
+    subTool("r1", t + 16_000, "Read", "src/bets/payout.ts", "  8  export const payout = (stakeCents: number, odds: number) => stakeCents * odds;"),
+    subSay("r2", t + 24_000, "`payout` returns fractional cents for decimal odds. Checking how Stripe expects amounts before choosing a rounding rule."),
+    { ...subTool("toolu_fetch", t + 27_000, "Agent", "Stripe amount rounding", "Async agent launched successfully."),
+      subagent: { id: "a51c2", backend: "claude", kind: "web-fetch", name: null, description: "Stripe amount rounding", prompt: "Find how Stripe expects payout amounts: integer or decimal, and any rounding guidance.", status: "done", startedAt: t + 27_000, endedAt: t + 49_000, toolCalls: 1,
+        result: "Stripe amounts are integers in the smallest currency unit (cents). Round before sending; Stripe does not round for you.",
+        messages: [subTool("w1", t + 30_000, "WebFetch", "https://docs.stripe.com/currencies#minor-units", "Amounts are integers in the currency's smallest unit."), subSay("w2", t + 49_000, "Stripe amounts are integers in the smallest currency unit (cents). Round before sending; Stripe does not round for you.")], earlier: 0 } },
+    subTool("r4", t + 52_000, "Bash", "npx vitest run src/bets/payout.test.ts", " ✓ src/bets/payout.test.ts (4 tests) 6ms\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)"),
+    subTool("r5", t + 63_000, "Edit", "src/bets/payout.ts", "-export const payout = (stakeCents: number, odds: number) => stakeCents * odds;\n+export const payout = (stakeCents: number, odds: number) => Math.floor(stakeCents * odds);"),
+    subTool("r6", t + 71_000, "Bash", "npx vitest run src/bets", " ✓ src/bets/payout.test.ts (5 tests) 7ms\n ✓ src/bets/settle.test.ts (9 tests) 15ms"),
+    subSay("r7", t + 80_000, "Payouts now round down to whole cents; the house keeps the fraction. All 14 bet tests pass."),
+  ];
+  return [
+    subSay("b1", t, a.task + ". Use subagents to research while you build.", "user"),
+    subSay("b2", t + 6_000, "I'll send one subagent to map how markets resolve and another to check the payout math, and write the settlement job meanwhile."),
+    { ...subTool("toolu_map", t + 10_000, "Agent", "Map market resolution flow", "Async agent launched successfully."),
+      subagent: { id: "a8f03", backend: "claude", kind: "Explore", name: null, description: "Map market resolution flow", prompt: "Read-only. Find where a market becomes resolved in this repo and what, if anything, settles the bets on it. Report file:line references and the bet model's fields.", status: "done", startedAt: t + 10_000, endedAt: t + 41_000, toolCalls: 4, result: mapSteps[5].text, messages: mapSteps, earlier: 0 } },
+    { ...subTool("toolu_payout", t + 12_000, "Agent", "Review payout rounding", "Async agent launched successfully."),
+      get subagent() { return liveSubagent({ id: "a2d71", backend: "claude", kind: "general-purpose", name: null, description: "Review payout rounding", prompt: "Check `src/bets/payout.ts` for rounding errors with decimal odds. Fix them with a test.", finishes: false }, payoutSteps, { start: t + 12_000, every: 5_000 }); } },
+    { ...subTool("toolu_old", t + 13_000, "Agent", "Backfill settled bets", "Async agent launched successfully."),
+      subagent: { id: "a77e0", backend: "claude", kind: "general-purpose", name: "backfill", description: "Backfill settled bets", prompt: "Write a one-off script that settles bets on markets resolved before today.", status: "stopped", startedAt: t + 13_000, endedAt: t + 33_000, toolCalls: 2, result: null,
+        messages: [subTool("k1", t + 20_000, "Bash", "psql $DATABASE_URL -c \"select count(*) from markets where status = 'resolved'\"", " count\n-------\n   318"), subTool("k2", t + 33_000, "Write", "scripts/backfill-settlement.ts", null)], earlier: 0 } },
+    subTool("b6", t + 50_000, "Write", "src/jobs/settle.ts", "Wrote 46 lines to src/jobs/settle.ts"),
+    subSay("b7", t + 55_000, a.lastMessage),
+  ];
+}
+const SUBAGENT_DEMO = new Set(["run_b1", "run_a7"]);
+
 // MOCK_TRANSCRIPT=<file>: a real /api/app/transcript response (readTranscript
 // output) shown as the first agent's conversation.
 const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
@@ -200,10 +290,11 @@ function mockStats(a) {
 }
 const toMsMock = (t) => (typeof t === "number" ? t : Date.parse(t));
 function transcriptFor(ws, run) {
-  const p = projects.find((x) => x.workspaceId === ws);
+  const p = projects.find((x) => x.workspaceId === ws) || (coordinator?.workspaceId === ws ? coordinator : null);
   const a = p?.agents.find((x) => x.id === run);
   if (!a) return null;
   if (!transcripts.has(run) && realTranscript && a === projects[0].agents[0]) transcripts.set(run, realTranscript.messages);
+  if (!transcripts.has(run) && SUBAGENT_DEMO.has(run)) transcripts.set(run, subagentTranscript(a));
   if (!transcripts.has(run)) transcripts.set(run, a.fresh ? [{ id: "m1", role: "user", ts: a.createdAt, text: a.task }] : baseTranscript(a));
   return { a, msgs: transcripts.get(run) };
 }
@@ -687,6 +778,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         email: "viraat@example.com", home: home(),
         projects: homeMode === "none" ? [] : freshProjects ?? projects,
+        coordinator,
         github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
         digest: digestPreviewOf(digestStore[0]) ?? null,
         onboarding: { ...onboarding },
@@ -775,6 +867,28 @@ const server = http.createServer(async (req, res) => {
         t.a.status = "review"; t.a.updatedAt = now(); t.a.lastMessage = "On it. I'll report back when the change is in.";
       }, 8000);
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/coordinator") {
+      coordinator ??= { workspaceId: "wsp_all_agents", name: "rudder-all-agents", repo: "", status: "running", dashboard: "running", agents: [], lastActivityAt: iso(now()) };
+      return json(res, 200, { workspace: coordinator.workspaceId });
+    }
+    if (p === "/api/app/task" && body.workspace === coordinator?.workspaceId) {
+      const main = /^\/main\s+([\s\S]+)/.exec(String(body.text || ""));
+      if (!main) return json(res, 200, { ok: true, status: "delivered" }); // /model
+      const id = `run_all_${Math.random().toString(36).slice(2, 6)}`;
+      const a = agent({ id, title: main[1].slice(0, 60), task: main[1], status: "working", backend: "claude", model: "claude-sonnet-5-5", mode: "main", createdAt: now(), updatedAt: now(), fresh: true });
+      setTimeout(() => coordinator.agents.unshift(a), 900);
+      setTimeout(() => {
+        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `t${now()}`, role: "tool", ts: now(), text: "", tool: { name: "mcp__all_agents__list_agents", input: "{}", output: "rudder [wsp_rudder]\n- run_a1 · working · claude opus · 1m ago · Phone app for agent control\n- run_a2 · waiting · codex gpt-6.1-sol · 4m ago · Fix flaky Ctrl+W chord test\n  needs you: permission for Bash: cargo test --release (prompt ask_1)", isError: false } });
+      }, 2500);
+      setTimeout(() => {
+        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `u${now()}`, role: "tool", ts: now(), text: "", tool: { name: "mcp__all_agents__read_agent", input: "{\"agent\":\"run_a2\",\"project\":\"rudder\"}", output: "rudder / Fix flaky Ctrl+W chord test (run_a2)\nstatus: waiting · codex gpt-6.1-sol · updated 4m ago\nneeds you: permission for Bash: cargo test --release (prompt ask_1)\n\n[agent] The chord test passes alone and fails in the full run. Running the release suite to confirm.", isError: false } });
+      }, 3500);
+      setTimeout(() => {
+        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `r${now()}`, role: "assistant", ts: now(), text: "Here is where things stand:\n\n**rudder**\n- *Phone app for agent control* is working: wiring the transcript poll.\n- *Fix flaky Ctrl+W chord test* needs you: it wants to run `cargo test --release` with network access.\n- *Tailnet HTTPS for previews* is done and ready to merge.\n\nWant me to approve the test run, or keep an eye on the working agents and tell you when they finish?" });
+        a.status = "done"; a.updatedAt = now(); a.lastMessage = "Here is where things stand.";
+      }, 6000);
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/task") {
       const proj = projects.find((x) => x.workspaceId === body.workspace);

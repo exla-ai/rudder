@@ -536,6 +536,15 @@ a { color: var(--accent); }
 .msg.failed .bubble { box-shadow: 0 0 0 1.5px var(--failed); }
 .msg .m-foot { font-size: 11.5px; color: var(--faint); margin-top: 4px; padding: 0 4px; display: flex; gap: 8px; align-items: center; }
 .msg .m-foot button { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px; }
+/* Edit under a sent message (chat-edit.js) shows on hover or focus. A phone
+   has no hover, so it always shows there, and a long press opens the
+   message's menu instead of selecting text. */
+.msg.user .edit-foot { opacity: 0; transition: opacity 0.12s; justify-content: flex-end; }
+.msg.user:hover .edit-foot, .msg.user:focus-within .edit-foot { opacity: 1; }
+@media (pointer: coarse) {
+  .msg.user .edit-foot { opacity: 1; }
+  .msg.user.editable .bubble { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+}
 
 .msg.assistant .md { font-size: 15.5px; line-height: 1.58; color: var(--ink); padding: 0 2px; }
 .msg.system { text-align: center; }
@@ -852,13 +861,13 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .key-strip button:active { transform: scale(.96); }
 .key-strip button.danger { color: var(--red, #c0392b); }
 
-/* Swipe a row left to delete its agent. The red edge rides along at the
-   row's right side and reads "Delete" once letting go would ask to delete. */
+/* Swipe a row left to close (delete) its agent. The red edge rides along at
+   the row's right side and reads "Close" once letting go would ask. */
 .row.agent { position: relative; touch-action: pan-y; }
 .row.agent.swiping { transition: none; }
 .row.agent:not(.swiping) { transition: transform 180ms cubic-bezier(.2,.7,.2,1), background 140ms; }
 .row.agent.swiping::after {
-  content: "Delete";
+  content: "Close";
   position: absolute; top: 0; bottom: 0; left: 100%; width: 150px;
   display: flex; align-items: center; padding-left: 20px;
   background: var(--surface-3); color: var(--muted); font-weight: 600; font-size: 14px;
@@ -1001,3 +1010,66 @@ input.rename {
 .topbar .title[role="button"] { cursor: text; border-radius: 6px; }
 .topbar .title[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .agent-menu { min-width: 200px; }
+
+/* Subagent cards (subagents.js): an Agent or spawn_agent call drawn as the agent it started. */
+.tool.subagent { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.tool.subagent > .sa-row { border: 0; border-radius: 0; background: none; }
+.sa-row {
+  width: 100%; display: flex; align-items: flex-start; gap: 10px;
+  min-height: 40px; padding: 9px 10px; border: 0; background: none; color: inherit;
+  text-align: left; font: inherit; font-size: 13.5px; cursor: pointer;
+}
+.sa-row .t-icon { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: var(--cs); color: var(--c); flex: none; }
+.sa-row .t-icon svg { width: 15px; height: 15px; }
+.sa-row .t-caret { width: 16px; height: 16px; color: var(--faint); flex: none; margin-top: 5px; transition: transform 160ms; }
+.subagent.open > .sa-row .t-caret { transform: rotate(90deg); }
+.tool.subagent:not(.open) > .sa-row .t-caret { transform: none; }
+.sa-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sa-title { font-weight: 600; color: var(--ink); line-height: 1.35; overflow-wrap: anywhere; }
+.sa-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12.5px; color: var(--muted); }
+.sa-state { display: inline-flex; align-items: center; gap: 6px; color: var(--c); font-weight: 600; }
+.sa-state .dot { width: 7px; height: 7px; }
+.sa-facts { font-variant-numeric: tabular-nums; }
+.sa-line { margin-top: 2px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-line.sa-result { font-family: var(--font); font-size: 13.5px; color: var(--ink-2); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.sa-line[hidden] { display: none; }
+.sa-body { padding: 10px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.sa-body[hidden] { display: none; }
+.sa-msgs { display: flex; flex-direction: column; gap: 8px; }
+.sa-msgs:empty { display: none; }
+.sa-text { font-size: 14px; line-height: 1.55; color: var(--ink); }
+.sa-note { font-size: 13px; line-height: 1.5; color: var(--muted); font-style: italic; }
+.sa-user { background: var(--surface-2); border-radius: 10px; padding: 8px 10px; font-size: 14px; line-height: 1.5; }
+.sa-user .sa-label, .sa-prompt summary { font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.sa-user .sa-label { margin-bottom: 2px; }
+.sa-prompt { background: var(--surface-2); border-radius: 10px; padding: 0 10px; }
+.sa-prompt[hidden] { display: none; }
+.sa-prompt summary { cursor: pointer; list-style: none; min-height: 34px; display: flex; align-items: center; }
+.sa-prompt summary::-webkit-details-marker { display: none; }
+.sa-prompt summary svg { width: 13px; height: 13px; margin-right: 5px; transition: transform 160ms; }
+.sa-prompt[open] summary svg { transform: rotate(90deg); }
+.sa-prompt .md { font-size: 13.5px; line-height: 1.5; padding-bottom: 10px; max-height: 320px; overflow: auto; }
+.sa-tool summary {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 3px 0;
+  cursor: pointer; list-style: none; font-size: 13px;
+}
+.sa-tool summary::-webkit-details-marker { display: none; }
+.sa-tool .t-icon { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); flex: none; }
+.sa-tool .t-icon svg { width: 13px; height: 13px; }
+.sa-tool .t-name { font-weight: 600; flex: none; }
+.sa-tool .t-input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-tool .t-caret { width: 14px; height: 14px; color: var(--faint); flex: none; transition: transform 160ms; }
+.sa-tool[open] .t-caret { transform: rotate(90deg); }
+.tool .sa-tool:not([open]) .t-caret { transform: none; }
+.sa-tool pre {
+  margin: 2px 0 4px 30px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--code-bg); color: var(--code-ink); font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  white-space: pre; overflow: auto; max-height: 260px;
+}
+.sa-tool pre.sa-none { color: var(--faint); font-style: italic; font-family: var(--font); }
+.sa-tool.error .t-icon { background: var(--failed-soft); color: var(--failed); }
+.sa-tool.error .t-name, .sa-tool.error pre { color: var(--failed); }
+.sa-compact, .sa-earlier, .sa-empty { font-size: 12.5px; color: var(--faint); }
+.sa-compact { text-align: center; }
+.sa-earlier[hidden], .sa-empty[hidden] { display: none; }
+.tool.subagent.sa-nested { margin: 0; background: var(--bg-elev); }

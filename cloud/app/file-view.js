@@ -153,7 +153,8 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
   saveBtn.addEventListener("click", () => { void save(); });
 
   // { source, path, doc, base (text the revision holds), revision, mode, editor,
-  //   pending, editable, readOnlyReason, latest (a newer read while dirty), closed, saving }
+  //   pending, editable, readOnlyReason, latest (a newer read while dirty), closed, saving,
+  //   readError (the last poll failed and its message shows) }
   let file = null;
   let timer = 0;
 
@@ -350,11 +351,15 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     if (!f?.doc || f.saving || f.closed || (!force && document.visibilityState !== "visible")) return;
     try {
       const value = await f.source.read(f.path, f.revision);
-      if (file !== f || value.unchanged) return;
+      if (file !== f) return;
+      // A read that works again clears the last one's error.
+      if (f.readError) { f.readError = false; paintControls(); }
+      if (value.unchanged) return;
       if (dirty()) { f.latest = value; paintConflict(f, "An agent changed this file while you were editing it."); return; }
       await show(f, value);
     } catch (e) {
       if (file !== f) return;
+      f.readError = true;
       statusEl.textContent = e?.message || "Unable to refresh this file";
     }
   }
@@ -414,10 +419,13 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     }
   }
 
+  // A short status ("Saved") that paintControls leaves alone until it ends.
+  let flashTimer = 0;
   function flash(text) {
+    clearTimeout(flashTimer);
     statusEl.textContent = text;
     statusEl.dataset.flash = "1";
-    setTimeout(() => { if (statusEl.textContent === text) { delete statusEl.dataset.flash; paintControls(); } }, 2500);
+    flashTimer = setTimeout(() => { delete statusEl.dataset.flash; paintControls(); }, 2500);
   }
 
   const view = {

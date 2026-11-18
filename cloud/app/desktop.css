@@ -97,7 +97,9 @@
 .pv-head { display: flex; align-items: center; }
 .pv-toggle { flex: 1; display: flex; align-items: center; gap: 10px; min-height: 44px; border: 0; background: none; padding: 0; color: var(--ink); text-align: left; font: inherit; }
 .pv-toggle[disabled] { cursor: default; }
-.pv-title { font-weight: 650; font-size: 16px; line-height: 1.3; min-width: 0; flex: 0 1 auto; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; padding: 8px 0; }
+/* Margin, not padding: a line clamp clips at the padding edge, so bottom
+   padding would show the top of a third line over the progress bar. */
+.pv-title { font-weight: 650; font-size: 16px; line-height: 1.3; min-width: 0; flex: 0 1 auto; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin: 8px 0; }
 .pv-count { font-size: 13px; color: var(--muted); flex: 1 0 auto; white-space: nowrap; }
 .pv-caret { width: 16px; height: 16px; color: var(--faint); transform: rotate(90deg); transition: transform 160ms; }
 .plan-view.collapsed .pv-caret { transform: none; }
@@ -270,6 +272,11 @@ body.desktop.side-closed .dsk-pane.p0 .topbar { padding-left: calc(var(--sal) + 
 body.desktop .dsk-main .scroller > *,
 body.desktop .dsk-main .composer > *,
 body.desktop .dsk-main .ask-slot > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+/* The composer hint's Alt+[ and Alt+] part: on the line when it fits, else
+   it wraps onto a second line that is clipped away. */
+.composer .c-hint:has(> .c-steps) { display: flex; flex-wrap: wrap; justify-content: center; column-gap: 0.6em; line-height: 16px; max-height: 16px; overflow: hidden; }
+/* A plan to review leaves the conversation in sight; Expand reads it whole. */
+body.desktop .dsk-main .ask-plan { max-height: min(28vh, 260px); }
 body.desktop .dsk-main .settings-screen .set-body { max-width: 680px; }
 body.desktop .dsk-main .topbar { padding-left: 16px; padding-right: 12px; }
 /* The sidebar is the way between projects: the project screen needs no back. */

@@ -237,9 +237,4 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   ta.addEventListener("input", () => { if (ta.value !== dismissed) dismissed = null; paint(); });
   ta.addEventListener("focus", paint);
   ta.addEventListener("blur", close);
-
-  return {
-    /** Load the list again (the agent's model or files changed). */
-    refresh() { load(workspace, run, agent()?.model ?? null, { force: true }).promise?.then(() => { painted = null; paint(); }); },
-  };
 }

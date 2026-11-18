@@ -5,9 +5,10 @@
 // Every read and save goes through the home's file service with an observed
 // workspace scope: the project checkout or a live agent's own workspace (its
 // fork mount on Linux). The browser never names a host path.
-import { api } from "/app/core.js";
+import { api, ls } from "/app/core.js";
 import { h, icon } from "/app/render.js";
 import { FileTree, FileView, iconButton, errorRow } from "/app/file-view.js";
+import { dropdown } from "/app/select.js";
 
 const CHECKOUT = "checkout";
 const TREE_POLL_MS = 6000;
@@ -19,7 +20,7 @@ const scopeKey = (s) => JSON.stringify([s.projectId, s.workspaceId, s.attemptId,
 
 /** A workspace scope as a file source. `renew` runs before each request so
  * the control plane's binding is current; a 403 asks for a fresh one. */
-export function projectFileSource(scope, { renew = async () => {}, denied = () => {} } = {}) {
+export function projectFileSource(scope, { renew, denied }) {
   const fields = () => ({ projectId: scope.projectId, workspaceId: scope.workspaceId, attemptId: scope.attemptId, ownerEpoch: String(scope.ownerEpoch) });
   const call = async (run) => {
     await renew();
@@ -68,6 +69,8 @@ const el = h(`<section class="fp" aria-label="Files">
 </section>`);
 const $ = (s) => el.querySelector(s);
 const wsSelect = $(".fp-ws"), noticeEl = $(".fp-notice"), bodyEl = $(".fp-body");
+// The app's dropdown (select.js) over the select, which stays the value.
+dropdown(wsSelect);
 
 const view = FileView({
   onBack: () => el.classList.remove("show-file"),
@@ -100,7 +103,7 @@ function place() {
     if (el.parentElement !== col) col.replaceChildren(el);
     col.hidden = false;
     col.closest(".dsk")?.classList.add("with-files");
-    const width = Number(localStorage.getItem(WIDTH_KEY));
+    const width = Number(ls.get(WIDTH_KEY));
     if (width) col.closest(".dsk")?.style.setProperty("--files-w", `${width}px`);
   } else {
     el.classList.add("fp-sheet");
@@ -122,19 +125,18 @@ $(".fp-grip").addEventListener("pointerdown", (e) => {
   const grip = e.currentTarget;
   grip.setPointerCapture(e.pointerId);
   dsk.classList.add("resizing");
-  const move = (ev) => {
+  // Every listener of this drag goes when the pointer is released or lost.
+  const drag = new AbortController();
+  grip.addEventListener("pointermove", (ev) => {
     const width = Math.round(Math.min(Math.max(window.innerWidth - ev.clientX, 360), window.innerWidth - 420));
     dsk.style.setProperty("--files-w", `${width}px`);
-  };
-  const up = () => {
+  }, { signal: drag.signal });
+  grip.addEventListener("lostpointercapture", () => {
+    drag.abort();
     dsk.classList.remove("resizing");
-    grip.removeEventListener("pointermove", move);
     const width = parseInt(getComputedStyle(dsk).getPropertyValue("--files-w"), 10);
-    try { if (width) localStorage.setItem(WIDTH_KEY, String(width)); } catch { /* private mode keeps the default */ }
-  };
-  grip.addEventListener("pointermove", move);
-  grip.addEventListener("pointerup", up, { once: true });
-  grip.addEventListener("pointercancel", up, { once: true });
+    if (width) ls.set(WIDTH_KEY, width);
+  }, { signal: drag.signal });
 });
 
 // ---------- Public surface ----------
@@ -185,7 +187,9 @@ async function retarget(target) {
   view.close();
   setTree(null, h(`<div class="fp-empty">Loading files</div>`));
   try { await renewScopes(); }
-  catch (e) { setTree(null, errorRow(e)); return; }
+  catch (e) { if (state.target === target) setTree(null, errorRow(e)); return; }
+  // The panel moved to another project or agent while this one loaded.
+  if (state.target !== target) return;
   const want = target.run ? state.scopes.find((s) => s.workspaceId === target.run) : null;
   const checkout = state.scopes.find((s) => s.workspaceId === CHECKOUT);
   const notice = target.run && !want ? `${agentName(target, target.run) || "This agent"} is not running. Showing the main checkout.` : "";

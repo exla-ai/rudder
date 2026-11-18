@@ -81,9 +81,9 @@ impl AppEngineLifecycle {
             app.attach_socket_path(),
             app.pty_output_waker.clone(),
         )?);
-        if owner.is_fabric() {
-            self.control = Some(EngineControl::bind(owner, app.pty_output_waker.clone())?);
-        }
+        // A dashboard owner binds the same authenticated socket: Files and
+        // terminal reads reach it. Its socket refuses shutdown and writes.
+        self.control = Some(EngineControl::bind(owner, app.pty_output_waker.clone())?);
         app.resume_migrated_agents();
         app.reconcile_orphaned_runs();
         app.mirror_graph();

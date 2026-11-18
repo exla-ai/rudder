@@ -899,6 +899,8 @@ impl EngineControl {
                 serde_json::json!({"ok":false,"error":"engine control identity or epoch mismatch"})
             } else if !matches!(request.op.as_str(), "status" | "shutdown" | "files" | "screen" | "results" | "await" | "previews" | "preview-register") {
                 serde_json::json!({"ok":false,"error":"unknown engine control operation"})
+            } else if !owner.is_fabric() && matches!(request.op.as_str(), "shutdown" | "preview-register") {
+                serde_json::json!({"ok":false,"error":format!("the project owner (legacy-native) does not serve {}; use its own dashboard", request.op)})
             } else {
                 if request.op == "shutdown" {
                     self.stopping = true;
@@ -1029,7 +1031,7 @@ fn request_control_observation(record:&OwnerRecord,op:&str,run_id:Option<String>
     let socket = record
         .control_socket
         .as_ref()
-        .context("owner has no engine control socket")?;
+        .context("the project owner has no engine control socket")?;
     let mut stream =
         connect_local(socket.to_path_buf()).context("engine control socket is not answering")?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -1230,9 +1232,17 @@ pub(crate) fn run_engine_command(args: &[String]) -> Result<()> {
         let ownership = EngineOwnership::acquire(&repo, NativeAuthority::Fabric)?;
         run_app_loop(None, ownership)
     } else if matches!(operation, "files" | "screen" | "results" | "await" | "previews" | "preview-register") {
-        anyhow::ensure!(ownership_lock_held(&repo)?, "project file authority is unavailable");
+        anyhow::ensure!(ownership_lock_held(&repo)?, "no live dashboard or engine owns this project");
         let record: OwnerRecord = serde_json::from_slice(&fs::read(repo.join(".rudder/engine/owner.json"))?)?;
-        anyhow::ensure!(record.repo == repo && record.authority == "fabric", "project file authority differs");
+        anyhow::ensure!(record.repo == repo, "the project owner record names a different checkout");
+        // A dashboard owner (legacy-native) answers the same authenticated
+        // control socket as the Fabric engine, so reads go to either.
+        // preview-register writes the owner's journal: Fabric only.
+        let serves = match operation {
+            "preview-register" => record.authority == "fabric",
+            _ => matches!(record.authority.as_str(), "fabric" | "legacy-native"),
+        };
+        anyhow::ensure!(serves, "the project owner ({}) does not serve {operation}", record.authority);
         if operation == "screen" {
             let id = run_id.as_ref().context("screen requires --run")?;
             anyhow::ensure!(!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control), "invalid run identity");

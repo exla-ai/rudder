@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { promptSuggestion } from "./suggestion.mjs";
-import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexRolloutFile, codexTypedText, editablePrompts, readCodexLineage } from "./session-lineage.mjs";
+import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexRolloutFile, codexTypedText, editablePrompts, readCodexLineage, unwrapPastedContent } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
@@ -405,6 +405,13 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         if (text) {
           push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
         }
+      } else if (block?.type === "thinking" && entry.type === "assistant" && entry.thinkingDisplay === "updates") {
+        // Claude Code's "updates" display stores the notes the agent writes
+        // to the user between tool calls as thinking; its terminal shows them.
+        const text = String(block.thinking || "").trim();
+        if (text) {
+          push({ id, role: "assistant", ts, text });
+        }
       } else if (block?.type === "tool_use" && block.id !== self) {
         const message = {
           id: block.id || id,
@@ -498,7 +505,7 @@ function cleanUserText(text) {
   if (!value || CLAUDE_HARNESS_TEXT.test(value)) {
     return "";
   }
-  return value.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+  return unwrapPastedContent(value.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")).trim();
 }
 
 function toolResultText(content) {

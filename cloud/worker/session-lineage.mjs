@@ -25,6 +25,12 @@ import path from "node:path";
 // an editable prompt is always a message the chat shows.
 export const CLAUDE_HARNESS_TEXT = /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/;
 
+// A multi-line message reaches Claude Code as a terminal paste, which it
+// records wrapped in <pasted_content id="..."> tags. The chat shows the text.
+export function unwrapPastedContent(text) {
+  return String(text || "").replace(/<pasted_content id="[^"]*">\n?([\s\S]*?)\n?<\/pasted_content[^>]*>/g, "$1");
+}
+
 function typedText(text) {
   const value = String(text || "").trim();
   return value !== "" && !CLAUDE_HARNESS_TEXT.test(value);
@@ -301,11 +307,11 @@ function claudeEditable(lines) {
   return prompts.slice(1).map((prompt) => {
     const content = prompt.message.content;
     if (typeof content === "string") {
-      return { messageId: prompt.uuid, entry: prompt.uuid, text: content.trim() };
+      return { messageId: prompt.uuid, entry: prompt.uuid, text: unwrapPastedContent(content).trim() };
     }
     // The transcript makes one message per text block: `${uuid}:${index}`.
     const index = content.findIndex((block) => block?.type === "text" && typedText(block.text));
-    return { messageId: `${prompt.uuid}:${index}`, entry: prompt.uuid, text: String(content[index].text).trim() };
+    return { messageId: `${prompt.uuid}:${index}`, entry: prompt.uuid, text: unwrapPastedContent(content[index].text).trim() };
   });
 }
 

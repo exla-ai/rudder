@@ -193,3 +193,21 @@ test("Codex: spawn_agent shows the subagent from its own rollout, past the paren
   [sub] = read().map((m) => m.subagent);
   assert.deepEqual({ status: sub.status, result: sub.result, endedAt: sub.endedAt, toolCalls: sub.toolCalls }, { status: "done", result: "Parsing works.", endedAt: Date.parse(at(20)), toolCalls: 1 });
 });
+
+test("Claude: notes between tool calls show, and a pasted message shows once without its wrapper", (t) => {
+  const session = "5e551011-0000-4000-8000-000000000009";
+  const { home, repo } = setup(t, { id: "run_n", backend: "claude", status: "running", session: { nativeSessionId: session } });
+  const project = path.join(home, ".claude", "projects", "-x");
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(project, `${session}.jsonl`), jsonl([
+    { type: "user", uuid: "u1", parentUuid: null, timestamp: at(0), message: { role: "user", content: '<pasted_content id="42">\nfix the menu\n\nAttached files:\n- /tmp/a.png\n</pasted_content id="42">' } },
+    { type: "assistant", uuid: "a1", parentUuid: "u1", timestamp: at(1), thinkingDisplay: "updates", message: { content: [{ type: "thinking", thinking: "Open this link to approve: https://example.test/x" }] } },
+    { type: "assistant", uuid: "a2", parentUuid: "a1", timestamp: at(2), message: { content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: "Done." }] } },
+  ]));
+  const texts = readTranscript(repo, "run_n", { home }).messages.map((m) => `${m.role}: ${m.text}`);
+  assert.deepEqual(texts, [
+    "user: fix the menu\n\nAttached files:\n- /tmp/a.png",
+    "assistant: Open this link to approve: https://example.test/x",
+    "assistant: Done.",
+  ]);
+});

@@ -42,6 +42,20 @@ async function createSandbox() {
   }
 }
 
+// A new sandbox is pending until a desktop slot takes it, and an op gives up
+// after about a minute of that. A pending sandbox closes as no-capacity after
+// 15 minutes; until then it is free, so wait for it here.
+async function waitReady(sandbox) {
+  const started = Date.now()
+  for (;;) {
+    const info = await sandbox.getInfo()
+    if (info.state === "ready") return
+    if (info.state === "closed") throw new Error(`offstage: sandbox ${sandbox.id} closed before a desktop slot took it (${info.closeReason})`)
+    console.log(`offstage: waiting for a desktop slot (${Math.round((Date.now() - started) / 1000)} s)`)
+    await new Promise((resolve) => setTimeout(resolve, 15_000))
+  }
+}
+
 const sandbox = await createSandbox()
 for (const [signal, exitCode] of [["SIGINT", 130], ["SIGTERM", 143]]) {
   process.once(signal, () => sandbox.kill().finally(() => process.exit(exitCode)))
@@ -49,6 +63,7 @@ for (const [signal, exitCode] of [["SIGINT", 130], ["SIGTERM", 143]]) {
 
 let code = 1
 try {
+  await waitReady(sandbox)
   console.log(`offstage: sandbox ${sandbox.id}, mac/ ${Math.ceil(source.length / 1024)} KiB`)
   await sandbox.files.write("src.tgz", source)
   const unpack = await sandbox.commands.run("mkdir -p src && tar -xzf src.tgz -C src && rm src.tgz")

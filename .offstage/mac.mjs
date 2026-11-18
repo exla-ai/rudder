@@ -10,8 +10,9 @@
 //   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  the App Store Connect key, release only
 //   MAC_DEVELOPER_ID_P12, MAC_DEVELOPER_ID_PASSWORD  the Developer ID certificate, release only
 //
-// Exits with the failing stage's exit code. The sandbox is killed whatever
-// happens.
+// Exits with the failing stage's exit code, or collect's when every stage
+// passed but the outputs could not be copied back. The sandbox is killed
+// whatever happens.
 import { execFileSync } from "node:child_process"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { Sandbox } from "offstage-cloud"
@@ -92,7 +93,9 @@ try {
     rmSync("offstage-out.tgz")
     console.log("offstage: logs and outputs in ./offstage-out/mac")
   } else {
-    console.log(`offstage: ${pack.stdout.trim()}`)
+    // No logs, and for a release no DMG: the run failed even if every stage passed.
+    console.log(`offstage: collect exit ${pack.exitCode}: ${pack.stdout.trim()}${pack.stderr.trim()}`)
+    if (code === 0) code = pack.exitCode || 1
   }
 } finally {
   await sandbox.kill()

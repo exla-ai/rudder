@@ -41,20 +41,22 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ]; then
       fi
     fi
   ) </dev/null >&2 &
-  # Codex refreshes in the background: it is not the default cloud backend, so
-  # the first session need not wait on npm. A plain `npm install -g` removes
-  # the old package before writing the new one, so `codex` did not exist for
-  # the whole install and anything starting then failed (ENOENT). Install
-  # beside it and swap the directory in at the end; skip when already current.
+  # Codex stays at the version whose "/" commands Rudder lists
+  # (RUDDER_CODEX_VERSION, set by the image), so this only puts it back when
+  # something else changed it. It runs in the background: Codex is not the
+  # default cloud backend. A plain `npm install -g` removes the old package
+  # before writing the new one, so `codex` did not exist for the whole install
+  # and anything starting then failed (ENOENT). Install beside it and swap the
+  # directory in at the end.
   (
     set +e
-    latest=$(timeout 30 npm view @openai/codex version 2>/dev/null)
+    want="${RUDDER_CODEX_VERSION:?the image sets RUDDER_CODEX_VERSION}"
     current=$(codex --version 2>/dev/null | awk '{print $NF}')
-    if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
+    if [ "$want" != "$current" ]; then
       next="$HOME/.codex-next"
       global="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/lib/node_modules/@openai"
       rm -rf "$next"
-      if timeout 300 npm install -g --prefix "$next" "@openai/codex@$latest" >/dev/null 2>&1 \
+      if timeout 300 npm install -g --prefix "$next" "@openai/codex@$want" >/dev/null 2>&1 \
         && [ -d "$next/lib/node_modules/@openai/codex" ]; then
         rm -rf "$global/codex.old"
         mv "$global/codex" "$global/codex.old" && mv "$next/lib/node_modules/@openai/codex" "$global/codex"

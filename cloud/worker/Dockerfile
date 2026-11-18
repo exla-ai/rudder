@@ -177,15 +177,21 @@ RUN test "$(/usr/local/bin/git --version)" = "git version 2.56.0" \
 # from cache; workers still run bounded Claude/Codex updates at boot.
 RUN groupadd --gid 1500 rudder \
   && useradd --create-home --shell /bin/bash --uid 1500 --gid 1500 rudder
+# Codex's "/" commands are listed by hand for one version (CODEX_VERSION in
+# cloud/worker/slash-commands.mjs; tests/slash-commands.test.mjs keeps the two
+# equal), so the image and the boot-time update (entrypoint.sh) install
+# exactly it. Bump both together after checking codex-rs/tui/src/slash_command.rs.
+ARG CODEX_VERSION=0.170.0
+ENV RUDDER_CODEX_VERSION=${CODEX_VERSION}
 WORKDIR /home/rudder
 USER rudder
 RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH} \
   && curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
-  && npm install -g @openai/codex@latest acpx@latest hunkdiff@latest pnpm@latest \
+  && npm install -g @openai/codex@${CODEX_VERSION} acpx@latest hunkdiff@latest pnpm@latest \
   && npm cache clean --force \
-  && codex --version
+  && codex --version | grep -qx "codex-cli ${CODEX_VERSION}"
 USER root
 
 # Backend archives depend on this tool layer, independently of Rudder's native

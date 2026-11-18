@@ -50,6 +50,11 @@ function writeFixture(root) {
   write("home/.codex/prompts/standup.md", "---\ndescription: Write my standup\n---\nWrite it\n");
 }
 
+test("the worker image pins the Codex whose '/' commands Rudder lists", () => {
+  const dockerfile = fs.readFileSync(new URL("../cloud/worker/Dockerfile", import.meta.url), "utf8");
+  assert.equal(/^ARG CODEX_VERSION=(\S+)$/m.exec(dockerfile)?.[1], CODEX_VERSION);
+});
+
 test("Claude and Codex '/' lists from synthetic config folders", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-slash-"));
   try {
@@ -104,7 +109,7 @@ test("Claude and Codex '/' lists from synthetic config folders", async () => {
       assert.equal(names.includes(absent), false, `/${absent} is not in this popup`);
     }
     assert.equal(codex.find((c) => c.name === "btw")?.alias, true);
-    assert.throws(() => buildCodexCommands({ ...state, version: "0.170.0", models, model: "test-model" }), /Codex 0\.169\.0; this machine has Codex 0\.170\.0/);
+    assert.throws(() => buildCodexCommands({ ...state, version: "0.0.1", models, model: "test-model" }), new RegExp(`Codex ${CODEX_VERSION.replaceAll(".", "\\.")}; this machine has Codex 0\\.0\\.1`));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

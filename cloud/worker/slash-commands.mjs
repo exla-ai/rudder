@@ -388,7 +388,7 @@ const aliasesOf = (variants) => [...new Set(variants.flatMap((v) => v.aliases))]
 // Codex
 // ---------------------------------------------------------------------------
 
-export const CODEX_VERSION = "0.169.0";
+export const CODEX_VERSION = "0.170.0";
 
 // Popup order. args: takes inline arguments. opens: "model" (the chat's model
 // sheet) or "terminal" (a picker, panel or TUI-only output), when "bare" (only

@@ -10,6 +10,7 @@ import { applyCommandSurface, printCommandDiscovery } from "../dist/operations/c
 import { agentToolCalls, validateOperationRequest, operationDigest, validateOperationReceipt, dispatchOperation } from "../dist/operations/requests.js";
 
 const fixtures = JSON.parse(readFileSync(new URL("../src/operations/contract-fixtures.json", import.meta.url), "utf8"));
+const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const now = new Date("2026-11-04T12:00:00Z");
 const expired = new Date("2027-02-01T00:00:00Z");
 const parsed = (command, args = [], flags = {}) => ({ command, args, flags });
@@ -230,7 +231,7 @@ test("real CLI help/completion and inert callbacks keep JSON framing and exit co
     assert.equal(completion.status, 0, completion.stderr);
     assert.deepEqual(JSON.parse(completion.stdout), commandCompletions(["doctor"]));
     const version = cli(["--version", "--help"]);
-    assert.equal(version.status, 0, version.stderr); assert.match(version.stdout, /^4\./);
+    assert.equal(version.status, 0, version.stderr); assert.equal(version.stdout.trim(), packageVersion);
     const inert = cli(["__future_callback", "--unknown"]);
     assert.equal(inert.status, 0, inert.stderr); assert.equal(inert.stdout, "");
     const routed = cli(["__route-task"], JSON.stringify({ task: "plan only: build the cache" }));

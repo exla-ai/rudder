@@ -13,6 +13,7 @@ import { filesButton, followFiles } from "/app/files-panel.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
+import { chatEdit } from "/app/chat-edit.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -3387,6 +3388,8 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
   // Claude Code's suggested next prompt: dim in the empty box, Tab or the chip fills it (prompt-suggest.js).
   const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
+  // Edit on the latest prompt: rewinds the conversation to it (chat-edit.js).
+  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript() });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -3924,6 +3927,7 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
       text = split.body;
       md.hidden = !text;
       paintAttachments(node.querySelector(".atts"), split.files.map((path) => ({ path })));
+      editAction(node, m, store.transcripts.get(key));
     }
     const sig = `${text}|${markdownReady()}`;
     if (md.dataset.sig !== sig) { renderMarkdown(md, text); md.dataset.sig = sig; }

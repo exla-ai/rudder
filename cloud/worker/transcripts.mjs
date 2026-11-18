@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { promptSuggestion } from "./suggestion.mjs";
+import { activeClaudeLines, editablePrompt, readCodexLineage } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
@@ -38,13 +39,17 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
     }));
     return base;
   }
-  const { text, truncated } = readTail(file, TAIL_BYTES);
-  const lines = text.split("\n");
   const codex = record.backend === "codex";
+  // A Codex fork references its parent's history; a Claude rewind leaves the
+  // old branch in the file. Both read as the one conversation the agent has.
+  const { text, truncated } = codex ? readCodexLineage(file, home, TAIL_BYTES) : readTail(file, TAIL_BYTES);
+  const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
   const stats = codex ? codexStats() : claudeStats();
   const messages = showUserTask(codex ? parseCodex(lines, stats) : parseClaude(lines, stats), record);
   base.truncated = truncated || messages.length > limit;
   base.messages = messages.slice(-limit);
+  // The one prompt the app may offer to edit (chat-edit.js).
+  base.edit = editablePrompt(lines, codex ? "codex" : "claude");
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // The numbers are extra: a model catalog or settings file that cannot be
@@ -75,12 +80,13 @@ export function lastAssistantText(record, { home, cache, now = Date.now() }) {
   if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) {
     return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
   }
-  const { text } = readTail(file, PREVIEW_TAIL_BYTES);
-  const lines = text.split("\n");
-  const messages = record.backend === "codex" ? parseCodex(lines) : parseClaude(lines);
+  const codex = record.backend === "codex";
+  const { text } = codex ? readCodexLineage(file, home, PREVIEW_TAIL_BYTES) : readTail(file, PREVIEW_TAIL_BYTES);
+  const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
+  const messages = codex ? parseCodex(lines) : parseClaude(lines);
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
-  const remoteUrl = record.backend === "codex" ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
+  const remoteUrl = codex ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
   const entry = { file, mtimeMs: stat.mtimeMs, size: stat.size, readAt: now, text: preview, remoteUrl };
   return { text: preview, remoteUrl, cacheEntry: entry };
 }
@@ -436,7 +442,7 @@ function parseCodex(lines, stats = null) {
       if (payload.role === "user") {
         const cleaned = /^<(environment_context|user_instructions|permissions|turn_aborted)/.test(text) ? "" : text;
         if (cleaned && !text.startsWith("# AGENTS.md instructions")) {
-          messages.push({ id, role: "user", ts, text: cleaned });
+          messages.push({ id: payload.id || id, role: "user", ts, text: cleaned });
         }
       } else if (payload.role === "assistant") {
         messages.push({ id, role: "assistant", ts, text });

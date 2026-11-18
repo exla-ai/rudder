@@ -87,6 +87,9 @@ let credentials = null;
 let credentialsRunning = false;
 let credentialsAgain = false;
 let vaultRefreshedAt = 0;
+// The vault as last applied, as JSON: a re-sent repo list re-checks the logins
+// only when it brought different secrets.
+let appliedVaultJson = null;
 // What Cloud would move this machine to, and how a dashboard's "update now" went.
 let homeUpdate = { current: null, target: null, state: "current", error: null };
 let homeUpdateRequestedAt = 0;
@@ -752,6 +755,15 @@ async function handleRpc(method, params) {
   if (method === "agentModel") {
     // One chat's model and effort (native deliver_model_request).
     return await steer(project, { kind: "model", taskId: String(params.runId || ""), instruction: `${params.model} ${params.effort}` });
+  }
+  if (method === "agentEdit") {
+    // Edit the chat's latest prompt (native chat_edit.rs): the conversation
+    // goes back to just before it and the new text runs in its place.
+    const entry = String(params.entry || "");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(entry)) {
+      throw new Error("not a message id");
+    }
+    return await steer(project, { kind: "edit", taskId: String(params.runId || ""), instruction: `${entry}\n${String(params.text || "")}` });
   }
   if (method === "previewRegister") {
     const service = await privatePreviewService();
@@ -1560,7 +1572,9 @@ async function checkCodex(env) {
   if (status.code !== 0) {
     return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
   }
-  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  // The cheapest model at low effort: the user's config.toml default (often max
+  // effort on the flagship) is for agents, not for a sign-in check.
+  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "-m", "gpt-6-luna", "-c", 'model_reasoning_effort="low"', "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
     return { ok: true, account, plan, detail: null };
   }
@@ -1902,6 +1916,9 @@ async function refreshVaultRepoFiles() {
   if (!fresh) {
     return;
   }
+  const freshJson = JSON.stringify(fresh);
+  const vaultChanged = freshJson !== (appliedVaultJson ?? JSON.stringify(vault));
+  appliedVaultJson = freshJson;
   deferredRepoFiles.length = 0;
   writeVaultFiles(fresh.files, deferredRepoFiles);
   acceptClaudeDialogs([]);
@@ -1915,7 +1932,12 @@ async function refreshVaultRepoFiles() {
   if (`${githubCredentials}:${process.env.GH_TOKEN}` !== githubBefore) {
     void refreshGithubRepos();
   }
-  void checkCredentials();
+  // Cloud re-sends the repo list on every control reconnect, resume and project
+  // change. Only new secrets (a GitHub token from the phone, logins a laptop
+  // synced) can change what the check finds; the 30-minute timer covers expiry.
+  if (vaultChanged) {
+    void checkCredentials();
+  }
   for (const project of projects.values()) {
     if (fs.existsSync(path.join(project.dir, ".git"))) {
       writeDeferredRepoFiles(project.name, project.dir);

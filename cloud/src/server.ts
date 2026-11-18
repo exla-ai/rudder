@@ -7656,6 +7656,30 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort }));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-edit") {
+    // Edit a chat's latest prompt: the dashboard takes the conversation back
+    // to just before it and runs the new text (native chat_edit.rs). `entry`
+    // is the prompt's id in the session file, from the transcript's `edit`.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const entry = (stringField(body, "entry") ?? "").trim();
+    const text = (stringField(body, "text") ?? "").trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(entry)) {
+      throw badRequest("entry is required");
+    }
+    if (!text) {
+      throw badRequest("text is required");
+    }
+    const edited = await homeRpc(home.id, "agentEdit", {
+      workspaceId: repo.id,
+      runId: stringField(body, "run") ?? "",
+      entry,
+      text: text.slice(0, 16_000),
+    });
+    captureProductEvent(account.accountId, "message_edited", { platform: requestPlatform(req) });
+    sendJson(res, 200, edited);
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/answer") {
     // The phone answering a prompt an agent is blocked on: a tool approval,
     // Claude's questions, or a plan (cloud/worker/asks.mjs builds the decision).

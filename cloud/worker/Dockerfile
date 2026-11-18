@@ -217,6 +217,7 @@ COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
+COPY cloud/worker/slash-commands.mjs ./slash-commands.mjs
 COPY cloud/worker/hook-paths.mjs ./hook-paths.mjs
 COPY cloud/worker/asks.mjs ./asks.mjs
 COPY cloud/worker/agent-status.mjs ./agent-status.mjs

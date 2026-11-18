@@ -14,6 +14,7 @@ import { FilesHubScreen } from "/app/files-hub.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
+import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
 import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
@@ -3503,33 +3504,9 @@ function AgentScreen(ws, run, { member = null, onClose = null } = {}) {
   if (!ro) fastPolls.add(fastPoll);
   if (!ro) pollState();
 
-  // `/` commands: the message is typed into the agent's own terminal, so its
-  // commands work. Suggest the common ones for this backend.
-  const slashBox = h(`<div class="slash-suggest" role="listbox" hidden></div>`);
-  composer.el.prepend(slashBox);
-  const SLASH = {
-    claude: [["/compact", "summarize and free context"], ["/clear", "start a fresh conversation"], ["/cost", "usage so far"], ["/context", "what fills the context"], ["/review", "review the changes"], ["/init", "write CLAUDE.md"], ["/resume", "pick a past session (use the terminal keys)"]],
-    codex: [["/compact", "summarize and free context"], ["/new", "start a fresh conversation"], ["/status", "session and usage"], ["/review", "review the changes"], ["/diff", "show the diff"], ["/init", "write AGENTS.md"], ["/approvals", "approval mode (use the terminal keys)"]],
-  };
-  const renderSlash = () => {
-    const value = composer.textarea.value;
-    const backend = agentNow()?.backend === "codex" ? "codex" : "claude";
-    if (!value.startsWith("/") || value.includes("\n")) { slashBox.hidden = true; return; }
-    const q = value.toLowerCase();
-    const hits = SLASH[backend].filter(([cmd]) => cmd.startsWith(q) || (q.length > 1 && cmd.includes(q.slice(1)))).slice(0, 6);
-    slashBox.replaceChildren(...hits.map(([cmd, what]) => {
-      const b = h(`<button type="button" role="option"><code></code><span></span></button>`);
-      b.querySelector("code").textContent = cmd; b.querySelector("span").textContent = what;
-      b.addEventListener("click", () => {
-        composer.textarea.value = cmd; composer.textarea.dispatchEvent(new Event("input")); composer.textarea.focus();
-        slashBox.hidden = true;
-        if (what.includes("terminal keys")) setTerminal(true);
-      });
-      return b;
-    }));
-    slashBox.hidden = hits.length === 0;
-  };
-  composer.textarea.addEventListener("input", renderSlash);
+  // `/`: what the agent's own CLI offers there (slash-menu.js). The message is
+  // typed into the agent's terminal, so its commands work.
+  if (!ro) mountSlashMenu(composer, { workspace: ws, run, agent: agentNow, modelControl: chatModel, openTerminal: () => setTerminal(true) });
 
   // Negotiate the exact current agent screen independently of the dashboard
   // byte channel. Historical and legacy owners retain their HTTP screen view.

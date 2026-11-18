@@ -7595,6 +7595,12 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, result);
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/app/slash-commands") {
+    // The chat's "/" menu: the commands of the agent's own CLI (cloud/worker/slash-commands.mjs).
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    sendJson(res, 200, await homeRpc(home.id, "slashCommands", { workspaceId: repo.id, runId: url.searchParams.get("run") ?? "" }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/send") {
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");

@@ -36,6 +36,7 @@ import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
+import { createSlashCommands } from "./slash-commands.mjs";
 import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
 
 let projectFiles;
@@ -173,6 +174,8 @@ const logins = createLoginRunner({
 
 /** @type {Map<string, Project>} */
 const projects = new Map();
+// The "/" menu of each agent's CLI for the app's chat (slash-commands.mjs).
+const slashCommands = createSlashCommands({ env: baseChildEnv, log, projectDirs: () => [...projects.values()].filter((p) => p.status !== "cloning").map((p) => p.dir) });
 let controlSocket = null;
 let controlEverConnected = false;
 // Replaced by startHomeTelemetry's hooks once the SDK loads (or kept: off).
@@ -759,6 +762,9 @@ async function handleRpc(method, params) {
   }
   if (method === "transcript") {
     return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });
+  }
+  if (method === "slashCommands") {
+    return await slashCommands.forRun(project.dir, String(params.runId || ""));
   }
   if (method === "send") {
     return await steer(project, { kind: "steer", taskId: String(params.runId || ""), instruction: String(params.text || "") });

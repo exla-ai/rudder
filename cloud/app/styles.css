@@ -851,11 +851,6 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
   background: var(--card, transparent); color: inherit; font: 600 14px/1 var(--mono, ui-monospace, monospace); }
 .key-strip button:active { transform: scale(.96); }
 .key-strip button.danger { color: var(--red, #c0392b); }
-.slash-suggest { display: flex; flex-direction: column; padding: 4px 6px 0; max-height: 34vh; overflow-y: auto; }
-.slash-suggest button { display: flex; gap: 10px; align-items: baseline; text-align: left; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; color: inherit; font: inherit; min-height: 40px; }
-.slash-suggest button:active { background: var(--surface-2, rgba(127,127,127,.08)); }
-.slash-suggest code { font: 600 14px var(--mono, ui-monospace, monospace); }
-.slash-suggest span { color: var(--muted); font-size: 13px; }
 
 /* Swipe a row left to delete its agent. The red edge rides along at the
    row's right side and reads "Delete" once letting go would ask to delete. */

@@ -68,6 +68,8 @@ pub(crate) enum SignalState {
 pub(crate) struct WorkerSignals {
     /// Path to write into `claude --settings <path>` (Claude workers only).
     pub(crate) claude_settings: Option<PathBuf>,
+    /// Rudder's Claude plugin and the run's suggestion file (Claude workers only).
+    pub(crate) claude_prompt_suggestion: Option<crate::prompt_suggestion::ClaudeWiring>,
     /// Path to point Codex `notify` at (Codex workers only).
     pub(crate) codex_notify: Option<PathBuf>,
     /// Config file to hand opencode through `OPENCODE_CONFIG` (opencode workers
@@ -140,6 +142,7 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     };
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-claude.json")));
+    let _ = crate::prompt_suggestion::cleanup(&dir, run_id);
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-notify.sh")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.session")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.turn")));
@@ -750,11 +753,16 @@ pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> WorkerSi
                         json = with_asks;
                     }
                 }
-                if std::fs::write(&settings, json).is_ok() {
-                    return WorkerSignals {
-                        claude_settings: Some(settings),
-                        ..WorkerSignals::default()
-                    };
+                // Without the plugin the settings stay unwritten, so the poll loop
+                // reports the missing wiring as it does a failed settings write.
+                if let Ok(suggestion) = crate::prompt_suggestion::ClaudeWiring::prepare(&dir, run_id) {
+                    if std::fs::write(&settings, json).is_ok() {
+                        return WorkerSignals {
+                            claude_settings: Some(settings),
+                            claude_prompt_suggestion: Some(suggestion),
+                            ..WorkerSignals::default()
+                        };
+                    }
                 }
             }
             Backend::Codex => {
@@ -843,6 +851,9 @@ pub(crate) fn augment_worker_command(
             if let Some(path) = signals.claude_settings {
                 command.args.push("--settings".to_string());
                 command.args.push(path.display().to_string());
+            }
+            if let Some(suggestion) = &signals.claude_prompt_suggestion {
+                suggestion.apply(command);
             }
             if !managed_claude_requested(command) {
                 if let Some(name) = remote_control_session_name(run_id) {

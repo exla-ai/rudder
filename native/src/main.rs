@@ -116,6 +116,7 @@ use crate::handoff::*;
 mod plan_stream;
 mod telemetry;
 
+mod prompt_suggestion;
 mod signals;
 use crate::plan_stream::*;
 mod gam_link;
@@ -125,6 +126,8 @@ use crate::home_update::*;
 mod agent_sync;
 use crate::agent_sync::*;
 mod subagents;
+mod chat_edit;
+use crate::chat_edit::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 /// How long injected text sits in a live agent's input box before the deferred
@@ -2011,6 +2014,11 @@ struct App {
     cloud_delete_confirm: Option<CloudDeleteConfirm>,
     cloud_delete_tx: mpsc::Sender<CloudDeleteOutcome>,
     cloud_delete_rx: mpsc::Receiver<CloudDeleteOutcome>,
+    /// Edit a sent message (chat_edit.rs): rewinds report back here, and a
+    /// chat has at most one in flight.
+    chat_edit_tx: mpsc::Sender<ChatEditOutcome>,
+    chat_edit_rx: mpsc::Receiver<ChatEditOutcome>,
+    chat_edits_in_flight: HashSet<String>,
     /// Runs the `rudder cloud … delete` CLI. A field so tests can stand in for
     /// the network without shelling out.
     cloud_delete_runner: fn(&Path, &[String]) -> Result<bool, String>,
@@ -3387,6 +3395,7 @@ impl App {
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         let cloud_deletes = mpsc::channel();
+        let chat_edits = mpsc::channel();
         let task_routing = mpsc::channel();
         let workspace_preps = mpsc::channel();
         Self {
@@ -3500,6 +3509,9 @@ impl App {
             cloud_delete_confirm: None,
             cloud_delete_tx: cloud_deletes.0,
             cloud_delete_rx: cloud_deletes.1,
+            chat_edit_tx: chat_edits.0,
+            chat_edit_rx: chat_edits.1,
+            chat_edits_in_flight: HashSet::new(),
             cloud_delete_runner: run_cloud_delete_cli,
             conflict_prompt: None,
             pending_jj_conflict: None,
@@ -15992,6 +16004,15 @@ Address the objection directly. If you disagree, say why inside \
                 "park" => self.deliver_park_request(&task_id, &instruction),
                 // The chat's model control: `<model> <effort|auto>` for one agent.
                 "model" => self.deliver_model_request(&task_id, &instruction),
+                // Edit the chat's latest prompt: `<entry>\n<text>`. Accepted
+                // edits answer when their rewind finishes (drain_chat_edits).
+                "edit" => match self.deliver_edit_request(&task_id, &instruction, &request_id) {
+                    Some(result) => result,
+                    None => {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                },
                 "steer" | "task" => self.deliver_steer_request(&task_id, &instruction),
                 // A kind from a newer sender must not reach an agent as typed
                 // text ("park"'s reason once would have been a prompt).
@@ -21547,6 +21568,7 @@ What to do\n\
             self.finish_task_routing(outcome);
         }
         self.drain_workspace_preps();
+        self.drain_chat_edits();
         self.poll_subagents();
         self.emit_dashboard_opened_once();
         self.continue_worker_drag_autoscroll();

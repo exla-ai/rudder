@@ -2260,6 +2260,12 @@ fn command_builder(command: Option<TerminalCommand>, term: &str) -> Result<Comma
             // `supports-hyperlinks` callers like Claude Code to emit them
             // whatever the outer terminal is. A command can still override it.
             builder.env("FORCE_HYPERLINK", "1");
+            // Every agent Rudder starts is its own top-level session, even when
+            // Rudder itself runs inside a Claude Code session. Claude reads
+            // these as "a child of another session": it turns transcript saving
+            // off and writes no session file, so resume and edit find nothing.
+            builder.env_remove("CLAUDE_CODE_CHILD_SESSION");
+            builder.env_remove("CLAUDECODE");
             for (key, value) in command.env {
                 if is_term_env_key(&key) {
                     continue;

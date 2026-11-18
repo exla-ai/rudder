@@ -32,6 +32,7 @@ mac/
 │   ├── AppWebView.swift     WKWebView + the `rudder` message bridge
 │   ├── Session.swift        sign-in, pairing codes, Keychain
 │   ├── LocalAgents.swift    finding local tools, `rudder cloud pull`, checkout mapping
+│   ├── About.swift          Rudder > About Rudder: the app's own About window
 │   ├── Info.plist, Rudder.entitlements, Assets.xcassets (icon from ../assets/rudder.icns)
 ├── Core/RudderCore.swift    pure logic: URLs, rudder:// parsing, needs-you counting, CLI output
 ├── Tests/RudderCoreTests.swift
@@ -208,6 +209,6 @@ fixed tag or a bucket instead.
   Today the control plane counts every state read as activity (`touchHome`) and
   wakes a sleeping home machine on it, so until the server skips both for a
   passive read, an open Mac app keeps the home awake and never idle.
-- Slack/Linear connects that send the page to an OAuth url open in the default
+- Slack connects that send the page to an OAuth url open in the default
   browser, so the callback lands in the browser, not this window.
 - No auto-update (Sparkle) yet: users download new DMGs.

@@ -50,9 +50,12 @@ struct WindowConfigurator: NSViewRepresentable {
 
 // MARK: Backdrop
 
-/// The signed-out backdrop: the app's background, a soft glow of the accent
-/// behind the mark, and a dot grid that fades out toward the edges.
+/// The signed-out and About backdrop: the app's background, a soft glow of the
+/// accent behind the mark, and a dot grid that fades out toward the edges.
+/// `focus` is where the mark sits; `reach` scales the glow and the grid to the window.
 struct Backdrop: View {
+    var focus = UnitPoint(x: 0.5, y: 0.30)
+    var reach: CGFloat = 1
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -61,9 +64,9 @@ struct Backdrop: View {
             Theme.canvas
             RadialGradient(
                 colors: [Theme.accent.opacity(dark ? 0.20 : 0.11), .clear],
-                center: UnitPoint(x: 0.5, y: 0.30),
+                center: focus,
                 startRadius: 0,
-                endRadius: 460
+                endRadius: 460 * reach
             )
             Canvas { context, size in
                 let step: CGFloat = 22
@@ -82,9 +85,9 @@ struct Backdrop: View {
             .mask(
                 RadialGradient(
                     colors: [.white, .white.opacity(0.35), .clear],
-                    center: UnitPoint(x: 0.5, y: 0.38),
-                    startRadius: 40,
-                    endRadius: 520
+                    center: UnitPoint(x: focus.x, y: focus.y + 0.08),
+                    startRadius: 40 * reach,
+                    endRadius: 520 * reach
                 )
             )
             LinearGradient(

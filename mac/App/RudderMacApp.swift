@@ -22,6 +22,9 @@ struct RudderMacApp: App {
         .defaultSize(width: 1180, height: 820)
         .defaultPosition(.center)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Rudder") { AboutWindow.show() }
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)

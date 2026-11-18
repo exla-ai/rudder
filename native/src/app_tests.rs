@@ -2914,6 +2914,8 @@ fn a_hidden_agent_cursor_is_not_shown() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            // Not $HOME: parallel tests point HOME at temp folders that come and go.
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -2970,6 +2972,7 @@ fn real_pty_planner_full_summary_survives_stream_then_exit() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 200,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3075,6 +3078,7 @@ fn focused_worker_wheel_scrolls_alternate_screen_history() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3158,6 +3162,7 @@ fn worker_wheel_forwards_to_inner_tui_when_scrollback_cannot_move() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3223,6 +3228,7 @@ fn worker_wheel_reaches_a_repainting_tui_and_never_its_snapshot_history() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 40 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3291,6 +3297,7 @@ fn codex_worker_wheel_at_edge_does_not_send_page_keys() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3350,6 +3357,7 @@ fn codex_worker_wheel_moves_normal_scrollback_before_forwarding() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3415,6 +3423,7 @@ fn codex_worker_wheel_moves_scroll_region_scrollback() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3481,6 +3490,7 @@ fn codex_alternate_screen_wheel_moves_snapshot_scrollback_first() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3547,6 +3557,7 @@ fn worker_wheel_scroll_moves_normal_screen_scrollback() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3600,6 +3611,7 @@ fn worker_wheel_at_edge_does_not_flash_notice() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3652,6 +3664,7 @@ fn terminal_snapshot_queries_do_not_drain_pending_output() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3690,6 +3703,7 @@ fn worker_scroll_moves_existing_scrollback_with_pending_output() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3746,6 +3760,7 @@ fn no_op_worker_scroll_does_not_mark_dirty() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -3904,6 +3919,7 @@ fn spawn_fake_claude_pager_app(rows: u16, transcript_lines: usize) -> App {
         TerminalPaneOptions {
             size: TerminalSize { rows, cols: 60 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4085,6 +4101,7 @@ fn spawn_claude_nav_test_app() -> App {
         TerminalPaneOptions {
             size: TerminalSize { rows: 8, cols: 60 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4182,6 +4199,7 @@ time.sleep(60)
         TerminalPaneOptions {
             size: TerminalSize { rows: 16, cols: 60 },
             scrollback_lines,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4371,6 +4389,7 @@ fn an_attached_terminal_mirrors_a_pane_and_types_into_it() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 8, cols: 40 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4568,6 +4587,7 @@ fn attach_selectors_name_exactly_one_live_pane() {
             TerminalPaneOptions {
                 size: TerminalSize { rows: 4, cols: 20 },
                 scrollback_lines: 10,
+                cwd: Some(std::env::temp_dir()),
                 ..Default::default()
             },
         )
@@ -4685,6 +4705,7 @@ fn alt_v_and_alt_b_work_even_when_the_terminal_swallows_the_alt_modifier() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 40 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4765,6 +4786,7 @@ fn alt_arrows_reach_a_codex_worker_untouched() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 60 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4836,6 +4858,7 @@ fn alt_v_on_a_non_claude_pane_that_took_the_alternate_screen_says_why() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 40 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4901,6 +4924,7 @@ fn wheel_scroll_routes_to_worker_under_pointer_even_when_task_is_focused() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -4961,6 +4985,7 @@ fn wheel_over_task_does_not_scroll_worker() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -5023,6 +5048,7 @@ fn worker_drag_selection_above_pane_autoscrolls() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -5079,6 +5105,7 @@ fn numbered_lines_pane(rows: u16) -> TerminalPane {
         TerminalPaneOptions {
             size: TerminalSize { rows, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -7460,6 +7487,7 @@ fn finished_cloud_command_does_not_write_to_dead_pty() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -7499,6 +7527,7 @@ fn worker_plain_shifted_letters_are_forwarded_to_terminal() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -8495,6 +8524,7 @@ fn q_confirms_before_quitting_with_running_agents() {
         Some(command),
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -8524,6 +8554,7 @@ fn ctrl_c_confirms_before_quitting_and_y_does_not_confirm() {
         Some(command),
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -9105,6 +9136,7 @@ fn worker_enter_on_a_live_pty_still_reaches_the_pty() {
             TerminalPaneOptions {
                 size: TerminalSize { rows: 5, cols: 40 },
                 scrollback_lines: 100,
+                cwd: Some(std::env::temp_dir()),
                 ..Default::default()
             },
         )
@@ -11315,6 +11347,7 @@ fn interactive_codex_orchestrator_mouse_selection_targets_terminal_region() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 8, cols: 50 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -11395,6 +11428,7 @@ fn planner_with_block(app: &App, block: &str) -> AgentRun {
         TerminalPaneOptions {
             size: TerminalSize { rows: 40, cols: 80 },
             scrollback_lines: 400,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -11895,6 +11929,7 @@ fn poll_loop_consumes_the_official_done_signal_for_a_live_worker() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -11968,6 +12003,7 @@ fn wired_worker_waits_for_the_signal_and_ignores_idle_chrome() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -13186,6 +13222,7 @@ fn interactive_orchestrator_self_launches_on_approve_marker() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -13390,6 +13427,7 @@ fn approval_keeps_the_orchestrator_live_and_mirrors_graph() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -13468,6 +13506,7 @@ fn task_input_reaches_the_orchestrator_while_a_plan_awaits_approval() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -13539,6 +13578,7 @@ fn task_input_sends_enter_key_to_live_orchestrator() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -13611,6 +13651,7 @@ fn completed_plan_followup_starts_its_own_worker_not_the_old_conductor() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -15675,6 +15716,7 @@ fn interactive_orchestrator_trackpad_scroll_uses_pointer_region() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 8, cols: 50 },
             scrollback_lines: 200,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -19326,6 +19368,7 @@ fn tab_toggles_a_drawer_header_and_still_reaches_the_worker_pty() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 20 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -22304,6 +22347,7 @@ fn a_live_gam_reviewer_survives_the_lifecycle_sweep() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -23711,6 +23755,7 @@ fn an_answered_agent_stops_saying_it_needs_you() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -23776,6 +23821,7 @@ fn a_working_signal_lifts_the_wait_without_anyone_typing_in_rudder() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -24633,6 +24679,7 @@ fn an_interrupted_claude_turn_is_shown_as_waiting_until_the_next_prompt() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 12, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -24701,6 +24748,7 @@ fn a_minute_of_silence_at_the_composer_stops_a_running_row_spinning() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 12, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -24773,6 +24821,7 @@ fn a_finished_claude_row_only_resumes_on_the_prompt_hook_not_on_a_repaint() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 8, cols: 60 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -24851,6 +24900,7 @@ fn a_manual_compaction_never_leaves_a_claude_row_working() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 12, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -24981,6 +25031,7 @@ fn an_api_error_turn_end_is_shown_as_a_failure_until_the_next_prompt() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -25308,6 +25359,7 @@ fn done_run_with_dying_worker(id: &str, cwd: &std::path::Path, seconds: &str) ->
         TerminalPaneOptions {
             size: TerminalSize { rows: 10, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -25903,6 +25955,7 @@ fn diff_panel_screenshot_svg() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 40, cols: 50 },
             scrollback_lines: 200,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -27115,6 +27168,7 @@ fn clicking_a_link_in_the_worker_pane_opens_it_and_dragging_does_not() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 50 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -28988,6 +29042,7 @@ fn gods_view_tile_shows_the_live_pty_without_resizing_it() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 40, cols: 120 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -29916,6 +29971,7 @@ fn a_working_claude_2_1_318_pane_never_reads_as_needing_permission() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 20, cols: 100 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -30005,6 +30061,7 @@ fn a_spinner_clearing_an_error_wait_reaches_run_json() {
         TerminalPaneOptions {
             size: TerminalSize { rows: 12, cols: 80 },
             scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
             ..Default::default()
         },
     )
@@ -30547,7 +30604,7 @@ fn background_output_bursts_keep_input_live_and_service_the_oldest_panes() {
             Some(TerminalCommand::with_args("/bin/sh", ["-c",
                 "dd if=/dev/zero bs=8192 count=128 2>/dev/null | tr '\\000' x; sleep 60",
             ])),
-            TerminalPaneOptions { scrollback_lines: 16, ..Default::default() },
+            TerminalPaneOptions { scrollback_lines: 16, cwd: Some(std::env::temp_dir()), ..Default::default() },
         ).unwrap());
         run
     }).collect();

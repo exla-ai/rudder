@@ -69,6 +69,14 @@ background. Done when
 prints 200. A new version can 404 for a minute or two after CI prints
 `+ @exla/rudder@X.Y.Z`.
 
+Release CI trusts only the first attempt of a tag run. `gh run rerun` stops
+at "Release qualification evidence rejected", so a failed tag run cannot
+publish. Fix the cause, commit, bump the patch version and tag again (5.0.2
+and 5.0.3 were skipped this way). Never move a pushed tag. The macOS
+qualification runner is slower than a Cloud home (the native suite took 95s
+against 59s here), so a test that waits on another process's timing can pass
+locally and fail there: re-run it alone, then fix the wait, not the product.
+
 Before a release that depends on a new npm dependency version (vibeprint in
 `cloud/worker/package.json`, for example), confirm the registry serves it. The
 worker image runs `npm install` against the registry.
@@ -132,6 +140,16 @@ builds `Rudder.dmg`. It then publishes GitHub release `mac-v<version>-<build>`
 as latest. `https://rudder.exla.ai/download/mac` redirects to
 `releases/latest/download/Rudder.dmg`. Rudder's npm releases create no GitHub
 release, so the Mac release stays "latest".
+
+Signing needs the Developer ID Application identity. Its private key exists
+only in the user's MacBook Pro keychain. Without the `MAC_DEVELOPER_ID_P12`
+and `MAC_DEVELOPER_ID_PASSWORD` repo secrets, the job fails at
+`exportArchive` with "No signing certificate "Developer ID Application"
+found" (a push-triggered build without `release=true` still passes). Either
+the user exports that identity as a .p12 into those secrets, or the build
+runs on the MacBook Pro itself with `mac/scripts/build.sh` over the tailnet,
+while the laptop is open; the first codesign there needs "Always Allow" on
+the keychain prompt.
 
 If the job sits in "Queued" with no runner, the exla-ai org is not connected to
 Offstage's GitHub App (console, CI page). Tell the user; do not move the job

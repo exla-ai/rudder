@@ -249,13 +249,21 @@ Implemented in `src/run-manager.ts`.
 5. **Merge / sync** (every run is jj):
    - `mergeJjRunIntoCurrentWorkspace(run, allowDirty)` (`jj.ts`):
      captures `currentOpId` first (records it on `MergeState.operationId`), then
-     `jj new <into> <node>` to merge the run's change into the current change `@`.
-     jj records any conflict in the merge change (`jj resolve --list`) rather than
-     blocking; sets `MergeState.mergeChangeId` and `run.status` to `merged` or
-     `merge-conflict`. A clean integration moves the target bookmark to the merge
-     change, requires `exportToGit` (`jj git export`) to succeed, and records the
-     exported Git commit plus whether `origin/<bookmark>` contains it. A resolver
-     finalizes that existing merge change instead of creating another merge on top.
+     integrates the run's commit into the target BOOKMARK, never into the
+     checkout's working-copy commit `@` (merging into an empty `@` put an empty,
+     message-less commit on main with every merge). A run based on the current
+     bookmark fast-forwards it; otherwise `jj new <bookmark> <run> --no-edit`
+     makes a merge whose first parent is the bookmark. jj records any conflict in
+     that merge; the merge then becomes the checkout's `@` for the resolver
+     (refused when `@` holds the user's own edits; `--abort-on-conflict` restores
+     the pre-merge op). Landing moves the bookmark, puts the checkout on top
+     (`jj new` when the checkout was the resolved merge, else `jj rebase -b @`,
+     so the user's edits stay uncommitted; a conflict there restores the op and
+     fails), requires `exportToGit` to succeed, and attaches Git HEAD to the
+     bookmark when it names the same commit, so `git status` reads "On branch
+     main" and clean. It records the change that landed, the exported Git commit
+     and whether `origin/<bookmark>` contains it. A resolver finalizes that
+     existing merge instead of creating another merge on top.
    - `syncRunWorkspace(run, baseBranch)` (`jj.ts`): `jj rebase -s <node> -o <trunk>`
      (jj records conflicts in place, never blocks; no rebase-in-progress dance).
    - `removeRunWorkspace(run)` (`jj.ts`): `jj workspace forget <name>` + rm dir.
@@ -2789,7 +2797,8 @@ verification time, and one or more checks. Only complete evidence may render `de
 ### 14.7 Merge model
 Planned DAG nodes integrate automatically; manually started runs use `m`/`M`. A
 hard-dep child launches only once its parent reaches `Merged`. Clean merge is
-mechanical jj (`jj new`); a
+mechanical jj onto the target bookmark (fast-forward, or `jj new <bookmark>
+<run>` when the bookmark moved; see section 5); a
 conflict spawns the AI resolver (`start_conflict_resolution_agent` →
 `finalize_merge_resolvers`, jj-worded prompt). Undo via `rudder undo` (op-log). See
 section 5 / `src/jj.ts` for the run-level merge plumbing.

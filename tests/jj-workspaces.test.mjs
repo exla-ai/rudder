@@ -150,138 +150,6 @@ test("currentOpId reads the latest operation id", async (t) => {
   assert.equal(await currentOpId(env.repo), "op12345");
 });
 
-test("jj merge captures merge.operationId and merges cleanly", async (t) => {
-  const env = await setupFakeJj(t);
-  const workspace = path.join(env.temp, "run-workspace");
-  await fsp.mkdir(path.join(workspace, ".jj"), { recursive: true });
-  process.env.JJ_SOURCE_WORKSPACE = workspace;
-  process.env.JJ_SOURCE_CHANGE = "sourcechange";
-  process.env.JJ_TARGET_CHANGE = "targetchange";
-  process.env.JJ_OP_ID = "opmerge99";
-  process.env.JJ_STATUS_OUTPUT = "The working copy has no changes.\n";
-  process.env.JJ_RESOLVE_LIST = "";
-
-  const run = await createRunRecord({
-    id: "run-merge",
-    repoRoot: env.repo,
-    task: "merge jj work",
-    backend: "claude",
-    targetBranch: "targetchange",
-    baseCommit: "basechange",
-    useWorkspace: true,
-    workspacePath: workspace,
-    workspaceName: "rudder-run-merge",
-  });
-
-  const merged = await mergeJjRunIntoCurrentWorkspace(run);
-
-  assert.equal(merged.status, "merged");
-  assert.equal(merged.merge?.status, "merged");
-  assert.equal(merged.merge?.operationId, "opmerge99");
-  assert.equal(merged.merge?.targetBranch, "main");
-  assert.equal(merged.merge?.pushed, false);
-  assert.match(await readLog(env.log), /\|new @ sourcechange -m rudder: merge jj work/);
-  assert.match(await readLog(env.log), /\|bookmark create main -r targetchange/);
-  assert.match(await readLog(env.log), /\|git export/);
-});
-
-test("jj merge records conflicted files and mergeChangeId on conflict", async (t) => {
-  const env = await setupFakeJj(t);
-  const workspace = path.join(env.temp, "conflict-workspace");
-  await fsp.mkdir(path.join(workspace, ".jj"), { recursive: true });
-  process.env.JJ_SOURCE_WORKSPACE = workspace;
-  process.env.JJ_SOURCE_CHANGE = "sourcechange";
-  process.env.JJ_TARGET_CHANGE = "targetchange";
-  process.env.JJ_OP_ID = "opconflict";
-  process.env.JJ_STATUS_OUTPUT = "The working copy has no changes.\n";
-  process.env.JJ_RESOLVE_LIST = "Conflict in src/a.ts\n";
-
-  const run = await createRunRecord({
-    id: "run-conflict",
-    repoRoot: env.repo,
-    task: "conflict jj work",
-    backend: "claude",
-    targetBranch: "targetchange",
-    baseCommit: "basechange",
-    useWorkspace: true,
-    workspacePath: workspace,
-    workspaceName: "rudder-run-conflict",
-  });
-
-  const merged = await mergeJjRunIntoCurrentWorkspace(run);
-
-  assert.equal(merged.status, "merge-conflict");
-  assert.equal(merged.merge?.status, "conflict");
-  assert.deepEqual(merged.merge?.conflictedFiles, ["src/a.ts"]);
-  assert.equal(merged.merge?.operationId, "opconflict");
-});
-
-test("automatic jj merge restores the pre-merge operation on conflict", async (t) => {
-  const env = await setupFakeJj(t);
-  const workspace = path.join(env.temp, "auto-conflict-workspace");
-  await fsp.mkdir(path.join(workspace, ".jj"), { recursive: true });
-  process.env.JJ_SOURCE_WORKSPACE = workspace;
-  process.env.JJ_OP_ID = "opbefore";
-  process.env.JJ_STATUS_OUTPUT = "The working copy has no changes.\n";
-  process.env.JJ_RESOLVE_LIST = "Conflict in src/a.ts\n";
-
-  const run = await createRunRecord({
-    id: "run-auto-conflict",
-    repoRoot: env.repo,
-    task: "auto conflict work",
-    backend: "claude",
-    targetBranch: "targetchange",
-    baseCommit: "basechange",
-    useWorkspace: true,
-    workspacePath: workspace,
-    workspaceName: "rudder-run-auto-conflict",
-  });
-
-  const merged = await mergeJjRunIntoCurrentWorkspace(run, true, { abortOnConflict: true });
-
-  assert.equal(merged.merge?.status, "conflict");
-  assert.deepEqual(merged.merge?.conflictedFiles, ["src/a.ts"]);
-  assert.equal(merged.merge?.mergeChangeId, undefined);
-  assert.match(merged.merge?.error ?? "", /nothing was merged/);
-  assert.match(await readLog(env.log), /\|op restore opbefore/);
-});
-
-test("resolved jj conflict finalizes the existing merge change without stacking another merge", async (t) => {
-  const env = await setupFakeJj(t);
-  const workspace = path.join(env.temp, "resolved-conflict-workspace");
-  await fsp.mkdir(path.join(workspace, ".jj"), { recursive: true });
-  process.env.JJ_SOURCE_WORKSPACE = workspace;
-  process.env.JJ_SOURCE_CHANGE = "sourcechange";
-  process.env.JJ_TARGET_CHANGE = "mergechange";
-  process.env.JJ_OP_ID = "opconflict";
-  process.env.JJ_STATUS_OUTPUT = "The working copy has no changes.\n";
-  process.env.JJ_RESOLVE_LIST = "Conflict in src/a.ts\n";
-
-  const run = await createRunRecord({
-    id: "run-resolved-conflict",
-    repoRoot: env.repo,
-    task: "resolve jj work",
-    backend: "claude",
-    targetBranch: "main",
-    baseCommit: "basechange",
-    useWorkspace: true,
-    workspacePath: workspace,
-    workspaceName: "rudder-run-resolved-conflict",
-  });
-
-  const conflicted = await mergeJjRunIntoCurrentWorkspace(run);
-  assert.equal(conflicted.status, "merge-conflict");
-  process.env.JJ_RESOLVE_LIST = "";
-  const merged = await mergeJjRunIntoCurrentWorkspace(conflicted);
-
-  assert.equal(merged.status, "merged");
-  assert.equal(merged.merge?.mergeChangeId, "mergechange");
-  const log = await readLog(env.log);
-  assert.equal(log.match(/\|new /g)?.length, 1, log);
-  assert.match(log, /\|bookmark create main -r mergechange/);
-  assert.match(log, /\|git export/);
-});
-
 test("jj export failure never records a run as merged", async (t) => {
   const env = await setupFakeJj(t);
   const workspace = path.join(env.temp, "export-failure-workspace");
@@ -549,7 +417,7 @@ case "\${1:-}" in
     : > "\${MARK}.merged"
     exit 0
     ;;
-  bookmark)
+  bookmark|describe)
     exit 0
     ;;
   git)

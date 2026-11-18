@@ -454,9 +454,26 @@ export function workspaceNameFor(id: string): string {
 }
 
 /**
- * Merge a run's jj change into the current (main) workspace `@`. Captures the
- * operation id before the merge and records it on merge.operationId. On
- * conflict sets merge.status="conflict" + conflictedFiles + mergeChangeId.
+ * Merge a run's jj change into the target bookmark (main) and put the main
+ * checkout on top of the result. Captures the operation id before the merge and
+ * records it on merge.operationId.
+ *
+ * The merge is built on the BOOKMARK, never on the checkout's working-copy
+ * commit `@`. In a colocated repo `@` is normally an empty commit with no
+ * description; merging into it (`jj new @ <run>`) made that empty commit the
+ * first parent of every merge on main, and left main pointing at the checkout's
+ * own working-copy commit, so Git showed a detached HEAD with the merged files
+ * staged against that empty commit.
+ *
+ * - The run's change descends from main: main fast-forwards to it.
+ * - main moved since the run started: a merge commit whose first parent is main.
+ * - That merge conflicts: it becomes the checkout's `@` so a resolver can settle
+ *   it there (merge.status="conflict" + conflictedFiles + mergeChangeId), and a
+ *   later call finalizes it. `abortOnConflict` restores the pre-merge operation
+ *   instead.
+ *
+ * Landing rebases the checkout's own edits onto the new main and attaches Git's
+ * HEAD to the bookmark (see `attachGitHead`).
  */
 export async function mergeJjRunIntoCurrentWorkspace(
   run: RunRecord,
@@ -464,27 +481,18 @@ export async function mergeJjRunIntoCurrentWorkspace(
   options: { abortOnConflict?: boolean } = {},
 ): Promise<RunRecord> {
   // Integration is one-at-a-time ACROSS PROCESSES: a `rudder merge` CLI call
-  // and a daemon tick are separate processes sharing the same @, and a second
-  // merge starting mid-flight would stack a merge change on a moving target.
-  return withIntegrationLock(run.repoRoot, async () => {
-    const opBefore = options.abortOnConflict ? await currentOpId(run.repoRoot) : "";
-    const merged = await mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty);
-    if (options.abortOnConflict && merged.merge?.status === "conflict" && opBefore) {
-      // Automatic integration never leaves a conflicted merge in the main
-      // checkout: restore the pre-merge operation and leave the run for the user.
-      await undoToOp(run.repoRoot, opBefore);
-      merged.merge = {
-        ...merged.merge,
-        mergeChangeId: undefined,
-        error: "merge into the main change conflicts; nothing was merged",
-      };
-      await saveRunRecord(merged);
-    }
-    return merged;
-  });
+  // and a daemon tick are separate processes sharing the same checkout, and a
+  // second merge starting mid-flight would stack a merge on a moving target.
+  return withIntegrationLock(run.repoRoot, () =>
+    mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty, options.abortOnConflict === true),
+  );
 }
 
-async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: boolean): Promise<RunRecord> {
+async function mergeJjRunIntoCurrentWorkspaceLocked(
+  run: RunRecord,
+  allowDirty: boolean,
+  abortOnConflict: boolean,
+): Promise<RunRecord> {
   if (!run.workspace.workspaceName) {
     throw new Error("Run has no jj workspace name to merge.");
   }
@@ -500,7 +508,8 @@ async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: 
       await saveRunRecord(run);
       return run;
     }
-    return await finalizeJjIntegration(run, run.merge.mergeChangeId);
+    // Undo only the landing if the checkout cannot follow: the resolution stays.
+    return await finalizeJjIntegration(run, run.merge.mergeChangeId, await currentOpId(run.repoRoot));
   }
   // Rudder writes its own files (.rudder/ is already filtered by jjStatus; RUDDER.md
   // and DECISIONS.md are the live coordination surfaces) into the main workspace
@@ -535,50 +544,94 @@ async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: 
   };
   await saveRunRecord(run);
 
-  const sourceChangeId = await currentJjChangeId(run.workspace.path);
-  if (!sourceChangeId) {
-    await markMergeFailed(run, "Could not determine jj change id for run workspace.");
-    throw new Error("Could not determine jj change id for run workspace.");
-  }
+  // The agent's change still carries Rudder's live status ("rudder: <task> [done]");
+  // it lands in main's history under the task's plain subject.
   const message = `rudder: ${commitSubject(run.task)}`;
-  const merge = await mergeNode({
-    repoRoot: run.repoRoot,
-    nodeChangeId: sourceChangeId,
-    intoChangeId: "@",
-    message,
-  });
-  if (!merge.mergeChangeId) {
-    const error = "jj merge failed.";
+  const described = await jjWriteWithStaleRecovery(run.workspace.path, ["describe", "-m", message]);
+  if (described.code !== 0) {
+    const error = described.stderr.trim() || "jj could not describe the run's change.";
     await markMergeFailed(run, error);
     throw new Error(error);
   }
-
-  if (merge.conflictedFiles.length === 0) {
-    // KEEP the pre-merge operationId captured above: it is the undo waypoint.
-    // Overwriting it with the POST-merge op id (as this used to) made
-    // `rudder undo <op>` restore to the state after the merge — a perfect
-    // no-op that reported success while changing nothing.
-    return await finalizeJjIntegration(run, merge.mergeChangeId);
+  // The workspace's commit id, not its change id: concurrent snapshots can make
+  // a change id divergent, while the commit id names exactly the finished work.
+  const source = await currentJjCommitId(run.workspace.path);
+  if (!source) {
+    await markMergeFailed(run, "Could not determine jj change id for run workspace.");
+    throw new Error("Could not determine jj change id for run workspace.");
+  }
+  const bookmark = await integrationBookmark(run.repoRoot, run.targetBranch);
+  const base = await integrationBase(run.repoRoot, bookmark);
+  // KEEP the pre-merge operationId captured above: it is the undo waypoint.
+  // Overwriting it with the POST-merge op id (as this used to) made
+  // `rudder undo <op>` restore to the state after the merge: a perfect
+  // no-op that reported success while changing nothing.
+  if (await jjIsAncestor(run.repoRoot, base, source)) {
+    // The run started from the current main: main gains exactly its change.
+    return await finalizeJjIntegration(run, await jjChangeIdOf(run.repoRoot, source), opIdBefore);
+  }
+  await runCommand("jj", ["new", base, source, "--no-edit", "-m", message], { cwd: run.repoRoot });
+  const mergeChangeId = await jjChangeIdOf(run.repoRoot, `latest(children(${base}) & children(${source}))`);
+  const conflictedFiles = await jjConflictedFiles(run.repoRoot, mergeChangeId);
+  if (conflictedFiles.length === 0) {
+    return await finalizeJjIntegration(run, mergeChangeId, opIdBefore);
   }
 
   run.status = "merge-conflict";
   run.hadMergeConflict = true;
+  if (abortOnConflict) {
+    // Automatic integration never leaves a conflicted merge behind: restore the
+    // pre-merge operation and leave the run for the user.
+    if (opIdBefore) await undoToOp(run.repoRoot, opIdBefore);
+    run.merge = {
+      ...run.merge,
+      status: "conflict",
+      conflictedFiles,
+      mergeChangeId: undefined,
+      error: "merge into the main change conflicts; nothing was merged",
+    };
+    await saveRunRecord(run);
+    return run;
+  }
+  // The resolver settles the conflict in the main checkout, on the merge itself.
+  // Moving there drops an empty, undescribed `@`; edits of the user's own would
+  // leave the checkout with it, so they stop the merge instead.
+  if (!(await checkoutIsDiscardable(run.repoRoot))) {
+    if (opIdBefore) await undoToOp(run.repoRoot, opIdBefore);
+    const error = `merging into ${bookmark} conflicts in ${conflictedFiles.join(", ")}, and the main checkout has edits of its own. Commit or discard them, then merge again so the conflict can be resolved there.`;
+    await markMergeFailed(run, error);
+    throw new Error(error);
+  }
+  await runCommand("jj", ["edit", mergeChangeId], { cwd: run.repoRoot });
   run.merge = {
     ...run.merge,
     status: "conflict",
-    conflictedFiles: merge.conflictedFiles,
-    mergeChangeId: merge.mergeChangeId,
-    // Pre-merge op stays the undo waypoint (see the clean-merge path above).
+    conflictedFiles,
+    mergeChangeId,
+    // Pre-merge op stays the undo waypoint (see above).
     error: "jj merge created conflicts.",
   };
   await saveRunRecord(run);
   return run;
 }
 
-async function finalizeJjIntegration(run: RunRecord, mergeChangeId: string): Promise<RunRecord> {
+/** Land `head` on the target bookmark and put the main checkout on top of it.
+ * `undoOp` is restored when the checkout's own edits conflict with what landed. */
+async function finalizeJjIntegration(run: RunRecord, head: string, undoOp: string): Promise<RunRecord> {
   const targetBookmark = await integrationBookmark(run.repoRoot, run.targetBranch);
-  await createBookmark(run.repoRoot, targetBookmark, mergeChangeId);
+  const base = await integrationBase(run.repoRoot, targetBookmark);
+  await createBookmark(run.repoRoot, targetBookmark, head);
+  await moveCheckoutOnto(run.repoRoot, targetBookmark, base);
+  // A conflict here is new: the merge refuses to start on a conflicted checkout.
+  const overlap = await jjConflictedFiles(run.repoRoot);
+  if (overlap.length > 0) {
+    if (undoOp) await undoToOp(run.repoRoot, undoOp);
+    const error = `the main checkout's own edits conflict with this merge in ${overlap.join(", ")}. Commit or discard them, then merge again.`;
+    await markMergeFailed(run, error);
+    throw new Error(error);
+  }
   await exportToGit(run.repoRoot);
+  await attachGitHead(run.repoRoot, targetBookmark);
   const localCommit = await gitRevision(run.repoRoot, targetBookmark);
   const pushed = localCommit
     ? await remoteContainsCommit(run.repoRoot, targetBookmark, localCommit)
@@ -588,7 +641,7 @@ async function finalizeJjIntegration(run: RunRecord, mergeChangeId: string): Pro
     ...run.merge,
     status: "merged",
     targetBranch: targetBookmark,
-    mergeChangeId,
+    mergeChangeId: head,
     localCommit: localCommit || undefined,
     pushed,
     pushedAt: pushed ? new Date().toISOString() : undefined,
@@ -628,6 +681,78 @@ async function integrationBookmark(repoRoot: string, recordedTarget: string): Pr
     return candidate;
   }
   return (await closestLocalBookmark(repoRoot)) || "main";
+}
+
+function bookmarkRevset(bookmark: string): string {
+  return `bookmarks(exact:${JSON.stringify(bookmark)})`;
+}
+
+async function jjCommitIds(repoRoot: string, revset: string): Promise<string[]> {
+  const result = await runCommand("jj", ["log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\n"'], {
+    cwd: repoRoot,
+  });
+  return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+/** The commit a merge lands on: where the bookmark points. A bookmark that does
+ * not exist yet (a repo with no commits) starts at the checkout's parent. */
+async function integrationBase(repoRoot: string, bookmark: string): Promise<string> {
+  let commits = await jjCommitIds(repoRoot, bookmarkRevset(bookmark));
+  if (commits.length === 0) commits = await jjCommitIds(repoRoot, "@-");
+  if (commits.length !== 1) {
+    throw new Error(`cannot merge into ${bookmark}: it resolves to ${commits.length} commits; settle it with jj first`);
+  }
+  return commits[0];
+}
+
+async function jjIsAncestor(repoRoot: string, ancestor: string, descendant: string): Promise<boolean> {
+  return (await jjCommitIds(repoRoot, `(${ancestor}) & ::(${descendant})`)).length > 0;
+}
+
+async function jjChangeIdOf(repoRoot: string, revision: string): Promise<string> {
+  const result = await runCommand("jj", ["log", "--no-graph", "-r", revision, "-T", "change_id"], { cwd: repoRoot });
+  const changeId = result.stdout.trim();
+  if (!changeId) throw new Error(`jj found no change at ${revision}`);
+  return changeId;
+}
+
+/** jj drops an empty, undescribed `@` when the checkout moves elsewhere. */
+async function checkoutIsDiscardable(repoRoot: string): Promise<boolean> {
+  const result = await runCommand(
+    "jj",
+    ["log", "--no-graph", "-r", "@", "-T", 'if(empty, if(description, "kept", "discardable"), "kept")'],
+    { cwd: repoRoot },
+  );
+  return result.stdout.trim() === "discardable";
+}
+
+/**
+ * Put the main checkout on top of a bookmark that just moved. A checkout that
+ * landed in it (the resolved merge itself) starts a fresh empty change there;
+ * one that sat on the old bookmark carries its own edits and commits onto the
+ * new one, still uncommitted. A checkout on another line of work is left alone.
+ */
+async function moveCheckoutOnto(repoRoot: string, bookmark: string, oldBase: string): Promise<void> {
+  const target = bookmarkRevset(bookmark);
+  if (await jjIsAncestor(repoRoot, "@", target)) {
+    await runCommand("jj", ["new", target], { cwd: repoRoot });
+  } else if (await jjIsAncestor(repoRoot, oldBase, "@")) {
+    await runCommand("jj", ["rebase", "-b", "@", "-o", target], { cwd: repoRoot });
+  }
+}
+
+/**
+ * jj keeps Git's HEAD detached at the checkout's parent. When that parent is the
+ * bookmark itself, point HEAD at the branch so plain Git reads "On branch main"
+ * with nothing staged. No commit or ref moves: HEAD names the same commit
+ * either way, and jj detaches HEAD again by itself before it ever moves that
+ * branch away from the checkout.
+ */
+async function attachGitHead(repoRoot: string, bookmark: string): Promise<void> {
+  const head = await gitRevision(repoRoot, "HEAD");
+  if (head && head === (await gitRevision(repoRoot, `refs/heads/${bookmark}`))) {
+    await runCommand("git", ["symbolic-ref", "HEAD", `refs/heads/${bookmark}`], { cwd: repoRoot });
+  }
 }
 
 async function gitRevision(repoRoot: string, ref: string): Promise<string> {
@@ -675,10 +800,10 @@ export async function mergeNode(params: {
   return { mergeChangeId, opId, conflictedFiles };
 }
 
-export async function jjConflictedFiles(workspacePath: string): Promise<string[]> {
+export async function jjConflictedFiles(workspacePath: string, revision = "@"): Promise<string[]> {
   // Stale-recovering read: a stale failure here would falsely report "no
   // conflicts" to the merge/sync paths.
-  const result = await jjReadInWorkspace(workspacePath, ["resolve", "--list"]);
+  const result = await jjReadInWorkspace(workspacePath, ["resolve", "--list", "-r", revision]);
   return result.code === 0 ? parseJjConflictedFiles(result.stdout) : [];
 }
 

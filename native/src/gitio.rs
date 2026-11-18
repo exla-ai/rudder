@@ -1741,10 +1741,11 @@ pub(crate) fn run_rudder_jj_command(
             error: "rudder CLI not found on PATH".to_string(),
         };
     };
-    // A merge from the TUI is an explicit user action; allow a dirty target. jj
-    // preserves the main workspace's working copy as a merge parent (no data loss,
-    // undoable via `rudder undo`), so the git-style dirty gate would only get in the
-    // way. (Rudder's own files no longer count as dirty either; see jj.ts.)
+    // A merge from the TUI is an explicit user action; allow a dirty target. The
+    // merge lands on the main bookmark and the checkout's own edits are rebased on
+    // top, still uncommitted (undoable via `rudder undo`), so the git-style dirty
+    // gate would only get in the way. (Rudder's own files never count as dirty;
+    // see jj.ts.)
     // `merge-auto` is automatic integration: same merge, but a conflict restores
     // the pre-merge operation so nothing half-merged is left in the checkout.
     let (command, extra): (&str, &[&str]) = match command {

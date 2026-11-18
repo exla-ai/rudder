@@ -274,6 +274,16 @@ conflicted under older code) shows "conflict · press m to resolve" and is never
 merged on its own. Automatic
 integration no longer rebases or runs checks before merging.
 
+Merge history: a merge lands on the main bookmark, not on the checkout's
+working-copy commit. It fast-forwards when the agent started from the current
+main and otherwise makes one merge commit with main as its first parent; main
+never gains an empty, message-less commit. Afterwards the checkout sits on the
+new main with its own edits still uncommitted and Git HEAD attached, so
+`git status` reads "On branch main". A conflicted merge is resolved in the
+checkout only when it has no edits of its own; otherwise the merge stops and
+asks for them to be committed or discarded. Pinned by
+`tests/jj-merge-history.test.mjs` (real jj and git).
+
 Selection speed: moving the selection to a busy agent now shows its current
 screen on the next frame. The selected pane drains its whole output queue
 before drawing (it used to replay up to 256 KB one 64 KB batch per frame), and

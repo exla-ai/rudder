@@ -18,7 +18,7 @@ import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-pi
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
-import { paintSubagent } from "/app/subagents.js";
+import { duration, paintSubagent } from "/app/subagents.js";
 import { applyAgentEdits, branchAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
@@ -3982,7 +3982,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // with the actual replies lost between them.
     let steps = null;
     for (const m of withCompactMarkers(t.messages || [])) {
-      if (m.ts) {
+      // A turn's time belongs to the turn above it, even past midnight.
+      if (m.ts && m.kind !== "turn") {
         const d = new Date(m.ts).toDateString();
         if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; steps = null; }
       }
@@ -4041,6 +4042,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (role === "system" && x.m.kind === "compact") {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
+    if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
     if (role === "system") return h(`<div class="msg system"><div class="sys md"></div></div>`);
     return h(`<div class="msg assistant"><div class="md"></div></div>`);
   }
@@ -4067,6 +4069,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
     if (m.kind === "compact") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
     const md = node.querySelector(".md");
     let text = m.text || "";
     if (m.role === "user") {

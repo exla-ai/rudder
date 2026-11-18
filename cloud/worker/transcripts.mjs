@@ -343,6 +343,13 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       reader.lastAt = toMillis(entry.timestamp) ?? reader.lastAt;
       return;
     }
+    // Claude Code writes how long each turn took once it ends.
+    if (entry.type === "system" && entry.subtype === "turn_duration") {
+      if (own && Number(entry.durationMs) > 0) {
+        push(turnMessage(entry.uuid || `turn-${messages.length}`, toMillis(entry.timestamp), Number(entry.durationMs)));
+      }
+      return;
+    }
     // Claude Code saves a session's cost-state as its process exits.
     if (sub && entry.type === "cost-state") {
       reader.exited = true;
@@ -496,6 +503,12 @@ function teammateMessage(text) {
 // marker (with the summary behind it), not as a wall of text from the user.
 function compactMessage(id, ts, { trigger = null, preTokens = null, summary = "" } = {}) {
   return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger, preTokens, summary } };
+}
+
+// A finished turn and how long it took, which the chat shows under the turn's
+// last message ("Worked for 1m 05s", as the terminals print it).
+function turnMessage(id, ts, durationMs) {
+  return { id, role: "system", kind: "turn", ts, text: "", durationMs };
 }
 
 const COMPACT_PREAMBLE = /^This session is being continued from a previous conversation that ran out of context\.[^\n]*\n+(?:Summary:\s*\n)?/;
@@ -654,6 +667,14 @@ function codexReader({ stats = null, child = false } = {}) {
       } else if (type === "turn_aborted") {
         reader.turn = "aborted";
         reader.endedAt = ts;
+      }
+      return;
+    }
+    // Codex ends a turn with task_complete, which says how long it took. A
+    // stopped turn (turn_aborted) shows no time.
+    if (entry.type === "event_msg" && entry.payload?.type === "task_complete") {
+      if (Number(entry.payload.duration_ms) > 0) {
+        messages.push(turnMessage(`c${index}`, ts, Number(entry.payload.duration_ms)));
       }
       return;
     }

@@ -211,3 +211,52 @@ test("Claude: notes between tool calls show, and a pasted message shows once wit
     "assistant: Done.",
   ]);
 });
+
+test("A finished turn shows how long it took: Claude's turn_duration, Codex's task_complete; a running or stopped turn shows none", (t) => {
+  const session = "5e551011-0000-4000-8000-00000000000a";
+  const claude = setup(t, { id: "run_tc", backend: "claude", status: "running", session: { nativeSessionId: session } });
+  const project = path.join(claude.home, ".claude", "projects", "-x");
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(project, `${session}.jsonl`), jsonl([
+    { type: "user", uuid: "u1", parentUuid: null, timestamp: at(0), message: { role: "user", content: "fix the menu" } },
+    { type: "assistant", uuid: "a1", parentUuid: "u1", timestamp: at(64), message: { content: [{ type: "text", text: "Fixed." }] } },
+    { type: "system", subtype: "turn_duration", uuid: "d1", parentUuid: "a1", isSidechain: false, durationMs: 65_012, messageCount: 4, timestamp: at(65) },
+    { type: "user", uuid: "u2", parentUuid: "d1", timestamp: at(70), message: { role: "user", content: "and the footer" } },
+    { type: "assistant", uuid: "a2", parentUuid: "u2", timestamp: at(72), message: { content: [{ type: "text", text: "Looking." }] } },
+  ]));
+  assert.deepEqual(readTranscript(claude.repo, "run_tc", { home: claude.home }).messages.map((m) => [m.role, m.kind ?? null, m.text, m.durationMs ?? null]), [
+    ["user", null, "fix the menu", null],
+    ["assistant", null, "Fixed.", null],
+    ["system", "turn", "", 65_012],
+    ["user", null, "and the footer", null],
+    ["assistant", null, "Looking.", null],
+  ]);
+
+  const hex = Date.parse(at(0)).toString(16).padStart(12, "0");
+  const thread = `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-00000000000b`;
+  const codex = setup(t, { id: "run_tx", backend: "codex", status: "running", session: { nativeSessionId: thread } });
+  const day = path.join(codex.home, ".codex", "sessions", "2026", "11", "18");
+  fs.mkdirSync(day, { recursive: true });
+  const item = (ordinal, ts, payload) => ({ timestamp: at(ts), ordinal, type: "response_item", payload });
+  const event = (ordinal, ts, payload) => ({ timestamp: at(ts), ordinal, type: "event_msg", payload });
+  const said = (ordinal, ts, role, text) => item(ordinal, ts, { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text }] });
+  fs.writeFileSync(path.join(day, `rollout-2026-11-18T09-00-00-${thread}.jsonl`), jsonl([
+    { timestamp: at(0), ordinal: 0, type: "session_meta", payload: { id: thread, cli_version: "0.169.0" } },
+    event(1, 0, { type: "task_started", turn_id: "t1", started_at: 1795078800 }),
+    said(2, 0, "user", "list ports"),
+    said(3, 4, "assistant", "Three ports."),
+    event(4, 4, { type: "task_complete", turn_id: "t1", last_agent_message: "Three ports.", started_at: 1795078800, completed_at: 1795078804, duration_ms: 4_210 }),
+    event(5, 10, { type: "task_started", turn_id: "t2" }),
+    said(6, 10, "user", "and docker"),
+    event(7, 12, { type: "turn_aborted", turn_id: "t2", reason: "interrupted" }),
+    event(8, 20, { type: "task_started", turn_id: "t3" }),
+    said(9, 20, "user", "try again"),
+  ]));
+  assert.deepEqual(readTranscript(codex.repo, "run_tx", { home: codex.home }).messages.map((m) => [m.role, m.kind ?? null, m.durationMs ?? null]), [
+    ["user", null, null],
+    ["assistant", null, null],
+    ["system", "turn", 4_210],
+    ["user", null, null],
+    ["user", null, null],
+  ]);
+});

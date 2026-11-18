@@ -9,9 +9,8 @@ name: Release
 #   git push origin HEAD:release-check/<version>  # full matrix/tests at FINAL SHA, no publish
 #   git push origin main vX.Y.Z  # after green, push the SAME SHA and explicit local tag
 #
-# One-time setup: add an npm "Automation" access token as the repo secret
-# NPM_TOKEN (Settings -> Secrets and variables -> Actions -> New secret).
-# Generate it at npmjs.com -> Access Tokens -> Generate New Token -> Automation.
+# npm publishes through trusted publishing (OIDC): @exla/rudder trusts this
+# repository's release.yml, so no npm token is stored anywhere.
 
 on:
   push:
@@ -377,7 +376,7 @@ jobs:
     runs-on: macos-15
     permissions:
       contents: read
-      id-token: write # required for npm provenance
+      id-token: write # npm trusted publishing and provenance
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -433,33 +432,17 @@ jobs:
           console.log(`Publishing ${version} to ${tag}`);
           NODE
 
+      # Trusted publishing needs npm 11.5.1 or newer; Node 22 ships npm 10.
+      - name: Use npm 11
+        if: github.ref_type == 'tag'
+        run: npm install -g npm@11.21.1
+
       # The publish runs prepack's TS/board/package work. Native Cargo is
       # bypassed only after all three source-bound binary pairs verify again;
       # copy-native rehashes while staging the downloaded artifacts.
       - name: Publish to npm
         if: github.ref_type == 'tag'
-        id: publish
-        continue-on-error: true
         run: npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
           RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
-
-      # @viraatdas/rudder (the pre-3.4.0 name) is retired: nothing new is
-      # published there and every version carries a deprecation notice that
-      # points at @exla/rudder. Re-running it each release is idempotent.
-      # Existing installs still move themselves over (src/version-check.ts).
-      - name: Deprecate the old package name
-        if: github.ref_type == 'tag'
-        continue-on-error: true
-        run: |
-          npm deprecate @viraatdas/rudder "Retired. Rudder is @exla/rudder: npm uninstall -g @viraatdas/rudder && npm install -g @exla/rudder"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Fail when the new name did not publish
-        if: github.ref_type == 'tag' && steps.publish.outcome != 'success'
-        run: |
-          echo "::error::npm publish of @exla/rudder failed (is viraatdas a publisher in the exla npm org, and can NPM_TOKEN publish to it?)"
-          exit 1

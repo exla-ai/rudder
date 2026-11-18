@@ -15,24 +15,42 @@ export const TRACK_GAP_MS = 10 * 60_000;
 const DIFF_MAX_BYTES = 2 * 1024 * 1024;
 export const RUN_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
-/** The run's record, or null when the agent is gone. */
-export function readRunRecord(projectDir, runId) {
+/**
+ * The run's record, or null when the agent is gone. A record that cannot be
+ * read is an error, not a gone agent: that would stop its tracking for good.
+ */
+function readRunRecord(projectDir, runId) {
+  const file = path.join(projectDir, ".rudder", "runs", runId, "run.json");
+  let body;
   try {
-    const record = JSON.parse(fs.readFileSync(path.join(projectDir, ".rudder", "runs", runId, "run.json"), "utf8"));
-    return record?.id === runId ? record : null;
-  } catch {
-    return null;
+    body = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
   }
+  let record;
+  try {
+    record = JSON.parse(body);
+  } catch (error) {
+    throw new Error(`could not read agent ${runId}: ${error.message}`);
+  }
+  if (record?.id !== runId) throw new Error(`${file} is not agent ${runId}'s record`);
+  return record;
 }
 
 /** Where the agent's edits are: its own workspace, or the checkout for a main agent. */
-export function runWorkspace(projectDir, record) {
+function runWorkspace(projectDir, record) {
   const ws = record?.workspace;
-  return ws?.enabled === true && typeof ws.path === "string" && ws.path && fs.existsSync(ws.path) ? ws.path : projectDir;
+  if (ws?.enabled !== true) return projectDir;
+  // Never the checkout instead: that diff is the user's, not this agent's.
+  if (typeof ws.path !== "string" || !ws.path || !fs.existsSync(ws.path)) {
+    throw new Error(`the agent's workspace ${ws.path || "(none)"} is gone`);
+  }
+  return ws.path;
 }
 
 /** What one turn's end looks like: it was working and now is not, and is not just asking to run a command. */
-export function turnEnded(before, record) {
+function turnEnded(before, record) {
   const now = phoneStatus(record);
   return before === "working" && now !== "working" && !(now === "waiting" && record?.attention === "permission");
 }
@@ -47,22 +65,19 @@ function jj(cwd, args, env) {
 
 /**
  * The agent's working-copy diff, as Rudder's verifier reads it (`jj diff --git`
- * in its workspace), recovering once from a stale working copy like src/jj.ts.
+ * in its workspace). A stale working copy is the agent's to update (its next
+ * jj command does it); the tracker never changes the agent's version control,
+ * so it reports the error and reads again on its next pass.
  */
 export async function readAgentDiff(cwd, env) {
-  const args = ["diff", "--git", "--no-pager"];
-  let r = await jj(cwd, args, env);
-  if (!r.ok && /stale/i.test(r.stderr)) {
-    await jj(cwd, ["workspace", "update-stale"], env);
-    r = await jj(cwd, args, env);
-  }
+  const r = await jj(cwd, ["diff", "--git", "--no-pager"], env);
   if (!r.ok) throw new Error(`could not read the agent's changes: ${r.stderr.trim().split("\n").at(-1)?.slice(0, 200) || "jj diff failed"}`);
   return Buffer.byteLength(r.stdout) > DIFF_MAX_BYTES ? Buffer.from(r.stdout).subarray(0, DIFF_MAX_BYTES).toString("utf8") : r.stdout;
 }
 
 const hashOf = (text) => createHash("sha256").update(text).digest("hex");
 
-export const authorOf = (record) => String(record?.taskSummary || record?.task || record?.id || "agent").replace(/\s+/g, " ").trim().slice(0, 80);
+const authorOf = (record) => String(record?.taskSummary || record?.task || record?.id || "agent").replace(/\s+/g, " ").trim().slice(0, 80);
 
 /**
  * @param {object} deps

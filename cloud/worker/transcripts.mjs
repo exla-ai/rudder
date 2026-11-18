@@ -8,11 +8,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { promptSuggestion } from "./suggestion.mjs";
-import { activeClaudeLines, editablePrompt, readCodexLineage } from "./session-lineage.mjs";
+import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexRolloutFile, codexTypedText, editablePrompts, readCodexLineage } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
 const TOOL_OUTPUT_LIMIT = 12_000;
+// A subagent's card carries its newest messages, with shorter tool output: the
+// chat is polled every few seconds and a turn can start dozens of subagents.
+const SUBAGENT_KEEP = 40;
+const SUBAGENT_OUTPUT_LIMIT = 2_000;
+const SUBAGENT_PROMPT_LIMIT = 6_000;
+// Subagents of subagents are shown this many levels deep.
+const SUBAGENT_DEPTH = 3;
+// The run is alive, so its unfinished subagents are still running. Otherwise
+// they stopped with it.
+const LIVE_RUN = new Set(["created", "running", "steering", "verifying"]);
 
 export function readTranscript(repoDir, runId, { limit = 300, home }) {
   const record = readRunRecord(repoDir, runId);
@@ -45,11 +55,20 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
   const { text, truncated } = codex ? readCodexLineage(file, home, TAIL_BYTES) : readTail(file, TAIL_BYTES);
   const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
   const stats = codex ? codexStats() : claudeStats();
-  const messages = showUserTask(codex ? parseCodex(lines, stats) : parseClaude(lines, stats), record);
+  const reader = codex ? parseCodex(lines, stats) : parseClaude(lines, stats);
+  const messages = showUserTask(reader.messages, record);
   base.truncated = truncated || messages.length > limit;
   base.messages = messages.slice(-limit);
-  // The one prompt the app may offer to edit (chat-edit.js).
-  base.edit = editablePrompt(lines, codex ? "codex" : "claude");
+  // Subagents the shown part of the chat started, each on its spawn call.
+  const shown = new Set(base.messages);
+  const live = LIVE_RUN.has(record.status);
+  if (codex) {
+    attachCodexSubagents(reader, { home, parentId: record.session.nativeSessionId, live, shown, depth: 0 });
+  } else {
+    attachClaudeSubagents(reader, { dir: path.join(file.replace(/\.jsonl$/, ""), "subagents"), live, shown, depth: 0 });
+  }
+  // The prompts the app may offer to edit (chat-edit.js).
+  base.edits = editablePrompts(lines, codex ? "codex" : "claude");
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // The numbers are extra: a model catalog or settings file that cannot be
@@ -83,7 +102,7 @@ export function lastAssistantText(record, { home, cache, now = Date.now() }) {
   const codex = record.backend === "codex";
   const { text } = codex ? readCodexLineage(file, home, PREVIEW_TAIL_BYTES) : readTail(file, PREVIEW_TAIL_BYTES);
   const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
-  const messages = codex ? parseCodex(lines) : parseClaude(lines);
+  const { messages } = codex ? parseCodex(lines) : parseClaude(lines);
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
   const remoteUrl = codex ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
@@ -144,12 +163,23 @@ function readRunRecord(repoDir, runId) {
   if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
     return null;
   }
+  let body;
   try {
-    const record = JSON.parse(fs.readFileSync(path.join(repoDir, ".rudder", "runs", runId, "run.json"), "utf8"));
-    return record && record.id === runId ? record : null;
-  } catch {
-    return null;
+    body = fs.readFileSync(path.join(repoDir, ".rudder", "runs", runId, "run.json"), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
+  let record;
+  try {
+    record = JSON.parse(body);
+  } catch (error) {
+    // Caught mid-write: the next poll reads it whole.
+    throw new Error(`could not read agent ${runId}: ${error.message}`);
+  }
+  return record?.id === runId ? record : null;
 }
 
 // Where each session's transcript lives, found once. A miss means searching
@@ -176,63 +206,35 @@ export function transcriptFile(record, home, now = Date.now()) {
 }
 
 function findTranscript(record, home, sessionId) {
-  if ((record.backend || "claude") === "codex") {
-    return codexRollout(home, sessionId);
+  if (record.backend === "codex") {
+    return codexRolloutFile(home, sessionId);
   }
-  const cwd = record.workspace?.path || record.worktree?.path || record.repoRoot || "";
+  // Claude files a session under its cwd with every other character as "-",
+  // except that a long cwd is cut and hashed: those are found by name.
   const projects = path.join(home, ".claude", "projects");
-  const direct = path.join(projects, String(cwd).replace(/[^A-Za-z0-9-]/g, "-"), `${sessionId}.jsonl`);
-  if (fs.existsSync(direct)) {
-    return direct;
-  }
-  try {
-    for (const dir of fs.readdirSync(projects)) {
-      const candidate = path.join(projects, dir, `${sessionId}.jsonl`);
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
+  const cwd = record.workspace?.path;
+  if (typeof cwd === "string" && cwd) {
+    const direct = path.join(projects, cwd.replace(/[^A-Za-z0-9-]/g, "-"), `${sessionId}.jsonl`);
+    if (fs.existsSync(direct)) {
+      return direct;
     }
-  } catch {
-    // no projects dir yet
+  }
+  let dirs;
+  try {
+    dirs = fs.readdirSync(projects);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null; // no Claude sessions on this machine yet
+    }
+    throw error;
+  }
+  for (const dir of dirs) {
+    const candidate = path.join(projects, dir, `${sessionId}.jsonl`);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
   return null;
-}
-
-const codexCache = new Map();
-
-function codexRollout(home, sessionId) {
-  const cached = codexCache.get(sessionId);
-  if (cached && fs.existsSync(cached)) {
-    return cached;
-  }
-  const root = path.join(home, ".codex", "sessions");
-  let newest = null;
-  let newestMtime = 0;
-  const walk = (dir, depth) => {
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory() && depth < 3) {
-        walk(full, depth + 1);
-      } else if (entry.isFile() && entry.name.includes(sessionId) && entry.name.endsWith(".jsonl")) {
-        const mtime = fs.statSync(full).mtimeMs;
-        if (mtime > newestMtime) {
-          newest = full;
-          newestMtime = mtime;
-        }
-      }
-    }
-  };
-  walk(root, 0);
-  if (newest) {
-    codexCache.set(sessionId, newest);
-  }
-  return newest;
 }
 
 function readTail(file, maxBytes) {
@@ -259,44 +261,92 @@ function readTail(file, maxBytes) {
 // ---------------------------------------------------------------------------
 
 function parseClaude(lines, stats = null) {
-  const messages = [];
-  const tools = new Map(); // tool_use id -> message
+  const reader = claudeReader({ stats });
   for (const line of lines) {
-    if (!line.trim()) {
-      continue;
-    }
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    reader.addLine(line);
+  }
+  return reader;
+}
+
+// The tool Claude Code starts a subagent with.
+const CLAUDE_SUBAGENT_TOOL = "Agent";
+
+// A Claude Code session read entry by entry. The parent's own file skips
+// sidechain entries; a subagent's file (`sidechain`) is nothing but those. Its
+// first user turn repeats the prompt from the parent's Agent call, and a fork's
+// file starts with a copy of that call (`self`), so neither shows again.
+function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
+  const tools = new Map(); // tool_use id -> message
+  const outputLimit = sidechain ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
+  const reader = {
+    messages: [],
+    // Agent tool_use id -> { message, ts, prompt, isError }
+    spawns: new Map(),
+    // Agent tool_use id -> the status of its newest <task-notification>
+    notifications: new Map(),
+    toolCalls: 0,
+    lastAt: null,
+    dropped: 0,
+    addLine(line) {
+      if (!line.trim()) {
+        return;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        return;
+      }
+      add(entry);
+      if (sidechain && reader.messages.length > SUBAGENT_KEEP * 2) {
+        const extra = reader.messages.length - SUBAGENT_KEEP;
+        reader.messages.splice(0, extra);
+        reader.dropped += extra;
+      }
+    },
+    // Lines a subagent's file has that the chat never shows (raw API requests,
+    // most of its bytes), passed over without parsing.
+    skip(prefix) {
+      return prefix.startsWith('{"type":"api-request');
+    },
+  };
+  const messages = reader.messages;
+  const push = (message) => messages.push(message);
+  let promptSeen = false;
+  function add(entry) {
     stats?.add(entry);
     if (entry.type === "system" && entry.subtype === "compact_boundary") {
       const meta = entry.compactMetadata || {};
-      messages.push(compactMessage(entry.uuid || `compact-${messages.length}`, toMillis(entry.timestamp), {
+      push(compactMessage(entry.uuid || `compact-${messages.length}`, toMillis(entry.timestamp), {
         trigger: typeof meta.trigger === "string" ? meta.trigger : null,
         preTokens: Number(meta.preTokens) || null,
       }));
-      continue;
+      return;
     }
+    const own = sidechain || !entry.isSidechain;
     // A message typed while the agent works: Claude Code hands it to the running
     // turn as a queued_command attachment, never as a user entry.
-    const queued = entry.type === "attachment" && !entry.isSidechain ? entry.attachment : null;
-    if (queued?.type === "queued_command" && queued.commandMode === "prompt" && queued.origin?.kind === "human") {
+    const queued = entry.type === "attachment" && own ? entry.attachment : null;
+    if (queued?.type === "queued_command") {
       const prompt = Array.isArray(queued.prompt)
         ? queued.prompt.filter((part) => part?.type === "text").map((part) => part.text).join("\n")
         : queued.prompt;
-      const text = cleanUserText(prompt);
-      if (text) {
-        messages.push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text });
+      noteTaskNotification(prompt);
+      if (queued.commandMode === "prompt" && queued.origin?.kind === "human") {
+        const text = cleanUserText(prompt);
+        if (text) {
+          push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text });
+        }
       }
-      continue;
+      return;
     }
-    if ((entry.type !== "user" && entry.type !== "assistant") || entry.isSidechain || entry.isMeta) {
-      continue;
+    if ((entry.type !== "user" && entry.type !== "assistant") || !own || entry.isMeta) {
+      return;
     }
     const ts = toMillis(entry.timestamp);
+    if (sidechain && ts !== null) {
+      reader.lastAt = ts;
+    }
     if (entry.isCompactSummary) {
       // The summary Claude starts over from is not something the user said:
       // it belongs to the compaction marker just before it.
@@ -305,30 +355,39 @@ function parseClaude(lines, stats = null) {
       if (last?.kind === "compact" && !last.compact.summary) {
         last.compact.summary = summary;
       } else {
-        messages.push(compactMessage(entry.uuid || `compact-${messages.length}`, ts, { summary }));
+        push(compactMessage(entry.uuid || `compact-${messages.length}`, ts, { summary }));
       }
-      continue;
+      return;
     }
     const content = entry.message?.content;
     const uuid = entry.uuid || `${messages.length}`;
-    if (typeof content === "string") {
-      const text = cleanUserText(content);
-      if (text) {
-        messages.push({ id: uuid, role: entry.type === "user" ? "user" : "assistant", ts, text });
+    const userText = (text) => {
+      noteTaskNotification(text);
+      const clean = cleanUserText(text);
+      if (clean && sidechain && !promptSeen) {
+        promptSeen = true;
+        return "";
       }
-      continue;
+      return clean;
+    };
+    if (typeof content === "string") {
+      const text = entry.type === "user" ? userText(content) : cleanUserText(content);
+      if (text) {
+        push({ id: uuid, role: entry.type === "user" ? "user" : "assistant", ts, text });
+      }
+      return;
     }
     if (!Array.isArray(content)) {
-      continue;
+      return;
     }
     content.forEach((block, index) => {
       const id = `${uuid}:${index}`;
       if (block?.type === "text") {
-        const text = entry.type === "user" ? cleanUserText(block.text) : String(block.text || "").trim();
+        const text = entry.type === "user" ? userText(block.text) : String(block.text || "").trim();
         if (text) {
-          messages.push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
+          push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
         }
-      } else if (block?.type === "tool_use") {
+      } else if (block?.type === "tool_use" && block.id !== self) {
         const message = {
           id: block.id || id,
           role: "tool",
@@ -337,18 +396,46 @@ function parseClaude(lines, stats = null) {
           tool: { name: block.name || "tool", input: summarizeClaudeInput(block.name, block.input), output: null, isError: false },
         };
         tools.set(block.id, message);
-        messages.push(message);
+        reader.toolCalls += 1;
+        if (block.name === CLAUDE_SUBAGENT_TOOL && block.id) {
+          reader.spawns.set(block.id, { message, ts, prompt: typeof block.input?.prompt === "string" ? block.input.prompt : null, isError: false });
+        }
+        push(message);
       } else if (block?.type === "tool_result") {
         const target = tools.get(block.tool_use_id);
-        const output = clip(toolResultText(block.content));
         if (target) {
-          target.tool.output = output;
+          target.tool.output = clip(toolResultText(block.content), outputLimit);
           target.tool.isError = Boolean(block.is_error);
+          // A followed subagent's reader lives across polls: a call is let go
+          // once its result is in, so a long subagent does not pile them up.
+          tools.delete(block.tool_use_id);
+        }
+        const spawn = reader.spawns.get(block.tool_use_id);
+        if (spawn) {
+          spawn.isError = Boolean(block.is_error);
         }
       }
     });
   }
-  return messages;
+  // Claude reports a background subagent's end to its parent as a
+  // <task-notification> naming the Agent call and how it ended.
+  function noteTaskNotification(text) {
+    const value = String(text || "");
+    if (!value.trimStart().startsWith("<task-notification>")) {
+      return;
+    }
+    const id = xmlTag(value, "tool-use-id");
+    const status = xmlTag(value, "status");
+    if (id && status) {
+      reader.notifications.set(id, status);
+    }
+  }
+  return reader;
+}
+
+function xmlTag(text, tag) {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
+  return match ? match[1].trim() : null;
 }
 
 // When an agent's context fills up, Claude Code and Codex summarize the
@@ -370,8 +457,7 @@ export function compactSummaryText(content) {
 
 function cleanUserText(text) {
   const value = String(text || "").trim();
-  // Harness-injected turns (command output, reminders, caveats) are not the user.
-  if (!value || /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/.test(value)) {
+  if (!value || CLAUDE_HARNESS_TEXT.test(value)) {
     return "";
   }
   return value.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
@@ -419,30 +505,100 @@ function summarizeClaudeInput(name, input) {
 // ---------------------------------------------------------------------------
 
 function parseCodex(lines, stats = null) {
-  const messages = [];
-  const calls = new Map(); // call_id -> message
-  let index = 0;
+  const reader = codexReader({ stats });
   for (const line of lines) {
-    if (!line.trim()) {
-      continue;
-    }
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
+    reader.addLine(line);
+  }
+  return reader;
+}
+
+// A Codex rollout read entry by entry: the agent's own, or a subagent's
+// (`child`). A subagent's rollout opens with its session_meta (who spawned it,
+// its `/root/<task>` path and nickname) and may carry its parent's history
+// before `subagent_history_start_ordinal`, which is not its own.
+function codexReader({ stats = null, child = false } = {}) {
+  const calls = new Map(); // call_id -> message
+  const outputLimit = child ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
+  let index = 0;
+  const reader = {
+    messages: [],
+    // spawn_agent call_id -> { message, ts, taskName, path, error }
+    spawns: new Map(),
+    meta: null,
+    start: 0,
+    // The newest turn of a subagent: "running", "done" or "aborted".
+    turn: null,
+    result: null,
+    endedAt: null,
+    toolCalls: 0,
+    dropped: 0,
+    addLine(line) {
+      if (!line.trim()) {
+        return;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        return;
+      }
+      add(entry);
+      if (child && reader.messages.length > SUBAGENT_KEEP * 2) {
+        const extra = reader.messages.length - SUBAGENT_KEEP;
+        reader.messages.splice(0, extra);
+        reader.dropped += extra;
+      }
+    },
+    // The inherited history (megabytes of it, compacted summaries included)
+    // is passed over by its ordinal without parsing.
+    skip(prefix) {
+      if (!child || !reader.meta) {
+        return false;
+      }
+      const match = /"ordinal":(\d+)/.exec(prefix);
+      return match !== null && Number(match[1]) < reader.start;
+    },
+  };
+  const messages = reader.messages;
+  function add(entry) {
+    if (child) {
+      if (entry.type === "session_meta") {
+        if (!reader.meta) {
+          reader.meta = entry.payload || {};
+          reader.start = Number(reader.meta.subagent_history_start_ordinal) || 0;
+        }
+        return;
+      }
+      if (Number(entry.ordinal) < reader.start) {
+        return;
+      }
     }
     stats?.add(entry);
     index += 1;
+    const ts = toMillis(entry.timestamp);
     if (entry.type === "compacted") {
-      messages.push(compactMessage(`c${index}`, toMillis(entry.timestamp), { summary: String(entry.payload?.message || "").trim() }));
-      continue;
+      messages.push(compactMessage(`c${index}`, ts, { summary: String(entry.payload?.message || "").trim() }));
+      return;
+    }
+    if (entry.type === "event_msg" && child) {
+      const type = entry.payload?.type;
+      if (type === "task_started") {
+        reader.turn = "running";
+        reader.endedAt = null;
+      } else if (type === "task_complete") {
+        reader.turn = "done";
+        reader.endedAt = ts;
+        reader.result = typeof entry.payload.last_agent_message === "string" ? entry.payload.last_agent_message.trim() || null : null;
+      } else if (type === "turn_aborted") {
+        reader.turn = "aborted";
+        reader.endedAt = ts;
+      }
+      return;
     }
     if (entry.type !== "response_item") {
-      continue;
+      return;
     }
     const payload = entry.payload || {};
-    const ts = toMillis(entry.timestamp);
     const id = `c${index}`;
     if (payload.type === "message") {
       const text = (payload.content || [])
@@ -450,12 +606,11 @@ function parseCodex(lines, stats = null) {
         .join("\n")
         .trim();
       if (!text) {
-        continue;
+        return;
       }
       if (payload.role === "user") {
-        const cleaned = /^<(environment_context|user_instructions|permissions|turn_aborted)/.test(text) ? "" : text;
-        if (cleaned && !text.startsWith("# AGENTS.md instructions")) {
-          messages.push({ id: payload.id || id, role: "user", ts, text: cleaned });
+        if (codexTypedText(text)) {
+          messages.push({ id: payload.id || id, role: "user", ts, text });
         }
       } else if (payload.role === "assistant") {
         messages.push({ id, role: "assistant", ts, text });
@@ -470,14 +625,35 @@ function parseCodex(lines, stats = null) {
       };
       if (payload.call_id) {
         calls.set(payload.call_id, message);
+        if (payload.name === "spawn_agent") {
+          reader.spawns.set(payload.call_id, { message, ts, taskName: codexArguments(payload).task_name ?? null, path: null, error: null });
+        }
       }
+      reader.toolCalls += 1;
       messages.push(message);
     } else if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output" || payload.type === "local_shell_call_output") {
       const target = calls.get(payload.call_id);
       if (target) {
         const { output, isError } = codexOutput(payload.output);
-        target.tool.output = clip(output);
+        target.tool.output = clip(output, outputLimit);
         target.tool.isError = isError;
+        calls.delete(payload.call_id);
+      }
+      const spawn = reader.spawns.get(payload.call_id);
+      if (spawn) {
+        // `{"task_name":"/root/<name>"}`, the path its rollout records; anything
+        // else is why the spawn failed.
+        let spawned = null;
+        try {
+          spawned = JSON.parse(String(payload.output));
+        } catch {
+          spawned = null;
+        }
+        if (typeof spawned?.task_name === "string") {
+          spawn.path = spawned.task_name;
+        } else {
+          spawn.error = codexOutput(payload.output).output || "The subagent did not start.";
+        }
       }
     } else if (payload.type === "reasoning") {
       // Summaries only; raw reasoning is encrypted.
@@ -487,7 +663,16 @@ function parseCodex(lines, stats = null) {
       }
     }
   }
-  return messages;
+  return reader;
+}
+
+function codexArguments(payload) {
+  try {
+    const value = JSON.parse(String(payload.arguments ?? ""));
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
 }
 
 // Codex tool output is a string, a JSON string ({output, metadata}), or an
@@ -514,6 +699,13 @@ function codexOutput(value) {
 }
 
 function summarizeCodexInput(payload) {
+  if (payload.name === "spawn_agent") {
+    // Its message is encrypted; the task name is what can be shown.
+    const task = codexArguments(payload).task_name;
+    if (typeof task === "string") {
+      return oneLine(task);
+    }
+  }
   const raw = payload.arguments ?? payload.input ?? payload.action ?? "";
   // Code-mode Codex runs tools from a script: `tools.exec_command({cmd:"..."})`.
   if (typeof raw === "string" && /tools\.\w+\(/.test(raw)) {
@@ -548,6 +740,289 @@ function summarizeCodexInput(payload) {
     return oneLine(JSON.stringify(value));
   }
   return oneLine(String(value));
+}
+
+// ---------------------------------------------------------------------------
+// Subagents. Claude Code's Agent tool and Codex's spawn_agent start another
+// agent whose own log sits next to the parent's. Each spawn call in the chat
+// carries a `subagent` with what the app's card shows (cloud/app/subagents.js):
+//   { id, backend, kind, name, description, prompt, status, startedAt,
+//     endedAt, toolCalls, result, messages, earlier }
+// status is running, done, failed or stopped. A subagent's log is followed:
+// each poll reads only what was appended since the last one.
+// ---------------------------------------------------------------------------
+
+// Claude Code 2.1 writes each subagent to <session>/subagents/agent-<id>.jsonl
+// with agent-<id>.meta.json beside it: the Agent call's toolUseId, its
+// description and agentType, and `finished` once it ended. Subagents of
+// subagents (parentAgentId) are in the same folder.
+function attachClaudeSubagents(reader, { dir, live, shown, depth }) {
+  if (!reader.spawns.size) {
+    return;
+  }
+  const metas = claudeSubagentMetas(dir);
+  for (const [toolUseId, spawn] of reader.spawns) {
+    if (shown && !shown.has(spawn.message)) {
+      continue;
+    }
+    // No metadata: a teammate (its own session), not a subagent.
+    const found = metas.get(toolUseId);
+    if (!found) {
+      continue;
+    }
+    const sub = followFile(path.join(dir, `agent-${found.agentId}.jsonl`), () => claudeReader({ sidechain: true, self: toolUseId }));
+    if (sub && depth + 1 < SUBAGENT_DEPTH) {
+      attachClaudeSubagents(sub, { dir, live, shown: null, depth: depth + 1 });
+    }
+    const meta = found.meta;
+    const note = reader.notifications.get(toolUseId);
+    const status = !meta.finished
+      ? live ? "running" : "stopped"
+      : spawn.isError || note === "failed" ? "failed" : note && note !== "completed" ? "stopped" : "done";
+    const messages = sub?.messages ?? [];
+    const last = messages[messages.length - 1];
+    spawn.message.subagent = {
+      id: found.agentId,
+      backend: "claude",
+      kind: typeof meta.agentType === "string" ? meta.agentType : null,
+      name: typeof meta.name === "string" ? meta.name : null,
+      description: typeof meta.description === "string" ? meta.description : null,
+      prompt: spawn.prompt ? clip(spawn.prompt, SUBAGENT_PROMPT_LIMIT) : null,
+      status,
+      startedAt: spawn.ts,
+      endedAt: status === "running" ? null : sub?.lastAt ?? null,
+      toolCalls: sub?.toolCalls ?? 0,
+      result: status !== "running" && last?.role === "assistant" ? last.text : null,
+      ...shownMessages(sub),
+    };
+  }
+}
+
+const claudeMetas = new Map(); // meta file -> { mtimeMs, size, value }
+
+function claudeSubagentMetas(dir) {
+  const metas = new Map(); // toolUseId -> { agentId, meta }
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return metas;
+    }
+    throw error;
+  }
+  for (const name of names) {
+    const match = /^agent-([A-Za-z0-9_-]+)\.meta\.json$/.exec(name);
+    if (!match) {
+      continue;
+    }
+    const meta = readSubagentMeta(path.join(dir, name));
+    if (typeof meta?.toolUseId === "string") {
+      metas.set(meta.toolUseId, { agentId: match[1], meta });
+    }
+  }
+  return metas;
+}
+
+function readSubagentMeta(file) {
+  const stat = fs.statSync(file);
+  const hit = claudeMetas.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    return hit.value;
+  }
+  let value;
+  try {
+    value = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    // Claude Code rewrites the file in place when the subagent ends; a read
+    // that lands mid-write is picked up whole on the next poll.
+    if (error instanceof SyntaxError) {
+      return null;
+    }
+    throw error;
+  }
+  claudeMetas.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, value });
+  return value;
+}
+
+// Codex (multi-agent v2): spawn_agent({task_name, message}) answers with the
+// subagent's path, `/root/<task_name>`; the message itself is encrypted. The
+// subagent's rollout is created at that moment, named for a time-ordered id,
+// and its session_meta names the parent thread and the path.
+function attachCodexSubagents(reader, { home, parentId, live, shown, depth }) {
+  for (const [callId, spawn] of reader.spawns) {
+    if (shown && !shown.has(spawn.message)) {
+      continue;
+    }
+    const file = spawn.error ? null : codexChildFile(home, parentId, callId, spawn);
+    const child = file ? followFile(file, () => codexReader({ child: true })) : null;
+    if (child?.meta && depth + 1 < SUBAGENT_DEPTH) {
+      attachCodexSubagents(child, { home, parentId: child.meta.id, live, shown: null, depth: depth + 1 });
+    }
+    const status = spawn.error
+      ? "failed"
+      : child?.turn === "done" ? "done" : child?.turn === "aborted" ? "stopped" : live ? "running" : "stopped";
+    const meta = child?.meta ?? {};
+    spawn.message.subagent = {
+      id: typeof meta.id === "string" ? meta.id : null,
+      backend: "codex",
+      kind: typeof meta.agent_role === "string" ? meta.agent_role : null,
+      name: typeof meta.agent_nickname === "string" ? meta.agent_nickname : null,
+      description: spawn.taskName ? spawn.taskName.replace(/[_-]+/g, " ").trim() : null,
+      prompt: null,
+      status,
+      startedAt: spawn.ts,
+      endedAt: status === "running" ? null : child?.endedAt ?? null,
+      toolCalls: child?.toolCalls ?? 0,
+      result: spawn.error ?? (status === "done" ? child.result : null),
+      ...shownMessages(child),
+    };
+  }
+}
+
+function shownMessages(reader) {
+  if (!reader) {
+    return { messages: [], earlier: 0 };
+  }
+  const messages = reader.messages.slice(-SUBAGENT_KEEP);
+  return { messages, earlier: reader.dropped + reader.messages.length - messages.length };
+}
+
+// Spawn -> rollout, found once. A miss (the rollout is not written yet) is
+// searched again at most every CHILD_RECHECK_MS.
+const CHILD_RECHECK_MS = 5_000;
+const codexChildren = new Map(); // `${parentId}|${callId}` -> { file, checkedAt }
+const codexMetas = new Map(); // rollout -> its session_meta payload
+
+function codexChildFile(home, parentId, callId, spawn, now = Date.now()) {
+  const key = `${parentId}|${callId}`;
+  const known = codexChildren.get(key);
+  if (known?.file) {
+    return known.file;
+  }
+  if (known && now - known.checkedAt < CHILD_RECHECK_MS) {
+    return null;
+  }
+  const file = spawn.ts === null ? null : findCodexChild(home, parentId, spawn);
+  codexChildren.set(key, { file, checkedAt: now });
+  return file;
+}
+
+function findCodexChild(home, parentId, spawn) {
+  const root = path.join(home, ".codex", "sessions");
+  // Rollouts are filed by local date; the days either side cover any zone.
+  const days = new Set([-1, 0, 1].map((offset) => new Date(spawn.ts + offset * 86_400_000).toISOString().slice(0, 10)));
+  let best = null;
+  for (const day of days) {
+    const dir = path.join(root, ...day.split("-"));
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+    for (const name of names) {
+      // A UUIDv7 thread id: its first 48 bits are when it was created, in ms.
+      const match = /([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/.exec(name);
+      if (!match) {
+        continue;
+      }
+      const distance = Math.abs(parseInt(match[1] + match[2], 16) - spawn.ts);
+      if (distance > 60_000 || (best && distance >= best.distance)) {
+        continue;
+      }
+      const file = path.join(dir, name);
+      const origin = codexSessionMeta(file)?.source?.subagent?.thread_spawn;
+      if (origin?.parent_thread_id !== parentId || typeof origin.agent_path !== "string") {
+        continue;
+      }
+      const matches = spawn.path ? origin.agent_path === spawn.path : origin.agent_path.endsWith(`/${spawn.taskName}`);
+      if (matches) {
+        best = { file, distance };
+      }
+    }
+  }
+  return best?.file ?? null;
+}
+
+const META_READ_BYTES = 1024 * 1024;
+
+function codexSessionMeta(file) {
+  if (codexMetas.has(file)) {
+    return codexMetas.get(file);
+  }
+  const buffer = Buffer.alloc(META_READ_BYTES);
+  const fd = fs.openSync(file, "r");
+  let length;
+  try {
+    length = fs.readSync(fd, buffer, 0, META_READ_BYTES, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const end = buffer.subarray(0, length).indexOf(10);
+  if (end < 0) {
+    // The first line is still being written.
+    return null;
+  }
+  const entry = JSON.parse(buffer.toString("utf8", 0, end));
+  const meta = entry?.type === "session_meta" ? entry.payload ?? null : null;
+  codexMetas.set(file, meta);
+  return meta;
+}
+
+// Logs followed by appended bytes: file -> { offset, carry, reader }. A log
+// only grows; one that shrank was replaced and is read again from the start.
+const FOLLOW_MAX = 256;
+const followed = new Map();
+
+function followFile(file, makeReader) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  let state = followed.get(file);
+  if (state && stat.size < state.offset) {
+    state = null;
+  }
+  if (!state) {
+    state = { offset: 0, carry: null, reader: makeReader() };
+  }
+  // Most recently used last, so the oldest is the one let go.
+  followed.delete(file);
+  followed.set(file, state);
+  if (followed.size > FOLLOW_MAX) {
+    followed.delete(followed.keys().next().value);
+  }
+  if (stat.size > state.offset) {
+    const chunk = Buffer.alloc(stat.size - state.offset);
+    const fd = fs.openSync(file, "r");
+    let length;
+    try {
+      length = fs.readSync(fd, chunk, 0, chunk.length, state.offset);
+    } finally {
+      fs.closeSync(fd);
+    }
+    state.offset += length;
+    const buffer = state.carry ? Buffer.concat([state.carry, chunk.subarray(0, length)]) : chunk.subarray(0, length);
+    let start = 0;
+    for (let end = buffer.indexOf(10, start); end !== -1; end = buffer.indexOf(10, start)) {
+      if (end > start && !state.reader.skip(buffer.toString("utf8", start, Math.min(end, start + 160)))) {
+        state.reader.addLine(buffer.toString("utf8", start, end));
+      }
+      start = end + 1;
+    }
+    // A line still being written waits for the rest of it.
+    state.carry = start < buffer.length ? Buffer.from(buffer.subarray(start)) : null;
+  }
+  return state.reader;
 }
 
 // ---------------------------------------------------------------------------
@@ -786,9 +1261,9 @@ function oneLine(text) {
   return value.length > 240 ? `${value.slice(0, 239)}…` : value;
 }
 
-function clip(text) {
+function clip(text, limit = TOOL_OUTPUT_LIMIT) {
   const value = String(text || "");
-  return value.length > TOOL_OUTPUT_LIMIT ? `${value.slice(0, TOOL_OUTPUT_LIMIT)}\n… (${value.length - TOOL_OUTPUT_LIMIT} more characters)` : value;
+  return value.length > limit ? `${value.slice(0, limit)}\n… (${value.length - limit} more characters)` : value;
 }
 
 function toMillis(value) {

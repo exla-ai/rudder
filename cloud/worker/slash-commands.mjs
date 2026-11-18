@@ -70,10 +70,11 @@ const CLAUDE_MODEL_COMMANDS = new Set(["model", "effort"]);
 /**
  * Command objects in a chunk of Claude Code's bundled JavaScript (read as
  * latin1, one char per byte). Adds each to `found` (name -> variants) and
- * only looks at objects whose `type:` starts before `limit`.
+ * only looks at objects whose `type:` starts in [from, limit).
  */
-export function collectClaudeCommandObjects(text, found, limit = text.length) {
+function collectClaudeCommandObjects(text, found, from, limit) {
   const re = /type:"(local-jsx|local|prompt)"/g;
+  re.lastIndex = from;
   let match;
   while ((match = re.exec(text)) && match.index < limit) {
     const object = enclosingObject(text, match.index);
@@ -243,19 +244,24 @@ function stringArray(raw) {
   return [...raw.matchAll(/"([^"\\]*)"/g)].map((m) => m[1]);
 }
 
-/** Command objects of the Claude Code binary at `file`, read in chunks. */
+/**
+ * Command objects of the Claude Code binary at `file`, read in chunks. Each
+ * read reaches `overlap` bytes into both neighbours, so an object cut by a
+ * chunk edge is whole in the chunk its `type:` falls in.
+ */
 export async function readClaudeBinaryCommands(file) {
   const handle = await fs.promises.open(file, "r");
   try {
     const { size } = await handle.stat();
     const chunk = 2 << 20;
     const overlap = 64 << 10;
-    const buffer = Buffer.alloc(chunk + overlap);
+    const buffer = Buffer.alloc(overlap + chunk + overlap);
     const found = new Map();
     for (let pos = 0; pos < size; pos += chunk) {
-      const { bytesRead } = await handle.read(buffer, 0, chunk + overlap, pos);
+      const start = Math.max(0, pos - overlap);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
       const text = buffer.toString("latin1", 0, bytesRead);
-      collectClaudeCommandObjects(text, found, Math.min(chunk, bytesRead));
+      collectClaudeCommandObjects(text, found, pos - start, Math.min(pos - start + chunk, bytesRead));
     }
     if (!found.has("resume") || !found.has("help") || !found.has("model")) {
       throw new Error(`could not read the built-in commands of ${file}`);

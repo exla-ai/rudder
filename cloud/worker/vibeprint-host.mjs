@@ -45,8 +45,20 @@ function relayBase(info) {
   return `${u.origin}/`;
 }
 
+/** A JSON file, or null when it does not exist. Both files are written whole (temp file, rename). */
 function readJson(file) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
+  let body;
+  try {
+    body = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    throw new Error(`vibeprint: ${file} is not valid JSON (${error.message})`);
+  }
 }
 
 function pidAlive(pid) {
@@ -199,9 +211,15 @@ export function createVibeprintHosts({ stateRoot, embedOrigin, env, log, cli = v
     };
     child.stdout.on("data", keep);
     child.stderr.on("data", keep);
-    child.on("error", (error) => { host.error = `vibeprint could not start: ${error.message}`; });
-    child.on("exit", (code, signal) => {
+    child.on("error", (error) => {
       if (hosts.get(project.workspaceId) !== host) return;
+      // A child that never started has no exit to report it.
+      host.child = null;
+      host.error = `vibeprint could not start: ${error.message}`;
+      log(`vibeprint ${project.name}: ${host.error}`);
+    });
+    child.on("exit", (code, signal) => {
+      if (hosts.get(project.workspaceId) !== host || !host.child) return;
       host.child = null;
       if (host.stopping) { hosts.delete(project.workspaceId); return; }
       const last = host.tail.filter((l) => !/^\[vibeprint\] (git|relay):/.test(l)).at(-1) ?? "";

@@ -1,5 +1,5 @@
 // Which part of an agent's session file is the conversation it is on now,
-// and which message in it can be edited.
+// and which messages in it can be edited.
 //
 // Claude Code gives every entry a parentUuid. Going back to an earlier
 // message (Claude's own rewind, or a prompt sent twice) leaves the old branch
@@ -11,7 +11,7 @@
 // file alone holds only what came after the fork.
 //
 // Editing a sent message (native/src/chat_edit.rs) creates both: a Claude
-// fork of a cut copy, a Codex fork through the turn before the edited prompt.
+// fork of a cut copy, a Codex fork through the turn before the edited prompt's.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -20,11 +20,14 @@ import path from "node:path";
 // Claude: the active branch.
 // ---------------------------------------------------------------------------
 
-const HARNESS_TEXT = /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/;
+// Harness-injected turns (command output, reminders, caveats) are not the user.
+// The chat (transcripts.mjs) and the edit list read user text the same way, so
+// an editable prompt is always a message the chat shows.
+export const CLAUDE_HARNESS_TEXT = /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/;
 
 function typedText(text) {
   const value = String(text || "").trim();
-  return value !== "" && !HARNESS_TEXT.test(value);
+  return value !== "" && !CLAUDE_HARNESS_TEXT.test(value);
 }
 
 // A prompt a person typed: what the chat shows as their message.
@@ -140,18 +143,22 @@ export function activeClaudeLines(lines) {
 
 const rolloutPaths = new Map(); // thread id -> rollout file (rollouts never move)
 
-function codexRolloutFile(home, threadId) {
+/** A Codex thread's rollout, ~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl, or null. */
+export function codexRolloutFile(home, threadId) {
   const known = rolloutPaths.get(threadId);
   if (known && fs.existsSync(known)) {
     return known;
   }
   const suffix = `-${threadId}.jsonl`;
   const walk = (dir, depth) => {
-    let entries = [];
+    let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return null;
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return null; // no sessions yet
+      }
+      throw error;
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
@@ -266,18 +273,19 @@ export function readCodexLineage(file, home, maxBytes) {
 }
 
 // ---------------------------------------------------------------------------
-// The message the chat can edit.
+// The messages the chat can edit.
 // ---------------------------------------------------------------------------
 
 /**
- * The chat's latest turn-starting prompt, when it can be edited:
- * `{ messageId, entry, text }`. `messageId` is the transcript message the
+ * The chat's turn-starting prompts after its first, oldest first:
+ * `[{ messageId, entry, text }]`. `messageId` is the transcript message the
  * Edit action goes on, `entry` is what the edit request names (Claude's entry
- * uuid, Codex's message id; native chat_edit.rs checks it is still the latest
- * prompt). Null when there is none or it is the first message in `lines`.
- * Pass Claude lines through activeClaudeLines first.
+ * uuid, Codex's message id). The last one is the chat's latest prompt, which
+ * the request also names so native chat_edit.rs can refuse when a newer one
+ * has arrived since; when that cannot hold the list is empty. Pass Claude
+ * lines through activeClaudeLines first.
  */
-export function editablePrompt(lines, backend) {
+export function editablePrompts(lines, backend) {
   return backend === "codex" ? codexEditable(lines) : claudeEditable(lines);
 }
 
@@ -290,25 +298,28 @@ function claudeEditable(lines) {
     }
   }
   const prompts = entries.filter((entry) => entry && claudeTypedPrompt(entry) && !claudeMidTurn(byUuid.get(entry.parentUuid)));
-  if (prompts.length < 2) {
-    return null;
-  }
-  const latest = prompts[prompts.length - 1];
-  const content = latest.message.content;
-  if (typeof content === "string") {
-    return { messageId: latest.uuid, entry: latest.uuid, text: content.trim() };
-  }
-  // The transcript makes one message per text block: `${uuid}:${index}`.
-  const index = content.findIndex((block) => block?.type === "text" && typedText(block.text));
-  return { messageId: `${latest.uuid}:${index}`, entry: latest.uuid, text: String(content[index].text).trim() };
+  return prompts.slice(1).map((prompt) => {
+    const content = prompt.message.content;
+    if (typeof content === "string") {
+      return { messageId: prompt.uuid, entry: prompt.uuid, text: content.trim() };
+    }
+    // The transcript makes one message per text block: `${uuid}:${index}`.
+    const index = content.findIndex((block) => block?.type === "text" && typedText(block.text));
+    return { messageId: `${prompt.uuid}:${index}`, entry: prompt.uuid, text: String(content[index].text).trim() };
+  });
 }
 
 const CODEX_HARNESS_TEXT = /^<(environment_context|user_instructions|permissions|turn_aborted)/;
 
+/** Whether a Codex user message is something the person typed (not Codex's own context). */
+export function codexTypedText(text) {
+  return text !== "" && !CODEX_HARNESS_TEXT.test(text) && !text.startsWith("# AGENTS.md instructions");
+}
+
 function codexEditable(lines) {
   let turns = 0;
   let prompted = false;
-  let latest = null;
+  const prompts = [];
   for (const entry of parseLines(lines)) {
     const payload = entry?.payload;
     if (entry?.type === "event_msg" && payload?.type === "task_started") {
@@ -320,17 +331,19 @@ function codexEditable(lines) {
       continue;
     }
     const text = (payload.content || []).map((part) => part?.text || "").join("\n").trim();
-    if (!text || CODEX_HARNESS_TEXT.test(text) || text.startsWith("# AGENTS.md instructions")) {
+    if (!codexTypedText(text)) {
       continue;
     }
     if (!prompted) {
-      latest = { turn: turns, id: payload.id, text };
+      prompts.push({ turn: turns, id: payload.id, text });
     }
     prompted = true;
   }
-  // The edit forks through the turn before this one, so it needs one.
-  if (!latest || latest.turn < 2 || typeof latest.id !== "string" || !latest.id) {
-    return null;
+  // The edit forks through the turn before the prompt's own, so it needs one,
+  // and names prompts by id. The request names the latest prompt too.
+  const editable = prompts.filter((prompt) => prompt.turn >= 2 && typeof prompt.id === "string" && prompt.id);
+  if (editable[editable.length - 1] !== prompts[prompts.length - 1]) {
+    return [];
   }
-  return { messageId: latest.id, entry: latest.id, text: latest.text };
+  return editable.map((prompt) => ({ messageId: prompt.id, entry: prompt.id, text: prompt.text }));
 }

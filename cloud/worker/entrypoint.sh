@@ -47,12 +47,14 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ]; then
   # default cloud backend. A plain `npm install -g` removes the old package
   # before writing the new one, so `codex` did not exist for the whole install
   # and anything starting then failed (ENOENT). Install beside it and swap the
-  # directory in at the end.
+  # directory in at the end. A failure is logged: the "/" list refuses any
+  # other Codex version.
   (
     set +e
     want="${RUDDER_CODEX_VERSION:?the image sets RUDDER_CODEX_VERSION}"
     current=$(codex --version 2>/dev/null | awk '{print $NF}')
     if [ "$want" != "$current" ]; then
+      echo "rudder-worker: putting Codex back to $want (found ${current:-none})" >&2
       next="$HOME/.codex-next"
       global="${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/lib/node_modules/@openai"
       rm -rf "$next"
@@ -61,9 +63,11 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ]; then
         rm -rf "$global/codex.old"
         mv "$global/codex" "$global/codex.old" && mv "$next/lib/node_modules/@openai/codex" "$global/codex"
         rm -rf "$global/codex.old" "$next"
+      else
+        echo "rudder-worker: Codex $want did not install; Codex is still ${current:-missing}" >&2
       fi
     fi
-  ) </dev/null >/dev/null 2>&1 &
+  ) </dev/null >&2 &
 fi
 
 # A home machine (one per account, every repo on it) runs its own supervisor.

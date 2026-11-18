@@ -1,12 +1,12 @@
 // Session lineage: the Claude branch a chat is on, a Codex fork's history
-// through history_base, and the message the chat can edit. Fixtures are
+// through history_base, and the messages the chat can edit. Fixtures are
 // synthetic.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { activeClaudeLines, editablePrompt, readCodexLineage } from "../cloud/worker/session-lineage.mjs";
+import { activeClaudeLines, editablePrompts, readCodexLineage } from "../cloud/worker/session-lineage.mjs";
 
 const jsonl = (entries) => entries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
 const uuids = (lines) => lines.filter(Boolean).map((line) => JSON.parse(line).uuid).filter(Boolean);
@@ -31,17 +31,26 @@ test("Claude shows only the branch it is on, with parallel tool results and hist
   ]).split("\n");
   const active = activeClaudeLines(lines);
   assert.deepEqual(uuids(active), ["u1", "a1", "a2", "r1", "r2", "a3", "c1", "u3", "a5"]);
-  assert.deepEqual(editablePrompt(active, "claude"), { messageId: "u3", entry: "u3", text: "second ask, reworded" });
+  assert.deepEqual(editablePrompts(active, "claude"), [{ messageId: "u3", entry: "u3", text: "second ask, reworded" }]);
 
-  // A text-block prompt is the transcript's `${uuid}:${index}` message; the
-  // first prompt is not editable.
+  // Every turn-starting prompt but the first, oldest first. A text-block
+  // prompt is the transcript's `${uuid}:${index}` message; one sent mid-turn
+  // (after a tool result) is not editable.
   const blocks = jsonl([
     user("u1", null, "first"),
     assistant("a1", "u1", [{ type: "text", text: "ok" }]),
     user("u2", "a1", [{ type: "image" }, { type: "text", text: "see this" }]),
+    assistant("a2", "u2", [{ type: "tool_use", id: "t1" }]),
+    user("r1", "a2", [{ type: "tool_result", tool_use_id: "t1" }]),
+    user("q1", "r1", "also this"),
+    assistant("a3", "q1", [{ type: "text", text: "done" }]),
+    user("u3", "a3", "third"),
   ]).split("\n");
-  assert.deepEqual(editablePrompt(blocks, "claude"), { messageId: "u2:1", entry: "u2", text: "see this" });
-  assert.equal(editablePrompt(blocks.slice(0, 2), "claude"), null);
+  assert.deepEqual(editablePrompts(blocks, "claude"), [
+    { messageId: "u2:1", entry: "u2", text: "see this" },
+    { messageId: "u3", entry: "u3", text: "third" },
+  ]);
+  assert.deepEqual(editablePrompts(blocks.slice(0, 2), "claude"), []);
 });
 
 test("a Codex fork reads its base rollout up to the fork point, then its own lines", () => {
@@ -75,7 +84,11 @@ test("a Codex fork reads its base rollout up to the fork point, then its own lin
     assert.equal(truncated, false);
     const asks = text.split("\n").filter(Boolean).map((line) => JSON.parse(line).payload?.content?.[0]?.text).filter(Boolean);
     assert.deepEqual(asks, ["<environment_context>cwd</environment_context>", "first ask", "one", "second ask", "two", "third ask, edited"]);
-    assert.deepEqual(editablePrompt(text.split("\n"), "codex"), { messageId: "m5", entry: "m5", text: "third ask, edited" });
+    // Every turn-starting prompt after the first, across the fork.
+    assert.deepEqual(editablePrompts(text.split("\n"), "codex"), [
+      { messageId: "m3", entry: "m3", text: "second ask" },
+      { messageId: "m5", entry: "m5", text: "third ask, edited" },
+    ]);
 
     // A tail read across the fork drops its cut first line and says so.
     const tail = readCodexLineage(forked, home, 400);
@@ -83,8 +96,11 @@ test("a Codex fork reads its base rollout up to the fork point, then its own lin
     assert.ok(tail.text.endsWith(`${JSON.stringify(ask("m5", "third ask, edited"))}\n`));
     assert.doesNotThrow(() => tail.text.split("\n").filter(Boolean).forEach((line) => JSON.parse(line)));
 
-    // The first turn has no earlier turn to fork through.
-    assert.equal(editablePrompt(jsonl([turn("t"), ask("m", "only ask")]).split("\n"), "codex"), null);
+    // The first turn has no earlier turn to fork through; without the latest
+    // prompt's id the edit request can't name it, so nothing is editable.
+    assert.deepEqual(editablePrompts(jsonl([turn("t"), ask("m", "only ask")]).split("\n"), "codex"), []);
+    const noId = { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "no id" }] } };
+    assert.deepEqual(editablePrompts(jsonl([turn("t1"), ask("m1", "one"), turn("t2"), noId]).split("\n"), "codex"), []);
 
     fs.rmSync(path.join(day, "rollout-2026-01-02T00-00-00-thread-a.jsonl"));
     assert.throws(() => readCodexLineage(forked, home, 1 << 20), /thread-a, which is missing/);

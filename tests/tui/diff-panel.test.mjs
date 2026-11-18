@@ -20,7 +20,7 @@ async function finishedWorker(t, prefix) {
   await session.type("write the done marker");
   await session.press("Enter");
   // The completer exits after writing DONE.txt; the row reaches review.
-  await session.waitForText("press m", { timeout: 30_000 });
+  await session.waitForText("ready for review", { timeout: 30_000 });
   return { repo, session };
 }
 

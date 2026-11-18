@@ -18,18 +18,18 @@ import {
 assertPrerequisites();
 
 // Rudder's theme (native/src/theme.rs, dark palette: the test terminal does
-// not report its colors): running blue, merged violet.
-const RUNNING = "#6cb6ff";
-const MERGED = "#a394ff";
+// not report its colors): working teal, merged blue (the app's colors).
+const RUNNING = "#3fc6bb";
+const MERGED = "#7c9cff";
 
 /** A working status shimmers: a light band sweeps across it frame by frame,
- * so its exact shade moves. It always stays in the running blue family. */
-function isRunningBlue(fg) {
+ * so its exact shade moves. It always stays in the working teal family. */
+function isRunningTeal(fg) {
   const hex = String(fg).toLowerCase();
   const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/.exec(hex);
   if (!match) return false;
   const [r, g, b] = match.slice(1).map((part) => parseInt(part, 16));
-  return b > g && g > r;
+  return g > b && b > r;
 }
 
 test("a running worker's status renders in the running color", { timeout: 60_000 }, async (t) => {
@@ -41,13 +41,14 @@ test("a running worker's status renders in the running color", { timeout: 60_000
 
   await session.type("a colored running task");
   await session.press("Enter");
-  await session.waitForText("working", { timeout: 30_000 });
+  await session.waitForText("working ·", { timeout: 30_000 });
 
-  const style = await session.styleAt("working");
+  // "working ·" is the card's status; the header's "1 working" count is grey.
+  const style = await session.styleAt("working ·");
   assert.ok(style, "the running status label is on screen");
   assert.ok(
-    isRunningBlue(style.fg),
-    `the running status is rendered in the running (blue) color, got ${style.fg}`,
+    isRunningTeal(style.fg),
+    `the running status is rendered in the working (teal) color, got ${style.fg}`,
   );
 });
 
@@ -76,7 +77,7 @@ test("running and merged statuses render in DIFFERENT colors", { timeout: 120_00
   assert.equal(
     String(merged.fg).toLowerCase(),
     MERGED,
-    "a merged worker is rendered in the merged (violet) color, distinct from running blue",
+    "a merged worker is rendered in the merged (blue) color, distinct from working teal",
   );
   assert.notEqual(String(merged.fg).toLowerCase(), RUNNING, "state colors are not identical");
 });

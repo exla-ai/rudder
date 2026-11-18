@@ -20,8 +20,8 @@ import {
 assertPrerequisites();
 
 // theme.rs dark palette (the test terminal does not report its colors).
-const CLOUD_ACCENT = "#a394ff"; // accent: connected
-const OFFLINE_GRAY = "#8c93a3"; // muted: how "cloud offline" renders
+const CLOUD_ACCENT = "#7c9cff"; // accent: connected
+const OFFLINE_GRAY = "#96938b"; // muted: how "cloud offline" renders
 
 test("inside a cloud worker the dashboard shows its own workspace, connected, in the accent", { timeout: 60_000 }, async (t) => {
   const repo = await scratchRepo("rudder-tui-cloudws-");

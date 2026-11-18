@@ -133,6 +133,26 @@ pub(crate) fn clear_signal(run_id: &str) {
     }
 }
 
+/// Forget which conversation the run's hooks last reported (Claude's
+/// `.claude-session`, Codex's `.json.session` and `.json.turn`), for a row
+/// moving to another backend: those ids belong to the old CLI.
+pub(crate) fn forget_session_reports(run_id: &str) -> std::io::Result<()> {
+    let Some(dir) = signals_dir() else {
+        return Ok(());
+    };
+    for name in [
+        format!("{run_id}.claude-session"),
+        format!("{run_id}.json.session"),
+        format!("{run_id}.json.turn"),
+    ] {
+        match std::fs::remove_file(dir.join(name)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Remove every per-run signal artifact (the signal file plus the Claude `--settings`
 /// / Codex notify config) when a run is deleted: nothing else ever prunes them, so
 /// `<rudder_home>/signals/` would otherwise accumulate dead runs forever. Best-effort.
@@ -170,14 +190,16 @@ pub(crate) const PERMISSION_HOOK_JS: &str = include_str!("permission_hook.mjs");
 
 /// Write the shared hook script (only when it changed) and return it with the
 /// run's asks dir.
-fn install_permission_hook(signals: &Path, run_id: &str) -> Option<(PathBuf, PathBuf)> {
+fn install_permission_hook(signals: &Path, run_id: &str) -> Result<(PathBuf, PathBuf)> {
     let script = signals.join("permission-hook.mjs");
     if std::fs::read_to_string(&script).ok().as_deref() != Some(PERMISSION_HOOK_JS) {
         let tmp = signals.join(format!("permission-hook.mjs.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, PERMISSION_HOOK_JS).ok()?;
-        std::fs::rename(&tmp, &script).ok()?;
+        std::fs::write(&tmp, PERMISSION_HOOK_JS)
+            .with_context(|| format!("could not write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &script)
+            .with_context(|| format!("could not install {}", script.display()))?;
     }
-    Some((script, asks_dir_in(signals, run_id)))
+    Ok((script, asks_dir_in(signals, run_id)))
 }
 
 /// Add the `PermissionRequest` hook (see permission_hook.mjs) to a Claude
@@ -727,89 +749,76 @@ pub(crate) fn worker_wants_signals(backend: Backend, mode: AgentMode) -> bool {
 
 /// Write the per-run hook config files (clearing any stale signal from a prior
 /// turn so it can't be misread as this turn's completion) and return the launch
-/// wiring. The poll loop surfaces config-generation failure as a lifecycle error.
-pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> WorkerSignals {
-    let Some(dir) = signals_dir() else {
-        return WorkerSignals::default();
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return WorkerSignals::default();
-    }
+/// wiring. A worker without it could never report a finished turn, so a
+/// failure here fails the launch with the reason.
+pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> Result<WorkerSignals> {
+    let dir = signals_dir().context("no home directory for the worker's lifecycle hooks")?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let signal = dir.join(format!("{run_id}.json"));
     // Clear a stale signal from a previous turn of this same run.
-    if let Some(signal) = signal_path(run_id) {
-        let _ = std::fs::remove_file(&signal);
-        match backend {
-            Backend::Claude => {
-                let settings = dir.join(format!("{run_id}-claude.json"));
-                // Carry the persisted /fast toggle into the worker's settings (Claude
-                // fast mode is a settings flag, not a launch flag, so this is how it
-                // reaches a spawned worker).
-                let fast_mode = crate::config::fast_mode_enabled();
-                let mut json = claude_settings_json(&signal, fast_mode);
-                if remote_asks_enabled() {
-                    if let Some(with_asks) = install_permission_hook(&dir, run_id)
-                        .map(|(script, asks)| with_permission_hook(&json, &script, &asks))
-                    {
-                        json = with_asks;
-                    }
-                }
-                // Without the plugin the settings stay unwritten, so the poll loop
-                // reports the missing wiring as it does a failed settings write.
-                if let Ok(suggestion) = crate::prompt_suggestion::ClaudeWiring::prepare(&dir, run_id) {
-                    if std::fs::write(&settings, json).is_ok() {
-                        return WorkerSignals {
-                            claude_settings: Some(settings),
-                            claude_prompt_suggestion: Some(suggestion),
-                            ..WorkerSignals::default()
-                        };
-                    }
-                }
+    match std::fs::remove_file(&signal) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("could not clear {}", signal.display())),
+    }
+    let write = |path: &Path, body: &str| {
+        std::fs::write(path, body).with_context(|| format!("could not write {}", path.display()))
+    };
+    match backend {
+        Backend::Claude => {
+            let settings = dir.join(format!("{run_id}-claude.json"));
+            // Carry the persisted /fast toggle into the worker's settings (Claude
+            // fast mode is a settings flag, not a launch flag, so this is how it
+            // reaches a spawned worker).
+            let fast_mode = crate::config::fast_mode_enabled();
+            let mut json = claude_settings_json(&signal, fast_mode);
+            if remote_asks_enabled() {
+                let (script, asks) = install_permission_hook(&dir, run_id)?;
+                json = with_permission_hook(&json, &script, &asks);
             }
-            Backend::Codex => {
-                let script = dir.join(format!("{run_id}-notify.sh"));
-                if std::fs::write(&script, codex_notify_script(&signal)).is_ok() {
-                    set_executable(&script);
-                    return WorkerSignals {
-                        codex_notify: Some(script),
-                        ..WorkerSignals::default()
-                    };
-                }
-            }
-            Backend::Opencode => {
-                let plugin = dir.join(format!("{run_id}-opencode.js"));
-                let config = dir.join(format!("{run_id}-opencode.json"));
-                if std::fs::write(&plugin, opencode_plugin_js(&signal)).is_ok()
-                    && std::fs::write(&config, opencode_config_json(&plugin)).is_ok()
-                {
-                    return WorkerSignals {
-                        opencode_config: Some(config),
-                        ..WorkerSignals::default()
-                    };
-                }
-            }
+            let suggestion = crate::prompt_suggestion::ClaudeWiring::prepare(&dir, run_id)
+                .context("could not install the prompt suggestion plugin")?;
+            write(&settings, &json)?;
+            Ok(WorkerSignals {
+                claude_settings: Some(settings),
+                claude_prompt_suggestion: Some(suggestion),
+                ..WorkerSignals::default()
+            })
+        }
+        Backend::Codex => {
+            let script = dir.join(format!("{run_id}-notify.sh"));
+            write(&script, &codex_notify_script(&signal))?;
+            set_executable(&script)?;
+            Ok(WorkerSignals {
+                codex_notify: Some(script),
+                ..WorkerSignals::default()
+            })
+        }
+        Backend::Opencode => {
+            let plugin = dir.join(format!("{run_id}-opencode.js"));
+            let config = dir.join(format!("{run_id}-opencode.json"));
+            write(&plugin, &opencode_plugin_js(&signal))?;
+            write(&config, &opencode_config_json(&plugin))?;
+            Ok(WorkerSignals {
+                opencode_config: Some(config),
+                ..WorkerSignals::default()
+            })
         }
     }
-    WorkerSignals::default()
 }
 
 #[cfg(unix)]
-fn set_executable(path: &Path) {
+fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        let mut perms = meta.permissions();
-        perms.set_mode(0o755);
-        let _ = std::fs::set_permissions(path, perms);
-    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("could not make {} executable", path.display()))
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path) {}
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
-/// Append the official-signal launch flags to an already-built worker command.
-/// Claude gets `--settings <file>` (Stop + idle Notification hooks); Codex gets a
-/// trailing `-c notify=["<script>"]` that OVERRIDES the earlier `notify=[]` baked
-/// by the Codex capability profile (last `-c` wins). No-op for non-worker
-/// modes. Config-generation failure is surfaced by the poll loop.
 /// Claude's Remote Control puts a session in the Claude phone app and on
 /// claude.ai. The cloud worker turns it on for every Claude pane it hosts
 /// (`RUDDER_REMOTE_CONTROL=1`); the name tells the sessions apart in the app.
@@ -832,20 +841,33 @@ pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
     Some(format!("{repo} · {short} (cloud)"))
 }
 
+/// Append the official-signal launch flags to an already-built worker command.
+/// Claude gets `--settings <file>` (Stop + idle Notification hooks); Codex gets a
+/// trailing `-c notify=["<script>"]` that OVERRIDES the earlier `notify=[]` baked
+/// by the Codex capability profile (last `-c` wins). No-op for non-worker
+/// modes. When the hook files can't be written the launch fails with the
+/// reason: the worker could never report a finished turn.
 pub(crate) fn augment_worker_command(
     command: &mut TerminalCommand,
     backend: Backend,
     mode: AgentMode,
     run_id: &str,
-) {
+) -> Result<()> {
+    // Here as well as at spawn: the wrappers below (a managed profile, a gam
+    // link) start the agent through `/bin/sh` or Rudder itself, which the
+    // spawn-time check cannot see through.
+    rudder_native::pty_terminal::require_agent_program(command)?;
     if cfg!(target_os = "linux") && home_runtime_from_env() {
         let volume = std::env::var("RUDDER_HOME_VOLUME").unwrap_or_else(|_| "/workspace".to_string());
         with_home_scratch(command, Path::new(&volume), run_id);
     }
     if !worker_wants_signals(backend, mode) {
-        return;
+        return Ok(());
     }
-    let signals = prepare_worker_signals(run_id, backend);
+    // Flattened, so a caller's `error.to_string()` names the cause.
+    let signals = prepare_worker_signals(run_id, backend).map_err(|error| {
+        anyhow::anyhow!("could not install the worker's lifecycle hooks: {error:#}")
+    })?;
     match backend {
         Backend::Claude => {
             if let Some(path) = signals.claude_settings {
@@ -900,15 +922,9 @@ pub(crate) fn augment_worker_command(
             }
         }
     }
-    let prepared = crate::fabric_runtime::prepare_agent_tools(command, backend, run_id)
-        .and_then(|()| prepare_managed_profile(command, backend, run_id));
-    if let Err(error) = prepared {
-        eprintln!("rudder engine agent identity setup failed: {error}");
-        if let Ok(exe) = std::env::current_exe() {
-            command.program = exe.display().to_string();
-            command.args = vec!["fabric".into(), "launch-error".into()];
-        }
-    }
+    crate::fabric_runtime::prepare_agent_tools(command, backend, run_id)
+        .and_then(|()| prepare_managed_profile(command, backend, run_id))
+        .map_err(|error| anyhow::anyhow!("the engine could not issue the agent's identity: {error:#}"))
 }
 
 /// On the cloud home each agent gets its own scratch directory,
@@ -962,11 +978,11 @@ mod home_scratch_tests {
 pub(crate) fn augment_existing_worker_command(
     command: &mut TerminalCommand, backend: Backend, mode: AgentMode,
     run_id: &str, profile: Option<&str>,
-) {
+) -> Result<()> {
     if profile_override(command).is_none() {
         command.env.push(("RUDDER_EXECUTION_PROFILE".into(), profile.unwrap_or("native").into()));
     }
-    augment_worker_command(command, backend, mode, run_id);
+    augment_worker_command(command, backend, mode, run_id)
 }
 
 fn profile_override(command: &TerminalCommand) -> Option<&str> {

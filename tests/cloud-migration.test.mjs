@@ -52,7 +52,7 @@ test("migration candidates include live isolated workers but exclude the conduct
       repoRoot: repo,
       targetBranch: "main",
       baseCommit: "abc",
-      worktree: { enabled: true, path: workerPath },
+      workspace: { enabled: true, path: workerPath },
       ...overrides,
     }));
   }
@@ -60,7 +60,7 @@ test("migration candidates include live isolated workers but exclude the conduct
   await writeRun("worker", {});
   await writeRun("orchestrator", {
     mode: "rudder-plan",
-    worktree: { enabled: false, path: repo },
+    workspace: { enabled: false, path: repo },
   });
   await writeRun("completed", { status: "completed" });
 

@@ -21,7 +21,7 @@ async function fixture(t) {
   const owned = path.join(repo, ".rudder", "runs", "peer");
   await fs.mkdir(owned, { recursive: true });
   await fs.writeFile(path.join(owned, "run.json"), JSON.stringify({ id: "peer", task: "Private peer task", taskSummary: "Peer", taskSummaryLlm: true,
-    repoRoot: repo, status: "completed", backend: "codex", vcs: "jj", createdAt: "2026-10-30T00:00:00Z", updatedAt: "2026-10-30T00:00:00Z",
+    repoRoot: repo, status: "completed", backend: "codex", createdAt: "2026-10-30T00:00:00Z", updatedAt: "2026-10-30T00:00:00Z",
     targetBranch: "main", baseCommit: "baseline", workspace: { enabled: false, path: repo }, autoSteer: { count: 0, max: 0 } }));
   await fs.writeFile(path.join(owned, "output.txt"), "Private peer output\n");
   const server = await startBoardDaemon({ port: 0, repoRoot: repo, controlMode: "projector", bus: new RudderBus() });

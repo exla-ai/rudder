@@ -15,7 +15,7 @@ pub(crate) fn load_rudder_config() -> Option<serde_json::Value> {
 /// unparseable" into `None`. If a saver treated that `None` as "start from
 /// defaults", a single transiently-corrupt file (an external editor mid-save,
 /// a partial write from an older build) would be overwritten on the next
-/// `/model` or another dashboard setting, wiping `backends`, `mergeStrategy`,
+/// `/model` or another dashboard setting, wiping `backends`,
 /// `orchestrator.maxParallel`, etc. Here we distinguish the two cases: a
 /// present-but-unparseable file is copied aside to `config.json.corrupt` so the
 /// user can recover it, and only then do we fall back to defaults.
@@ -449,8 +449,6 @@ pub(crate) fn ensure_config_defaults(config: &mut serde_json::Value) {
         .or_insert(serde_json::json!(1));
     root.entry("defaultBackend".to_string())
         .or_insert(serde_json::json!("claude"));
-    root.entry("mergeStrategy".to_string())
-        .or_insert(serde_json::json!("merge"));
     root.entry("colorMode".to_string())
         .or_insert(serde_json::json!("terminal"));
     root.entry("runPolicy".to_string()).or_insert_with(|| {
@@ -469,7 +467,6 @@ pub(crate) fn default_config_value() -> serde_json::Value {
     serde_json::json!({
         "version": 1,
         "defaultBackend": "claude",
-        "mergeStrategy": "merge",
         "colorMode": "terminal",
         "runPolicy": {
             "sameCheckout": "single-active",

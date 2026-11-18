@@ -1130,9 +1130,9 @@ function CardDetail({
               </span>
             )}
           </div>
-          {node.worktree && (
-            <div class="drawer-worktree mono" title={node.worktree.path}>
-              {node.worktree.workspaceName ?? node.worktree.path}
+          {node.workspace && (
+            <div class="drawer-worktree mono" title={node.workspace.path}>
+              {node.workspace.workspaceName ?? node.workspace.path}
             </div>
           )}
           {node.delivery?.required && (

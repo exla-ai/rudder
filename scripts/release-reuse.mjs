@@ -15,7 +15,7 @@ const WORKFLOW = '.github/workflows/release.yml';
 export const QUALIFY_STEPS = {
   native_archives:'Authenticate original native archives before extraction',
   verify_native:'Verify complete native artifacts and source revision',
-  git_config:'Configure git (rebase-first test creates temp repos)', install_jj:'Install jj',
+  git_config:'Configure git (tests create temp repos)', install_jj:'Install jj',
   install:'Install npm dependencies', cloud:'Install + build cloud test fixtures',
   fixtures:'Compile engine and native test fixtures', js:'Typecheck + JS tests',
   rust:'Native tests', jj_provider:'Managed jj provider tests', tui:'TUI end-to-end tests',

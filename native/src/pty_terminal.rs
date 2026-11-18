@@ -1075,7 +1075,7 @@ impl TerminalPane {
         let mut command = command;
         if let Some(command) = command.as_mut() {
             crate::openrouter::attach_credentials(command)?;
-            require_codex_on_path(command)?;
+            require_agent_program(command)?;
         }
         // Reserve ownership and start the reaper before a fallible spawn can
         // leave a real child behind. Teardown never needs to spawn a thread.
@@ -2248,13 +2248,51 @@ fn enter_fork(command: Option<TerminalCommand>, cwd: Option<&std::path::Path>) -
     })
 }
 
-/// A Codex agent runs the `codex` on PATH (`codex_program()` in launch.rs);
-/// Rudder never installs or downloads one. Without it the launch fails here
-/// with the install command. Claude agents and shells never look for Codex.
-fn require_codex_on_path(command: &TerminalCommand) -> Result<()> {
-    if command.program != "codex" {
-        return Ok(());
+/// The agent CLIs Rudder starts, each with the command that installs it.
+const AGENT_PROGRAMS: &[(&str, &str)] = &[
+    ("claude", "npm install -g @anthropic-ai/claude-code"),
+    ("codex", "npm install -g @openai/codex"),
+    ("opencode", "npm install -g opencode-ai"),
+];
+
+/// An agent CLI that is not on PATH. Rudder never installs or downloads one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingAgentProgram {
+    pub program: &'static str,
+    pub install: &'static str,
+}
+
+impl MissingAgentProgram {
+    /// The same reason for the backend new work starts on, which `/model`
+    /// can switch away from.
+    pub fn with_switch_hint(&self) -> String {
+        format!(
+            "{} is not installed or not on PATH. Install it with `{}`, or switch with /model.",
+            self.program, self.install
+        )
     }
+}
+
+impl fmt::Display for MissingAgentProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is not installed or not on PATH. Install it with `{}`.",
+            self.program, self.install
+        )
+    }
+}
+
+impl std::error::Error for MissingAgentProgram {}
+
+/// An agent launch (`claude`, `codex`, `opencode`, as launch.rs names them)
+/// fails here, before anything starts, when its CLI is not on the PATH it
+/// runs with, naming the install command. Without this the only reason was
+/// "failed to spawn command in PTY". Shells and other programs pass.
+pub fn require_agent_program(command: &TerminalCommand) -> Result<()> {
+    let Some(&(program, install)) = AGENT_PROGRAMS.iter().find(|(name, _)| *name == command.program) else {
+        return Ok(());
+    };
     let path = command
         .env
         .iter()
@@ -2263,12 +2301,10 @@ fn require_codex_on_path(command: &TerminalCommand) -> Result<()> {
         .map(|(_, value)| std::ffi::OsString::from(value))
         .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_default();
-    if std::env::split_paths(&path).any(|dir| dir.join("codex").is_file()) {
+    if std::env::split_paths(&path).any(|dir| dir.join(program).is_file()) {
         return Ok(());
     }
-    Err(anyhow!(
-        "codex is not installed or not on PATH. Install it with `npm install -g @openai/codex`."
-    ))
+    Err(MissingAgentProgram { program, install }.into())
 }
 
 fn command_builder(command: Option<TerminalCommand>, term: &str) -> Result<CommandBuilder> {
@@ -2336,23 +2372,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_codex_launch_without_codex_on_path_names_the_install_command() {
-        let empty = std::env::temp_dir().join(format!("rudder-no-codex-{}", std::process::id()));
+    fn an_agent_launch_without_its_cli_on_path_names_the_install_command() {
+        let empty = std::env::temp_dir().join(format!("rudder-no-agent-{}", std::process::id()));
         std::fs::create_dir_all(&empty).unwrap();
         let path = empty.display().to_string();
-        let codex = TerminalCommand::with_args("codex", ["--no-alt-screen"]).with_env("PATH", &path);
-        let error = TerminalPane::spawn_shell_or_command(Some(codex), TerminalPaneOptions::default())
-            .err()
-            .expect("codex is missing");
-        assert_eq!(
-            error.to_string(),
-            "codex is not installed or not on PATH. Install it with `npm install -g @openai/codex`."
-        );
+        for (program, install) in AGENT_PROGRAMS {
+            let command = TerminalCommand::with_args(*program, ["--x"]).with_env("PATH", &path);
+            let error = TerminalPane::spawn_shell_or_command(Some(command), TerminalPaneOptions::default())
+                .err()
+                .expect("the CLI is missing");
+            assert_eq!(
+                error.to_string(),
+                format!("{program} is not installed or not on PATH. Install it with `{install}`.")
+            );
+            let missing = error.downcast_ref::<MissingAgentProgram>().expect("typed");
+            assert!(missing.with_switch_hint().ends_with(&format!("`{install}`, or switch with /model.")));
+        }
         std::fs::write(empty.join("codex"), "#!/bin/sh\n").unwrap();
         let codex = TerminalCommand::new("codex").with_env("PATH", &path);
-        assert!(require_codex_on_path(&codex).is_ok());
-        let claude = TerminalCommand::new("claude").with_env("PATH", &path);
-        assert!(require_codex_on_path(&claude).is_ok());
+        assert!(require_agent_program(&codex).is_ok());
+        let shell = TerminalCommand::new("sh").with_env("PATH", &path);
+        assert!(require_agent_program(&shell).is_ok(), "not an agent CLI");
         std::fs::remove_dir_all(&empty).unwrap();
     }
 

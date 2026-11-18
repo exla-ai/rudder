@@ -103,7 +103,6 @@ test("a run whose merge conflicted can retry integration instead of being stuck 
       backend: "claude",
       targetBranch: "main",
       baseCommit: "abc",
-      vcs: "jj",
       useWorkspace: true,
       workspacePath: repo,
     });
@@ -133,7 +132,6 @@ test("a run whose merge conflicted can retry integration instead of being stuck 
       backend: "claude",
       targetBranch: "main",
       baseCommit: "abc",
-      vcs: "jj",
       useWorkspace: true,
       workspacePath: repo,
     });

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { projectNodeStatus, readGraph, readyNodes } from "./graph.js";
 import { mergeGeneratedRudderMd, withRudderMdLock } from "./rudder-md.js";
-import { AGENT_WORKSPACES_DIR, LEGACY_AGENT_WORKSPACES_DIR, agentContextPath, loadRunRecord } from "./state.js";
+import { agentContextPath, ensureProjectRuntimeIgnored, loadRunRecord } from "./state.js";
 import type { RudderGraph, TaskNode } from "./types.js";
 import { ensureDir, nowIso, pathExists, runCommand, shortenHome } from "./util.js";
 
@@ -124,7 +124,7 @@ export async function appendSharedContext(
   if (!normalized) {
     return false;
   }
-  await ensureLine(path.join(repoRoot, ".gitignore"), SHARED_CONTEXT_FILE);
+  await ensureProjectRuntimeIgnored(repoRoot);
   const target = sharedContextPath(repoRoot);
   const existing = await fsp.readFile(target, "utf8").catch(() => "");
   if (existing.includes(normalized)) {
@@ -230,7 +230,7 @@ export async function syncSharedContextToWorkspaces(
   repoRoot: string,
   workspaces: Iterable<string>,
 ): Promise<void> {
-  await ensureLine(path.join(repoRoot, ".gitignore"), SHARED_CONTEXT_FILE);
+  await ensureProjectRuntimeIgnored(repoRoot);
   const source = sharedContextPath(repoRoot);
   const content = await fsp.readFile(source).catch(() => null);
   if (!content) {
@@ -504,11 +504,7 @@ function oneLine(value: string, max: number): string {
 // git-excluded so the projection never lands in a commit. Mirrors the launch
 // snapshot's exclusion handling (run-manager.writeRudderContextFiles).
 async function writeLiveRudderMd(repoRoot: string, graph: RudderGraph, content: string): Promise<void> {
-  await ensureLine(path.join(repoRoot, ".gitignore"), "RUDDER.md");
-  await ensureLine(path.join(repoRoot, ".gitignore"), SHARED_CONTEXT_FILE);
-  // Workspaces live inside the project; ignore them so worker checkouts are not untracked.
-  await ensureLine(path.join(repoRoot, ".gitignore"), `${AGENT_WORKSPACES_DIR}/`);
-  await ensureLine(path.join(repoRoot, ".gitignore"), `${LEGACY_AGENT_WORKSPACES_DIR}/`);
+  await ensureProjectRuntimeIgnored(repoRoot);
   const workspaces = new Set<string>([repoRoot]);
   for (const node of Object.values(graph.nodes)) {
     if (node.workspace?.path) {

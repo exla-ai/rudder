@@ -9,8 +9,6 @@ export const CODEX_RUDDER_COMMON_CONFIG_ARGS = [
   "-c",
   'model_reasoning_summary="detailed"',
   "-c",
-  "model_supports_reasoning_summaries=true",
-  "-c",
   "model_auto_compact_token_limit=150000",
   "-c",
   "tool_output_token_limit=6000",

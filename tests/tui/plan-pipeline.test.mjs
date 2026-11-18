@@ -57,7 +57,7 @@ test("plan → approve → workers → merge lands every node's work", { timeout
       if (matches.length === 0) return false;
       assert.equal(matches.length, 1, `one actual run for ${nodeId}`);
       const record = matches[0], workspace = record.workspace?.path;
-      assert.equal(record.vcs, "jj", `${nodeId} uses a jj workspace`);
+      assert.equal(typeof record.workspace?.workspaceName, "string", `${nodeId} uses a jj workspace`);
       assert.equal(typeof workspace, "string", `${nodeId} has its actual workspace path`);
       assert(path.isAbsolute(workspace));
       const relative = path.relative(path.join(repo, ".rudder-workspaces"), workspace);

@@ -44,7 +44,7 @@ import type {
 } from "./types.js";
 import { currentBranch } from "./git.js";
 import path from "node:path";
-import { newRunId, nowIso, writeJson } from "./util.js";
+import { commitSubject, newRunId, nowIso, writeJson } from "./util.js";
 
 // ===========================================================================
 // PURE decision functions. No IO, no spawning: these are the unit-tested core
@@ -279,7 +279,6 @@ async function launchReservedNode(repoRoot: string, graph: RudderGraph, node: Ta
     effort: node.effort,
     targetBranch: baseChange,
     baseCommit: baseChange,
-    vcs: "jj",
     useWorkspace: isolated,
     workspaceName: workspace.workspaceName,
     workspaceChangeId: jjChangeId,
@@ -377,7 +376,7 @@ async function mergeNodeIntoIntegrationLocked(repoRoot: string, node: TaskNode, 
     repoRoot,
     nodeChangeId: nodeRevision,
     intoChangeId: intoChange,
-    message: `rudder: ${node.title.slice(0, 72)}`,
+    message: `rudder: ${commitSubject(node.title)}`,
   });
 
   if (result.conflictedFiles.length === 0 && result.mergeChangeId) {
@@ -528,7 +527,6 @@ async function spawnResolver(
     effort: node.effort,
     targetBranch: input.mergeChangeId,
     baseCommit: input.mergeChangeId,
-    vcs: "jj",
     resolverFor: node.id,
     useWorkspace: true,
     workspaceName: workspace.workspaceName,

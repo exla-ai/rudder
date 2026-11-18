@@ -30,7 +30,7 @@ import {
   workspaceNameFor,
 } from "./jj.js";
 import { buildFreshHandoffPrompt, encodeClaudeProjectsCwd, type MigrationCandidate } from "./migration.js";
-import { adoptLegacyWorkspaceKey, AGENT_WORKSPACES_DIR, LEGACY_AGENT_WORKSPACES_DIR, workspacePath } from "./state.js";
+import { AGENT_WORKSPACES_DIR, LEGACY_AGENT_WORKSPACES_DIR, workspacePath } from "./state.js";
 import type { JsonValue } from "./types.js";
 import { ensureDir, nowIso, pathExists, readJson, runCommand, shortHash, writeJson } from "./util.js";
 
@@ -116,7 +116,6 @@ export async function findMoveCandidates(repoRoot: string, runIds?: string[]): P
     if (!record || record.id !== name) {
       continue;
     }
-    adoptLegacyWorkspaceKey(record);
     const status = String(record.status ?? "");
     // Named explicitly, a finished agent (an interrupted turn reads as done)
     // can move too: the person asked for that one.
@@ -468,7 +467,6 @@ async function adoptOne(
   if (!record) {
     throw new Error("run record missing from the bundle");
   }
-  adoptLegacyWorkspaceKey(record);
 
   const target = adoptedWorkspacePath(repoRoot, agent);
   if (await pathExists(target)) {
@@ -527,7 +525,6 @@ async function adoptOne(
     workspaceName: name,
     ...(jjChangeId ? { jjChangeId } : {}),
   };
-  record.vcs = "jj";
   // Nothing runs it yet: the dashboard resumes it when told to adopt it, and a
   // record claiming "running" with no process would read as orphaned first.
   record.status = "paused";

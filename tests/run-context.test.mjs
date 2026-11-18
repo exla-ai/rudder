@@ -23,7 +23,6 @@ test("writeAgentContext separates active, ready, completed, and merge-ready runs
       backend,
       targetBranch: "base",
       baseCommit: "base",
-      vcs: "jj",
       useWorkspace: isolated,
       workspacePath: workspace,
       workspaceName: isolated ? `rudder-${id}` : undefined,
@@ -87,7 +86,6 @@ test("legacy startedAt ownership cannot overwrite a newly redirected attempt", a
     backend: "claude",
     targetBranch: "base",
     baseCommit: "base",
-    vcs: "jj",
     useWorkspace: false,
     workspacePath: repo,
   });

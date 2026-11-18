@@ -4135,8 +4135,8 @@ pub(crate) fn worker_stats_title(app: &App, focused: bool) -> Option<Line<'stati
     if run_id != &run.id {
         return None;
     }
-    let label = crate::agent_stats::stats_label(summary);
-    if label.is_empty() {
+    let (speed, context) = crate::agent_stats::stats_parts(summary);
+    if speed.is_none() && context.is_none() {
         return None;
     }
     let p = pal();
@@ -4146,20 +4146,14 @@ pub(crate) fn worker_stats_title(app: &App, focused: bool) -> Option<Line<'stati
         Some(used) if used >= 70.0 => Style::default().fg(p.waiting),
         _ => quiet,
     };
-    // The context part is the last piece of the label.
-    let (speed, context) = match label.rsplit_once(" \u{b7} ") {
-        Some((speed, context)) => (Some(speed.to_string()), context.to_string()),
-        None if summary.context.is_some() => (None, label.clone()),
-        None => (Some(label.clone()), String::new()),
-    };
     let mut spans = vec![Span::styled(" ", quiet)];
     if let Some(speed) = speed {
         spans.push(Span::styled(speed, quiet));
-        if !context.is_empty() {
+        if context.is_some() {
             spans.push(Span::styled(" \u{b7} ", quiet));
         }
     }
-    if !context.is_empty() {
+    if let Some(context) = context {
         spans.push(Span::styled(context, level));
     }
     spans.push(Span::styled(" ", quiet));
@@ -5872,16 +5866,11 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
             FAILED_COLOR,
         )
     } else if let Some(prompt) = &app.conflict_prompt {
-        let operation_label = if prompt.operation == ConflictOperation::Rebase {
-            "Rebase"
-        } else {
-            "Merge"
-        };
         let count = prompt.conflicted_files.len();
         let mut lines = vec![
             Line::from(Span::styled(
                 format!(
-                    "{operation_label} stopped on {count} conflicted file{}.",
+                    "Merge stopped on {count} conflicted file{}.",
                     if count == 1 { "" } else { "s" }
                 ),
                 Style::default().fg(FAILED_COLOR),
@@ -5919,11 +5908,7 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
 
         (
             Span::styled(
-                if prompt.operation == ConflictOperation::Rebase {
-                    " Rebase conflict "
-                } else {
-                    " Merge conflict "
-                },
+                " Merge conflict ",
                 Style::default().fg(FAILED_COLOR),
             ),
             lines,

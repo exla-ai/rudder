@@ -33,8 +33,8 @@ async function fixture(t) {
   const runs = path.join(repo, ".rudder", "runs");
   await fsp.mkdir(path.join(runs, "old-run"), { recursive: true });
   const record = {
-    id: "old-run", status: "running", backend: "codex", vcs: "jj", task: "preserve edits",
-    worktree: { enabled: true, path: workspace, jjChangeId: "opaque-old-change" },
+    id: "old-run", status: "running", backend: "codex", task: "preserve edits",
+    workspace: { enabled: true, path: workspace, jjChangeId: "opaque-old-change" },
     session: { nativeSessionId: "session-1" }, process: { pid: 1234 }, terminal: { kind: "tmux" },
     merge: { operationId: "old-op", mergeChangeId: "old-merge" },
     delivery: { status: "pending", target: "preserve delivery fact" }, futureField: { opaque: true },
@@ -80,7 +80,7 @@ test("upgrade checkpoint exports real jj 0.40 history, source and sessions witho
   assert.equal(recovered.status, "paused");
   assert.equal(recovered.process, undefined);
   assert.equal(recovered.terminal, undefined);
-  assert.deepEqual(recovered.workspace, f.record.worktree);
+  assert.deepEqual(recovered.workspace, f.record.workspace);
   assert.deepEqual(recovered.session, f.record.session);
   assert.deepEqual(recovered.merge, f.record.merge);
   assert.deepEqual(recovered.delivery, f.record.delivery);

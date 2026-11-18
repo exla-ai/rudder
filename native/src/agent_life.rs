@@ -142,13 +142,18 @@ pub(crate) fn delete_conversation(
     job: &ConversationCleanup,
 ) -> Result<usize, String> {
     let mut in_use: HashSet<String> = job.kept_sessions.iter().cloned().collect();
+    // A remaining run that has no record yet (still starting) left no
+    // sessions. One whose record can't be read might name any of these, so
+    // nothing is deleted.
     for record in &job.kept_records {
-        if let Some(value) = fs::read_to_string(record)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        {
-            in_use.extend(recorded_session_ids(&value));
-        }
+        let raw = match fs::read_to_string(record) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("{}: {error}", record.display())),
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| format!("{}: {error}", record.display()))?;
+        in_use.extend(recorded_session_ids(&value));
     }
     let doomed: Vec<&String> = job
         .sessions
@@ -200,8 +205,11 @@ pub(crate) struct GcProbe {
     pub(crate) backend: Backend,
     pub(crate) cwd: PathBuf,
     pub(crate) session: Option<String>,
-    /// Its jj workspace, while the directory exists.
-    pub(crate) workspace: Option<String>,
+    /// Its jj workspace name and directory, while the directory exists.
+    pub(crate) workspace: Option<(String, PathBuf)>,
+    /// The jj change it started as, for finding its work once the workspace
+    /// is gone.
+    pub(crate) change: Option<String>,
     /// Where the phone's questions for it wait (`<id>.json`).
     pub(crate) asks: Option<PathBuf>,
 }
@@ -212,10 +220,15 @@ fn modified(path: &Path) -> Result<SystemTime, String> {
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// `<name>@` as a revset, the name quoted.
+fn workspace_revset(workspace: &str) -> String {
+    format!("\"{}\"@", workspace.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// When jj last saw the workspace's files change: its working-copy commit's
 /// committer time. Read-only; it does not snapshot anything.
 fn workspace_changed_at(repo_root: &Path, workspace: &str) -> Result<SystemTime, String> {
-    let revset = format!("\"{}\"@", workspace.replace('\\', "\\\\").replace('"', "\\\""));
+    let revset = workspace_revset(workspace);
     let output = Command::new(jj_program())
         .args(["--ignore-working-copy", "log", "--no-graph", "-r", &revset, "-T"])
         .arg("committer.timestamp().utc().format(\"%s\")")
@@ -233,15 +246,53 @@ fn workspace_changed_at(repo_root: &Path, workspace: &str) -> Result<SystemTime,
     Ok(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
+/// The agent has work main does not: a non-empty commit in its workspace's
+/// history (snapshotted first, so files it never committed count) or, once
+/// the workspace is gone, in its change or anything built on it, that is
+/// neither in trunk nor under the main checkout. Untouched means no such
+/// work, whatever the agent's status. An error counts as unmerged work: the
+/// agent is left alone.
+fn has_unmerged_work(repo_root: &Path, probe: &GcProbe) -> bool {
+    let revset = match (&probe.workspace, &probe.change) {
+        (Some((workspace, path)), _) => {
+            if crate::gitio::snapshot_jj_workspace(path).is_err() {
+                return true;
+            }
+            format!("::{}", workspace_revset(workspace))
+        }
+        (None, Some(change)) if !change.is_empty() && change.chars().all(|c| c.is_ascii_alphanumeric()) => {
+            format!("present({change})::")
+        }
+        (None, Some(_)) => return true,
+        (None, None) => return false,
+    };
+    let output = Command::new(jj_program())
+        .args(["--ignore-working-copy", "log", "--no-graph", "--limit", "1", "-r"])
+        .arg(format!("({revset}) ~ ::(trunk() | @) ~ empty()"))
+        .args(["-T", "commit_id.short() ++ \"\\n\""])
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => !output.stdout.trim_ascii().is_empty(),
+        _ => true,
+    }
+}
+
 /// A question, permission or plan from the agent still waits for an answer.
+/// A folder that can't be read counts as waiting: the agent is left alone.
 fn has_pending_ask(asks: &Path) -> bool {
-    fs::read_dir(asks).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.ends_with(".json") && !name.ends_with(".answer.json")
-        })
-    })
+    match fs::read_dir(asks) {
+        Ok(mut entries) => entries.any(|entry| match entry {
+            Ok(entry) => {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(".json") && !name.ends_with(".answer.json")
+            }
+            Err(_) => true,
+        }),
+        Err(error) => error.kind() != io::ErrorKind::NotFound,
+    }
 }
 
 /// The newest change of anything the agent owns: its record, its current
@@ -267,7 +318,7 @@ fn last_touched(
             newest = newest.max(modified(transcript)?);
         }
     }
-    if let Some(workspace) = probe.workspace.as_deref() {
+    if let Some((workspace, _)) = &probe.workspace {
         newest = newest.max(workspace_changed_at(repo_root, workspace)?);
     }
     Ok(newest)
@@ -317,6 +368,7 @@ pub(crate) fn untouched_agents(
     probes
         .iter()
         .filter(|probe| !probe.asks.as_deref().is_some_and(has_pending_ask))
+        .filter(|probe| !has_unmerged_work(repo_root, probe))
         .filter(|probe| {
             last_touched(repo_root, roots, &rollouts, probe)
                 .is_ok_and(|at| now.duration_since(at.max(since)).is_ok_and(|age| age >= ttl))
@@ -350,9 +402,11 @@ impl App {
             .agents
             .get_mut(index)
             .ok_or_else(|| "no agent selected".to_string())?;
-        run.task_summary = title.clone();
-        save_native_run_record(&self.cwd, run)
-            .map_err(|error| format!("could not save the name: {error}"))?;
+        let previous = std::mem::replace(&mut run.task_summary, title.clone());
+        if let Err(error) = save_native_run_record(&self.cwd, run) {
+            run.task_summary = previous;
+            return Err(format!("could not save the name: {error}"));
+        }
         self.renamed_runs.insert(run.id.clone());
         self.dirty = true;
         Ok(format!("renamed to {title}"))
@@ -403,15 +457,22 @@ impl App {
         SteerDelivery::Delivered
     }
 
-    /// Every session this run used, read before its record is removed.
+    /// Every session Rudder made for this run, read before its record is
+    /// removed. A conversation it was switched to (`/resume`, a restored
+    /// session) is the person's and stays.
     pub(crate) fn conversation_of(&self, run: &AgentRun) -> ConversationCleanup {
         let record = native_run_dir(&self.cwd, &run.id).join("run.json");
-        let mut sessions: Vec<String> = fs::read_to_string(&record)
+        let record = fs::read_to_string(&record)
             .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .map(|value| recorded_session_ids(&value))
-            .unwrap_or_default();
-        sessions.extend(run.session_id.clone());
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let mut sessions: Vec<String> = record.iter().flat_map(rudder_session_ids).collect();
+        sessions.extend(
+            record
+                .iter()
+                .flat_map(recorded_session_ids)
+                .chain(run.session_id.clone())
+                .filter(|session| is_rudder_session(session)),
+        );
         sessions.sort();
         sessions.dedup();
         // A branch still being set up has no session of its own yet, but its
@@ -453,23 +514,21 @@ impl App {
             }
         };
         let tx = self.bg_notice_tx.clone();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("rudder-conversation-remove".to_string())
             .spawn(move || {
                 if let Err(error) = delete_conversation(&roots, &job) {
                     let _ = tx.send(format!("could not delete all of its conversation: {error}"));
                 }
-            })
-            .ok();
+            });
+        if let Err(error) = spawned {
+            let _ = self.bg_notice_tx.send(format!("kept its conversation: {error}"));
+        }
     }
 
     /// The plan this orchestrator drives still has work queued, waiting for
     /// approval or not yet merged.
-    fn plan_is_live(&self, plan_id: Option<&str>) -> bool {
-        let Some(plan_id) = plan_id else {
-            // A planner from before plans had ids: it can't be told apart.
-            return true;
-        };
+    fn plan_is_live(&self, plan_id: &str) -> bool {
         self.plans.iter().any(|plan| {
             plan.id == plan_id && (!plan.planned_nodes.is_empty() || plan.awaiting_approval)
         }) || self.agents.iter().any(|run| {
@@ -498,7 +557,11 @@ impl App {
             // A plan's unmerged node: deleting it would let its dependents
             // start without its work.
             || (run.node_id.is_some() && run.status != AgentStatus::Merged)
-            || (run.is_orchestrator() && self.plan_is_live(run.plan_id.as_deref()))
+            || (run.is_orchestrator() && run.plan_id.as_deref().is_some_and(|plan| self.plan_is_live(plan)))
+            // Unmerged work: finished and waiting for review or a merge, or
+            // merged but no longer in main.
+            || agent_awaits_merge(run)
+            || (run.status == AgentStatus::Merged && run.integration.in_trunk == Some(false))
     }
 
     pub(crate) fn agent_gc_probes(&self) -> Vec<GcProbe> {
@@ -512,10 +575,10 @@ impl App {
                 backend: run.backend,
                 cwd: run.cwd.clone(),
                 session: run.session_id.clone(),
-                workspace: run
-                    .workspace_name
-                    .clone()
-                    .filter(|_| run.workspace_path.as_deref().is_some_and(Path::exists)),
+                workspace: run.workspace_name.clone().zip(
+                    run.workspace_path.clone().filter(|path| path.exists()),
+                ),
+                change: run.jj_change_id.clone(),
                 asks: signals.as_deref().map(|dir| signals::asks_dir_in(dir, &run.id)),
             })
             .collect()
@@ -558,8 +621,7 @@ impl App {
         };
         let repo = self.cwd.clone();
         let (tx, rx) = mpsc::channel();
-        self.agent_gc_rx = Some(rx);
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("rudder-agent-gc".to_string())
             .spawn(move || {
                 let _ = tx.send(untouched_agents(
@@ -570,8 +632,11 @@ impl App {
                     SystemTime::now(),
                     UNTOUCHED_AGENT_TTL,
                 ));
-            })
-            .ok();
+            });
+        match spawned {
+            Ok(_) => self.agent_gc_rx = Some(rx),
+            Err(error) => self.push_activity(format!("cleanup: could not start its scan: {error}")),
+        }
     }
 
     /// Delete what the scan found, unless it was touched or became busy since.

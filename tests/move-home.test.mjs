@@ -47,7 +47,7 @@ function sh(cwd, command, args) {
 async function writeRun(repo, runId, fields) {
   const dir = path.join(repo, ".rudder", "runs", runId);
   await fsp.mkdir(dir, { recursive: true });
-  await fsp.writeFile(path.join(dir, "run.json"), JSON.stringify({ id: runId, repoRoot: repo, vcs: "jj", turns: [], ...fields }, null, 2));
+  await fsp.writeFile(path.join(dir, "run.json"), JSON.stringify({ id: runId, repoRoot: repo, turns: [], ...fields }, null, 2));
 }
 
 async function readRun(repo, runId) {

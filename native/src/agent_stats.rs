@@ -189,22 +189,18 @@ pub(crate) fn claude_window_from(
     }
 }
 
-/// `42 tok/s · 63% left`, or what part of it is known. Empty when nothing is.
-pub(crate) fn stats_label(summary: &crate::timeline::TimelineSummary) -> String {
-    let mut parts = Vec::new();
-    if let Some(speed) = summary.speed {
-        parts.push(format!("{} tok/s", format_rate(speed.tokens_per_second())));
-    }
-    if let Some(context) = &summary.context {
-        match summary.window.filter(|w| *w > 0) {
-            Some(window) => {
-                let used = context.input as f64 / window as f64 * 100.0;
-                parts.push(format!("{}% left", (100.0 - used).round().clamp(0.0, 100.0) as u64));
-            }
-            None => parts.push(format!("{} context", format_token_count(context.input))),
-        }
-    }
-    parts.join(" \u{b7} ")
+/// The two halves of `42 tok/s · 63% left`, each when it is known: the speed,
+/// and the context (what is left of the window, or its size when the window is
+/// not known).
+pub(crate) fn stats_parts(summary: &crate::timeline::TimelineSummary) -> (Option<String>, Option<String>) {
+    let speed = summary
+        .speed
+        .map(|speed| format!("{} tok/s", format_rate(speed.tokens_per_second())));
+    let context = summary.context.as_ref().map(|context| match context_used_pct(summary) {
+        Some(used) => format!("{}% left", (100.0 - used).round().clamp(0.0, 100.0) as u64),
+        None => format!("{} context", format_token_count(context.input)),
+    });
+    (speed, context)
 }
 
 /// How full the context is, 0 to 100, when the window is known.
@@ -269,11 +265,14 @@ mod tests {
         assert_eq!(claude_window_from("opus", None, Some(&catalog), None), None);
 
         let mut summary = crate::timeline::TimelineSummary::default();
-        assert_eq!(stats_label(&summary), "");
+        assert_eq!(stats_parts(&summary), (None, None));
         summary.speed = Some(Speed { end_ms: 1, tokens: 424, ms: 10_000 });
         summary.context = Some(crate::timeline::ContextUsage { input: 74_000, ..Default::default() });
-        assert_eq!(stats_label(&summary), "42 tok/s \u{b7} 74.0k context");
+        let part = |text: &str| Some(text.to_string());
+        assert_eq!(stats_parts(&summary), (part("42 tok/s"), part("74.0k context")));
         summary.window = Some(200_000);
-        assert_eq!(stats_label(&summary), "42 tok/s \u{b7} 63% left");
+        assert_eq!(stats_parts(&summary), (part("42 tok/s"), part("63% left")));
+        summary.speed = None;
+        assert_eq!(stats_parts(&summary), (None, part("63% left")));
     }
 }

@@ -141,7 +141,6 @@ export function legacyRecoveryRecord(value: unknown): Record<string, unknown> {
   const raw = value as Record<string, unknown>;
   if (typeof raw.id !== "string" || typeof raw.status !== "string") throw new Error("Legacy record has no identity or status");
   const result = { ...raw };
-  if (!result.workspace && result.worktree) result.workspace = result.worktree;
   delete result.process;
   delete result.terminal;
   if (["created", "running", "steering", "verifying", "orphaned"].includes(raw.status)) result.status = "paused";

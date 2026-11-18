@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -142,15 +143,18 @@ test("extractSharedContextSnippet captures secret-like lines without token-budge
   assert.doesNotMatch(snippet ?? "", /token budget/);
 });
 
-test("appendSharedContext writes gitignored RUDDER_SHARED.md", async () => {
+test("appendSharedContext writes RUDDER_SHARED.md excluded from Git, leaving .gitignore alone", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "rudder-shared-"));
   try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
     const wrote = await appendSharedContext(dir, "APIFY_TOKEN=abc1234567", "test");
     assert.equal(wrote, true);
     const content = await readFile(path.join(dir, SHARED_CONTEXT_FILE), "utf8");
-    const gitignore = await readFile(path.join(dir, ".gitignore"), "utf8");
+    const exclude = await readFile(path.join(dir, ".git", "info", "exclude"), "utf8");
     assert.match(content, /APIFY_TOKEN=abc1234567/);
-    assert.match(gitignore, new RegExp(`^${SHARED_CONTEXT_FILE}$`, "m"));
+    assert.match(exclude, new RegExp(`^${SHARED_CONTEXT_FILE}$`, "m"));
+    assert.match(exclude, /^\.rudder-workspaces\/$/m);
+    await assert.rejects(readFile(path.join(dir, ".gitignore"), "utf8"), { code: "ENOENT" });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

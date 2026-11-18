@@ -65,7 +65,7 @@ export type BoardNode = {
   deps: { hard: string[]; soft: string[] };
   createdAt: string;
   updatedAt: string;
-  worktree: { path: string; workspaceName?: string } | null;
+  workspace: { path: string; workspaceName?: string } | null;
   merge: MergeState | null;
   delivery?: DeliveryEvidence;
   updates: TaskUpdate[];

@@ -103,7 +103,7 @@ test("migration payload field names agree across CLI, worker, and dashboard", as
   const gitio = await fsp.readFile(path.join(repoRoot, "native", "src", "gitio.rs"), "utf8");
 
   // Manifest entry fields the CLI writes must be what the supervisor reads.
-  for (const field of ["cloudWorkspaceRelativePath", "sessionJsonlSnapshotPath", "workspaceBranch"]) {
+  for (const field of ["cloudWorkspaceRelativePath", "sessionJsonlSnapshotPath"]) {
     assert.ok(migration.includes(field), `src/migration.ts defines ${field}`);
     assert.ok(supervisor.includes(field), `supervisor.mjs reads ${field}`);
   }

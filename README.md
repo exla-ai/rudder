@@ -97,7 +97,8 @@ the agent's pane and resume a stopped agent explicitly.
 If a task needs shared local context like API tokens, private URLs, account ids,
 or environment values, save it with `/share <text>` in the task input. Rudder
 also captures obvious token-looking lines like `APIFY_TOKEN=...` from task-bar
-messages. The text is written to `RUDDER_SHARED.md`, which is gitignored and
+messages. The text is written to `RUDDER_SHARED.md`, which Rudder keeps out of
+Git through `.git/info/exclude` and
 mirrored into worker workspaces; all agents are explicitly told to read it when
 present.
 
@@ -343,7 +344,7 @@ running, Rudder also exposes matching project skills; the orchestrator can write
 | `/model` | Pick provider, then model, then effort |
 | `/fast` | Fast mode for new agents: flagship model at low effort (Claude opus / Codex gpt-6.1-sol); `/model` switches back |
 | `/swarm [n] <task>` | Run `n` competing experiments at one goal (leave `n` out and the swarm decides). A conversational planner proposes the experiment list; talk to it to change the list, then press `Enter` to launch. Every experiment runs on the current model in its own workspace, at most 18 at a time (`swarm.maxParallel`), and none merges on its own |
-| `/share <text>` | Save gitignored shared context for all agents in `RUDDER_SHARED.md` |
+| `/share <text>` | Save shared context, kept out of Git, for all agents in `RUDDER_SHARED.md` |
 | `/main [task]` or `/m` | Start an agent in the main checkout instead of its own workspace |
 | `/review-all` | Combine completed workspaces and start a Codex review-all agent |
 | `/merge-all` | Merge all completed workspaces |

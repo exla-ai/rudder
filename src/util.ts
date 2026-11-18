@@ -227,7 +227,7 @@ export function commandExists(command: string): boolean {
 const TOOL_INSTALL_HINTS: Record<string, string> = {
   claude: "Install with `npm install -g @anthropic-ai/claude-code` (see https://github.com/anthropics/claude-code).",
   codex: "Install with `npm install -g @openai/codex` (see https://github.com/openai/codex).",
-  acpx: "Install with `npm install -g acpx@latest` or run `rudder onboard`.",
+  acpx: "Install with `npm install -g acpx@latest`.",
   jj: "Rudder normally sets jj up on its own; run `rudder doctor` to retry, or install it with `brew install jj` or `cargo install jj-cli` (https://jj-vcs.github.io).",
 };
 
@@ -445,6 +445,21 @@ export function isReadableRunId(id: string): boolean {
     && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)
     && !/^\d{10,}$/.test(slug.split("-")[0] ?? "")
   );
+}
+
+/**
+ * A commit subject from free text: its first non-empty line, whitespace
+ * collapsed, cut at a word boundary with an ellipsis when it runs past
+ * `maxChars`. A bare slice left subjects like "...add a test for i".
+ */
+export function commitSubject(text: string, maxChars = 72): string {
+  const line = text.split("\n").map((item) => item.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+  if (line.length <= maxChars) {
+    return line;
+  }
+  const head = line.slice(0, maxChars - 1);
+  const space = head.lastIndexOf(" ");
+  return `${(space > 0 ? head.slice(0, space) : head).trimEnd()}…`;
 }
 
 export function shortHash(value: string): string {

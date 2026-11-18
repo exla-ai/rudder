@@ -7,14 +7,12 @@ import type {
   BackendId,
   EffortLevel,
   JsonValue,
-  MergeStrategy,
   ProjectEntry,
   ProjectsRegistry,
   RudderConfig,
   RunRecord,
   RudderEvent,
   UndoEntry,
-  VcsMode,
 } from "./types.js";
 import { DEFAULT_BOARD_PORT } from "./types.js";
 import {
@@ -123,10 +121,11 @@ const projectRuntimeIgnoreInstalls = new Map<string, Promise<void>>();
  * workspace command is too late because jj snapshots the current checkout as
  * part of that command.
  *
- * We write both .gitignore (the existing, visible project contract) and Git's
- * local exclude file. The latter applies immediately across colocated jj
- * workspaces, including a scaffold change created before an older Rudder
- * version had installed the project-level rules.
+ * The rules go to Git's local exclude file, never the tracked .gitignore: an
+ * edit there is a change in the user's tree that shows in their status and
+ * rides along in a merge. jj honors info/exclude in a colocated repo and in
+ * each of its workspaces (checked on the shipped jj 0.40.0). A folder outside
+ * any Git repository has nothing to exclude from.
  */
 export function ensureProjectRuntimeIgnored(repoRoot: string): Promise<void> {
   const key = path.resolve(repoRoot);
@@ -141,19 +140,17 @@ export function ensureProjectRuntimeIgnored(repoRoot: string): Promise<void> {
 }
 
 async function installProjectRuntimeIgnores(repoRoot: string): Promise<void> {
-  const targets = [path.join(repoRoot, ".gitignore")];
   const exclude = await runCommand("git", ["rev-parse", "--git-path", "info/exclude"], {
     cwd: repoRoot,
     allowFailure: true,
-  }).catch(() => null);
-  const excludePath = exclude?.stdout.trim();
-  if (excludePath) {
-    targets.push(path.isAbsolute(excludePath) ? excludePath : path.resolve(repoRoot, excludePath));
+  });
+  if (exclude.code !== 0) {
+    if (/not a git repository/i.test(exclude.stderr)) return;
+    throw new Error(`git could not find the exclude file for ${repoRoot}: ${exclude.stderr.trim()}`);
   }
-  for (const target of new Set(targets)) {
-    for (const line of PROJECT_RUNTIME_IGNORES) {
-      await ensureIgnoreLine(target, line);
-    }
+  const excludePath = path.resolve(repoRoot, exclude.stdout.trim());
+  for (const line of PROJECT_RUNTIME_IGNORES) {
+    await ensureIgnoreLine(excludePath, line);
   }
 }
 
@@ -242,7 +239,6 @@ export function defaultConfig(): RudderConfig {
   return {
     version: 1,
     defaultBackend: "claude",
-    mergeStrategy: "merge",
     colorMode: "terminal",
     runPolicy: {
       sameCheckout: "single-active",
@@ -267,7 +263,6 @@ function normalizeConfig(existing: RudderConfig): RudderConfig {
   const normalized: RudderConfig = {
     ...defaults,
     ...existing,
-    mergeStrategy: parseMergeStrategy(existing.mergeStrategy),
     colorMode: existing.colorMode === "paper" ? "paper" : "terminal",
     runPolicy: {
       ...defaults.runPolicy,
@@ -298,10 +293,6 @@ function normalizeConfig(existing: RudderConfig): RudderConfig {
   // forward through the top-level config spread.
   Reflect.deleteProperty(normalized, "autoMerge");
   return normalized;
-}
-
-function parseMergeStrategy(value: unknown): MergeStrategy {
-  return value === "rebase" ? "rebase" : "merge";
 }
 
 export async function saveConfig(config: RudderConfig): Promise<void> {
@@ -440,10 +431,8 @@ export async function createRunRecord(params: {
   mode?: RunRecord["mode"];
   targetBranch: string;
   baseCommit: string;
-  vcs?: VcsMode;
   resolverFor?: string;
   useWorkspace: boolean;
-  workspaceBranch?: string;
   workspaceName?: string;
   workspaceChangeId?: string;
   workspacePath?: string;
@@ -453,7 +442,6 @@ export async function createRunRecord(params: {
   const record: RunRecord = {
     id,
     status: "created",
-    vcs: params.vcs,
     ...(params.resolverFor ? { resolverFor: params.resolverFor } : {}),
     mode: params.mode ?? "execute",
     task: params.task,
@@ -469,7 +457,6 @@ export async function createRunRecord(params: {
     workspace: {
       enabled: params.useWorkspace,
       path: params.workspacePath ?? params.repoRoot,
-      branch: params.workspaceBranch,
       workspaceName: params.workspaceName,
       ...(params.workspaceChangeId ? { jjChangeId: params.workspaceChangeId } : {}),
     },
@@ -527,26 +514,9 @@ export async function saveRunRecord(
 
 const inflightLlmSummaries = new Set<string>();
 
-/**
- * Records written before the worktree->workspace rename carry the isolation info
- * under a `worktree` key. Lift it onto `workspace` on read so every consumer
- * speaks one name; the next save persists the new key. Reading a record must
- * never throw on the old shape, so this is a pure in-memory promotion.
- */
-export function adoptLegacyWorkspaceKey<T extends object>(record: T): T {
-  const raw = record as Record<string, unknown>;
-  if (raw.workspace === undefined && raw.worktree !== undefined) {
-    raw.workspace = raw.worktree;
-  }
-
-  delete raw.worktree;
-  return record;
-}
-
 export async function loadRunRecord(repoRoot: string, runId: string): Promise<RunRecord | null> {
   const record = await readJson<RunRecord>(runRecordPath(repoRoot, runId));
   if (record) {
-    adoptLegacyWorkspaceKey(record);
     healMovedRepoPaths(record, repoRoot);
   }
   if (record && !record.taskSummary) {

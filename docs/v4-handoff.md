@@ -137,7 +137,8 @@ App loop. The clock starts at the first scan in a project
 (`.rudder/cleanup-since`), so nothing is deleted on update; existing agents
 get a full day from then. Never collected: pinned, running or waiting, pending asks, cloud
 owned, mid-integration, unmerged plan nodes, orchestrators of a live plan,
-finished work waiting for a merge, and merged work that is no longer in main.
+finished work waiting for a merge, merged work that is no longer in main, and
+any agent whose workspace has edits main does not have, whatever its status.
 Every delete (`dd`, `cc`, the app, the cleanup) now deletes the conversations
 Rudder made for the agent and no other (`session.rudderSessionIds`: launches
 with `--session-id`, edit and branch copies, Codex forks, the Codex session a
@@ -147,6 +148,12 @@ was switched to (`/resume`, a restored session) stays. Workspace removal
 snapshots first, so the agent's jj change stays in `jj log`; a workspace with
 no jj name is kept. Checked with native filter `untouched_agents` and
 a headless run against dev-mock.
+
+Every run is jj (local, unreleased). The git-worktree path is gone: the
+`vcs ?? "git"` routing and the git merge, sync and rebase helpers in `git.ts`,
+the `worktree` record key, `workspace.branch`, the `mergeStrategy` setting, the
+cloud handoff's `worktree*` spellings, native's git rebase conflict prompt, and
+the record's `vcs` field (an old record that still has it loads like any other).
 
 Branch an agent (local, unreleased): the app's row menu (Branch, with an
 optional first message) and the dashboard's `b` start a new agent named
@@ -385,6 +392,24 @@ Claude reports through `SubagentStart`/`SubagentStop`/`PostToolUse`(Agent)
 hooks plus task notifications; Codex through `SubagentStart`/`SubagentStop`,
 named from its rollout, and it never reports a failed subagent. View state
 only. See engineering-reference section 7.
+
+Codex rows from the rollout (native/src/codex_rollout.rs, not released yet):
+a background scan reads each live Codex worker's rollout once a second. A done
+row reopens only for a turn the rollout shows running (`task_started` with no
+`task_complete`/`turn_aborted`) that is not the one `<signal>.turn` last
+reported done, or for the UserPromptSubmit hook; Esc, F2, `/` and Backspace no
+longer leave it "working". Questions (`request_user_input`, accepted
+`request_user_input_async`) and a finished plan on "Implement this plan?" show
+"needs input". The rules mirror `pendingCodexAsks` in cloud/worker/asks.mjs;
+both sides are pinned to `tests/fixtures/codex-0.170-rollout*` (Rust
+`codex_rollout::tests`, JS `tests/codex-rollout-fixture.test.mjs`), so change
+them together.
+
+Rudder's ignore entries (RUDDER.md, RUDDER_SHARED.md, `.rudder-workspaces/`,
+the orchestrator skills) go in `.git/info/exclude`, never `.gitignore`; jj
+0.40.0 honors it. jj ignores Git's user.name/email, so with no jj identity the
+dashboard and `rudder doctor` say commits would read "JJ_EMPTY_STRING" and
+print the `jj config set --user` commands. Commit subjects cut at a word.
 
 Kimi and GLM agents (native/src/openrouter.rs, not released yet): `kimi` and
 `glm` are two more rows in the `/model` picker (also `/model kimi`,

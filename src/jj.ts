@@ -5,6 +5,7 @@ import path from "node:path";
 import type { RunRecord } from "./types.js";
 import {
   commandExists,
+  commitSubject,
   MissingToolError,
   pathExistsSync,
   runCommand,
@@ -419,8 +420,7 @@ function workspaceDescription(
   status: string,
 ): string {
   const label = params.nodeId ? `rudder[${params.nodeId}]` : "rudder";
-  const task = (params.task ?? "").trim().replace(/\s+/g, " ");
-  const summary = task.length > 72 ? `${task.slice(0, 71)}…` : task;
+  const summary = commitSubject(params.task ?? "");
   return summary ? `${label}: ${summary} [${status}]` : `${label} [${status}]`;
 }
 
@@ -540,7 +540,7 @@ async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: 
     await markMergeFailed(run, "Could not determine jj change id for run workspace.");
     throw new Error("Could not determine jj change id for run workspace.");
   }
-  const message = `rudder: ${run.task.slice(0, 72)}`;
+  const message = `rudder: ${commitSubject(run.task)}`;
   const merge = await mergeNode({
     repoRoot: run.repoRoot,
     nodeChangeId: sourceChangeId,
@@ -593,7 +593,6 @@ async function finalizeJjIntegration(run: RunRecord, mergeChangeId: string): Pro
     pushed,
     pushedAt: pushed ? new Date().toISOString() : undefined,
     conflictedFiles: undefined,
-    conflictKind: undefined,
     error: undefined,
   };
   await saveRunRecord(run);

@@ -2,7 +2,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { JsonValue, RunRecord } from "./types.js";
-import { adoptLegacyWorkspaceKey, workspaceDirName } from "./state.js";
+import { workspaceDirName } from "./state.js";
 import { pathExists, readJson } from "./util.js";
 
 export type MigrationDecision = "migrate" | "migrate-fresh" | "stay" | "stop";
@@ -14,7 +14,6 @@ export type MigrationCandidate = {
   backend: string;
   status: string;
   workspacePath: string;
-  workspaceBranch?: string;
   sessionId?: string;
   sessionJsonlPath?: string;
   reason: "resumable" | "no-session" | "no-jsonl" | "unsupported-backend" | "missing-workspace" | "not-running";
@@ -40,7 +39,6 @@ export type MigrationManifestEntry = {
   cloudWorkspaceRelativePath: string;
   /** Relative path inside the snapshot tar where the session jsonl is staged. */
   sessionJsonlSnapshotPath: string;
-  workspaceBranch?: string;
   createdAt?: string;
   /**
    * Prompt-engineered handoff for fresh restarts (when no resumable session
@@ -112,10 +110,6 @@ export async function findMigrationCandidates(repoRoot: string): Promise<Migrati
     if (!record || record.id !== entry.name) {
       continue;
     }
-    // Read run.json directly (no loadRunRecord side effects), so promote the
-    // pre-rename `worktree` key here too or every legacy record classifies as
-    // "not isolated" and silently never migrates.
-    adoptLegacyWorkspaceKey(record);
     const candidate = await classify(record);
     if (candidate) {
       out.push(candidate);
@@ -153,7 +147,6 @@ async function classify(record: RunRecord): Promise<MigrationCandidate | null> {
     backend: record.backend,
     status,
     workspacePath,
-    workspaceBranch: record.workspace?.branch,
     sessionId: record.session?.nativeSessionId,
   };
   if (!workspaceExists) {

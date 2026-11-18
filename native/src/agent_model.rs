@@ -113,19 +113,18 @@ impl App {
             Some((first, rest)) if provider_backend(first).is_some() => rest,
             _ => args,
         };
-        match args {
-            [model] => self.apply_agent_model_choice(model, default_effort_for(backend, model)),
-            [model, effort] => {
-                let parsed = parse_effort_arg(effort);
-                if parsed.is_none() && !effort.eq_ignore_ascii_case("auto") {
-                    self.model_for = None;
-                    self.notice = Some(format!("model not changed: unknown effort {effort}"));
-                    return true;
-                }
-                self.apply_agent_model_choice(model, parsed)
-            }
-            _ => {
-                self.notice = Some("pick a model, then an effort".to_string());
+        if args.is_empty() {
+            self.notice = Some("pick a model, then an effort".to_string());
+            return true;
+        }
+        // The agent's own backend, and only a model its list knows.
+        let mut full = vec![backend.as_str()];
+        full.extend_from_slice(args);
+        match parse_model_args(&full) {
+            Ok((_, model, effort)) => self.apply_agent_model_choice(&model, effort),
+            Err(refusal) => {
+                self.model_for = None;
+                self.notice = Some(format!("model not changed: {refusal}"));
                 true
             }
         }

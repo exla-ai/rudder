@@ -61,7 +61,6 @@ async function seedReviewNode(repo) {
     backend: "claude",
     targetBranch: "main",
     baseCommit: "base",
-    vcs: "jj",
     useWorkspace: false,
     workspacePath: repo,
   });
@@ -177,7 +176,6 @@ test("standalone board redirects a running worker and returns it through review"
     backend: "claude",
     targetBranch: "main",
     baseCommit: "HEAD",
-    vcs: "jj",
     useWorkspace: false,
     workspacePath: repo,
   });

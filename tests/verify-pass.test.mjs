@@ -14,7 +14,7 @@ import { verifyRun } from "../dist/brain.js";
 test("verification reads only the pass it is judging", async (t) => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-verify-"));
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
-  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("jj", ["git", "init", "--colocate"], { cwd: repo, stdio: "ignore" });
   fs.writeFileSync(path.join(repo, "SMOKE.md"), "ok\n");
 
   const id = "run-verify";
@@ -28,7 +28,6 @@ test("verification reads only the pass it is judging", async (t) => {
     id,
     repoRoot: repo,
     task: "Write the word ok into SMOKE.md",
-    vcs: "git",
     workspace: { enabled: false, path: repo },
   };
 

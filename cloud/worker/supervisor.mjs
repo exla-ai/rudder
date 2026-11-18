@@ -654,18 +654,16 @@ function stageMigratedAgents(workdir) {
       continue;
     }
     // Field names and staging dirs are a contract with stageMigratedAgents in
-    // src/cloud.ts / MigrationManifestEntry in src/migration.ts ("workspace"
-    // vocabulary); the "worktree" spellings are accepted for snapshots made by
-    // older CLIs. tests/cloud-handoff.test.mjs greps both sides.
-    const cloudWorkspace = [agent.cloudWorkspaceRelativePath, agent.cloudWorktreeRelativePath]
-      .find((value) => typeof value === "string" && value.trim().length > 0) || null;
+    // src/cloud.ts / MigrationManifestEntry in src/migration.ts.
+    // tests/cloud-handoff.test.mjs greps both sides.
+    const cloudWorkspace = typeof agent.cloudWorkspaceRelativePath === "string" && agent.cloudWorkspaceRelativePath.trim().length > 0
+      ? agent.cloudWorkspaceRelativePath
+      : null;
     if (!cloudWorkspace) {
       continue;
     }
-    const stagedWorkspace = ["migrated-workspaces", "migrated-worktrees"]
-      .map((dir) => path.join("/workspace/unpacked", dir, agent.runId))
-      .find((candidate) => fs.existsSync(candidate));
-    if (stagedWorkspace) {
+    const stagedWorkspace = path.join("/workspace/unpacked", "migrated-workspaces", agent.runId);
+    if (fs.existsSync(stagedWorkspace)) {
       fs.mkdirSync(cloudWorkspace, { recursive: true });
       sh(`cp -R ${shQuote(stagedWorkspace + "/.")} ${shQuote(cloudWorkspace + "/")}`);
       if (!fs.existsSync(path.join(cloudWorkspace, ".git"))) {
@@ -699,11 +697,8 @@ function stageMigratedAgents(workdir) {
       runId: agent.runId,
       sessionId: sessionPlaced,
       // workspacePath is what the dashboard's read_migration_manifest
-      // (native/src/gitio.rs) resumes from; worktreePath stays for dashboards
-      // older than the rename.
+      // (native/src/gitio.rs) resumes from.
       workspacePath: cloudWorkspace,
-      worktreePath: cloudWorkspace,
-      workspaceBranch: agent.workspaceBranch || agent.worktreeBranch || null,
       task: agent.task || "",
       taskSummary: agent.taskSummary || "",
       backend: agent.backend || "claude",
@@ -727,17 +722,13 @@ function stageMigratedAgents(workdir) {
       continue;
     }
     record.repoRoot = workdir;
-    // Write the canonical "workspace" key and drop any legacy "worktree" one:
-    // loadRunRecord / adoptLegacyWorkspaceKey prefer an existing "workspace"
-    // block, so leaving the local machine's stale one in place would point the
-    // cloud dashboard at a path that only exists on the user's laptop.
+    // Point the workspace at the cloud copy: the local machine's path only
+    // exists on the user's laptop.
     record.workspace = {
-      ...(record.workspace || record.worktree || {}),
+      ...(record.workspace || {}),
       enabled: true,
       path: entry.workspacePath,
-      branch: entry.workspaceBranch || record.workspace?.branch || record.worktree?.branch,
     };
-    delete record.worktree;
     if (entry.sessionId) {
       record.session = {
         ...(record.session || {}),

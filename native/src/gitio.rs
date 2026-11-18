@@ -315,7 +315,6 @@ pub(crate) fn create_main_agent(
         effort,
         status: AgentStatus::Stopped,
         cwd: repo_root.to_path_buf(),
-        workspace_branch: None,
         workspace_path: None,
         workspace_name: None,
         jj_change_id: None,
@@ -356,7 +355,6 @@ pub(crate) fn create_main_agent(
         merge_resolver: false,
         merge_requested: false,
         merge_conflict: false,
-        merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
         had_merge_conflict: false,
         done_summary: None,
@@ -685,9 +683,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .and_then(|value| value.as_str())
         .and_then(AgentMode::parse)
         .unwrap_or(AgentMode::Execute);
-    // Records written before the worktree->workspace rename carry the isolation
-    // info under `worktree`. Read either; every write below emits `workspace`.
-    let workspace = record.get("workspace").or_else(|| record.get("worktree"));
+    let workspace = record.get("workspace");
     let workspace_enabled = workspace
         .and_then(|value| value.get("enabled"))
         .and_then(|value| value.as_bool())
@@ -704,11 +700,6 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| repo_root.to_path_buf());
-    let workspace_branch = workspace
-        .and_then(|value| value.get("branch"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned);
     let workspace_path = workspace_enabled.then_some(cwd.clone());
     let workspace_name = workspace
         .and_then(|value| value.get("workspaceName"))
@@ -825,15 +816,6 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
         || merge_conflict;
-    let conflict_kind = merge_state
-        .and_then(|value| value.get("conflictKind"))
-        .or_else(|| sync_state.and_then(|value| value.get("conflictKind")))
-        .and_then(serde_json::Value::as_str);
-    let merge_conflict_operation = if conflict_kind == Some("rebase") {
-        ConflictOperation::Rebase
-    } else {
-        ConflictOperation::Merge
-    };
     let conflict_files_from = |state: Option<&serde_json::Value>| {
         state
             .and_then(|value| value.get("conflictedFiles"))
@@ -897,7 +879,6 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         effort,
         status,
         cwd,
-        workspace_branch,
         workspace_path,
         workspace_name,
         jj_change_id,
@@ -938,7 +919,6 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         merge_resolver,
         merge_requested,
         merge_conflict,
-        merge_conflict_operation,
         merge_conflict_files,
         had_merge_conflict,
         done_summary: record
@@ -1288,17 +1268,76 @@ pub(crate) fn recorded_session_ids(record: &serde_json::Value) -> Vec<String> {
     ids
 }
 
-/// The record's `session`: the current id, and every id the record named
-/// before it, so no conversation the run had is forgotten when it moves on.
+/// Conversations this dashboard made: a Claude session it launched with
+/// `--session-id`, an edited chat's or a branch's copy, a Codex fork, and the
+/// Codex session its own launch started. A run's record keeps the ones it was
+/// on as `session.rudderSessionIds`, and deleting the agent deletes those and
+/// no other: a conversation it was switched to (`/resume`, a restored
+/// session) belongs to the person.
+static RUDDER_SESSIONS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub(crate) fn note_rudder_session(id: &str) {
+    RUDDER_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(id.to_string());
+}
+
+pub(crate) fn is_rudder_session(id: &str) -> bool {
+    RUDDER_SESSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(id)
+}
+
+/// A new Claude session id for a conversation Rudder starts.
+pub(crate) fn new_rudder_session_id() -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    note_rudder_session(&id);
+    id
+}
+
+fn string_list(record: &serde_json::Value, key: &str) -> Vec<String> {
+    record
+        .get("session")
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The sessions a run record says Rudder made for that run: the only ones
+/// deleting the agent may delete.
+pub(crate) fn rudder_session_ids(record: &serde_json::Value) -> Vec<String> {
+    string_list(record, "rudderSessionIds")
+}
+
+/// The record's `session`: the current id, every id the record named before
+/// it, so no conversation the run had is forgotten when it moves on, and which
+/// of them Rudder made.
 fn session_record(existing: &serde_json::Value, current: Option<&str>) -> serde_json::Value {
     let mut previous = recorded_session_ids(existing);
     previous.retain(|id| Some(id.as_str()) != current);
+    let mut made = rudder_session_ids(existing);
+    for id in previous.iter().map(String::as_str).chain(current) {
+        if is_rudder_session(id) && !made.iter().any(|known| known == id) {
+            made.push(id.to_string());
+        }
+    }
     let mut session = serde_json::Map::new();
     if let Some(current) = current {
         session.insert("nativeSessionId".to_string(), serde_json::json!(current));
     }
     if !previous.is_empty() {
         session.insert("previousSessionIds".to_string(), serde_json::json!(previous));
+    }
+    if !made.is_empty() {
+        session.insert("rudderSessionIds".to_string(), serde_json::json!(made));
     }
     if session.is_empty() {
         serde_json::Value::Null
@@ -1307,29 +1346,29 @@ fn session_record(existing: &serde_json::Value, current: Option<&str>) -> serde_
     }
 }
 
-/// Add a session the run used without ever being on it (the cut copy an
-/// edited message resumes from) to its record, so deleting the agent deletes
-/// that file too.
+/// Add a copy Rudder made of a conversation that the run used without ever
+/// being on it (the cut copy an edited message or a branch resumes from) to
+/// its record, so deleting the agent deletes that file too.
 pub(crate) fn record_retired_session(repo_root: &Path, run_id: &str, session: &str) -> Result<()> {
+    note_rudder_session(session);
     let path = native_run_dir(repo_root, run_id).join("run.json");
     let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-    let mut previous: Vec<String> = record
-        .get("session")
-        .and_then(|value| value.get("previousSessionIds"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect();
-    if previous.iter().any(|id| id == session) {
+    let mut previous = string_list(&record, "previousSessionIds");
+    let mut made = rudder_session_ids(&record);
+    if previous.iter().any(|id| id == session) && made.iter().any(|id| id == session) {
         return Ok(());
     }
-    previous.push(session.to_string());
+    if !previous.iter().any(|id| id == session) {
+        previous.push(session.to_string());
+    }
+    if !made.iter().any(|id| id == session) {
+        made.push(session.to_string());
+    }
     if !record.get("session").is_some_and(serde_json::Value::is_object) {
         record["session"] = serde_json::json!({});
     }
     record["session"]["previousSessionIds"] = serde_json::json!(previous);
+    record["session"]["rudderSessionIds"] = serde_json::json!(made);
     write_run_record(&path, &record)
 }
 
@@ -1368,9 +1407,6 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
             })
         })
         .collect::<Vec<_>>();
-    // A run isolated in a jj workspace carries a workspace name. Those records
-    // declare `vcs:"jj"` so the TS merge/sync path routes through jj. Old
-    // git-worktree records retain `vcs:"git"` for readable history only.
     // A workspace's IDENTITY is written once and never unwritten. An in-memory row
     // that has lost its name or change id (reloaded from a partial record, rebuilt
     // by a path that does not carry them) must not erase what disk already knows:
@@ -1379,34 +1415,26 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     // workspace disappeared from a live repo.
     let recorded_workspace_name = existing_record
         .get("workspace")
-        .or_else(|| existing_record.get("worktree"))
         .and_then(|value| value.get("workspaceName"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
     let recorded_change_id = existing_record
         .get("workspace")
-        .or_else(|| existing_record.get("worktree"))
         .and_then(|value| value.get("jjChangeId"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
     let workspace_name = run.workspace_name.clone().or(recorded_workspace_name);
     let jj_change_id = run.jj_change_id.clone().or(recorded_change_id);
-    let is_jj_run = workspace_name.is_some() || jj_change_id.is_some();
     let mut workspace = serde_json::json!({
         "enabled": run.workspace_path.is_some(),
         "path": run.cwd,
     });
     if let Some(map) = workspace.as_object_mut() {
-        if is_jj_run {
-            if let Some(name) = workspace_name.as_ref() {
-                map.insert("workspaceName".to_string(), serde_json::json!(name));
-            }
-            if let Some(change_id) = jj_change_id.as_ref() {
-                map.insert("jjChangeId".to_string(), serde_json::json!(change_id));
-            }
-        } else if let Some(branch) = run.workspace_branch.as_ref() {
-            // Preserve the branch field only when rewriting an old record.
-            map.insert("branch".to_string(), serde_json::json!(branch));
+        if let Some(name) = workspace_name.as_ref() {
+            map.insert("workspaceName".to_string(), serde_json::json!(name));
+        }
+        if let Some(change_id) = jj_change_id.as_ref() {
+            map.insert("jjChangeId".to_string(), serde_json::json!(change_id));
         }
     }
     let record_status = if run.status == AgentStatus::Done && run.merge_conflict {
@@ -1421,7 +1449,6 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // What a live row is waiting on, for readers outside the dashboard (the
         // phone app): the flags themselves are in-memory only.
         "attention": run_attention(run),
-        "vcs": if is_jj_run { "jj" } else { "git" },
         "mode": run.mode.as_str(),
         // Whether this RudderPlan row is a TRANSIENT reconcile planner (vs the pinned
         // orchestrator). Persisted so an orphan left by a crash mid-reconcile is
@@ -1507,17 +1534,11 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         map.remove("process");
     }
     if run.merge_conflict {
-        let conflict_kind = if run.merge_conflict_operation == ConflictOperation::Rebase {
-            "rebase"
-        } else {
-            "merge"
-        };
         if let Some(map) = record.as_object_mut() {
             map.insert(
                 "merge".to_string(),
                 serde_json::json!({
                     "status": "conflict",
-                    "conflictKind": conflict_kind,
                     "conflictedFiles": run.merge_conflict_files,
                 }),
             );
@@ -1530,7 +1551,6 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
             .unwrap_or_else(|| serde_json::json!({}));
         merge["status"] = serde_json::json!("merged");
         if let Some(map) = merge.as_object_mut() {
-            map.remove("conflictKind");
             map.remove("conflictedFiles");
             if let Some(bookmark) = run.integration.bookmark.as_ref() {
                 map.insert("targetBranch".to_string(), serde_json::json!(bookmark));
@@ -1707,7 +1727,7 @@ pub(crate) enum JjCliOutcome {
 }
 
 /// Run `rudder <command> <run_id>` synchronously (the TS command routes through
-/// the jj merge/sync helpers for vcs:jj runs and captures op-log for undo), then
+/// the jj merge/sync helpers and captures op-log for undo), then
 /// read back run.json to classify the outcome. Mirrors the cloudio.rs
 /// locate_rudder_cli + Command::output pattern.
 pub(crate) fn run_rudder_jj_command(
@@ -1887,7 +1907,6 @@ pub(crate) fn remove_native_run_record(repo_root: &Path, run_id: &str) -> Result
 pub(crate) struct WorkspaceInfo {
     pub(crate) id: String,
     pub(crate) path: PathBuf,
-    pub(crate) branch: Option<String>,
     pub(crate) path_is_workspace: bool,
     /// jj workspace name for the run (e.g. `rudder-launch-video-k3f9q`). Present for new
     /// runs isolated in a jj workspace; `None` for the dedicated main agent.
@@ -1901,7 +1920,6 @@ impl WorkspaceInfo {
         Self {
             id: new_run_id("task"),
             path,
-            branch: None,
             path_is_workspace: false,
             workspace_name: None,
             jj_change_id: None,
@@ -2116,7 +2134,6 @@ pub(crate) fn prepare_jj_workspace_as(
     Ok(WorkspaceInfo {
         id,
         path: PathBuf::from(path),
-        branch: None,
         path_is_workspace: true,
         workspace_name,
         jj_change_id,
@@ -2207,16 +2224,6 @@ pub(crate) fn jj_workspace_change_id(cwd: &Path) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-pub(crate) fn conflicted_files(cwd: &Path) -> Vec<String> {
-    git_output(cwd, ["diff", "--name-only", "--diff-filter=U"])
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 /// Files with unresolved jj conflicts in `cwd` (via `jj resolve --list`). Empty when
@@ -2330,6 +2337,84 @@ pub(crate) fn checkpoint_working_copy(repo: &Path, message: &str) -> Result<Opti
     Ok(Some(change.to_string()))
 }
 
+/// jj authors every commit Rudder makes and reads only its own config, never
+/// git's user.name/email (checked on jj 0.40.0); without one the commits say
+/// "JJ_EMPTY_STRING". The dashboard's notice at launch, worded as `rudder
+/// doctor`'s fix line (src/auth.ts `jjIdentityFix`). It names the user's git
+/// identity when there is one and never sets anything on their behalf. Runs
+/// jj and git: call it off the App loop.
+pub(crate) fn jj_identity_problem(cwd: &Path) -> Option<String> {
+    // `unset_exit`: the status that means "no value" (`git config` exits 1).
+    let value = |program: std::ffi::OsString, args: &[&str], unset_exit: Option<i32>| {
+        let shown = format!("{} {}", program.to_string_lossy(), args.join(" "));
+        let output = Command::new(&program)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("could not run {shown}: {error}"))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else if unset_exit.is_some() && output.status.code() == unset_exit {
+            Ok(String::new())
+        } else {
+            Err(format!(
+                "{shown} failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    let identity = || -> Result<Option<String>, String> {
+        let name = value(jj_program(), &["config", "get", "user.name"], None)?;
+        let email = value(jj_program(), &["config", "get", "user.email"], None)?;
+        if !name.is_empty() && !email.is_empty() {
+            return Ok(None);
+        }
+        let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+        let mut commands = Vec::new();
+        if name.is_empty() {
+            let git = value("git".into(), &["config", "user.name"], Some(1))?;
+            let git = if git.is_empty() { "Your Name".to_string() } else { git };
+            commands.push(format!("jj config set --user user.name {}", quote(&git)));
+        }
+        if email.is_empty() {
+            let git = value("git".into(), &["config", "user.email"], Some(1))?;
+            let git = if git.is_empty() { "you@example.com".to_string() } else { git };
+            commands.push(format!("jj config set --user user.email {}", quote(&git)));
+        }
+        let missing = match (name.is_empty(), email.is_empty()) {
+            (true, true) => "name or email",
+            (true, false) => "name",
+            _ => "email",
+        };
+        Ok(Some(format!(
+            "jj has no author {missing}, so Rudder's commits are authored by \"JJ_EMPTY_STRING\". Set yours: {}",
+            commands.join(" && ")
+        )))
+    };
+    identity().unwrap_or_else(|error| Some(format!("could not read jj's author identity: {error}")))
+}
+
+/// A commit subject from free text: its first non-empty line, whitespace
+/// collapsed, cut at a word boundary with an ellipsis past `max_chars` (as
+/// `commitSubject` in src/util.ts). A bare cut left "...add a test for i".
+pub(crate) fn commit_subject(text: &str, max_chars: usize) -> String {
+    let line = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= max_chars {
+        return line;
+    }
+    let head: String = line.chars().take(max_chars.saturating_sub(1)).collect();
+    let cut = match head.rfind(' ') {
+        Some(space) if space > 0 => &head[..space],
+        _ => head.as_str(),
+    };
+    format!("{}\u{2026}", cut.trim_end())
+}
+
 /// Best-effort: set a jj workspace's working-copy change description to reflect
 /// the agent's status, so `jj log` reads like a live coordination board
 /// (`rudder[n3]: fix memory leak [done]`) instead of "(no description set)".
@@ -2351,8 +2436,8 @@ pub(crate) fn describe_workspace_status(run: &AgentRun, status: &str) {
     } else {
         task
     };
-    let summary: String = task.chars().take(72).collect();
-    let message = if summary.trim().is_empty() {
+    let summary = commit_subject(task, 72);
+    let message = if summary.is_empty() {
         format!("{label} [{status}]")
     } else {
         format!("{label}: {summary} [{status}]")
@@ -3054,13 +3139,18 @@ pub(crate) fn write_rudder_context_with_history(
     final_gates: &[(FinalGateStatus, Option<&str>)],
     control_results: &[(String, String)],
 ) -> Result<()> {
-    ensure_gitignore_contains(repo_root, "RUDDER.md")?;
-    ensure_gitignore_contains(repo_root, RUDDER_SHARED_CONTEXT_FILE)?;
-    // Workspaces now live INSIDE the project at <repo>/.rudder-workspaces; ignore them in the
-    // USER's repo (only Rudder's own repo previously listed it), or each worker's checkout
-    // would show up as untracked files in the parent and could be committed/cleaned.
-    ensure_gitignore_contains(repo_root, &format!("{AGENT_WORKSPACES_DIR}/"))?;
-    ensure_gitignore_contains(repo_root, &format!("{LEGACY_AGENT_WORKSPACES_DIR}/"))?;
+    // Workspaces live INSIDE the project at <repo>/.rudder-workspaces; ignored, or each
+    // worker's checkout would show up as untracked files in the parent and could be
+    // committed or cleaned.
+    ensure_git_excludes(
+        repo_root,
+        &[
+            "RUDDER.md",
+            RUDDER_SHARED_CONTEXT_FILE,
+            &format!("{AGENT_WORKSPACES_DIR}/"),
+            &format!("{LEGACY_AGENT_WORKSPACES_DIR}/"),
+        ],
+    )?;
     let mut body = String::from("# Rudder-Specific Context\n\nThis file is generated by Rudder. It is not user-authored repo documentation. Use it to coordinate with other Rudder agents in this checkout.\n\n");
     append_global_job_snapshot(&mut body, agents, pending);
     append_ship_status(&mut body, repo_root, agents);
@@ -3102,14 +3192,13 @@ pub(crate) fn write_rudder_context_with_history(
     }
     if let Some(workspace) = pending {
         body.push_str(&format!(
-            "- starting node=- mode=execute status=starting backend=pending model=pending cwd={} where={} branch={}\n",
+            "- starting node=- mode=execute status=starting backend=pending model=pending cwd={} where={}\n",
             workspace.path.display(),
             if workspace.path_is_workspace {
                 "workspace"
             } else {
                 "main-checkout"
             },
-            workspace.branch.as_deref().unwrap_or("current")
         ));
     }
     let ready_agents = agents
@@ -3510,7 +3599,7 @@ pub(crate) fn sync_shared_context_surfaces(
     agents: &[AgentRun],
     pending: Option<&WorkspaceInfo>,
 ) -> Result<()> {
-    ensure_gitignore_contains(repo_root, RUDDER_SHARED_CONTEXT_FILE)?;
+    ensure_git_excludes(repo_root, &[RUDDER_SHARED_CONTEXT_FILE])?;
     let source = shared_context_path(repo_root);
     if !source.exists() {
         return Ok(());
@@ -3552,7 +3641,7 @@ pub(crate) fn append_shared_context(repo_root: &Path, source: &str, text: &str) 
     if text.is_empty() {
         return Ok(false);
     }
-    ensure_gitignore_contains(repo_root, RUDDER_SHARED_CONTEXT_FILE)?;
+    ensure_git_excludes(repo_root, &[RUDDER_SHARED_CONTEXT_FILE])?;
     let path = shared_context_path(repo_root);
     let existing = fs::read_to_string(&path).unwrap_or_default();
     if existing.contains(text) {
@@ -3901,22 +3990,74 @@ pub(crate) fn replace_rudder_plan_block(repo_root: &Path, plan_block: &str) -> R
     Ok(())
 }
 
-pub(crate) fn ensure_gitignore_contains(repo_root: &Path, line: &str) -> Result<()> {
-    let path = repo_root.join(".gitignore");
-    let existing = fs::read_to_string(&path).unwrap_or_default();
-    if existing
-        .lines()
-        .any(|existing_line| existing_line.trim() == line)
-    {
+/// Rudder's own files (RUDDER.md, the agent workspaces, generated skills) are
+/// ignored through the repository's `info/exclude`, never its tracked
+/// `.gitignore`: an edit there is a change in the user's tree, shows in their
+/// status and rides along in a merge. jj honors `info/exclude` in a colocated
+/// repo and in each of its workspaces (checked on the shipped jj 0.40.0). A
+/// folder outside any Git repository has nothing to exclude from.
+pub(crate) fn ensure_git_excludes(repo_root: &Path, lines: &[&str]) -> Result<()> {
+    let Some(path) = git_exclude_file(repo_root)? else {
         return Ok(());
+    };
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(anyhow::anyhow!("could not read {}: {error}", path.display()))
+        }
+    };
+    let missing: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !existing.lines().any(|have| have.trim() == *line))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
     let prefix = if existing.is_empty() || existing.ends_with('\n') {
         ""
     } else {
         "\n"
     };
-    fs::write(path, format!("{existing}{prefix}{line}\n"))?;
+    fs::write(&path, format!("{existing}{prefix}{}\n", missing.join("\n")))
+        .map_err(|error| anyhow::anyhow!("could not write {}: {error}", path.display()))?;
     Ok(())
+}
+
+/// `info/exclude` of the Git repository holding `dir`, resolved by Git itself
+/// (a linked worktree's lives in the common dir) once per folder. None when no
+/// ancestor has a `.git`, without starting a process.
+fn git_exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
+    static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let resolved = RESOLVED.get_or_init(Default::default);
+    if let Some(path) = resolved.lock().expect("exclude paths").get(dir) {
+        return Ok(Some(path.clone()));
+    }
+    if !dir.ancestors().any(|ancestor| ancestor.join(".git").exists()) {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .current_dir(dir)
+        .output()
+        .map_err(|error| anyhow::anyhow!("could not run git in {}: {error}", dir.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git could not find the exclude file for {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let path = dir.join(String::from_utf8_lossy(&output.stdout).trim());
+    resolved
+        .lock()
+        .expect("exclude paths")
+        .insert(dir.to_path_buf(), path.clone());
+    Ok(Some(path))
 }
 
 /// A run id is a few words of the task plus a short random key:
@@ -4072,4 +4213,20 @@ pub(crate) fn run_attention(run: &AgentRun) -> Option<&'static str> {
         return Some("input");
     }
     None
+}
+
+#[cfg(test)]
+mod commit_subject_tests {
+    use super::commit_subject;
+
+    #[test]
+    fn commit_subjects_end_on_a_whole_word() {
+        let task = "Fix the flaky login retry and add a test for it so the suite stays green\nmore";
+        assert_eq!(
+            commit_subject(task, 40),
+            "Fix the flaky login retry and add a\u{2026}"
+        );
+        assert_eq!(commit_subject("\n  short   task \nrest", 72), "short task");
+        assert_eq!(commit_subject(&"x".repeat(80), 10), format!("{}\u{2026}", "x".repeat(9)));
+    }
 }

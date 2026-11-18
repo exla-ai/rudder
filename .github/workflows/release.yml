@@ -260,7 +260,7 @@ jobs:
         id: verify_native
         run: node scripts/native-artifacts.mjs verify --root prebuilt-native --revision "$GITHUB_SHA"
 
-      - name: Configure git (rebase-first test creates temp repos)
+      - name: Configure git (tests create temp repos)
         id: git_config
         run: |
           git config --global user.email "ci@rudder.local"

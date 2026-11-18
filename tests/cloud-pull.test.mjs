@@ -40,7 +40,7 @@ function sh(cwd, command, args) {
 async function writeRun(repo, runId, fields) {
   const dir = path.join(repo, ".rudder", "runs", runId);
   await fsp.mkdir(dir, { recursive: true });
-  await fsp.writeFile(path.join(dir, "run.json"), JSON.stringify({ id: runId, repoRoot: repo, vcs: "jj", turns: [], ...fields }, null, 2));
+  await fsp.writeFile(path.join(dir, "run.json"), JSON.stringify({ id: runId, repoRoot: repo, turns: [], ...fields }, null, 2));
 }
 
 async function readRun(repo, runId) {
@@ -140,7 +140,6 @@ test("a home agent's work and conversation come to the laptop as a paused jj wor
 
     const record = await readRun(fx.laptop, RUN_ID);
     assert.equal(record.status, "paused");
-    assert.equal(record.vcs, "jj");
     assert.equal(record.mode, "execute");
     assert.equal(record.repoRoot, fx.laptop);
     assert.equal(record.workspace.path, pulled.path);

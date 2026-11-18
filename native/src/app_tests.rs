@@ -177,6 +177,23 @@ fn env_guard() -> EnvGuard {
 
 /// Write `body` as an executable script at `path` (the fake `claude`/`codex` the
 /// TUI harness injects via RUDDER_CLAUDE_BIN / RUDDER_CODEX_BIN).
+/// A PATH holding stand-in `claude`, `codex` and `opencode` executables, for
+/// tests that wire an agent command without starting it: launch wiring
+/// refuses an agent CLI that is not installed.
+fn fake_agent_path() -> String {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("rudder-fake-agents-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("fake agent dir");
+        for program in ["claude", "codex", "opencode"] {
+            write_fake_bin(&dir.join(program), "#!/bin/sh\nexit 0\n");
+        }
+        dir
+    })
+    .display()
+    .to_string()
+}
+
 fn write_fake_bin(path: &std::path::Path, body: &str) {
     fs::write(path, body).expect("write fake bin");
     #[cfg(unix)]
@@ -1228,14 +1245,10 @@ fn preview_text_redacts_secret_values() {
 fn jj_merge_conflict_prompt_uses_jj_not_git() {
     let mut app = App::new();
     app.conflict_prompt = Some(MergeConflictPrompt {
-        operation: ConflictOperation::Merge,
         task: "wire up the parser".to_string(),
         conflicted_files: vec!["src/parser.rs".to_string()],
         error: "jj merge created conflicts.".to_string(),
         repo_root: std::env::temp_dir(),
-        target_branch: None,
-        source_branch: None,
-        workspace_path: None,
         agent_id: Some("agent-1".to_string()),
     });
     let prompt = app.conflict_resolution_prompt().expect("merge prompt");
@@ -1612,7 +1625,7 @@ fn switching_model_provider_cannot_kill_a_running_agent() {
     let _env = env_guard();
     let run_id = "run-hooks-1";
     // Hooks wired at launch, as a Claude worker.
-    let wired = signals::prepare_worker_signals(run_id, Backend::Claude);
+    let wired = signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
     assert!(wired.claude_settings.is_some(), "claude settings written");
 
     // The row now claims a different backend. The wiring did not change.
@@ -1676,6 +1689,145 @@ fn picking_a_model_leaves_a_running_main_row_alone() {
             terminal.request_termination();
         }
     }
+}
+
+#[test]
+fn picking_a_model_for_a_dead_main_row_only_records_it() {
+    let _env = env_guard();
+    let home = unique_test_repo("model-pick-dead-main");
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    let mut app = App::new();
+    app.cwd = home.clone();
+    let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
+    main.mode = AgentMode::Main;
+    main.backend = Backend::Claude;
+    main.model = "opus".to_string();
+    main.status = AgentStatus::Paused;
+    let turns = main.turns.len();
+    app.agents.push(main);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Task;
+
+    app.apply_suggestion(Suggestion {
+        label: "gpt-5.6-terra".to_string(),
+        detail: String::new(),
+        action: SuggestionAction::SetModel {
+            backend: Backend::Codex,
+            model: "gpt-5.6-terra".to_string(),
+            effort: Some(EffortLevel::Low),
+        },
+    });
+
+    let row = &app.agents[0];
+    assert_eq!((row.backend, row.model.as_str()), (Backend::Codex, "gpt-5.6-terra"));
+    assert!(row.terminal.is_none(), "the session starts with the next message, not on the pick");
+    assert_eq!(row.turns.len(), turns, "no generic prompt was sent");
+    assert!(app.focus == FocusPane::Task, "typing after the pick stays in the task bar");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_new_backend_for_a_paused_main_row_drops_the_old_cli_session() {
+    let _env = env_guard();
+    let home = unique_test_repo("model-pick-new-backend");
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    let mut app = App::new();
+    app.cwd = home.clone();
+    let old = "d1d1d1d1-0000-4000-8000-000000000001";
+    let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
+    main.mode = AgentMode::Main;
+    main.backend = Backend::Claude;
+    main.model = "opus".to_string();
+    main.status = AgentStatus::Paused;
+    main.session_id = Some(old.to_string());
+    main.execution_profile = Some("claude-sdk".to_string());
+    main.resume_turn = true;
+    save_native_run_record(&home, &main).unwrap();
+    let reported = crate::signals::claude_session_path(MAIN_AGENT_ID).unwrap();
+    fs::create_dir_all(reported.parent().unwrap()).unwrap();
+    fs::write(&reported, old).unwrap();
+    app.agents.push(main);
+    app.selected_agent = 0;
+    let pick = |app: &mut App, backend: Backend, model: &str| {
+        app.apply_suggestion(Suggestion {
+            label: model.to_string(),
+            detail: String::new(),
+            action: SuggestionAction::SetModel { backend, model: model.to_string(), effort: None },
+        });
+    };
+
+    // Another model on the same CLI keeps the conversation.
+    pick(&mut app, Backend::Claude, "sonnet");
+    assert_eq!(app.agents[0].session_id.as_deref(), Some(old));
+    assert!(reported.exists());
+
+    pick(&mut app, Backend::Codex, "gpt-5.6-terra");
+    let row = &app.agents[0];
+    assert_eq!(row.backend, Backend::Codex);
+    assert_eq!(row.session_id, None, "a Claude id is never resumed with codex");
+    assert_eq!(row.execution_profile, None, "the next launch picks Codex's profile");
+    assert!(!row.resume_turn);
+    assert!(!reported.exists(), "the old hook report can't be adopted back");
+    let record: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(native_run_dir(&home, MAIN_AGENT_ID).join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["session"].get("nativeSessionId"), None);
+    assert_eq!(record["session"]["previousSessionIds"], serde_json::json!([old]), "still in its history");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
+    let _env = env_guard();
+    let home = unique_test_repo("model-command-refusal");
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    std::env::set_var("HOME", &home);
+    std::env::set_var("CODEX_HOME", home.join(".codex"));
+    let config = crate::config::rudder_config_path().unwrap();
+    let mut app = App::new();
+    app.cwd = home.clone();
+    let before = (app.backend, app.model.clone(), app.effort);
+    for input in [
+        // Esc left "/model claude" in the input, then "/model codex" was typed.
+        "/model claude /model codex",
+        "/model codex /model",
+        "/model /model",
+        "/model claude nonsense",
+        "/model codex sonnet",
+        "/model sonnet turbo",
+        "/model haiku max",
+        "/model claude sonnet low extra",
+        "/model",
+    ] {
+        app.notice = None;
+        assert!(app.handle_command(input));
+        assert_eq!((app.backend, app.model.clone(), app.effort), before, "{input} changed the model");
+        assert!(app.notice.is_some(), "{input} says why");
+        let saved = fs::read_to_string(&config).unwrap_or_default();
+        assert!(!saved.contains("/model") && !saved.contains("nonsense"), "{input} saved {saved}");
+    }
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("usage: /model claude|codex|opencode <model> [effort]")
+    );
+    app.handle_command("/model claude /model codex");
+    assert_eq!(
+        app.notice.as_deref(),
+        Some("/model is not a claude model; pick one from /model claude")
+    );
+
+    app.handle_command("/model codex gpt-5.6-terra low");
+    assert_eq!(
+        (app.backend, app.model.as_str(), app.effort),
+        (Backend::Codex, "gpt-5.6-terra", Some(EffortLevel::Low))
+    );
+    // A known name in any case, saved as the list spells it.
+    app.handle_command("/model Sonnet");
+    assert_eq!((app.backend, app.model.as_str()), (Backend::Claude, "sonnet"));
+    app.handle_command("/model claude fable[1m] auto");
+    assert_eq!((app.backend, app.model.as_str(), app.effort), (Backend::Claude, "fable[1m]", None));
+    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -1882,6 +2034,35 @@ fn a_codex_session_is_matched_by_start_time_not_by_being_newest() {
         "the session that started right after the spawn is the run's"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_codex_rows_session_is_looked_up_off_the_app_loop() {
+    let _env = env_guard();
+    let home = unique_test_repo("codex-session-lookup");
+    std::env::set_var("HOME", &home);
+    let started_at_ms = parse_iso8601_millis("2026-07-28T23:45:48.000Z").expect("parsed") as u64;
+    let session = "019fabfa-0000-0000-0000-0000000000a1";
+    write_codex_rollout(&home.join(".codex/sessions/2026/07/28"), session, "/repo", "2026-07-28T23:45:49.186Z");
+    let mut app = App::new();
+    app.cwd = home.clone();
+    let mut run = test_agent_run("codex-row", "codex work");
+    run.backend = Backend::Codex;
+    run.status = AgentStatus::Done;
+    run.cwd = PathBuf::from("/repo");
+    run.created_at = started_at_ms.to_string();
+    app.agents.push(run);
+
+    app.ensure_session_ids_recorded();
+    assert_eq!(app.agents[0].session_id, None, "the App loop does not read the rollouts itself");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.agents[0].session_id.is_none() && Instant::now() < deadline {
+        app.collect_codex_session_lookup();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(app.agents[0].session_id.as_deref(), Some(session));
+    assert!(app.codex_session_lookup_rx.is_none(), "the lookup is done");
+    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -5455,10 +5636,6 @@ fn plan_commands_use_read_only_backend_profiles() {
         .args
         .windows(2)
         .any(|window| window[0] == "-c" && window[1] == "features.computer_use=true"));
-    assert!(execute_codex
-        .env
-        .iter()
-        .any(|(key, value)| key == "CODEX_RUDDER_SCROLLBACK_SAFE" && value == "1"));
 
     let execute_claude = agent_command(
         Backend::Claude,
@@ -6055,37 +6232,7 @@ fn persisted_rudder_plan_worker_uses_worker_title_summary() {
 }
 
 #[test]
-fn legacy_worktree_key_still_loads_as_a_jj_workspace_run() {
-    // Records written before the worktree->workspace rename keep the old key.
-    // Reading must still recover the workspace name and change id, or every
-    // pre-rename agent row loses its identity and stops being mergeable.
-    let record = serde_json::json!({
-        "id": "run-legacy",
-        "status": "completed",
-        "mode": "execute",
-        "task": "legacy shape",
-        "backend": "claude",
-        "model": "sonnet",
-        "createdAt": "1",
-        "worktree": {
-            "enabled": true,
-            "path": "/tmp/repo/.rudder-worktrees/g/n0",
-            "workspaceName": "rudder-n0",
-            "jjChangeId": "zzz"
-        }
-    });
-
-    let run = agent_from_run_record(Path::new("/tmp/repo"), record).expect("run");
-    assert_eq!(run.workspace_name.as_deref(), Some("rudder-n0"));
-    assert_eq!(run.jj_change_id.as_deref(), Some("zzz"));
-    assert_eq!(
-        run.workspace_path.as_deref(),
-        Some(Path::new("/tmp/repo/.rudder-worktrees/g/n0"))
-    );
-}
-
-#[test]
-fn jj_run_record_writes_vcs_jj_and_workspace_fields() {
+fn jj_run_record_writes_workspace_fields() {
     let repo_root = std::env::temp_dir().join(format!(
         "rudder-jj-record-test-{}-{}",
         std::process::id(),
@@ -6099,7 +6246,6 @@ fn jj_run_record_writes_vcs_jj_and_workspace_fields() {
     let mut run = test_agent_run("jj-run-1", "wire up jj isolation");
     run.cwd = repo_root.join("workspace");
     run.workspace_path = Some(run.cwd.clone());
-    run.workspace_branch = None;
     run.workspace_name = Some("rudder-jj-run-1-abc123".to_string());
     run.jj_change_id = Some("zzzzzzzz".to_string());
 
@@ -6108,7 +6254,7 @@ fn jj_run_record_writes_vcs_jj_and_workspace_fields() {
         .expect("read run.json");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("parse run.json");
 
-    assert_eq!(value.get("vcs").and_then(|v| v.as_str()), Some("jj"));
+    assert!(value.get("vcs").is_none(), "every run is jj; the record names no vcs");
     let workspace = value.get("workspace").expect("workspace object");
     assert_eq!(
         workspace.get("workspaceName").and_then(|v| v.as_str()),
@@ -6230,7 +6376,6 @@ fn merge_conflict_run_record_round_trips_actionable_state() {
     let record = serde_json::json!({
         "id": "conflict-run-1",
         "status": "merge-conflict",
-        "vcs": "jj",
         "mode": "execute",
         "task": "build auth",
         "taskSummary": "build auth",
@@ -6518,41 +6663,6 @@ fn refresh_run_token_usage_never_regresses_a_stored_total() {
     refresh_run_token_usage(&mut run);
     assert_eq!(run.tokens_in, 500);
     assert_eq!(run.tokens_out, 100);
-    let _ = fs::remove_dir_all(repo_root);
-}
-
-#[test]
-fn legacy_git_run_record_keeps_vcs_git_and_branch() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "rudder-git-record-test-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&repo_root).expect("create test repo root");
-
-    let mut run = test_agent_run("git-run-1", "legacy workspace run");
-    run.cwd = repo_root.join("workspace");
-    run.workspace_path = Some(run.cwd.clone());
-    run.workspace_branch = Some("rudder/legacy-1".to_string());
-    run.workspace_name = None;
-    run.jj_change_id = None;
-
-    save_native_run_record(&repo_root, &run).expect("save git run record");
-    let raw = fs::read_to_string(native_run_dir(&repo_root, "git-run-1").join("run.json"))
-        .expect("read run.json");
-    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse run.json");
-
-    assert_eq!(value.get("vcs").and_then(|v| v.as_str()), Some("git"));
-    let workspace = value.get("workspace").expect("workspace object");
-    assert_eq!(
-        workspace.get("branch").and_then(|v| v.as_str()),
-        Some("rudder/legacy-1")
-    );
-    assert!(workspace.get("workspaceName").is_none());
-
     let _ = fs::remove_dir_all(repo_root);
 }
 
@@ -7950,14 +8060,10 @@ fn a_modal_is_sized_by_wrapped_rows_not_line_structs() {
 fn render_merge_conflict_modal_lists_files_and_hint() {
     let mut app = App::new();
     app.conflict_prompt = Some(MergeConflictPrompt {
-        operation: ConflictOperation::Merge,
         task: "build auth".to_string(),
         conflicted_files: vec!["src/auth.rs".to_string(), "src/router.rs".to_string()],
         error: "conflict".to_string(),
         repo_root: std::env::temp_dir(),
-        target_branch: None,
-        source_branch: None,
-        workspace_path: None,
         agent_id: None,
     });
 
@@ -8124,7 +8230,6 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         effort: None,
         status: AgentStatus::Running,
         cwd: std::env::temp_dir(),
-        workspace_branch: None,
         workspace_path: None,
         workspace_name: None,
         jj_change_id: None,
@@ -8163,7 +8268,6 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         merge_resolver: false,
         merge_requested: false,
         merge_conflict: false,
-        merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
         had_merge_conflict: false,
         done_summary: None,
@@ -9561,6 +9665,7 @@ fn deleting_an_agent_keeps_its_conversation_while_a_branch_of_it_is_set_up() {
     app.cwd = dir.clone();
     let mut source = test_agent_run("src-1", "source");
     source.backend = Backend::Codex;
+    crate::gitio::note_rudder_session(thread);
     source.session_id = Some(thread.to_string());
     // Its branch has no session of its own until the fork is made.
     app.pending_launches.insert(
@@ -9770,7 +9875,6 @@ fn merge_request_clears_pending_delete() {
     let mut app = App::new();
     let mut run = test_agent_run("run-1", "test task");
     run.status = AgentStatus::Done;
-    run.workspace_branch = Some("rudder/test".to_string());
     run.workspace_path = Some(app.cwd.join("workspace"));
     // Reviewed, so this reaches the confirm modal rather than the diff gate.
     run.reviewed_at = Some("2026-08-04T00:00:00Z".to_string());
@@ -9791,7 +9895,6 @@ fn unread_work_cannot_be_merged_without_being_shown_first() {
     let mut app = App::new();
     let mut run = test_agent_run("run-1", "change something");
     run.status = AgentStatus::Done;
-    run.workspace_branch = Some("rudder/test".to_string());
     run.workspace_path = Some(app.cwd.join("workspace"));
     app.agents.push(run);
     app.delete_pending = Some("run-1".to_string());
@@ -9886,7 +9989,6 @@ fn merge_request_refuses_running_agent() {
     let mut app = App::new();
     let mut run = test_agent_run("run-1", "test task");
     run.status = AgentStatus::Running;
-    run.workspace_branch = Some("rudder/test".to_string());
     run.workspace_path = Some(app.cwd.join("workspace"));
     app.agents.push(run);
 
@@ -9904,7 +10006,6 @@ fn merge_agent_at_refuses_running_agent() {
     let mut app = App::new();
     let mut run = test_agent_run("run-1", "test task");
     run.status = AgentStatus::Running;
-    run.workspace_branch = Some("rudder/test".to_string());
     run.workspace_path = Some(app.cwd.join("workspace"));
     app.agents.push(run);
 
@@ -9924,8 +10025,6 @@ fn merge_error_does_not_fail_running_agent() {
     app.handle_merge_error(
         "test task".to_string(),
         anyhow::anyhow!("agent is still running; stop it or wait before merging"),
-        None,
-        None,
         None,
         Some("run-1".to_string()),
     );
@@ -10019,7 +10118,6 @@ fn selected_oneoff_agent_cannot_be_merged() {
     let mut oneoff = test_agent_run("oneoff-1", "quick question");
     oneoff.mode = AgentMode::OneOff;
     oneoff.status = AgentStatus::Done;
-    oneoff.workspace_branch = Some("rudder/oneoff".to_string());
     oneoff.workspace_path = Some(app.cwd.join("oneoff-workspace"));
     app.agents.push(oneoff);
     app.selected_agent = 0;
@@ -10045,7 +10143,6 @@ fn merging_review_all_row_moves_source_agents_to_merged_section() {
     let mut review = test_agent_run("review-1", "review all");
     review.mode = AgentMode::ReviewAll;
     review.status = AgentStatus::Done;
-    review.workspace_branch = Some("rudder/review-all".to_string());
     review.review_source_ids = vec!["run-1".to_string(), "run-2".to_string()];
     let live = test_agent_run("run-live", "live task");
     app.agents.push(first);
@@ -10058,9 +10155,6 @@ fn merging_review_all_row_moves_source_agents_to_merged_section() {
     assert_eq!(app.agents[0].status, AgentStatus::Merged);
     assert_eq!(app.agents[1].status, AgentStatus::Merged);
     assert_eq!(app.agents[2].status, AgentStatus::Merged);
-    assert!(app.agents[0].workspace_branch.is_none());
-    assert!(app.agents[1].workspace_branch.is_none());
-    assert!(app.agents[2].workspace_branch.is_none());
     // All three merged rows moved into the `done` drawer, leaving the live run as the
     // only navigable agent row; the drawer holds them in section order.
     assert_eq!(app.visible_agent_indices(), vec![3]);
@@ -10352,7 +10446,6 @@ fn delete_agent_requires_second_d() {
         effort: None,
         status: AgentStatus::Done,
         cwd: app.cwd.clone(),
-        workspace_branch: None,
         workspace_path: None,
         workspace_name: None,
         jj_change_id: None,
@@ -10391,7 +10484,6 @@ fn delete_agent_requires_second_d() {
         merge_resolver: false,
         merge_requested: false,
         merge_conflict: false,
-        merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
         had_merge_conflict: false,
         done_summary: None,
@@ -10479,7 +10571,6 @@ fn main_agent_blocks_merge_but_renames() {
     let mut app = App::new();
     let mut main = test_agent_run(MAIN_AGENT_ID, "main branch");
     main.mode = AgentMode::Main;
-    main.workspace_branch = None;
     main.workspace_path = None;
     app.agents.push(main);
     app.selected_agent = 0;
@@ -10779,7 +10870,6 @@ fn merge_cleanup_preserves_main_agent() {
     let mut app = App::new();
     let mut main = test_agent_run(MAIN_AGENT_ID, "main branch");
     main.mode = AgentMode::Main;
-    main.workspace_branch = None;
     main.workspace_path = None;
     app.agents.push(main);
     // The defensive guard in merge_agent_at's cleanup branch must never
@@ -11788,7 +11878,7 @@ fn poll_loop_consumes_the_official_done_signal_for_a_live_worker() {
         return; // no HOME in this env; signal path is unavailable
     };
     let _ = std::fs::remove_file(&sig);
-    let wiring = crate::signals::prepare_worker_signals("sig-worker-itest", Backend::Claude);
+    let wiring = crate::signals::prepare_worker_signals("sig-worker-itest", Backend::Claude).unwrap();
     assert!(
         wiring.claude_settings.is_some(),
         "signal wiring is required"
@@ -11854,7 +11944,7 @@ fn wired_worker_waits_for_the_signal_and_ignores_idle_chrome() {
     std::env::set_var("RUDDER_HOME", &home);
 
     let run_id = "sig-wait-itest";
-    let wiring = crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    let wiring = crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
     let settings = wiring
         .claude_settings
         .clone()
@@ -11948,14 +12038,10 @@ fn merge_conflict_resolver_spawn_wires_its_completion_signal() {
     app.agents.push(run);
     app.selected_agent = 0;
     app.conflict_prompt = Some(MergeConflictPrompt {
-        operation: ConflictOperation::Merge,
         task: "build auth".to_string(),
         conflicted_files: vec!["src/auth.rs".to_string()],
         error: "conflict".to_string(),
         repo_root: repo.clone(),
-        target_branch: None,
-        source_branch: None,
-        workspace_path: None,
         agent_id: Some(run_id.to_string()),
     });
 
@@ -12453,12 +12539,12 @@ fn write_rudder_context_mirrors_shared_context_to_workspace() {
     let repo = unique_test_repo("shared-context-mirror");
     let workspace = repo.join("worker");
     fs::create_dir_all(&workspace).unwrap();
+    assert!(Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
 
     append_shared_context(&repo, "test", "APIFY_TOKEN=abc1234567").unwrap();
     let pending = WorkspaceInfo {
         id: "run-1".to_string(),
         path: workspace.clone(),
-        branch: None,
         path_is_workspace: true,
         workspace_name: None,
         jj_change_id: None,
@@ -12469,14 +12555,16 @@ fn write_rudder_context_mirrors_shared_context_to_workspace() {
     let root_shared = fs::read_to_string(repo.join("RUDDER_SHARED.md")).unwrap();
     let workspace_shared = fs::read_to_string(workspace.join("RUDDER_SHARED.md")).unwrap();
     let rudder_md = fs::read_to_string(repo.join("RUDDER.md")).unwrap();
-    let gitignore = fs::read_to_string(repo.join(".gitignore")).unwrap();
+    let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
 
     assert!(root_shared.contains("APIFY_TOKEN=abc1234567"));
     assert_eq!(workspace_shared, root_shared);
     assert!(rudder_md.contains("RUDDER_SHARED.md"));
-    assert!(gitignore
-        .lines()
-        .any(|line| line.trim() == "RUDDER_SHARED.md"));
+    // Rudder's ignores go to the untracked exclude file, never the user's .gitignore.
+    for line in ["RUDDER.md", "RUDDER_SHARED.md", ".rudder-workspaces/"] {
+        assert!(exclude.lines().any(|have| have == line), "{line} in {exclude}");
+    }
+    assert!(!repo.join(".gitignore").exists());
 
     let _ = fs::remove_dir_all(&repo);
 }
@@ -12535,7 +12623,6 @@ fn write_rudder_context_includes_global_job_snapshot() {
     let pending = WorkspaceInfo {
         id: "pending-1".to_string(),
         path: workspace,
-        branch: Some("feature/global-view".to_string()),
         path_is_workspace: true,
         workspace_name: None,
         jj_change_id: None,
@@ -18931,7 +19018,6 @@ fn the_diff_gate_guards_the_local_road_only() {
     local.publish = PublishState::Inactive(PublishBlocker::NotGitHub);
     let mut unread = publishable_run("run-local", "add the widget");
     unread.reviewed_at = None;
-    unread.workspace_branch = Some("rudder/local".to_string());
     local.agents.push(unread);
 
     assert_eq!(local.merge_route_for(0), MergeRoute::LocalMerge);
@@ -19288,6 +19374,7 @@ fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
 #[test]
 fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change() {
     use crate::agent_life::{cleanup_since, untouched_agents, ConversationRoots, UNTOUCHED_AGENT_TTL};
+    use crate::gitio::note_rudder_session;
     let _env = env_guard();
     let repo = unique_test_repo("agent-gc");
     let home = repo.join("home");
@@ -19332,11 +19419,42 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     };
     let (s1, s2, cut) = ("c1a1a1a1-0000-4000-8000-000000000001", "c1a1a1a1-0000-4000-8000-000000000002", "c1a1a1a1-0000-4000-8000-000000000003");
     let fresh_session = "c1a1a1a1-0000-4000-8000-000000000004";
+    let resumed = "c1a1a1a1-0000-4000-8000-000000000005";
     let (c1, c2, c3) = ("0193a000-0000-7000-8000-0000000000c1", "0193a000-0000-7000-8000-0000000000c2", "0193a000-0000-7000-8000-0000000000c3");
+    // The sessions Rudder made: a launch's and an edit's (and the edit's cut
+    // copy, below), the Codex threads its launch and fork started.
+    for session in [s1, s2, c1, c2] {
+        note_rudder_session(session);
+    }
 
+    // A merged worker whose work main has, in a workspace last changed long
+    // ago. Set up first: moving main's working copy rewrites its files.
+    let workspace = repo.join(".rudder-workspaces/proj/node-old");
+    fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+    jj(&repo, &["workspace", "add", "--name", "rudder-node-old", workspace.to_str().unwrap()]).unwrap();
+    write(&workspace.join("agent-work.txt"), "merged into main\n");
+    jj(&workspace, &["util", "snapshot"]).unwrap();
+    jj(&repo, &["new", "rudder-node-old@"]).unwrap();
+    let mut merged = test_agent_run("merged-worker", "merged worker");
+    merged.status = AgentStatus::Merged;
+    merged.cwd = workspace.clone();
+    merged.workspace_path = Some(workspace.clone());
+    merged.workspace_name = Some("rudder-node-old".to_string());
+    // Never collected, however old: unmerged work. A failed worker whose
+    // workspace holds a change main does not have, recorded long ago.
+    let failed_workspace = repo.join(".rudder-workspaces/proj/node-failed");
+    jj(&repo, &["workspace", "add", "--name", "rudder-node-failed", failed_workspace.to_str().unwrap()]).unwrap();
+    write(&failed_workspace.join("unmerged.txt"), "not integrated anywhere\n");
+    jj(&failed_workspace, &["util", "snapshot"]).unwrap();
+    let mut failed = test_agent_run("failed-worker", "failed worker");
+    failed.status = AgentStatus::Failed;
+    failed.cwd = failed_workspace.clone();
+    failed.workspace_path = Some(failed_workspace.clone());
+    failed.workspace_name = Some("rudder-node-failed".to_string());
     let mut app = App::new();
     app.cwd = repo.clone();
-    // A main chat that moved sessions twice (one of them an edit's cut copy).
+    // A main chat that moved sessions three times: to an edit's session (via
+    // its cut copy), then to the person's own conversation with `/resume`.
     let mut chat = test_agent_run("old-chat", "old chat");
     chat.mode = AgentMode::Main;
     chat.status = AgentStatus::Paused;
@@ -19346,7 +19464,9 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     chat.session_id = Some(s2.to_string());
     save_native_run_record(&repo, &chat).unwrap();
     record_retired_session(&repo, &chat.id, cut).unwrap();
-    for session in [s1, s2, cut] {
+    chat.session_id = Some(resumed.to_string());
+    save_native_run_record(&repo, &chat).unwrap();
+    for session in [s1, s2, cut, resumed] {
         write(&claude_dir.join(format!("{session}.jsonl")), "{}\n");
         age(&claude_dir.join(format!("{session}.jsonl")));
     }
@@ -19373,17 +19493,17 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     child.pinned = true;
     child.session_id = Some(c3.to_string());
     let c3_file = rollout(c3, Some(c2));
-    // A worker with edits jj has not seen yet, in a workspace last changed long ago.
-    let workspace = repo.join(".rudder-workspaces/proj/node-old");
-    fs::create_dir_all(workspace.parent().unwrap()).unwrap();
-    jj(&repo, &["workspace", "add", "--name", "rudder-node-old", workspace.to_str().unwrap()]).unwrap();
-    write(&workspace.join("agent-work.txt"), "not integrated anywhere\n");
+    // Finished and waiting for a merge, or merged but no longer in main.
+    let waiting = repo.join(".rudder-workspaces/proj/node-waiting");
     let mut worker = test_agent_run("old-worker", "old worker");
     worker.status = AgentStatus::Done;
-    worker.cwd = workspace.clone();
-    worker.workspace_path = Some(workspace.clone());
-    worker.workspace_name = Some("rudder-node-old".to_string());
-    // Never collected, however old.
+    worker.cwd = waiting.clone();
+    worker.workspace_path = Some(waiting);
+    worker.workspace_name = Some("rudder-node-waiting".to_string());
+    let mut reverted = test_agent_run("reverted", "merged, then reverted");
+    reverted.status = AgentStatus::Merged;
+    reverted.workspace_name = Some("rudder-node-reverted".to_string());
+    reverted.integration.in_trunk = Some(false);
     let mut busy = test_agent_run("busy", "still working");
     busy.status = AgentStatus::Running;
     let mut asking = test_agent_run("asking", "has a question");
@@ -19392,13 +19512,13 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     let mut node = test_agent_run("plan-node", "unmerged plan node");
     node.status = AgentStatus::Done;
     node.node_id = Some("n0".to_string());
-    for run in [&codex, &fresh, &child, &worker, &busy, &asking, &node] {
+    for run in [&codex, &fresh, &child, &merged, &failed, &worker, &reverted, &busy, &asking, &node] {
         save_native_run_record(&repo, run).unwrap();
     }
-    for run in [&chat, &codex, &fresh, &child, &worker, &busy, &asking, &node] {
+    for run in [&chat, &codex, &fresh, &child, &merged, &failed, &worker, &reverted, &busy, &asking, &node] {
         age(&native_run_dir(&repo, &run.id).join("run.json"));
     }
-    app.agents = vec![chat, fresh, codex, child, worker, busy, asking, node];
+    app.agents = vec![chat, fresh, codex, child, merged, failed, worker, reverted, busy, asking, node];
 
     let roots = ConversationRoots::from_env().unwrap();
     let probes = app.agent_gc_probes();
@@ -19416,10 +19536,13 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     assert_eq!(since, UNIX_EPOCH + Duration::from_secs(seconds), "a later scan reads it back");
     let mut found = untouched_agents(&repo, &roots, &probes, since, SystemTime::now(), UNTOUCHED_AGENT_TTL);
     found.sort();
-    assert_eq!(found, ["old-chat", "old-codex", "old-worker"]);
+    assert_eq!(found, ["merged-worker", "old-chat", "old-codex"]);
     app.delete_untouched_agents(found);
     let left: Vec<&str> = app.agents.iter().map(|run| run.id.as_str()).collect();
-    assert_eq!(left, ["fresh-chat", "codex-child", "busy", "asking", "plan-node"]);
+    assert_eq!(
+        left,
+        ["fresh-chat", "codex-child", "failed-worker", "old-worker", "reverted", "busy", "asking", "plan-node"]
+    );
     assert!(app.activity_log.iter().any(|entry| entry.contains("cleaned up \"old chat\" (untouched for a day)")));
 
     // Deletion runs on threads: wait until everything that should go is gone.
@@ -19436,6 +19559,7 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
         assert!(!claude_dir.join(format!("{session}.jsonl")).exists(), "{session} is deleted");
     }
     assert!(!claude_dir.join(s1).exists(), "the session's own folder goes with it");
+    assert!(claude_dir.join(format!("{resumed}.jsonl")).exists(), "a conversation Rudder did not make stays");
     assert!(claude_dir.join(format!("{fresh_session}.jsonl")).exists(), "another agent's chat stays");
     assert!(!c1_file.exists(), "a rollout nothing builds on is deleted");
     assert!(c2_file.exists(), "a rollout another agent's fork builds on stays");
@@ -19445,6 +19569,8 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     assert!(!kept.is_empty(), "the worker's edits stay in jj log as a change");
     let workspaces = jj(&repo, &["workspace", "list"]).unwrap();
     assert!(!workspaces.contains("rudder-node-old"), "{workspaces}");
+    assert!(workspaces.contains("rudder-node-failed"), "unmerged work keeps its workspace: {workspaces}");
+    assert!(failed_workspace.join("unmerged.txt").is_file());
     let _ = fs::remove_dir_all(&repo);
 }
 
@@ -20314,8 +20440,6 @@ fn a_merge_conflict_starts_a_resolver_instead_of_parking_on_a_prompt() {
         "n2 task".to_string(),
         anyhow::anyhow!("merge produced conflicts"),
         None,
-        None,
-        None,
         Some("worker".to_string()),
     );
 
@@ -20349,8 +20473,6 @@ fn a_resolver_that_conflicts_again_asks_rather_than_respawning_forever() {
     app.handle_merge_error(
         "n2 task".to_string(),
         anyhow::anyhow!("merge produced conflicts"),
-        None,
-        None,
         None,
         Some("worker".to_string()),
     );
@@ -22036,13 +22158,14 @@ fn gam_reviewer_launch_wiring_puts_a_config_where_the_sweep_looks() {
             "precondition: {backend:?} starts unwired"
         );
 
-        let mut command = TerminalCommand::with_args(program, ["--no-alt-screen"]);
+        let mut command =
+            TerminalCommand::with_args(program, ["--no-alt-screen"]).with_env("PATH", fake_agent_path());
         // Codex's reviewer profile bakes in `notify=[]` for augment to replace.
         if backend == Backend::Codex {
             command.args.push("-c".to_string());
             command.args.push("notify=[]".to_string());
         }
-        signals::augment_worker_command(&mut command, backend, AgentMode::GamAdversarial, &run_id);
+        signals::augment_worker_command(&mut command, backend, AgentMode::GamAdversarial, &run_id).unwrap();
 
         assert!(
             signals::worker_has_config(&run_id, backend),
@@ -22068,13 +22191,13 @@ fn a_live_gam_reviewer_survives_the_lifecycle_sweep() {
     let _ = std::fs::remove_file(&sig);
 
     // Launch wiring, exactly as start_gam_pair performs it.
-    let mut command = TerminalCommand::with_args("claude", ["--no-alt-screen"]);
+    let mut command = TerminalCommand::with_args("claude", ["--no-alt-screen"]).with_env("PATH", fake_agent_path());
     signals::augment_worker_command(
         &mut command,
         Backend::Claude,
         AgentMode::GamAdversarial,
         run_id,
-    );
+    ).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -23471,7 +23594,7 @@ fn an_answered_agent_stops_saying_it_needs_you() {
         return; // no HOME in this env
     };
     let _ = std::fs::remove_file(&sig);
-    let wiring = crate::signals::prepare_worker_signals("sig-waiting-itest", Backend::Claude);
+    let wiring = crate::signals::prepare_worker_signals("sig-waiting-itest", Backend::Claude).unwrap();
     assert!(
         wiring.claude_settings.is_some(),
         "signal wiring is required"
@@ -23541,7 +23664,7 @@ fn a_working_signal_lifts_the_wait_without_anyone_typing_in_rudder() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals("sig-resume-itest", Backend::Opencode);
+    crate::signals::prepare_worker_signals("sig-resume-itest", Backend::Opencode).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -24294,8 +24417,9 @@ fn codex_workers_get_lifecycle_hooks_ahead_of_the_resume_subcommand() {
     let mut command = TerminalCommand::with_args(
         "codex",
         ["--no-alt-screen", "-c", "notify=[]", "resume", "sess-1"],
-    );
-    signals::augment_worker_command(&mut command, Backend::Codex, AgentMode::Execute, run_id);
+    )
+    .with_env("PATH", fake_agent_path());
+    signals::augment_worker_command(&mut command, Backend::Codex, AgentMode::Execute, run_id).unwrap();
     let args = command.args.clone();
     signals::cleanup_run_signals(run_id);
 
@@ -24396,7 +24520,7 @@ fn an_interrupted_claude_turn_is_shown_as_waiting_until_the_next_prompt() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -24464,7 +24588,7 @@ fn a_minute_of_silence_at_the_composer_stops_a_running_row_spinning() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -24536,7 +24660,7 @@ fn a_finished_claude_row_only_resumes_on_the_prompt_hook_not_on_a_repaint() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -24613,7 +24737,7 @@ fn a_manual_compaction_never_leaves_a_claude_row_working() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -24745,7 +24869,7 @@ fn an_api_error_turn_end_is_shown_as_a_failure_until_the_next_prompt() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
@@ -28015,7 +28139,6 @@ fn the_home_machine_adopts_a_staged_agent_once_and_resumes_its_conversation() {
             "status": "paused",
             "createdAt": "1",
             "turns": [],
-            "vcs": "jj",
             "workspace": { "enabled": true, "path": workspace, "workspaceName": "rudder-fix" },
             "session": { "nativeSessionId": "11111111-2222-3333-4444-555555555555" },
             "migration": { "origin": "laptop", "sessionId": "11111111-2222-3333-4444-555555555555", "pendingResume": true },
@@ -29663,7 +29786,7 @@ fn a_working_claude_2_1_318_pane_never_reads_as_needing_permission() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
     let repo = unique_test_repo("perm-spinner-tip");
     let mut app = App::new();
     app.cwd = repo.clone();
@@ -29757,7 +29880,7 @@ fn a_spinner_clearing_an_error_wait_reaches_run_json() {
         return;
     };
     let _ = std::fs::remove_file(&sig);
-    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
     let repo = unique_test_repo("attention-spinner");
     let mut app = App::new();
     app.cwd = repo.clone();
@@ -30439,7 +30562,7 @@ fn a_requested_merge_conflict_found_at_startup_gets_a_resolver_and_others_wait_f
         let run_dir = native_run_dir(&repo, id);
         fs::create_dir_all(&run_dir).unwrap();
         let mut record = serde_json::json!({
-            "id": id, "status": "merge-conflict", "vcs": "jj", "mode": "execute",
+            "id": id, "status": "merge-conflict", "mode": "execute",
             "task": format!("{id} work"), "taskSummary": id, "backend": "claude", "model": "sonnet",
             "createdAt": "2026-11-05T00:00:00.000Z",
             "turns": [
@@ -31268,4 +31391,66 @@ fn model_key_switches_the_selected_agent_and_leaves_the_default_alone() {
     }
     assert!(app.model_for.is_none());
     fs::remove_dir_all(dir).unwrap();
+}
+
+// A Codex question answered from the phone with text of its own: the keys
+// request carries the text as hex, pasted into the pane, commas and all.
+#[test]
+fn phone_keys_paste_text_as_a_bracketed_paste() {
+    let hex: String = "Blue, but darker\x1b[2J".bytes().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(
+        crate::remote_input_bytes(&format!("paste:{hex}")).unwrap(),
+        b"\x1b[200~Blue, but darker [2J\x1b[201~".to_vec()
+    );
+    assert_eq!(crate::remote_input_bytes("down").unwrap(), b"\x1b[B".to_vec());
+    assert_eq!(crate::remote_input_bytes("shift-left").unwrap(), b"\x1b[1;2D".to_vec());
+    assert!(crate::remote_input_bytes("paste:zz").is_err());
+    assert!(crate::remote_input_bytes("paste:").is_err());
+    assert!(crate::remote_input_bytes("hyperspace").is_err());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
+    let repo = unique_test_repo("codex-rollout-reopen");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 5"])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 40 },
+            cwd: Some(repo.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker PTY");
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "codex-1".to_string();
+    run.backend = Backend::Codex;
+    run.status = AgentStatus::Done;
+    let read_before_done = Instant::now();
+    run.completed_at = Some(Instant::now());
+    app.agents.push(run);
+    let deliver = |app: &mut App, read_at, new_turn, waits| {
+        let (tx, rx) = mpsc::channel();
+        tx.send(vec![codex_rollout::ScanResult { run_id: "codex-1".to_string(), read_at, new_turn, waits }])
+            .unwrap();
+        app.codex_rollout_rx = Some(rx);
+        app.last_codex_rollout_scan = Instant::now();
+        app.poll_codex_rollouts();
+    };
+    // Read before the row finished: that read may predate the turn's end.
+    deliver(&mut app, read_before_done, true, Vec::new());
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    // The plan it finished waits on "Implement this plan?": needs you, still done.
+    deliver(&mut app, Instant::now(), false, vec![codex_rollout::CodexWait::Plan]);
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    assert!(app.agents[0].needs_user_input);
+    assert_eq!(agent_status_label(&app.agents[0]), "needs input");
+    // A new turn read after it finished reopens it.
+    deliver(&mut app, Instant::now(), true, Vec::new());
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(app.codex_waits.is_empty());
+    app.agents[0].terminal = None;
+    let _ = fs::remove_dir_all(&repo);
 }

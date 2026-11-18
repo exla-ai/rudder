@@ -204,6 +204,74 @@ pub(crate) fn known_model_backend(model: &str) -> Option<Backend> {
     None
 }
 
+/// `model` as `backend`'s known list spells it: an alias or id the model
+/// picker offers for that backend (any case), or a Claude one with the
+/// `[1m]` context suffix. `None` for anything else, so a stray word never
+/// becomes a saved model.
+pub(crate) fn known_model(backend: Backend, model: &str) -> Option<String> {
+    let model = model.trim();
+    let (base, suffix) = match model.strip_suffix("[1m]") {
+        Some(base) if backend == Backend::Claude => (base, "[1m]"),
+        _ => (model, ""),
+    };
+    if base.is_empty() {
+        return None;
+    }
+    model_suggestions_for(backend, "").into_iter().find_map(|suggestion| match suggestion.action {
+        SuggestionAction::ChooseModel { model: known, .. } if known.eq_ignore_ascii_case(base) => {
+            Some(format!("{known}{suffix}"))
+        }
+        _ => None,
+    })
+}
+
+/// `/model [backend] <model> [effort]`: the backend, the model as its known
+/// list spells it and the effort. Anything that is not a backend name, a
+/// known model or a valid effort for it is refused with the reason, so an
+/// unknown value is never saved.
+pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option<EffortLevel>), String> {
+    const USAGE: &str = "usage: /model claude|codex|opencode <model> [effort]";
+    let Some((first, rest)) = args.split_first() else {
+        return Err(USAGE.to_string());
+    };
+    let (named, rest) = match provider_backend(first) {
+        Some(backend) => (Some(backend), rest),
+        None => (None, args),
+    };
+    let (model, effort_arg) = match rest {
+        [model] => (*model, None),
+        [model, effort] => (*model, Some(*effort)),
+        [] => return Err(format!("usage: /model {first} <model> [effort]")),
+        _ => return Err(USAGE.to_string()),
+    };
+    let (backend, model) = match named {
+        Some(backend) => known_model(backend, model).map(|known| (backend, known)).ok_or_else(|| {
+            format!(
+                "{model} is not a {backend} model; pick one from /model {backend}",
+                backend = backend.as_str()
+            )
+        })?,
+        None => [Backend::Claude, Backend::Codex, Backend::Opencode]
+            .into_iter()
+            .find_map(|backend| known_model(backend, model).map(|known| (backend, known)))
+            .ok_or_else(|| format!("unknown model: {model}; pick one from /model"))?,
+    };
+    let effort = match effort_arg {
+        None => default_effort_for(backend, &model),
+        Some(arg) => {
+            let effort = parse_effort_arg(arg);
+            if effort.is_none() && !arg.eq_ignore_ascii_case("auto") {
+                return Err(format!("unknown effort: {arg}"));
+            }
+            if !effort_options_for(backend, &model).contains(&effort) {
+                return Err(format!("{model} has no {arg} effort"));
+            }
+            effort
+        }
+    };
+    Ok((backend, model, effort))
+}
+
 pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<EffortLevel>> {
     if !model_supports_reasoning(backend, model) {
         return vec![None];

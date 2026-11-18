@@ -66,10 +66,8 @@ export type AuthProfileStore = {
 
 export type RudderConfig = {
   version: 1;
-  vcs?: VcsMode;
   defaultBackend: BackendId;
   lastUsedBackend?: BackendId;
-  mergeStrategy: MergeStrategy;
   colorMode?: "terminal" | "paper";
   /** Anonymous usage events. Undefined means on; see src/analytics.ts. */
   telemetry?: boolean;
@@ -109,8 +107,6 @@ export const DEFAULT_BOARD_PORT = 4774;
 
 export type BackendId = "claude" | "codex" | "acpx" | "opencode";
 
-export type VcsMode = "git" | "jj";
-
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type RunMode =
@@ -120,8 +116,6 @@ export type RunMode =
   | "review-all"
   | "main"
   | "one-off";
-
-export type MergeStrategy = "merge" | "rebase";
 
 export type BackendConfig = {
   profileId?: string;
@@ -288,7 +282,6 @@ export type ResolverContext = {
 export type RunRecord = {
   id: string;
   status: RunStatus;
-  vcs?: VcsMode;
   mode?: RunMode;
   resolverFor?: string;
   resolverRunId?: string;
@@ -312,7 +305,6 @@ export type RunRecord = {
   workspace: {
     enabled: boolean;
     path: string;
-    branch?: string;
     workspaceName?: string;
     jjChangeId?: string;
   };
@@ -373,8 +365,6 @@ export type MergeState = {
   status: "not-started" | "merged" | "conflict" | "failed";
   attemptedAt?: string;
   targetBranch?: string;
-  strategy?: MergeStrategy;
-  conflictKind?: "merge" | "rebase";
   conflictedFiles?: string[];
   operationId?: string;
   mergeChangeId?: string;

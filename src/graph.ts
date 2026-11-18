@@ -13,7 +13,7 @@ import type {
   RunStatus,
   TaskNode,
 } from "./types.js";
-import { adoptLegacyWorkspaceKey, ensureProjectRuntimeIgnored, projectStateDir } from "./state.js";
+import { ensureProjectRuntimeIgnored, projectStateDir } from "./state.js";
 import { nowIso, pathExists, readJson, shortHash, updateJson } from "./util.js";
 
 // ---------------------------------------------------------------------------
@@ -49,24 +49,12 @@ export async function readGraph(repoRoot: string): Promise<RudderGraph> {
       ...((graph as PlanningGraph).launchReservations ? { launchReservations: (graph as PlanningGraph).launchReservations } : {}),
       repoRoot: graph.repoRoot || repoRoot,
       ...(graph.integrationChangeId ? { integrationChangeId: graph.integrationChangeId } : {}),
-      nodes: adoptLegacyNodeWorkspaceKeys(graph.nodes),
+      nodes: graph.nodes,
       edges: graph.edges,
       updatedAt: graph.updatedAt || nowIso(),
     };
   }
   return emptyGraph(repoRoot);
-}
-
-/**
- * Nodes written before the worktree->workspace rename store isolation info under
- * `worktree`. Promote it in place so the scheduler, board and TUI only ever read
- * `workspace`; the next updateGraph persists the new key.
- */
-function adoptLegacyNodeWorkspaceKeys(nodes: Record<string, TaskNode>): Record<string, TaskNode> {
-  for (const node of Object.values(nodes)) {
-    adoptLegacyWorkspaceKey(node);
-  }
-  return nodes;
 }
 
 /**

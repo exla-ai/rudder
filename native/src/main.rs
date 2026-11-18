@@ -128,6 +128,7 @@ use crate::home_update::*;
 mod agent_sync;
 use crate::agent_sync::*;
 mod subagents;
+mod codex_rollout;
 mod chat_edit;
 mod agent_life;
 mod branch;
@@ -2064,6 +2065,8 @@ struct App {
     /// a session (it died at launch) must not make the dashboard rescan forever.
     session_id_attempts: HashMap<String, u32>,
     session_id_last_try: HashMap<String, Instant>,
+    /// The Codex session lookup running on a thread: (run id, session id).
+    codex_session_lookup_rx: Option<mpsc::Receiver<Vec<(String, String)>>>,
     worker_selection: Option<WorkerSelection>,
     /// A selection drag that left the worker pane: the event, the pane's inner
     /// area and when it last scrolled (see `continue_worker_drag_autoscroll`).
@@ -2114,6 +2117,12 @@ struct App {
     /// The background scan of the subagent hook payloads, while one is out.
     subagent_scan_rx: Option<mpsc::Receiver<Vec<(String, Vec<subagents::SubagentEvent>)>>>,
     last_subagent_scan: Instant,
+    /// Codex rollouts (codex_rollout.rs): the scan in flight, when the last
+    /// one started, and what each live Codex worker's rollout leaves waiting
+    /// on the user.
+    codex_rollout_rx: Option<mpsc::Receiver<Vec<codex_rollout::ScanResult>>>,
+    last_codex_rollout_scan: Instant,
+    codex_waits: HashMap<String, Vec<codex_rollout::CodexWait>>,
     /// Agents whose subagent tree is open in the sidebar (Tab), by run id, so
     /// it stays open however the list re-sorts.
     subagent_trees_open: HashSet<String>,
@@ -2594,14 +2603,10 @@ fn preview_list(items: &[String], max: usize) -> String {
 }
 
 struct MergeConflictPrompt {
-    operation: ConflictOperation,
     task: String,
     conflicted_files: Vec<String>,
     error: String,
     repo_root: PathBuf,
-    target_branch: Option<String>,
-    source_branch: Option<String>,
-    workspace_path: Option<PathBuf>,
     /// The id of the agent whose merge stopped. We reuse its row for the AI
     /// conflict resolver so we never grow a fresh dashboard pane mid-merge.
     agent_id: Option<String>,
@@ -2620,12 +2625,6 @@ struct MergeConflictPrompt {
 struct ControlResult {
     marker: String,
     outcome: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConflictOperation {
-    Merge,
-    Rebase,
 }
 
 /// Why and when an idle agent was put to sleep (run.json `parked`).
@@ -2683,13 +2682,12 @@ struct AgentRun {
     effort: Option<EffortLevel>,
     status: AgentStatus,
     cwd: PathBuf,
-    workspace_branch: Option<String>,
     workspace_path: Option<PathBuf>,
     /// jj workspace name for runs isolated in a jj workspace. `None` for the
-    /// main agent and legacy git-worktree runs.
+    /// main agent and other runs in the checkout.
     workspace_name: Option<String>,
-    /// jj change id captured when the run's workspace was created. Used to route
-    /// merge/sync through jj for new (vcs:jj) runs.
+    /// jj change id captured when the run's workspace was created, for merging
+    /// and syncing the run's work.
     jj_change_id: Option<String>,
     integration: IntegrationEvidence,
     /// What happened when this row was published as a pull request: the branch,
@@ -2821,7 +2819,6 @@ struct AgentRun {
     /// for the user to press `m` (or approve a resolver), while a resolver is actively
     /// running in this same row.
     merge_conflict: bool,
-    merge_conflict_operation: ConflictOperation,
     merge_conflict_files: Vec<String>,
     /// Durable "an integration conflict happened at some point this run" marker.
     /// Unlike `merge_conflict` (LIVE state, cleared once a resolver succeeds or the
@@ -2900,7 +2897,6 @@ impl AgentRun {
         let original = self
             .task
             .strip_prefix("Resolve merge conflicts: ")
-            .or_else(|| self.task.strip_prefix("Resolve rebase conflicts: "))
             .map(str::to_string);
         if let Some(original) = original {
             if !original.trim().is_empty() {
@@ -2967,7 +2963,6 @@ impl AgentRun {
     /// A conflicted jj merge Rudder resolves by itself (attempts aside).
     pub(crate) fn conflict_auto_resolvable(&self) -> bool {
         self.merge_conflict
-            && self.merge_conflict_operation == ConflictOperation::Merge
             && (self.workspace_name.is_some() || self.jj_change_id.is_some())
             && !self.is_main()
             && !self.is_oneoff()
@@ -3089,7 +3084,6 @@ fn fork_row(
         effort,
         status: AgentStatus::Running,
         cwd,
-        workspace_branch: None,
         workspace_path: None,
         workspace_name: None,
         jj_change_id: None,
@@ -3131,7 +3125,6 @@ fn fork_row(
         merge_resolver: false,
         merge_requested: false,
         merge_conflict: false,
-        merge_conflict_operation: ConflictOperation::Merge,
         merge_conflict_files: Vec::new(),
         had_merge_conflict: false,
         done_summary: None,
@@ -3631,6 +3624,7 @@ impl App {
             last_reconcile: None,
             session_id_attempts: HashMap::new(),
             session_id_last_try: HashMap::new(),
+            codex_session_lookup_rx: None,
             worker_selection: None,
             worker_drag_edge: None,
             task_selection: None,
@@ -3649,6 +3643,9 @@ impl App {
             subagents: HashMap::new(),
             subagent_scan_rx: None,
             last_subagent_scan: Instant::now(),
+            codex_rollout_rx: None,
+            last_codex_rollout_scan: Instant::now(),
+            codex_waits: HashMap::new(),
             subagent_trees_open: HashSet::new(),
             subagent_cursor: None,
             subagent_row_map: Vec::new(),
@@ -4342,22 +4339,37 @@ impl App {
         // model. Update all main rows here (the one chokepoint every path calls).
         let model_now = self.model.clone();
         let cwd_now = self.cwd.clone();
+        let mut unsaved = None;
         // Only relabel main rows with NO live PTY: a running process keeps its
         // launch-time model, and rewriting its row advertised a model the
-        // process was not using. The next (re)spawn picks up the new default.
+        // process was not using. The next message starts it on the new choice.
         for run in self
             .agents
             .iter_mut()
             .filter(|run| run.is_main() && run.terminal.is_none())
         {
+            if run.backend != backend {
+                // Its conversation belongs to the old CLI: resuming that id
+                // with the new one fails. The next message starts a fresh
+                // session (the old id stays in the record's history).
+                run.session_id = None;
+                run.execution_profile = None;
+                run.resume_turn = false;
+                if let Err(error) = signals::forget_session_reports(&run.id) {
+                    unsaved = Some(format!("the main agent's old session reports were not cleared: {error}"));
+                }
+            }
             run.backend = backend;
             run.model = model_now.clone();
             run.effort = effort;
-            let _ = save_native_run_record(&cwd_now, run);
+            if let Err(error) = save_native_run_record(&cwd_now, run) {
+                unsaved = Some(format!("the main agent's record was not saved: {error}"));
+            }
         }
         let warning = save_model_defaults(self.backend, &self.model, self.effort)
             .err()
             .map(|error| format!("config warning: {error}"))
+            .or(unsaved)
             .or_else(|| openrouter_key_refusal(self.backend, &self.model).map(str::to_string));
         // Switching to a DIFFERENT model retires a still-planning planner so the next
         // task re-plans and launches its agents on the new model (see
@@ -6170,6 +6182,98 @@ impl App {
         self.subagent_scan_rx = Some(rx);
     }
 
+    /// Codex rollouts (codex_rollout.rs): apply a finished background scan
+    /// and start the next one on its cadence. The scan thread does the file IO.
+    ///
+    /// A Done Codex row reopens only for a real turn: one its rollout shows
+    /// running that is not the turn it last reported done, read after the row
+    /// completed (an earlier read may predate the turn's end). A keystroke that
+    /// starts nothing writes nothing there. What the rollout leaves waiting is
+    /// "needs you": the Running arm of `poll_agents` adds it each tick, and a
+    /// Done row (a plan on "Implement this plan?") takes it here.
+    fn poll_codex_rollouts(&mut self) {
+        if let Some(rx) = &self.codex_rollout_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.codex_rollout_rx = None;
+                    for result in results {
+                        let Some(run) = self.agents.iter_mut().find(|run| run.id == result.run_id) else {
+                            continue;
+                        };
+                        if run.status == AgentStatus::Done
+                            && result.new_turn
+                            && run.completed_at.is_none_or(|at| at < result.read_at)
+                        {
+                            run.status = AgentStatus::Running;
+                            run.completed_at = None;
+                            let _ = save_native_run_record(&self.cwd, run);
+                            self.dirty = true;
+                        }
+                        if result.waits.is_empty() {
+                            self.codex_waits.remove(&result.run_id);
+                        } else {
+                            self.codex_waits.insert(result.run_id, result.waits);
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.codex_rollout_rx = None,
+            }
+        }
+        let agents = &self.agents;
+        self.codex_waits.retain(|id, _| {
+            agents
+                .iter()
+                .any(|run| &run.id == id && run.terminal.is_some())
+        });
+        for run in self
+            .agents
+            .iter_mut()
+            .filter(|run| run.backend == Backend::Codex && run.status == AgentStatus::Done)
+        {
+            let waiting = !run.needs_permission && self.codex_waits.contains_key(&run.id);
+            if run.needs_user_input != waiting {
+                run.needs_user_input = waiting;
+                self.dirty = true;
+            }
+        }
+        if self.codex_rollout_rx.is_some()
+            || self.last_codex_rollout_scan.elapsed() < codex_rollout::SCAN_INTERVAL
+        {
+            return;
+        }
+        self.last_codex_rollout_scan = Instant::now();
+        let requests: Vec<codex_rollout::ScanRequest> = self
+            .agents
+            .iter()
+            .filter(|run| {
+                // A managed Codex (app-server) gets its turns from the protocol.
+                let managed = matches!(
+                    run.terminal.as_ref().and_then(TerminalPane::execution_profile),
+                    Some("claude-sdk" | "codex-app-server")
+                );
+                run.backend == Backend::Codex
+                    && run.terminal.is_some()
+                    && !managed
+                    && !run.plain_process
+                    && !run.is_orchestrator()
+                    && matches!(run.status, AgentStatus::Running | AgentStatus::Done)
+            })
+            .map(|run| codex_rollout::ScanRequest {
+                run_id: run.id.clone(),
+                session_id: run.session_id.clone(),
+            })
+            .collect();
+        if requests.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(codex_rollout::scan(&requests));
+        });
+        self.codex_rollout_rx = Some(rx);
+    }
+
     /// An open tree shows a running subagent: its spinner and elapsed time
     /// move even when the parent's own turn has ended (a background subagent).
     fn subagent_tree_animating(&self) -> bool {
@@ -7094,32 +7198,14 @@ impl App {
                 if self.apply_agent_model_choice(&model, effort) {
                     return;
                 }
-                let warning = self.set_model_defaults(backend, model.clone(), effort);
+                // Picking only records the choice (`set_model_defaults` relabels
+                // a main row with no live process): the session starts on the
+                // next message, and focus stays where it is, so typing after
+                // the pick never lands in a freshly started agent.
+                let warning = self.set_model_defaults(backend, model, effort);
                 self.task_input.clear();
                 self.task_cursor = 0;
                 self.picker_index = 0;
-                let mut should_spawn_main = false;
-                if let Some(main_index) = self.selected_main_index() {
-                    let cwd = self.cwd.clone();
-                    let run = &mut self.agents[main_index];
-                    // Only a row with no live process takes the new selection.
-                    // `set_model_defaults` already refuses to relabel a running
-                    // row; overriding that here advertised a model the process was
-                    // not using, and rewriting `backend` mid-flight made the poll
-                    // loop hunt for the wrong hook file and kill the agent.
-                    if run.terminal.is_none() {
-                        run.backend = backend;
-                        run.model = model;
-                        run.effort = effort;
-                        let _ = save_native_run_record(&cwd, run);
-                        if self.selected_agent == main_index {
-                            should_spawn_main = true;
-                        }
-                    }
-                }
-                if should_spawn_main {
-                    self.focus_or_spawn_main();
-                }
                 self.notice = warning.or_else(|| {
                     Some(agent_model_label(self.backend, &self.model, self.effort))
                 });
@@ -9220,7 +9306,6 @@ impl App {
                 }
                 args.push(prompt.to_string());
                 TerminalCommand::with_args(codex_program(), args)
-                    .with_env("CODEX_RUDDER_SCROLLBACK_SAFE", "1")
             }
             // opencode has no read-only headless mode; the reconcile planner runs in
             // its TUI (no --auto, so an unexpected edit stops for approval) and its
@@ -9317,7 +9402,6 @@ impl App {
             effort,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
-            workspace_branch: None,
             workspace_path: None,
             workspace_name: None,
             jj_change_id: None,
@@ -9357,7 +9441,6 @@ impl App {
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -9476,7 +9559,6 @@ impl App {
             effort,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
-            workspace_branch: None,
             workspace_path: None,
             workspace_name: None,
             jj_change_id: None,
@@ -9519,7 +9601,6 @@ impl App {
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -9660,14 +9741,16 @@ impl App {
 
     /// Start the agent for the prepared row at `index`. On failure the row is
     /// marked Failed and keeps no process.
+    /// Start `command` in row `index`. A command that could not be wired
+    /// (`Err`) fails the row with the reason, like a failed spawn.
     fn spawn_into_row(
         &mut self,
         index: usize,
-        command: TerminalCommand,
+        command: Result<TerminalCommand>,
         options: TerminalPaneOptions,
         typed: &[u8],
     ) -> std::result::Result<(), String> {
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match command.and_then(|command| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -9681,11 +9764,22 @@ impl App {
                 Ok(())
             }
             Err(error) => {
+                let reason = self.launch_failure(self.agents[index].backend, &error);
                 let run = &mut self.agents[index];
                 run.status = AgentStatus::Failed;
-                run.last_error = Some(error.to_string());
-                Err(error.to_string())
+                run.last_error = Some(reason.clone());
+                Err(reason)
             }
+        }
+    }
+
+    /// Why a launch failed, as the person reads it. When the missing agent
+    /// CLI belongs to the backend new work starts on, the reason also offers
+    /// `/model` to switch away from it.
+    fn launch_failure(&self, backend: Backend, error: &anyhow::Error) -> String {
+        match error.downcast_ref::<rudder_native::pty_terminal::MissingAgentProgram>() {
+            Some(missing) if backend == self.backend => missing.with_switch_hint(),
+            _ => error.to_string(),
         }
     }
 
@@ -9724,7 +9818,6 @@ impl App {
         let (backend, model, effort, goal_prompt, session_id) = {
             let run = &mut self.agents[index];
             run.cwd = workspace.path.clone();
-            run.workspace_branch = workspace.branch.clone();
             run.workspace_path = workspace
                 .path_is_workspace
                 .then_some(workspace.path.clone());
@@ -9755,7 +9848,8 @@ impl App {
         // Official completion signal: wire the backend's own Stop hook (Claude) /
         // notify (Codex) so it deterministically reports turn-end. Keyed by the run id the poll loop
         // reads. See signals.rs.
-        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
+        let command = signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
+            .map(|()| command);
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(workspace.path.clone()),
@@ -9911,7 +10005,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             AgentMode::Execute,
             session_id.as_deref(),
         );
-        signals::augment_worker_command(
+        let generator_wired = signals::augment_worker_command(
             &mut generator_command,
             backend,
             AgentMode::Execute,
@@ -9925,7 +10019,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             AgentMode::GamAdversarial,
             adversarial_session.as_deref(),
         );
-        signals::augment_worker_command(
+        let adversarial_wired = signals::augment_worker_command(
             &mut adversarial_command,
             adversarial_backend,
             AgentMode::GamAdversarial,
@@ -9962,7 +10056,6 @@ Until the first packet arrives, reply only: \"standing by\"."
             effort,
             status: AgentStatus::Running,
             cwd: workspace.path.clone(),
-            workspace_branch: workspace.branch.clone(),
             workspace_path: workspace
                 .path_is_workspace
                 .then_some(workspace.path.clone()),
@@ -10005,7 +10098,6 @@ Until the first packet arrives, reply only: \"standing by\"."
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -10024,7 +10116,9 @@ Until the first packet arrives, reply only: \"standing by\"."
             ..TerminalPaneOptions::default()
         };
         let mut spawned_generator = false;
-        match TerminalPane::spawn_shell_or_command(Some(generator_command), generator_options) {
+        match generator_wired
+            .and_then(|()| TerminalPane::spawn_shell_or_command(Some(generator_command), generator_options))
+        {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -10062,7 +10156,6 @@ Until the first packet arrives, reply only: \"standing by\"."
                 AgentStatus::Stopped
             },
             cwd: workspace.path.clone(),
-            workspace_branch: None,
             workspace_path: None,
             workspace_name: None,
             jj_change_id: None,
@@ -10103,7 +10196,6 @@ Until the first packet arrives, reply only: \"standing by\"."
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -10121,10 +10213,9 @@ Until the first packet arrives, reply only: \"standing by\"."
             ..TerminalPaneOptions::default()
         };
         if spawned_generator {
-            match TerminalPane::spawn_shell_or_command(
-                Some(adversarial_command),
-                adversarial_options,
-            ) {
+            match adversarial_wired.and_then(|()| {
+                TerminalPane::spawn_shell_or_command(Some(adversarial_command), adversarial_options)
+            }) {
                 Ok(mut terminal) => {
                     let _ = terminal.drain_output();
                     Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -11281,7 +11372,6 @@ Address the objection directly. If you disagree, say why inside \
             effort,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
-            workspace_branch: None,
             workspace_path: None,
             workspace_name: None,
             jj_change_id: None,
@@ -11320,7 +11410,6 @@ Address the objection directly. If you disagree, say why inside \
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -12012,7 +12101,7 @@ Address the objection directly. If you disagree, say why inside \
         // loop WAITS for the official signal — a resumed process launched without
         // --settings / notify could never write it and would sit "running" forever.
         // (Same trap the conflict-resolver respawn fixed in e027f32.)
-        signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
         // A resumed OLD session may still call `rudder done`; point it at the
         // sidecar the conductor reads. New launches no longer set this.
         let report_id = run.node_id.as_deref().unwrap_or(&run.id);
@@ -12025,7 +12114,7 @@ Address the objection directly. If you disagree, say why inside \
             cwd: Some(cwd.clone()),
             ..TerminalPaneOptions::default()
         };
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12301,14 +12390,14 @@ Address the objection directly. If you disagree, say why inside \
                 session_id.as_deref(),
             )
         };
-        if self.agents[main_index].execution_profile.is_some() {
+        let wired = if self.agents[main_index].execution_profile.is_some() {
             signals::augment_existing_worker_command(
                 &mut command, backend, AgentMode::Main,
                 &self.agents[main_index].id, self.agents[main_index].execution_profile.as_deref(),
-            );
+            )
         } else {
-            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &self.agents[main_index].id);
-        }
+            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &self.agents[main_index].id)
+        };
         let done_file = worker_done_file(&self.cwd, &self.agents[main_index].id);
         if !bootstrap.is_empty() {
             let _ = std::fs::remove_file(&done_file);
@@ -12325,7 +12414,7 @@ Address the objection directly. If you disagree, say why inside \
         // against Done was always false — stale delivery evidence survived a
         // fresh non-delivery turn. (The sibling sites read status first.)
         let was_done_before_spawn = self.agents[main_index].status == AgentStatus::Done;
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12363,10 +12452,11 @@ Address the objection directly. If you disagree, say why inside \
                 let _ = save_native_run_record(&self.cwd, run);
             }
             Err(error) => {
+                let reason = self.launch_failure(backend, &error);
                 let run = &mut self.agents[main_index];
                 run.status = AgentStatus::Failed;
-                run.last_error = Some(error.to_string());
-                self.notice = Some(format!("main launch failed: {error}"));
+                run.last_error = Some(reason.clone());
+                self.notice = Some(format!("main launch failed: {reason}"));
                 let _ = save_native_run_record(&self.cwd, run);
             }
         }
@@ -12422,13 +12512,13 @@ Address the objection directly. If you disagree, say why inside \
         // Re-wire completion hooks like every other (re)spawn path; without this
         // the run would sit "running" forever waiting for a signal the resumed
         // process was never configured to send.
-        signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
             ..TerminalPaneOptions::default()
         };
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12584,13 +12674,13 @@ Address the objection directly. If you disagree, say why inside \
             Backend::Codex => codex_fork_command(&model, effort, session_id, instruction),
             Backend::Opencode => opencode_fork_command(&model, session_id, instruction),
         };
-        signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
             ..TerminalPaneOptions::default()
         };
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12788,14 +12878,14 @@ Address the objection directly. If you disagree, say why inside \
             session_id.as_deref(),
             orchestrator_interactive,
         );
-        signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(run.cwd.clone()),
             ..TerminalPaneOptions::default()
         };
 
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12864,43 +12954,16 @@ Address the objection directly. If you disagree, say why inside \
                 if self.apply_agent_model_command(&args) {
                     return true;
                 }
-                match args.as_slice() {
-                    [] => {
-                        self.notice =
-                            Some("usage: /model claude|codex <model> [effort]".to_string());
-                    }
-                    [provider] if provider_backend(provider).is_some() => {
-                        self.notice = Some(format!("usage: /model {provider} <model> [effort]"));
-                    }
-                    [provider, model] if provider_backend(provider).is_some() => {
-                        let backend = provider_backend(provider).unwrap();
-                        let warning = self.set_model_defaults(
-                            backend,
-                            (*model).to_string(),
-                            default_effort_for(backend, model),
-                        );
-                        self.notice = warning.or_else(|| {
-                            Some(agent_model_label(self.backend, &self.model, self.effort))
-                        });
-                    }
-                    [provider, model, effort, ..] if provider_backend(provider).is_some() => {
-                        let backend = provider_backend(provider).unwrap();
-                        let parsed_effort = parse_effort_arg(effort);
-                        let warning =
-                            self.set_model_defaults(backend, (*model).to_string(), parsed_effort);
-                        self.notice = warning.or_else(|| {
-                            Some(agent_model_label(self.backend, &self.model, self.effort))
-                        });
-                    }
-                    _ => {
-                        let model = args.join(" ");
-                        let backend = backend_for_model(&model);
-                        let effort = default_effort_for(backend, &model);
+                // Only a backend name and a model its list knows are saved:
+                // anything else (a leftover "/model" in the input) is refused.
+                match parse_model_args(&args) {
+                    Ok((backend, model, effort)) => {
                         let warning = self.set_model_defaults(backend, model, effort);
                         self.notice = warning.or_else(|| {
                             Some(agent_model_label(self.backend, &self.model, self.effort))
                         });
                     }
+                    Err(refusal) => self.notice = Some(refusal),
                 }
                 true
             }
@@ -14356,57 +14419,44 @@ Address the objection directly. If you disagree, say why inside \
     /// (remove_dir_all on a tree with node_modules takes seconds). The agent's
     /// jj change is kept: its edits are snapshotted first and forgetting a
     /// workspace never abandons a change that has any, so un-integrated work
-    /// stays in `jj log`. A workspace that cannot be snapshotted is kept.
+    /// stays in `jj log`. A workspace that cannot be snapshotted is kept, and
+    /// so is one with no jj workspace name: every agent workspace is a jj one.
     fn remove_workspace_in_background(&self, path: PathBuf, workspace_name: Option<String>) {
+        let Some(name) = workspace_name else {
+            let _ = self.bg_notice_tx.send(format!(
+                "kept its workspace at {}: it has no jj workspace name",
+                path.display()
+            ));
+            return;
+        };
         let cwd = self.cwd.clone();
         let tx = self.bg_notice_tx.clone();
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("rudder-workspace-remove".to_string())
             .spawn(move || {
-                let error = if let Some(name) = workspace_name.as_deref() {
-                    // jj workspace: forget the registry entry AND remove the
-                    // checkout. `git worktree remove` fails on a jj workspace
-                    // and leaked both the directory and jj's workspace list.
-                    let unsaved = if path.exists() {
-                        crate::gitio::snapshot_jj_workspace(&path).err().map(|error| {
-                            format!(
-                                "kept its workspace at {}: could not record its changes in jj: {error}",
-                                path.display()
-                            )
-                        })
-                    } else {
-                        None
-                    };
-                    unsaved.or_else(|| {
-                        forget_jj_workspace(&cwd, name, &path)
-                            .err()
-                            .map(|error| format!("failed to remove jj workspace: {error}"))
+                // Forget the registry entry AND remove the checkout.
+                let unsaved = if path.exists() {
+                    crate::gitio::snapshot_jj_workspace(&path).err().map(|error| {
+                        format!(
+                            "kept its workspace at {}: could not record its changes in jj: {error}",
+                            path.display()
+                        )
                     })
                 } else {
-                    // Legacy git-worktree run.
-                    match Command::new("git")
-                        .args(["worktree", "remove", "--force"])
-                        .arg(&path)
-                        .current_dir(&cwd)
-                        .output()
-                    {
-                        Ok(output) if output.status.success() => None,
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                            Some(if stderr.is_empty() {
-                                "failed to remove workspace".to_string()
-                            } else {
-                                format!("failed to remove workspace: {stderr}")
-                            })
-                        }
-                        Err(error) => Some(format!("failed to remove workspace: {error}")),
-                    }
+                    None
                 };
+                let error = unsaved.or_else(|| {
+                    forget_jj_workspace(&cwd, &name, &path)
+                        .err()
+                        .map(|error| format!("failed to remove jj workspace: {error}"))
+                });
                 let _ = tx.send(
                     error.unwrap_or_else(|| "deleted agent and removed workspace".to_string()),
                 );
-            })
-            .ok();
+            });
+        if let Err(error) = spawned {
+            let _ = self.bg_notice_tx.send(format!("kept its workspace: {error}"));
+        }
     }
 
     fn start_rudder_cli_command(&mut self, label: &str, args: Vec<String>) {
@@ -14491,7 +14541,6 @@ Address the objection directly. If you disagree, say why inside \
             effort: self.effort,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
-            workspace_branch: None,
             workspace_path: None,
             workspace_name: None,
             jj_change_id: None,
@@ -14532,7 +14581,6 @@ Address the objection directly. If you disagree, say why inside \
             merge_resolver: false,
             merge_requested: false,
             merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
             merge_conflict_files: Vec::new(),
             had_merge_conflict: false,
             done_summary: None,
@@ -15179,8 +15227,6 @@ Address the objection directly. If you disagree, say why inside \
         }
         let task = run.task.clone();
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
-        let source_branch = run.workspace_branch.clone();
-        let workspace_path = run.workspace_path.clone();
         let agent_id = Some(run.id.clone());
         self.record_merge_request(index);
         match self.merge_agent_at(index) {
@@ -15189,7 +15235,7 @@ Address the objection directly. If you disagree, say why inside \
                 self.run_scheduler();
             }
             Err(error) => {
-                self.handle_merge_error(task, error, None, source_branch, workspace_path, agent_id);
+                self.handle_merge_error(task, error, None, agent_id);
             }
         }
     }
@@ -16345,9 +16391,9 @@ Address the objection directly. If you disagree, say why inside \
         };
         let mut bytes = Vec::new();
         for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
-            match remote_key_bytes(key) {
-                Some(sequence) => bytes.extend_from_slice(sequence),
-                None => return SteerDelivery::Failed(format!("unknown key: {key}")),
+            match remote_input_bytes(key) {
+                Ok(sequence) => bytes.extend_from_slice(&sequence),
+                Err(error) => return SteerDelivery::Failed(error),
             }
         }
         if bytes.is_empty() {
@@ -16484,8 +16530,8 @@ Address the objection directly. If you disagree, say why inside \
         }
         let run = &mut self.agents[index];
         let backend = run.backend;
-        if run.is_orchestrator() || run.gam.is_some() || run.plain_process || is_cloud_owned_agent(run) {
-            return SteerDelivery::Failed("this agent keeps the model it was started with".to_string());
+        if let Some(refusal) = crate::agent_model::model_switch_refusal(run) {
+            return SteerDelivery::Failed(refusal.to_string());
         }
         if let Some(other) = known_model_backend(model).filter(|other| *other != backend) {
             return SteerDelivery::Failed(format!(
@@ -16506,14 +16552,11 @@ Address the objection directly. If you disagree, say why inside \
                 "it is in the middle of a turn; switch when it finishes".to_string(),
             );
         }
-        if live && backend == Backend::Codex && run.session_id.is_none() {
-            run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
-        }
         let session = run.session_id.clone().filter(|id| !id.trim().is_empty());
         if live && session.is_none() {
             return SteerDelivery::Failed("this chat has no saved session to continue".to_string());
         }
-        run.model = model.to_string();
+        let previous = (std::mem::replace(&mut run.model, model.to_string()), run.effort);
         run.effort = effort;
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
         if let Some(session) = session.filter(|_| live) {
@@ -16522,8 +16565,8 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Codex => codex_resume_command(run, &session),
                 Backend::Opencode => opencode_resume_command(run, &session),
             };
-            if run.is_main() && run.execution_profile.is_none() {
-                signals::augment_worker_command(&mut command, backend, run.mode, &run.id);
+            let wired = if run.is_main() && run.execution_profile.is_none() {
+                signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
             } else {
                 signals::augment_existing_worker_command(
                     &mut command,
@@ -16531,7 +16574,12 @@ Address the objection directly. If you disagree, say why inside \
                     run.mode,
                     &run.id,
                     run.execution_profile.as_deref(),
-                );
+                )
+            };
+            // Refused before the old process is touched: it keeps its model.
+            if let Err(error) = wired {
+                (run.model, run.effort) = previous;
+                return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
             }
             let options = TerminalPaneOptions {
                 size: run.terminal_size.unwrap_or_default(),
@@ -16559,7 +16607,9 @@ Address the objection directly. If you disagree, say why inside \
             }
         }
         let run = &self.agents[index];
-        let _ = save_native_run_record(&self.cwd, run);
+        if let Err(error) = save_native_run_record(&self.cwd, run) {
+            return SteerDelivery::Failed(format!("{label} switched, but its record was not saved: {error}"));
+        }
         let note = format!("{label} now on {}", agent_model_label(backend, &run.model, run.effort));
         self.push_activity(note);
         self.mirror_graph();
@@ -18213,13 +18263,13 @@ Address the objection directly. If you disagree, say why inside \
             AgentMode::ReviewAll,
             session_id.as_deref(),
         );
-        signals::augment_worker_command(&mut command, backend, AgentMode::ReviewAll, &reviewer_id);
+        let wired = signals::augment_worker_command(&mut command, backend, AgentMode::ReviewAll, &reviewer_id);
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(cwd),
             ..TerminalPaneOptions::default()
         };
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -18329,7 +18379,6 @@ Address the objection directly. If you disagree, say why inside \
         run.merge_resolver = false;
         run.merge_conflict = true;
         run.had_merge_conflict = true;
-        run.merge_conflict_operation = ConflictOperation::Merge;
         run.merge_conflict_files = files;
         run.integration.phase = IntegrationPhase::Pending;
         let _ = save_native_run_record(&cwd, run);
@@ -18547,14 +18596,10 @@ Address the objection directly. If you disagree, say why inside \
             .unwrap_or(&run.task)
             .to_string();
         self.conflict_prompt = Some(MergeConflictPrompt {
-            operation: ConflictOperation::Merge,
             task,
             conflicted_files: files,
             error,
             repo_root: self.cwd.clone(),
-            target_branch: None,
-            source_branch: run.workspace_branch.clone(),
-            workspace_path: run.workspace_path.clone(),
             agent_id: Some(run.id.clone()),
         });
         self.record_activity(format!(
@@ -18577,7 +18622,6 @@ Address the objection directly. If you disagree, say why inside \
         run.merge_resolver = false;
         run.merge_conflict = true;
         run.had_merge_conflict = true;
-        run.merge_conflict_operation = ConflictOperation::Merge;
         if !files.is_empty() {
             run.merge_conflict_files = files;
         }
@@ -18673,7 +18717,7 @@ Address the objection directly. If you disagree, say why inside \
                     if files.is_empty() {
                         // Not a conflict (rudder CLI missing, timeout, legacy run):
                         // the same terminal handling as a manual merge failure.
-                        self.handle_merge_error(task, error, None, None, None, Some(id.clone()));
+                        self.handle_merge_error(task, error, None, Some(id.clone()));
                     } else {
                         // Nothing was merged (the CLI restored the pre-merge
                         // operation). A resolver takes it from here.
@@ -19615,7 +19659,6 @@ Address the objection directly. If you disagree, say why inside \
         let (backend, model, effort) = {
             let run = &mut self.agents[index];
             run.cwd = workspace.path.clone();
-            run.workspace_branch = workspace.branch.clone();
             run.workspace_path = workspace
                 .path_is_workspace
                 .then_some(workspace.path.clone());
@@ -19640,7 +19683,8 @@ Address the objection directly. If you disagree, say why inside \
             Backend::Codex => codex_fork_command(&model, effort, &session_id, seed.as_deref()),
             Backend::Opencode => opencode_fork_command(&model, &session_id, seed.as_deref()),
         };
-        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id);
+        let command = signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
+            .map(|()| command);
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(workspace.path.clone()),
@@ -19717,7 +19761,7 @@ Address the objection directly. If you disagree, say why inside \
         // starts: after automatic integration nothing was merged, so there is no
         // conflict in the checkout for a resolver to work on yet. Past the
         // automatic attempts, `m` grants exactly one more.
-        if run.merge_conflict_operation == ConflictOperation::Merge && Self::run_is_jj(run) {
+        if Self::run_is_jj(run) {
             let id = run.id.clone();
             let label = short_task(&run.task_summary);
             let spent = run.resolver_attempts() >= MAX_AUTO_RESOLVER_ATTEMPTS;
@@ -19749,30 +19793,17 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
 
-        let operation = run.merge_conflict_operation;
-        let repo_root = if operation == ConflictOperation::Rebase {
-            run.workspace_path
-                .clone()
-                .unwrap_or_else(|| run.cwd.clone())
-        } else {
-            self.cwd.clone()
-        };
+        let repo_root = self.cwd.clone();
         let mut files = run.merge_conflict_files.clone();
         if files.is_empty() {
-            files = if operation == ConflictOperation::Rebase {
-                conflicted_files(&repo_root)
-            } else {
-                jj_unresolved_conflicts(&repo_root)
-            };
+            files = jj_unresolved_conflicts(&repo_root);
         }
         let task = run
             .task
             .strip_prefix("Resolve merge conflicts: ")
-            .or_else(|| run.task.strip_prefix("Resolve rebase conflicts: "))
             .unwrap_or(&run.task)
             .to_string();
         self.conflict_prompt = Some(MergeConflictPrompt {
-            operation,
             task,
             conflicted_files: files,
             error: run
@@ -19780,9 +19811,6 @@ Address the objection directly. If you disagree, say why inside \
                 .clone()
                 .unwrap_or_else(|| "merge conflict is still unresolved".to_string()),
             repo_root,
-            target_branch: current_branch_at(&self.cwd),
-            source_branch: run.workspace_branch.clone(),
-            workspace_path: run.workspace_path.clone(),
             agent_id: Some(run.id.clone()),
         });
         self.merge_confirm = None;
@@ -19958,17 +19986,9 @@ Address the objection directly. If you disagree, say why inside \
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.start_conflict_resolution_agent(),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    let rebase = self
-                        .conflict_prompt
-                        .as_ref()
-                        .is_some_and(|prompt| prompt.operation == ConflictOperation::Rebase);
                     self.conflict_prompt = None;
-                    self.notice = Some(if rebase {
-                        "resolve the rebase conflicts in the workspace, then run git rebase --continue"
-                            .to_string()
-                    } else {
-                        "resolve the jj conflicts manually, then press m to finalize".to_string()
-                    });
+                    self.notice =
+                        Some("resolve the jj conflicts manually, then press m to finalize".to_string());
                 }
                 _ => {
                     self.notice = Some(
@@ -19994,8 +20014,6 @@ Address the objection directly. If you disagree, say why inside \
                     self.notice = Some("selected agent no longer exists".to_string());
                     return;
                 };
-                let source_branch = self.agents[index].workspace_branch.clone();
-                let workspace_path = self.agents[index].workspace_path.clone();
                 let agent_id = Some(self.agents[index].id.clone());
                 self.record_merge_request(index);
                 match self.merge_agent_at(index) {
@@ -20015,8 +20033,6 @@ Address the objection directly. If you disagree, say why inside \
                             task,
                             error,
                             None,
-                            source_branch,
-                            workspace_path,
                             agent_id,
                         );
                     }
@@ -20058,28 +20074,12 @@ Address the objection directly. If you disagree, say why inside \
         task: String,
         error: anyhow::Error,
         merged_before_error: Option<usize>,
-        source_branch: Option<String>,
-        workspace_path: Option<PathBuf>,
         agent_id: Option<String>,
     ) {
-        let mut operation = ConflictOperation::Merge;
-        let mut conflict_root = self.cwd.clone();
-        // jj runs report their conflicted files through pending_jj_conflict (jj
-        // records conflicts in the change, not as git unmerged paths). Prefer
-        // those; the git query remains only for rebase conflict reporting.
-        let jj_conflicts = self.pending_jj_conflict.take();
-        let mut conflicts = jj_conflicts.unwrap_or_else(|| conflicted_files(&self.cwd));
+        // jj reports the conflicted files through pending_jj_conflict (jj
+        // records conflicts in the change, not as git unmerged paths).
+        let conflicts = self.pending_jj_conflict.take().unwrap_or_default();
         self.emit_merge_finished(false, !conflicts.is_empty(), agent_id.is_none());
-        if conflicts.is_empty() {
-            if let Some(path) = workspace_path.as_ref() {
-                let workspace_conflicts = conflicted_files(path);
-                if !workspace_conflicts.is_empty() {
-                    operation = ConflictOperation::Rebase;
-                    conflict_root = path.clone();
-                    conflicts = workspace_conflicts;
-                }
-            }
-        }
         if conflicts.is_empty() {
             let prefix = merged_before_error
                 .map(|count| format!("merge all stopped after {count}: "))
@@ -20103,7 +20103,6 @@ Address the objection directly. If you disagree, say why inside \
         }
 
         let count = conflicts.len();
-        let target_branch = current_branch_at(&self.cwd);
         let conflict_files = conflicts.clone();
         // Captured BEFORE the block below clears `merge_resolver`: a resolver that
         // conflicts AGAIN must not silently respawn itself in a loop, and after
@@ -20115,14 +20114,10 @@ Address the objection directly. If you disagree, say why inside \
                 run.merge_resolver || run.resolver_attempts() >= MAX_AUTO_RESOLVER_ATTEMPTS
             });
         self.conflict_prompt = Some(MergeConflictPrompt {
-            operation,
             task,
             conflicted_files: conflicts,
             error: error.to_string(),
-            repo_root: conflict_root,
-            target_branch,
-            source_branch: source_branch.clone(),
-            workspace_path: workspace_path.clone(),
+            repo_root: self.cwd.clone(),
             agent_id: agent_id.clone(),
         });
         if let Some(index) = agent_id
@@ -20139,16 +20134,10 @@ Address the objection directly. If you disagree, say why inside \
                 run.merge_resolver = false;
                 run.merge_conflict = true;
                 run.had_merge_conflict = true;
-                run.merge_conflict_operation = operation;
                 run.merge_conflict_files = conflict_files;
                 let _ = save_native_run_record(&self.cwd, run);
             }
         }
-        let operation_label = if operation == ConflictOperation::Rebase {
-            "rebase"
-        } else {
-            "merge"
-        };
         let conflict_task = short_task(
             &self
                 .conflict_prompt
@@ -20165,7 +20154,7 @@ Address the objection directly. If you disagree, say why inside \
         // ourselves and let the user watch it in the row it already owns.
         if !already_resolver_attempt && self.can_auto_resolve_conflict() {
             let message = format!(
-                "{operation_label} conflict in {conflict_task} ({count} file{}): resolving automatically",
+                "merge conflict in {conflict_task} ({count} file{}): resolving automatically",
                 if count == 1 { "" } else { "s" }
             );
             self.notice = Some(message.clone());
@@ -20178,7 +20167,7 @@ Address the objection directly. If you disagree, say why inside \
         // deleted mid-merge), or a resolver already tried and conflicted again.
         // Ask rather than silently looping.
         let message = format!(
-            "{operation_label} conflict in {conflict_task} ({count} file{}): press y to let AI resolve & complete the merge, or n to do it manually",
+            "merge conflict in {conflict_task} ({count} file{}): press y to let AI resolve & complete the merge, or n to do it manually",
             if count == 1 { "" } else { "s" }
         );
         self.notice = Some(message.clone());
@@ -20351,8 +20340,9 @@ Address the objection directly. If you disagree, say why inside \
             // RE-WIRE completion hooks for the re-goaled session: its hook config file
             // already exists, so the poll loop waits for the official signal — a
             // relaunch without the hooks wired would never flip back to review.
-            signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
-            (command, deliver_after, new_session, size, cwd, label)
+            let wired =
+                signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+            (wired.map(|()| command), deliver_after, new_session, size, cwd, label)
         };
 
         let options = TerminalPaneOptions {
@@ -20363,7 +20353,7 @@ Address the objection directly. If you disagree, say why inside \
         if let Some(run) = self.agents.get_mut(index) {
             run.terminal = None;
         }
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match command.and_then(|command| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -20663,15 +20653,10 @@ Address the objection directly. If you disagree, say why inside \
             .as_ref()
             .map(|p| p.task.clone())
             .unwrap_or_default();
-        let conflict_context = self.conflict_prompt.as_ref().map(|p| {
-            (
-                p.operation,
-                p.repo_root.clone(),
-                p.source_branch.clone(),
-                p.workspace_path.clone(),
-                p.conflicted_files.clone(),
-            )
-        });
+        let conflict_context = self
+            .conflict_prompt
+            .as_ref()
+            .map(|p| (p.repo_root.clone(), p.conflicted_files.clone()));
         self.conflict_prompt = None;
 
         // Reuse the failing agent's row instead of spawning a new pane. The
@@ -20691,14 +20676,8 @@ Address the objection directly. If you disagree, say why inside \
         let model = self.agents[index].model.clone();
         let effort = self.agents[index].effort;
         let terminal_size = self.agents[index].terminal_size.unwrap_or_default();
-        let (operation, resolver_cwd, source_branch, workspace_path, conflicted_files) =
-            conflict_context.unwrap_or((
-                ConflictOperation::Merge,
-                self.cwd.clone(),
-                None,
-                None,
-                Vec::new(),
-            ));
+        let (resolver_cwd, conflicted_files) =
+            conflict_context.unwrap_or((self.cwd.clone(), Vec::new()));
         let session_id = mint_session_id_for(backend);
         let resolver_run_id = self.agents[index].id.clone();
         let mut command = agent_command(
@@ -20715,7 +20694,7 @@ Address the objection directly. If you disagree, say why inside \
         // on disk, so worker_has_config() is true and the poll loop WAITS for a Stop
         // hook that was never wired -> a cleanly-resolved resolver sits Running forever
         // and finalize_merge_resolvers (needs status==Done) never merges it. See signals.rs.
-        signals::augment_worker_command(
+        let wired = signals::augment_worker_command(
             &mut command,
             backend,
             AgentMode::Execute,
@@ -20733,7 +20712,7 @@ Address the objection directly. If you disagree, say why inside \
             run.terminal = None;
         }
 
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -20743,13 +20722,7 @@ Address the objection directly. If you disagree, say why inside \
                     run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
                     run.status = AgentStatus::Running;
-                    if operation == ConflictOperation::Rebase {
-                        run.workspace_path = workspace_path.or_else(|| Some(resolver_cwd.clone()));
-                        run.workspace_branch = source_branch;
-                    } else {
-                        run.workspace_path = None;
-                        run.workspace_branch = None;
-                    }
+                    run.workspace_path = None;
                     run.session_id = session_id;
                     run.completed_at = None;
                     run.last_output_at = Instant::now();
@@ -20758,40 +20731,19 @@ Address the objection directly. If you disagree, say why inside \
                     run.last_error = None;
                     // Track jj merge resolvers so the poll loop finalizes the merge
                     // (flip the node to Merged, unblock children) once they finish
-                    // with no conflicts left. Git rebase resolvers keep manual flow.
-                    run.merge_resolver = operation == ConflictOperation::Merge;
-                    run.integration.phase = if operation == ConflictOperation::Merge {
-                        IntegrationPhase::Resolving
-                    } else {
-                        IntegrationPhase::Pending
-                    };
+                    // with no conflicts left.
+                    run.merge_resolver = true;
+                    run.integration.phase = IntegrationPhase::Resolving;
                     run.merge_conflict = true;
                     run.had_merge_conflict = true;
-                    run.merge_conflict_operation = operation;
                     run.merge_conflict_files = conflicted_files;
                     run.task = if original_task.is_empty() {
-                        if operation == ConflictOperation::Rebase {
-                            "Resolve rebase conflicts".to_string()
-                        } else {
-                            "Resolve merge conflicts".to_string()
-                        }
+                        "Resolve merge conflicts".to_string()
                     } else {
-                        format!(
-                            "Resolve {} conflicts: {original_task}",
-                            if operation == ConflictOperation::Rebase {
-                                "rebase"
-                            } else {
-                                "merge"
-                            }
-                        )
+                        format!("Resolve merge conflicts: {original_task}")
                     };
                     run.task_summary = format!(
-                        "{} conflicts \u{2192} {}",
-                        if operation == ConflictOperation::Rebase {
-                            "rebase"
-                        } else {
-                            "merge"
-                        },
+                        "merge conflicts \u{2192} {}",
                         summarize_task(&original_task)
                     );
                     // Recorded as the resolver's turn, not the user's: the trailing
@@ -20826,7 +20778,6 @@ Address the objection directly. If you disagree, say why inside \
                     run.merge_resolver = false;
                     run.merge_conflict = true;
                     run.had_merge_conflict = true;
-                    run.merge_conflict_operation = operation;
                     run.merge_conflict_files = conflicted_files;
                     run.last_error = Some(error.to_string());
                     let _ = save_native_run_record(&self.cwd, run);
@@ -20856,46 +20807,6 @@ Address the objection directly. If you disagree, say why inside \
                 .join("\n")
         };
         let repo = prompt.repo_root.display().to_string();
-        let target = prompt
-            .target_branch
-            .clone()
-            .unwrap_or_else(|| "HEAD".to_string());
-        let source = prompt
-            .source_branch
-            .clone()
-            .unwrap_or_else(|| "(unknown branch)".to_string());
-        if prompt.operation == ConflictOperation::Rebase {
-            return Some(format!(
-                "A git rebase stopped with conflicts in the agent workspace.\n\
-\n\
-Where you are working\n\
-- You are running inside the conflicted workspace at: {repo}\n\
-- The workspace branch being rebased is: {source}\n\
-- The base branch is: {target}\n\
-\n\
-What was being attempted\n\
-- Original task on {source}: {task}\n\
-\n\
-What conflicted\n\
-{files}\n\
-\n\
-Git reported\n\
-{err}\n\
-\n\
-What to do\n\
-1. Run `git status` from {repo} to see the rebase state.\n\
-2. Resolve the conflict markers in the files above.\n\
-3. After every file is resolved, run relevant tests or checks if practical.\n\
-4. Stage the resolved files with `git add`.\n\
-5. Run `git rebase --continue` and report the result. Do not abort the rebase unless it is truly unresolvable.\n",
-                repo = repo,
-                target = target,
-                source = source,
-                task = prompt.task,
-                files = files,
-                err = prompt.error,
-            ));
-        }
         Some(format!(
             "A jj (Jujutsu) merge created conflicts and you are now the conflict resolver.\n\
 \n\
@@ -21153,7 +21064,6 @@ What to do\n\
                 } else {
                     IntegrationPhase::MergedLocal
                 };
-                run.workspace_branch = None;
                 run.completed_at = Some(Instant::now());
                 run.merge_resolver = false;
                 run.merge_conflict = false;
@@ -21388,12 +21298,19 @@ What to do\n\
         }
     }
 
+    /// Codex mints its own session ids, so a Codex row learns its session from
+    /// the rollout that began with its launch (`codex_session_id_for_run`).
+    /// That reads Codex's day directories, so it runs on a thread, one lookup
+    /// at a time; `collect_codex_session_lookup` applies the answers.
     fn ensure_session_ids_recorded(&mut self) {
         const RETRY_AFTER: Duration = Duration::from_secs(5);
         const MAX_ATTEMPTS: u32 = 24;
+        if self.codex_session_lookup_rx.is_some() {
+            return;
+        }
         let cwd = self.cwd.clone();
-        let mut found: Vec<(usize, String)> = Vec::new();
-        for (index, run) in self.agents.iter().enumerate() {
+        let mut wanted: Vec<(String, PathBuf, u64)> = Vec::new();
+        for run in &self.agents {
             if run.session_id.is_some() || run.backend != Backend::Codex {
                 continue;
             }
@@ -21426,22 +21343,65 @@ What to do\n\
             } else {
                 run.cwd.clone()
             };
-            if let Some(session_id) = codex_session_id_for_run(&search_cwd, started_at_ms) {
-                found.push((index, session_id));
-            }
+            wanted.push((run.id.clone(), search_cwd, started_at_ms));
         }
-        for (index, session_id) in found {
-            let Some(run) = self.agents.get_mut(index) else {
+        if wanted.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let spawned = thread::Builder::new()
+            .name("rudder-codex-sessions".to_string())
+            .spawn(move || {
+                let found = wanted
+                    .into_iter()
+                    .filter_map(|(run_id, cwd, started_at_ms)| {
+                        codex_session_id_for_run(&cwd, started_at_ms).map(|session| (run_id, session))
+                    })
+                    .collect();
+                let _ = tx.send(found);
+            });
+        match spawned {
+            Ok(_) => self.codex_session_lookup_rx = Some(rx),
+            Err(error) => self.push_activity(format!("could not look up Codex sessions: {error}")),
+        }
+    }
+
+    /// Record the sessions the Codex lookup found, for rows that still have
+    /// none.
+    fn collect_codex_session_lookup(&mut self) {
+        let Some(rx) = self.codex_session_lookup_rx.take() else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(TryRecvError::Empty) => {
+                self.codex_session_lookup_rx = Some(rx);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => return,
+        };
+        let cwd = self.cwd.clone();
+        for (run_id, session_id) in found {
+            let Some(run) = self
+                .agents
+                .iter_mut()
+                .find(|run| run.id == run_id && run.session_id.is_none() && run.backend == Backend::Codex)
+            else {
                 continue;
             };
+            // In its own workspace only Rudder's process starts sessions, so
+            // the match is the one Rudder made. In the checkout it may be the
+            // person's own.
+            if run.workspace_path.is_some() {
+                crate::gitio::note_rudder_session(&session_id);
+            }
             run.session_id = Some(session_id.clone());
-            let id = run.id.clone();
             let backend = run.backend.as_str();
             let _ = save_native_run_record(&cwd, run);
             self.record_event(
                 "session-pinned",
                 "recorded the backend session for a run",
-                serde_json::json!({ "run": id, "backend": backend, "session": session_id }),
+                serde_json::json!({ "run": run_id, "backend": backend, "session": session_id }),
             );
             self.dirty = true;
         }
@@ -21512,6 +21472,7 @@ What to do\n\
         self.maybe_refresh_publish_pr_state();
 
         self.collect_untouched_agents();
+        self.collect_codex_session_lookup();
         if self.last_workspace_gc.elapsed() >= Duration::from_secs(60) {
             self.gc_merged_workspaces();
             self.gc_orphan_workspaces();
@@ -21746,15 +21707,18 @@ What to do\n\
                         run.last_worker_input_at,
                         run.completed_at,
                     );
-                    // A Claude worker has its UserPromptSubmit hook wired, and THAT is
-                    // what a new turn is. "Typed something and the pane repainted" is
-                    // not: a draft being typed, `/model`, `/help`, any local command
+                    // A Claude or Codex worker has its UserPromptSubmit hook wired
+                    // (Codex's with the trust bypass, signals.rs), and THAT is what a
+                    // new turn is. "Typed something and the pane repainted" is not: a
+                    // draft being typed, `/model`, `/help`, Esc, F2, any local command
                     // repaints without starting a turn (measured: `/model` fires no
                     // hook at all), and no Stop ever ends a turn that never began, so
-                    // the row spun until someone noticed. Backends without a prompt
-                    // hook (Codex's are trust-gated), orchestrators and plain panes
-                    // keep the typed-input reading.
-                    let hooks_say_new_turn = run.backend == Backend::Claude
+                    // the row spun "working" until someone noticed. A Codex turn no
+                    // prompt starts (a goal continuing, an approved plan) reopens the
+                    // row from its rollout instead (`poll_codex_rollouts`).
+                    // Orchestrators, plain panes and opencode keep the typed-input
+                    // reading.
+                    let hooks_say_new_turn = matches!(run.backend, Backend::Claude | Backend::Codex)
                         && !is_orchestrator
                         && !run.plain_process;
                     let user_started_new_turn = if hooks_say_new_turn {
@@ -21787,8 +21751,11 @@ What to do\n\
                     let settled = run
                         .completed_at
                         .is_none_or(|at| at.elapsed() >= BUSY_REOPEN_GRACE);
+                    // A Codex worker's rollout says whether a turn runs, so its
+                    // screen is not read for it.
                     let resumed_work = !user_started_new_turn
                         && settled
+                        && !(run.backend == Backend::Codex && hooks_say_new_turn)
                         && recent_lines_show_turn_work(&terminal.visible_lines_snapshot());
                     if user_started_new_turn || resumed_work {
                         run.status = AgentStatus::Running;
@@ -21853,11 +21820,14 @@ What to do\n\
                 // status label) but DO NOT ring: only entering review pings (see
                 // mark_run_done). Previously these rang on every detector flicker,
                 // which fired a ping whenever you selected a waiting agent.
+                // A Codex question waits in its rollout, not in any hook
+                // (`poll_codex_rollouts`); the screen alone misses the queued ones.
                 let needs_user_input = !needs_permission
                     && (matches!(
                         run.wait_signal,
                         Some(WaitSignal::Input | WaitSignal::Interrupted | WaitSignal::Idle)
-                    ) || visible_lines.as_ref().is_some_and(|lines| {
+                    ) || self.codex_waits.contains_key(&run.id)
+                        || visible_lines.as_ref().is_some_and(|lines| {
                             terminal_needs_user_input_from_lines(run.backend, lines)
                         }));
                 run.needs_user_input = needs_user_input;
@@ -22123,6 +22093,9 @@ What to do\n\
             }
         }
 
+        // After the loop, so a plan turn that just ended (mark_run_done clears
+        // needs_user_input) shows its "Implement this plan?" wait this tick.
+        self.poll_codex_rollouts();
 
         // The INITIAL planner run is KEPT as the pinned orchestrator (no removal),
         // so its index stays stable. A RECONCILE planner is transient and removed by
@@ -22746,6 +22719,16 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     app.cwd = ownership.app_identity().0.to_path_buf();
     if let Some(records)=ownership.take_migration_records() {v4_migration_adoption::apply(&mut app,records)?;}
     app.engine_headless = terminal.is_none();
+    // Commits without an author read "JJ_EMPTY_STRING"; say so once, at launch.
+    if terminal.is_some() {
+        let notices = app.bg_notice_tx.clone();
+        let cwd = app.cwd.clone();
+        thread::spawn(move || {
+            if let Some(problem) = gitio::jj_identity_problem(&cwd) {
+                let _ = notices.send(problem);
+            }
+        });
+    }
     install_termination_handlers();
     if ownership.is_fabric() {
         #[cfg(unix)]
@@ -23962,6 +23945,9 @@ pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
         "down" => b"\x1b[B",
         "right" => b"\x1b[C",
         "left" => b"\x1b[D",
+        // Codex's queued questions sit behind its main prompt (asks.mjs).
+        "shift-right" => b"\x1b[1;2C",
+        "shift-left" => b"\x1b[1;2D",
         "backspace" => b"\x7f",
         "space" => b" ",
         "ctrl-c" => b"\x03",
@@ -23973,6 +23959,29 @@ pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
         "3" => b"3",
         _ => return None,
     })
+}
+
+/// One item of a `keys` request: a named key, or `paste:<hex of UTF-8>`, text
+/// pasted as a bracketed paste (an answer typed into a Codex question). Hex
+/// keeps commas and newlines inside the comma-separated list; the text is
+/// cleaned like a steer message.
+pub(crate) fn remote_input_bytes(key: &str) -> Result<Vec<u8>, String> {
+    let Some(hex) = key.strip_prefix("paste:") else {
+        return remote_key_bytes(key)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| format!("unknown key: {key}"));
+    };
+    let raw = (0..hex.len())
+        .step_by(2)
+        .map(|at| hex.get(at..at + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .ok_or_else(|| "paste is not hex-encoded UTF-8".to_string())?;
+    let text = sanitize_steer_instruction(&raw);
+    if text.is_empty() {
+        return Err("nothing to paste".to_string());
+    }
+    Ok(bracketed_paste_bytes(&text))
 }
 
 

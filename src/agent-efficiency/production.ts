@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import type { RunRecord, JsonValue } from "../types.js";
 import { runDir } from "../state.js";
-import { currentCommit, workspaceStatus } from "../git.js";
+import { workspaceStatus } from "../git.js";
 import { readJson, runCommand } from "../util.js";
 import { boundedRows, editEvidence } from "./storage.js";
 import { evidenceId } from "./privacy.js";
@@ -77,9 +77,7 @@ export async function learnIntegratedRun(run:RunRecord):Promise<void>{
  * context carries open obligations and advisory provenance, never new authority. */
 export async function efficiencyContext(run:RunRecord):Promise<string>{
   const evidence=await readJson<Actions>(actionsPath(run));
-  const revision=run.vcs==="jj"
-    ?(await runCommand("jj",["log","-r","@-","--no-graph","-T","commit_id"],{cwd:run.workspace.path})).stdout.trim()
-    :await currentCommit(run.workspace.path);
+  const revision=(await runCommand("jj",["log","-r","@-","--no-graph","-T","commit_id"],{cwd:run.workspace.path})).stdout.trim();
   const clean=(await workspaceStatus(run)).length===0;
   // New runs can retrieve the same scoped advice for explicitly named files.
   // Resolve only bounded existing paths within this actual execution checkout.

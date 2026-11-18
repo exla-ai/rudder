@@ -22,8 +22,6 @@ import {
   loadConfig,
   loadRunRecord,
   outputPath,
-  AGENT_WORKSPACES_DIR,
-  LEGACY_AGENT_WORKSPACES_DIR,
   registerProject,
   rememberBackendSelection,
   resolveRun,
@@ -32,7 +30,7 @@ import {
   saveRunRecord,
   stopRequestPath,
 } from "./state.js";
-import type { BackendId, EffortLevel, JsonValue, MergeStrategy, RunRecord, RudderEvent, VerificationResult } from "./types.js";
+import type { BackendId, EffortLevel, JsonValue, RunRecord, RudderEvent, VerificationResult } from "./types.js";
 import { readGraph, updateGraph } from "./graph.js";
 import {
   appendEvent,
@@ -41,11 +39,8 @@ import {
   activeRunsForCheckout,
   currentBranch,
   findRepoRoot,
-  mergeGitRunIntoCurrentBranch,
   processAlive,
   runProcessAlive,
-  removeGitWorktree,
-  syncGitRunWorktree,
 } from "./git.js";
 import {
   createRunJjWorkspace,
@@ -85,7 +80,7 @@ const AUTO_STEER_DELAY_MS = Number(process.env.RUDDER_AUTO_STEER_DELAY_MS) || 10
 // project owner nor old branch/workspace fields authorize a legacy fallback.
 function hasManagedSource(run: RunRecord, repoRoot = run.repoRoot, runId = run.id): boolean {
   const raw = run as unknown as Record<string, unknown>;
-  if (Object.hasOwn(raw, "managedLocal") || (raw.vcs !== undefined && raw.vcs !== "git" && raw.vcs !== "jj")) return true;
+  if (Object.hasOwn(raw, "managedLocal")) return true;
   try {
     fs.lstatSync(path.join(runDir(repoRoot, runId), "managed-local.json"));
     return true;
@@ -169,7 +164,6 @@ export async function startRun(params: {
     effort,
     targetBranch,
     baseCommit,
-    vcs: "jj",
     useWorkspace,
     workspaceName: workspaceInfo.workspaceName,
     workspaceChangeId: workspaceInfo.jjChangeId,
@@ -858,13 +852,9 @@ async function writeRudderContextFiles(repoRoot: string, runs: RunRecord[], cont
     });
   };
   if (!writable(repoRoot)) return;
-  await ensureLine(path.join(repoRoot, ".gitignore"), "RUDDER.md");
-  await ensureLine(path.join(repoRoot, ".gitignore"), SHARED_CONTEXT_FILE);
-  // Workspaces live INSIDE the project at <repo>/<agent-workspaces-dir>; ignore them in the
-  // user's repo so each worker checkout does not show up as untracked files (Rust parity:
-  // gitio.rs write_rudder_context).
-  await ensureLine(path.join(repoRoot, ".gitignore"), `${AGENT_WORKSPACES_DIR}/`);
-  await ensureLine(path.join(repoRoot, ".gitignore"), `${LEGACY_AGENT_WORKSPACES_DIR}/`);
+  // RUDDER.md, RUDDER_SHARED.md and the agent workspaces inside the project stay
+  // out of the user's status (Rust parity: gitio.rs write_rudder_context).
+  await ensureProjectRuntimeIgnored(repoRoot);
   const workspaces = new Set<string>([repoRoot]);
   for (const run of runs) {
     if (!hasManagedSource(run, repoRoot) && run.workspace.path && writable(run.workspace.path) && await pathExists(run.workspace.path)) {
@@ -927,39 +917,23 @@ async function createRunWorkspace(params: {
   };
 }
 
-// Route through the run's recorded vcs. New runs are always jj; legacy git
-// workspace runs (run.vcs === "git") still merge/sync through the git helpers.
 async function mergeRunIntoCurrentBranch(
   run: RunRecord,
   allowDirty: boolean,
-  strategy: MergeStrategy,
   abortOnConflict = false,
 ): Promise<RunRecord> {
   assertLegacyRunAllowed(run);
-  if ((run.vcs ?? "git") === "jj") {
-    return await mergeJjRunIntoCurrentWorkspace(run, allowDirty, { abortOnConflict });
-  }
-  return await mergeGitRunIntoCurrentBranch(run, allowDirty, strategy);
+  return await mergeJjRunIntoCurrentWorkspace(run, allowDirty, { abortOnConflict });
 }
 
 async function syncRunWorkspace(run: RunRecord, baseBranch: string): Promise<RunRecord> {
   assertLegacyRunAllowed(run);
-  if ((run.vcs ?? "git") === "jj") {
-    return await syncJjRunWorkspace(run, baseBranch);
-  }
-  return await syncGitRunWorktree(run, baseBranch);
+  return await syncJjRunWorkspace(run, baseBranch);
 }
 
-async function removeRunWorkspace(run: RunRecord, force = true): Promise<void> {
+async function removeRunWorkspace(run: RunRecord): Promise<void> {
   assertLegacyRunAllowed(run);
-  if ((run.vcs ?? "git") === "jj") {
-    await removeJjRunWorkspace(run);
-    return;
-  }
-  if (!run.workspace.enabled) {
-    return;
-  }
-  await removeGitWorktree(run.repoRoot, run.workspace.path, force);
+  await removeJjRunWorkspace(run);
 }
 
 async function baseRevision(repoRoot: string): Promise<string> {
@@ -992,7 +966,7 @@ function shortRunTask(run: RunRecord): string {
 
 function workspaceKind(run: RunRecord): string {
   if (hasManagedSource(run)) return "managed workspace";
-  return (run.vcs ?? "git") === "jj" ? "jj-workspace" : "git-worktree";
+  return "jj-workspace";
 }
 
 export async function statusRuns(options?: { json?: boolean }): Promise<void> {
@@ -1159,13 +1133,7 @@ export async function mergeRun(
   if (isActiveStatus(run.status) && !hasBlockedIntegration(run)) {
     throw new Error(`Run ${runId} is still active; stop it or wait for it to finish before merging.`);
   }
-  const config = await loadConfig();
-  const merged = await mergeRunIntoCurrentBranch(
-    run,
-    allowDirty,
-    config.mergeStrategy,
-    Boolean(options?.abortOnConflict),
-  );
+  const merged = await mergeRunIntoCurrentBranch(run, allowDirty, Boolean(options?.abortOnConflict));
   await emit(merged, {
     ts: nowIso(),
     runId,
@@ -1174,9 +1142,7 @@ export async function mergeRun(
     data: (merged.merge ?? {}) as unknown as JsonValue,
   });
   if (merged.merge?.status === "merged") {
-    if ((merged.vcs ?? "git") === "jj") {
-      await exportToGit(repoRoot);
-    }
+    await exportToGit(repoRoot);
     // A merged RUN is not yet a merged NODE. Without this the DAG never learns
     // its work landed: the node keeps its old status, everything hard-depending
     // on it stays unlaunchable, and the plan stalls with finished, integrated
@@ -1193,13 +1159,9 @@ export async function mergeRun(
   await writeAgentContext(repoRoot);
   if (!options?.silent) {
     if (merged.merge?.status === "conflict") {
-      const kind = merged.merge.conflictKind === "rebase" ? "Rebase conflict" : "Merge conflict";
-      console.log(`${kind} for ${runId}`);
+      console.log(`Merge conflict for ${runId}`);
       for (const file of merged.merge?.conflictedFiles ?? []) {
         console.log(`  ${file}`);
-      }
-      if (merged.merge.conflictKind === "rebase") {
-        console.log(`Resolve in ${shortenHome(merged.workspace.path)}, run git rebase --continue, then retry rudder merge ${runId}.`);
       }
     } else {
       console.log(`Merge failed for ${runId}: ${merged.merge?.error ?? "unknown error"}`);
@@ -1216,7 +1178,7 @@ export async function syncRun(runId?: string, options?: { silent?: boolean }): P
     throw new Error("No runs found.");
   }
   assertLegacyRunAllowed(run, repoRoot);
-  const hasIsolation = run.workspace.enabled && (run.workspace.workspaceName || run.workspace.branch);
+  const hasIsolation = run.workspace.enabled && run.workspace.workspaceName;
   if (!hasIsolation) {
     throw new Error(`Run ${run.id} has no workspace to sync.`);
   }
@@ -1245,7 +1207,7 @@ export async function syncRun(runId?: string, options?: { silent?: boolean }): P
       for (const file of synced.sync.conflictedFiles ?? []) {
         console.log(`  ${file}`);
       }
-      console.log(`Resolve in ${shortenHome(synced.workspace.path)}, run git rebase --continue, then retry rudder sync ${synced.id}.`);
+      console.log(`jj recorded the conflicts in the change. Resolve them in ${shortenHome(synced.workspace.path)}.`);
     } else {
       console.log(`Sync failed for ${synced.id}: ${synced.sync?.error ?? "unknown error"}`);
     }
@@ -1280,7 +1242,7 @@ export async function deleteRun(runId: string, options?: { mergeFirst?: boolean;
   }
   await interruptWorkerAttempt(repoRoot, latest);
   if (latest.workspace.enabled) {
-    await removeRunWorkspace(latest, options?.force ?? true).catch(() => undefined);
+    await removeRunWorkspace(latest).catch(() => undefined);
   }
   await fsp.rm(runDir(repoRoot, runId), { recursive: true, force: true });
   await writeAgentContext(repoRoot);
@@ -1291,15 +1253,10 @@ export async function deleteRun(runId: string, options?: { mergeFirst?: boolean;
 
 function mergeResultMessage(run: RunRecord): string {
   if (run.merge?.status === "merged") {
-    return run.merge.strategy === "rebase"
-      ? "Rebased and fast-forward merged successfully"
-      : "Merged successfully";
+    return "Merged successfully";
   }
   if (run.merge?.status === "conflict") {
     const files = (run.merge.conflictedFiles ?? []).join(", ") || "unknown files";
-    if (run.merge.conflictKind === "rebase") {
-      return `Rebase conflict before merge: ${files}. Resolve in the workspace, run git rebase --continue, then retry merge.`;
-    }
     return `Merge conflict: ${files}`;
   }
   if (run.merge?.status === "failed") {
@@ -1314,7 +1271,7 @@ function syncResultMessage(run: RunRecord): string {
   }
   if (run.sync?.status === "conflict") {
     const files = (run.sync.conflictedFiles ?? []).join(", ") || "unknown files";
-    return `Rebase conflict while syncing: ${files}. Resolve in the workspace, run git rebase --continue, then retry sync.`;
+    return `Rebase conflict while syncing: ${files}. jj recorded the conflicts in the change; resolve them in the workspace.`;
   }
   if (run.sync?.status === "failed") {
     return `Sync failed: ${run.sync.error ?? "unknown error"}`;
@@ -1331,10 +1288,10 @@ export async function cleanupRuns(force = false): Promise<void> {
       continue;
     }
     try {
-      await removeRunWorkspace(run, force);
+      await removeRunWorkspace(run);
       console.log(`Removed ${shortenHome(run.workspace.path)}`);
     } catch {
-      // Best-effort cleanup matches the existing git workspace behavior.
+      // Best effort: one workspace that cannot be removed does not stop the rest.
     }
   }
   await writeAgentContext(repoRoot);
@@ -1348,10 +1305,7 @@ function canCleanupRun(run: RunRecord, force: boolean): boolean {
   if (force) {
     return true;
   }
-  if ((run.vcs ?? "git") === "jj") {
-    return run.status === "merged" || run.status === "completed";
-  }
-  return run.status === "merged";
+  return run.status === "merged" || run.status === "completed";
 }
 
 async function emit(run: RunRecord, event: RudderEvent): Promise<void> {
@@ -1666,7 +1620,7 @@ function isContextCompletedStatus(status: RunRecord["status"]): boolean {
 function runHasMergeSource(run: RunRecord): boolean {
   return Boolean(
     !hasManagedSource(run) && run.workspace.enabled &&
-      (run.workspace.path || run.workspace.branch || run.workspace.workspaceName || run.workspace.jjChangeId),
+      (run.workspace.path || run.workspace.workspaceName || run.workspace.jjChangeId),
   );
 }
 

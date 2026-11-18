@@ -30,9 +30,6 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     if args.first().is_some_and(|s| s == "workspace") {
         return crate::workspace_cli::run(&args[1..]);
     }
-    if args.first().is_some_and(|s| s == "launch-error") {
-        bail!("engine could not issue a scoped agent identity; inspect engine diagnostics");
-    }
     if args.first().is_some_and(|s| s == "mcp") {
         return crate::agent_mcp::run(&args[1..]);
     }

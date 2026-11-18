@@ -27,7 +27,7 @@ import {
   type MoveCandidate,
   type MoveManifest,
 } from "./move-home.js";
-import { adoptLegacyWorkspaceKey, AGENT_WORKSPACES_DIR, ensureProjectRuntimeIgnored, workspacePath } from "./state.js";
+import { AGENT_WORKSPACES_DIR, ensureProjectRuntimeIgnored, workspacePath } from "./state.js";
 import type { JsonValue } from "./types.js";
 import { nowIso, pathExists, readJson, runCommand, shortHash, writeJson } from "./util.js";
 
@@ -78,7 +78,6 @@ export async function exportRunForPull(repoRoot: string, runId: string, outFile:
   if (!record || record.id !== runId) {
     throw new Error(`no agent ${runId} on the home machine`);
   }
-  adoptLegacyWorkspaceKey(record);
   const workspace = (record.workspace ?? {}) as Record<string, unknown>;
   const ownWorkspace = workspace.enabled === true && typeof workspace.path === "string" && workspace.path
     && (await pathExists(workspace.path)) ? workspace.path : null;

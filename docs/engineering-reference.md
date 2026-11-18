@@ -202,7 +202,7 @@ Implemented in `src/run-manager.ts`.
      currentJjChangeId(repoRoot)` (else `currentBranch`).
    - `createRunWorkspace` -> `jj.ts::createRunJjWorkspace`: `jj workspace add` at
      `<repo>/.rudder-workspaces/<repo>-<hash>/<run id>` with name `rudder-<run id>`.
-     The run records `vcs:"jj"` and `workspace.jjChangeId`.
+     The run records `workspace.workspaceName` and `workspace.jjChangeId`.
    - **Run ids are a few task words plus a 5-character key**:
      `launch-video-k3f9q` (`new_run_id` in gitio.rs, `newRunId` in util.ts;
      at most 4 words / 32 chars from the redacted task summary, filler words
@@ -246,8 +246,8 @@ Implemented in `src/run-manager.ts`.
 4. **Verify** (`brain.ts::verifyRun`): produces a `VerificationResult`
    (`satisfied`, `missing`, `notes`, `shouldContinue`) written to `verifier.json`.
 
-5. **Merge / sync** (jj-first; routed by `run.vcs` in `run-manager.ts`):
-   - New runs are jj. `mergeJjRunIntoCurrentWorkspace(run, allowDirty)` (`jj.ts`):
+5. **Merge / sync** (every run is jj):
+   - `mergeJjRunIntoCurrentWorkspace(run, allowDirty)` (`jj.ts`):
      captures `currentOpId` first (records it on `MergeState.operationId`), then
      `jj new <into> <node>` to merge the run's change into the current change `@`.
      jj records any conflict in the merge change (`jj resolve --list`) rather than
@@ -262,10 +262,6 @@ Implemented in `src/run-manager.ts`.
    - **Global undo:** `currentOpId`/`undoToOp`/`undoLast` back `rudder undo [opId]`;
      `.rudder/undo-stack.json` records `UndoEntry`s. `jj op restore` is global - it
      rewinds all workspaces and refs at once.
-   - **Legacy git runs** (`run.vcs === "git"`, created before the jj switch) stay
-     mergeable via the git helpers kept in `git.ts`
-     (`mergeGitRunIntoCurrentBranch`, `syncGitRunWorktree`, `rebaseWorktreeOntoBase`,
-     `resolveRebaseBaseRef`, `removeGitWorktree`), reached only behind the vcs guard.
 
 ---
 
@@ -279,15 +275,15 @@ The important shapes:
   `lifecyclePhase` (`working`, `verifying`, `integrating`, `resolving`,
   `merged-locally`, `pushed`, `deployed`, `delivery proof needed`, `orphaned`, or
   `cloud-owned`). Holds
-  `workspace{enabled,path,branch?,workspaceName?,jjChangeId?}` (pre-rename records use the `worktree` key and are promoted on read),
-  `vcs:"jj"|"git"`, `process{pid,...}`, `turns[]`, `autoSteer`,
+  `workspace{enabled,path,workspaceName?,jjChangeId?}`,
+  `process{pid,...}`, `turns[]`, `autoSteer`,
   `session{nativeSessionId,...}`, `terminal{kind:"tmux",...}`, `verification`,
   `merge` (with `operationId`/`mergeChangeId`), `sync`,
   `resolverFor?`/`resolverRunId?`, `taskSummary`/`taskSummaryLlm`, and optional
   `delivery` evidence (`kind`, status, target/url/appPath, provider, revision,
   deployment id/version, verification time, and smoke checks). Process completion,
   local integration, push, and verified delivery are deliberately separate facts.
-- `RudderConfig`: `defaultBackend`, `lastUsedBackend`, `mergeStrategy`,
+- `RudderConfig`: `defaultBackend`, `lastUsedBackend`,
   `runPolicy`, `backends{claude,codex,acpx}` (each `BackendConfig` with
   `model`/`effort`/`reasoningEffort`/`profileId`).
 - `AuthProfileStore`: provider credentials (`api_key` / `oauth` / `token`),
@@ -295,8 +291,6 @@ The important shapes:
 - `RudderEvent`: the event-stream union appended to `events.ndjson`.
 - `SpecContract` / `VerificationResult` / `RunRequest` / `BackendAdapter`.
 - `CloudAuthState` / `CloudSail` for cloud.
-- `VcsMode = "git" | "jj"`: new runs are always `"jj"`; `"git"` only appears on
-  legacy records merged behind the vcs guard (section 12).
 - `UndoEntry = {opId,label,ts,runIds[]}`: entries on `.rudder/undo-stack.json`
   backing `rudder undo`.
 
@@ -834,8 +828,7 @@ Subcommands: `login`, `logout`, `launch`, `sail`, `list`/`ls`, `status`, `logs`,
   sail with NO task — the worker then boots the bare dashboard, which resumes the
   conversation via `claude --resume`. The manifest field names are a three-way
   contract (CLI writer / `cloud/worker/supervisor.mjs` stager / `native/src/gitio.rs`
-  reader) pinned by `tests/cloud-handoff.test.mjs`; the vocabulary is "workspace"
-  ("worktree" spellings are read for old snapshots, never written).
+  reader) pinned by `tests/cloud-handoff.test.mjs`; the vocabulary is "workspace".
 - Error messages prefer the parsed server error, then the body, then `<status>
   <statusText>` (so empty gateway responses still report a code).
 
@@ -1213,7 +1206,7 @@ brain lives in the cloud, and the phone is a first-class client.
   tracks every non-ignored file, so a stray secret would reach GitHub. The receiver
   (`importWork`) moves onto it (`jj new <head>`) only when nothing is lost: it has no
   work of its own, its work is already in the incoming history, or its edits read the
-  same there (Rudder's .gitignore lines in a fresh clone). Otherwise both stay and the
+  same there. Otherwise both stay and the
   incoming one is bookmark `rudder-sync/<from>`. The SENDER checkpoints a working copy
   with edits (`jj new`) so its next edits are a child of what was sent, or every second
   sync would read as diverged. `rudder cloud sync <name>` clones a repo that is only on
@@ -1915,7 +1908,6 @@ From `package.json`:
   `tui_harness_renders_the_plan_mode_card_when_the_planner_asks`.
 
 `tests/` are integration tests that import from `dist/` (so build first):
-`rebase-first.test.mjs` exercises merge/rebase/sync via `git.ts` + `state.ts`.
 `board-steer.test.mjs` covers both web-control owners: projector requests become
 durable native inbox entries, and a real standalone board redirects a delayed fake
 worker end-to-end before returning the same task/workspace to Review.
@@ -2032,9 +2024,7 @@ rudder.viraat.dev 308-redirects there (site/vercel.json).
   2.39. Only when that fails does `ensureJj` throw `MissingToolError("jj")`,
   carrying the reason. The jj driver is `src/jj.ts` (all commands via
   `runCommand("jj", ...)`); `git.ts` keeps only the externally-git contract
-  (root/branch/commit, status+diff for Hunk) plus the legacy git merge/sync
-  helpers behind a `run.vcs === "git"` guard. New runs always record
-  `vcs:"jj"` + `workspace.jjChangeId`. Use `exportToGit` after each merge. Global
+  (repo root, branch, commit). Every run records `workspace.jjChangeId`. Use `exportToGit` after each merge. Global
   undo is free via `jj op restore` (`rudder undo`). jj 0.40 note: `jj rebase`
   uses `-o`/`--onto` (not `-d`); `jj git push --allow-new` is gone (plain
   `--bookmark` push handles new bookmarks) - both have fallbacks in `jj.ts`.
@@ -2778,7 +2768,8 @@ verification time, and one or more checks. Only complete evidence may render `de
   The generated status sections are intentionally separate: Active means live or
   waiting, Ready means completed work awaiting review or merge, and Completed is
   terminal history.
-- **`RUDDER_SHARED.md`** — gitignored local shared context for API tokens, private URLs,
+- **`RUDDER_SHARED.md`** — local shared context, kept out of Git by `.git/info/exclude`
+  (Rudder never edits `.gitignore`), for API tokens, private URLs,
   account ids, env vars, and setup details the user gives Rudder and expects every agent
   to use. It is intentionally separate from `DECISIONS.md` because it may contain
   credential values and must not enter jj/git history. Native task-bar input calls

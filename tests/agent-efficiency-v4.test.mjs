@@ -280,8 +280,9 @@ test('production read receipts teach only integrated runs and reach fresh Claude
   await fs.writeFile(path.join(root,'src','worker.ts'),'export const value = 1;\n');
   await fs.writeFile(path.join(root,'.gitignore'),'.rudder/\n');
   for(const args of [['init'],['config','user.email','fixture@example.invalid'],['config','user.name','Fixture'],['add','.'],['commit','-m','fixture']])await exec('git',args,{cwd:root});
+  await exec('jj',['git','init','--colocate'],{cwd:root});
   const revision=(await exec('git',['rev-parse','HEAD'],{cwd:root})).stdout.trim();
-  const run={id:'read-run',backend:'claude',repoRoot:root,workspace:{path:root},task:'Update src/worker.ts',vcs:'git',verification:{missing:[],shouldContinue:false},merge:{status:'pending'}};
+  const run={id:'read-run',backend:'claude',repoRoot:root,workspace:{path:root},task:'Update src/worker.ts',verification:{missing:[],shouldContinue:false},merge:{status:'pending'}};
   const { BackendTelemetryObserver } = await import('../src/agent-efficiency/backend-observer.ts');
   const observer=new BackendTelemetryObserver(run);
   for(let i=0;i<3;i++) {
@@ -304,9 +305,6 @@ test('production read receipts teach only integrated runs and reach fresh Claude
     assert.match(context,/Advisory .*Retrieve the relevant symbol/);
     assert.match(context,/required checks and approvals still apply/);
   }
-  await exec('jj',['git','init','--colocate'],{cwd:root});
-  const jjContext=await efficiencyContext({...run,id:'fresh-jj',backend:'codex',vcs:'jj',merge:undefined});
-  assert.match(jjContext,/Advisory .*Retrieve the relevant symbol/);
   await fs.writeFile(path.join(root,'src/worker.ts'),'changed\n');
   assert.doesNotMatch(await efficiencyContext({...run,id:'dirty-fresh'}),/Advisory /);
 });

@@ -156,9 +156,9 @@ pub(crate) fn fork_claude(
     }
     let folder = projects.join(encode_claude_project_dir(target_cwd));
     fs::create_dir_all(&folder).map_err(|error| format!("could not create {}: {error}", folder.display()))?;
-    let fork_from = uuid::Uuid::new_v4().to_string();
+    let fork_from = crate::gitio::new_rudder_session_id();
     write_private_new(&folder.join(format!("{fork_from}.jsonl")), &bytes[..complete])?;
-    Ok(Branched::Claude { fork_from, session: uuid::Uuid::new_v4().to_string() })
+    Ok(Branched::Claude { fork_from, session: crate::gitio::new_rudder_session_id() })
 }
 
 /// Fork the source's whole conversation for the branch working in `target_cwd`.
@@ -201,7 +201,7 @@ fn branch_refusal(run: &AgentRun) -> Option<String> {
     if run.gam.is_some() || run.mode == AgentMode::GamAdversarial {
         return Some("Agents in a /gam pair can't be branched".to_string());
     }
-    if is_cloud_owned_agent(run) || run.status == AgentStatus::Migrated {
+    if is_cloud_owned_agent(run) {
         return Some("This agent runs on another machine".to_string());
     }
     if run.backend == Backend::Opencode {
@@ -382,7 +382,6 @@ impl App {
         };
         let run = &mut self.agents[index];
         run.cwd = workspace.path.clone();
-        run.workspace_branch = workspace.branch.clone();
         run.workspace_path = workspace.path_is_workspace.then_some(workspace.path.clone());
         run.workspace_name = workspace.workspace_name.clone();
         run.jj_change_id = workspace.jj_change_id.clone();
@@ -399,7 +398,8 @@ impl App {
             Branched::Codex { session } => codex_resume_command(run, session),
         };
         // A resumed conversation runs in a terminal here, as an edited chat's does.
-        signals::augment_existing_worker_command(&mut command, backend, AgentMode::Execute, &run_id, Some("native"));
+        let wired =
+            signals::augment_existing_worker_command(&mut command, backend, AgentMode::Execute, &run_id, Some("native"));
         if let Some(prompt) = &branch.prompt {
             // After `--`, text that starts with "-" is the prompt, not a flag.
             command.args.push("--".to_string());
@@ -414,7 +414,7 @@ impl App {
             cwd: Some(workspace.path.clone()),
             ..TerminalPaneOptions::default()
         };
-        let spawned = self.spawn_into_row(index, command, options, typed);
+        let spawned = self.spawn_into_row(index, wired.map(|()| command), options, typed);
         let run = &mut self.agents[index];
         if spawned.is_ok() {
             match &branch.prompt {

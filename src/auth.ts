@@ -21,6 +21,7 @@ import {
   readJson,
   runCommand,
   runCommandSync,
+  shellQuote,
   shortenHome,
 } from "./util.js";
 import { CODEX_DEFAULT_MODEL, authStorePath, loadAuthStore, loadConfig, saveAuthStore, saveConfig } from "./state.js";
@@ -161,12 +162,21 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
   for (const [profileId, credential] of Object.entries(store.profiles).sort()) {
     console.log(`    - ${profileId} (${credential.provider}/${credential.type})`);
   }
-  if (!detection.acpxCommand) {
-    console.log("  fix:    run `npm install -g acpx@latest` or `rudder onboard`");
+  // Only what this setup actually lacks. acpx matters only as the default
+  // backend; a terminal gets the install offer below instead of a fix line.
+  const { onboardingInteractive, runLaptopOnboarding } = await import("./onboarding.js");
+  if (!detection.claudeCommand && !detection.codexCommand && !onboardingInteractive(options?.json)) {
+    console.log("  fix:    install an agent: `npm i -g @openai/codex` or `npm i -g @anthropic-ai/claude-code`");
+  }
+  if (!detection.acpxCommand && config.defaultBackend === "acpx") {
+    console.log(`  fix:    ${formatMissingToolMessage("acpx")}`);
+  }
+  const identity = detection.jjCommand ? await jjIdentityFix() : null;
+  if (identity) {
+    console.log(`  fix:    ${identity}`);
   }
   // On a terminal: offer Claude Code / Codex when missing, and list the repos
   // already on the cloud machine when this computer is signed in.
-  const { runLaptopOnboarding } = await import("./onboarding.js");
   const { cloudRepoSummaries } = await import("./cloud.js");
   await runLaptopOnboarding({ json: options?.json, cloudRepos: cloudRepoSummaries });
   if (!detection.jjCommand) {
@@ -174,6 +184,36 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
     console.log(`  fix:    ${reason ? `Rudder could not set jj up (${reason}). ` : ""}${formatMissingToolMessage("jj")}`);
     throw new MissingToolError("jj", "jj is required but not installed. Rudder uses jj for run isolation and merge.");
   }
+}
+
+/**
+ * jj authors every commit Rudder makes and reads only its own config, never
+ * git's user.name/email (checked on jj 0.40.0). Without one the commits say
+ * "JJ_EMPTY_STRING". The fix names the user's git identity when there is one;
+ * nothing is invented or set on their behalf.
+ */
+async function jjIdentityFix(): Promise<string | null> {
+  const value = async (program: string, args: string[], unsetExit: number | null): Promise<string> => {
+    const result = await runCommand(program, args, { allowFailure: true });
+    if (result.code !== 0 && result.code !== unsetExit) {
+      throw new Error(`${program} ${args.join(" ")} failed: ${result.stderr.trim()}`);
+    }
+    return result.stdout.trim();
+  };
+  const name = await value("jj", ["config", "get", "user.name"], null);
+  const email = await value("jj", ["config", "get", "user.email"], null);
+  if (name && email) {
+    return null;
+  }
+  // `git config <key>` exits 1 when the key is unset.
+  const gitName = name ? "" : await value("git", ["config", "user.name"], 1);
+  const gitEmail = email ? "" : await value("git", ["config", "user.email"], 1);
+  const commands = [
+    ...(name ? [] : [`jj config set --user user.name ${shellQuote(gitName || "Your Name")}`]),
+    ...(email ? [] : [`jj config set --user user.email ${shellQuote(gitEmail || "you@example.com")}`]),
+  ];
+  const missing = !name && !email ? "name or email" : name ? "email" : "name";
+  return `jj has no author ${missing}, so Rudder's commits are authored by "JJ_EMPTY_STRING". Set yours: ${commands.join(" && ")}`;
 }
 
 export async function runOnboard(options?: { nonInteractive?: boolean; json?: boolean }): Promise<void> {

@@ -78,6 +78,8 @@ pub(crate) fn terminal_bytes_for_key(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::PageUp => b"\x1b[5~".to_vec(),
         KeyCode::PageDown => b"\x1b[6~".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
+        // Codex's "f2 to view" (and any agent's F-key binding) needs these.
+        KeyCode::F(number @ 1..=12) => function_key_bytes(number, key.modifiers),
         _ => return None,
     };
     Some(bytes)
@@ -160,8 +162,8 @@ pub(crate) fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
     }
 }
 
-pub(crate) fn modified_arrow(final_byte: &str, modifiers: KeyModifiers) -> Vec<u8> {
-    // xterm: parameter = 1 + Shift(1) + Alt(2) + Ctrl(4); omitted when no modifier.
+/// xterm's modifier parameter: 1 + Shift(1) + Alt(2) + Ctrl(4).
+fn xterm_modifier_code(modifiers: KeyModifiers) -> u8 {
     let mut code = 1;
     if modifiers.contains(KeyModifiers::SHIFT) {
         code += 1;
@@ -172,9 +174,56 @@ pub(crate) fn modified_arrow(final_byte: &str, modifiers: KeyModifiers) -> Vec<u
     if modifiers.contains(KeyModifiers::CONTROL) {
         code += 4;
     }
+    code
+}
+
+pub(crate) fn modified_arrow(final_byte: &str, modifiers: KeyModifiers) -> Vec<u8> {
+    // The parameter is omitted when no modifier is held.
+    let code = xterm_modifier_code(modifiers);
     if code == 1 {
         format!("\x1b[{final_byte}").into_bytes()
     } else {
         format!("\x1b[1;{code}{final_byte}").into_bytes()
+    }
+}
+
+/// xterm function keys: F1-F4 are `ESC O P`..`ESC O S` (`ESC [1;<mods>P`.. when
+/// modified), F5-F12 are `ESC [<n>~` (`ESC [<n>;<mods>~` when modified).
+fn function_key_bytes(number: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let code = xterm_modifier_code(modifiers);
+    if number <= 4 {
+        let final_byte = ["P", "Q", "R", "S"][usize::from(number - 1)];
+        return if code == 1 {
+            format!("\x1bO{final_byte}").into_bytes()
+        } else {
+            modified_arrow(final_byte, modifiers)
+        };
+    }
+    let n = [15, 17, 18, 19, 20, 21, 23, 24][usize::from(number - 5)];
+    if code == 1 {
+        format!("\x1b[{n}~").into_bytes()
+    } else {
+        format!("\x1b[{n};{code}~").into_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_keys_reach_the_pane_as_xterm_sequences() {
+        let key = |number, modifiers| terminal_bytes_for_key(KeyEvent::new(KeyCode::F(number), modifiers));
+        let none = KeyModifiers::empty();
+        assert_eq!(key(1, none), Some(b"\x1bOP".to_vec()));
+        assert_eq!(key(2, none), Some(b"\x1bOQ".to_vec()));
+        assert_eq!(key(4, none), Some(b"\x1bOS".to_vec()));
+        assert_eq!(key(5, none), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(key(10, none), Some(b"\x1b[21~".to_vec()));
+        assert_eq!(key(11, none), Some(b"\x1b[23~".to_vec()));
+        assert_eq!(key(12, none), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(key(2, KeyModifiers::SHIFT), Some(b"\x1b[1;2Q".to_vec()));
+        assert_eq!(key(5, KeyModifiers::CONTROL), Some(b"\x1b[15;5~".to_vec()));
+        assert_eq!(key(13, none), None);
     }
 }

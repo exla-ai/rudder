@@ -27,7 +27,7 @@ const ORCHESTRATOR_SKILLS_DIR: &str = ".claude/skills";
 
 pub(crate) fn mint_session_id_for(backend: Backend) -> Option<String> {
     match backend {
-        Backend::Claude => Some(uuid::Uuid::new_v4().to_string()),
+        Backend::Claude => Some(crate::gitio::new_rudder_session_id()),
         // Codex and opencode mint their own session ids and offer no way to
         // pre-declare one; Rudder discovers theirs after the fact.
         Backend::Codex | Backend::Opencode => None,
@@ -35,7 +35,7 @@ pub(crate) fn mint_session_id_for(backend: Backend) -> Option<String> {
 }
 
 pub(crate) fn ensure_orchestrator_skills(repo_root: &Path) -> Result<()> {
-    ensure_gitignore_contains(repo_root, ".claude/skills/rudder-*/")?;
+    ensure_git_excludes(repo_root, &[".claude/skills/rudder-*/"])?;
     let base = repo_root.join(ORCHESTRATOR_SKILLS_DIR);
     fs::create_dir_all(&base)?;
     for skill in ORCHESTRATOR_SKILLS {
@@ -848,7 +848,6 @@ pub(crate) fn push_codex_interactive_orchestrator_args(
 pub(crate) const CODEX_COMMON_CONFIG: &[&str] = &[
     "notify=[]",
     "model_reasoning_summary=\"detailed\"",
-    "model_supports_reasoning_summaries=true",
     "model_auto_compact_token_limit=150000",
     "tool_output_token_limit=6000",
 ];
@@ -935,8 +934,9 @@ pub(crate) fn opencode_program() -> String {
 }
 
 /// The Codex executable: the `codex` on PATH. RUDDER_CODEX_BIN only points
-/// tests at a fake. A missing `codex` fails the launch at spawn
-/// (`require_codex_on_path` in pty_terminal.rs).
+/// tests at a fake. A missing `codex` fails the launch with its install
+/// command (`require_agent_program` in pty_terminal.rs), as a missing
+/// `claude` or `opencode` does.
 pub(crate) fn codex_program() -> String {
     env::var("RUDDER_CODEX_BIN")
         .ok()

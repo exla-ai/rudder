@@ -62,12 +62,11 @@ async function runProbe(mode, directory) {
     for (const name of ["owned.txt", "RUDDER.md", "RUDDER_SHARED.md", ".gitignore", ".git/info/exclude"]) {
       await fsp.writeFile(path.join(workspace, name), `protected ${name}\n`);
     }
-    const value = { id, status: "completed", mode: "execute", backend: "codex", vcs: "git",
+    const value = { id, status: "completed", mode: "execute", backend: "codex",
       task: "[[FAKE_FILE:owned.txt]]\nwrong worker\n[[/FAKE_FILE]]", taskSummary: "Saved title", taskSummaryLlm: true,
       repoRoot: repo, targetBranch: "main", baseCommit: "old-base", createdAt: "2026-10-30T00:00:00Z", updatedAt: "2026-10-30T00:00:00Z",
-      workspace: { enabled: true, path: workspace, branch: "old-branch", workspaceName: "old-workspace", jjChangeId: "old-change" },
+      workspace: { enabled: true, path: workspace, workspaceName: "old-workspace", jjChangeId: "old-change" },
       autoSteer: { count: 0, max: 0 }, ...extra };
-    if (extra.vcs === undefined && Object.hasOwn(extra, "vcs")) delete value.vcs;
     await fsp.writeFile(path.join(owned, "run.json"), JSON.stringify(value));
     await fsp.writeFile(path.join(owned, "events.ndjson"), "{\"type\":\"backend.output\",\"data\":\"saved\"}\n");
     await fsp.writeFile(path.join(owned, "output.txt"), "saved output\n");
@@ -82,12 +81,11 @@ async function runProbe(mode, directory) {
     const cases = [
       ...[null, false, 0, "", [], {}, { phase: "assigned", assignment: {} }, { phase: "quarantined" }]
         .map((managedLocal) => ({ extra: { managedLocal } })),
-      ...["fabric", "future-vcs", false, null, {}].map((vcs) => ({ extra: { vcs } })),
       { extra: { managedLocal: { phase: "reserved" }, status: "merged" } },
-      { extra: { vcs: "jj" }, sidecar: "{malformed" },
-      { extra: { vcs: undefined }, sidecar: "" },
-      { extra: { vcs: "git" }, sidecar: "directory" },
-      { extra: { vcs: "jj" }, sidecar: "symlink" },
+      { extra: {}, sidecar: "{malformed" },
+      { extra: {}, sidecar: "" },
+      { extra: {}, sidecar: "directory" },
+      { extra: {}, sidecar: "symlink" },
     ];
     for (const [index, item] of cases.entries()) {
       const fixture = await record(`protected-${index}`, item.extra, item.sidecar);
@@ -127,7 +125,7 @@ async function runProbe(mode, directory) {
     const saved = await snapshot(fixture.workspace);
     const alias = path.join(directory, "legacy-alias");
     await fsp.symlink(fixture.workspace, alias);
-    const legacy = await record("legacy-alias", { vcs: "git" });
+    const legacy = await record("legacy-alias");
     legacy.value.workspace.path = alias;
     await fsp.writeFile(path.join(legacy.owned, "run.json"), JSON.stringify(legacy.value));
     await manager.writeAgentContext(repo);
@@ -150,14 +148,16 @@ async function runProbe(mode, directory) {
     assert.deepEqual(await commands(), savedCommands, "root protection must return before any Git probe");
     assert.deepEqual(await snapshot(fixture.workspace), saved);
   } else {
-    for (const [index, vcs] of [undefined, "git", "jj"].entries()) {
-      const fixture = await record(`legacy-${index}`, { vcs });
+    // A record from before the field was dropped still carries `vcs`; it is
+    // ignored like any other unknown key.
+    for (const [index, extra] of [{}, { vcs: "git" }].entries()) {
+      const fixture = await record(`legacy-${index}`, extra);
       await manager.deleteRun(fixture.value.id, { force: true, silent: true });
       await assert.rejects(fsp.stat(fixture.owned), { code: "ENOENT" });
     }
     const rows = await commands();
-    assert.equal(rows.filter((r) => r.tool === "git" && r.args[0] === "worktree" && r.args[1] === "remove").length, 2);
-    assert.equal(rows.filter((r) => r.tool === "jj" && r.args[0] === "workspace" && r.args[1] === "forget").length, 1);
+    assert.equal(rows.filter((r) => r.tool === "git" && r.args[0] === "worktree").length, 0);
+    assert.equal(rows.filter((r) => r.tool === "jj" && r.args[0] === "workspace" && r.args[1] === "forget").length, 2);
     const stoppable = await record("legacy-stop", { vcs: "git" });
     await manager.stopRun(stoppable.value.id, { silent: true });
     assert.equal(JSON.parse(await fsp.readFile(path.join(stoppable.owned, "run.json"))).status, "cancelled");
@@ -172,7 +172,7 @@ if (process.argv[2] === "--managed-guard-probe") {
   for (const [mode, description] of [
     ["blocked", "managed and quarantined records reject every legacy mutation before touching protected paths"],
     ["context", "readonly views and context propagation protect managed aliases and filesystem roots"],
-    ["legacy", "valid Git, jj and pre-VCS records keep their existing delete and stop behavior"],
+    ["legacy", "records delete through jj and stop, whatever old vcs key they carry"],
   ]) {
     test(description, { skip: process.platform === "win32", timeout: 30_000 }, async (t) => {
       // Child process.cwd() resolves macOS /var -> /private/var (and other

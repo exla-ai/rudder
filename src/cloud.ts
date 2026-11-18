@@ -1415,7 +1415,6 @@ async function stageMigratedAgents(
       localWorkspacePath: candidate.workspacePath,
       cloudWorkspaceRelativePath: cloudWorkspaceAbs,
       sessionJsonlSnapshotPath: sessionJsonlSnapshotPath ?? "",
-      workspaceBranch: candidate.workspaceBranch,
       freshPrompt,
     });
   }

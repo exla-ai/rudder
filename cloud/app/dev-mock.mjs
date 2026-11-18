@@ -4,6 +4,7 @@
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
+// /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
@@ -26,6 +27,7 @@ const iso = (ms) => new Date(ms).toISOString();
 
 let signedOut = process.env.MOCK_SIGNED_OUT === "1";
 let homeMode = "running";
+let usageMode = "ok";
 // Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
 const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
 const CREDS = {
@@ -724,6 +726,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === "/app/__mock/signout") { signedOut = true; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/home/")) { homeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/usage/")) { usageMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/creds/")) {
     creds = (CREDS[p.split("/").pop()] || CREDS.out)();
     for (const key of Object.keys(logins)) delete logins[key];
@@ -840,6 +843,7 @@ const server = http.createServer(async (req, res) => {
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
       if (homeMode !== "running") return json(res, 503, { error: "The cloud machine is asleep", asleep: true });
+      if (usageMode === "old") return json(res, 400, { error: "Your cloud machine runs Rudder 4.4.2, which does not have this yet. Update it: press Alt+r in its dashboard." });
       const fetchedAt = iso(now() - 2 * MIN);
       const win = (label, percent, inMin) => ({ label, percent, resetsAt: iso(now() + inMin * MIN) });
       return json(res, 200, { fetchedAt, ttlSeconds: 300, accounts: [

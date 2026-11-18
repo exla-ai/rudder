@@ -4,7 +4,7 @@
 // sidebar footer (GET /api/app/usage, src/usage.ts fetchQuota on the home).
 // Each shows a popover with the detail: on hover with a mouse, on tap.
 import { h, setText, escapeHtml } from "/app/render.js";
-import { api, coarse, rel, toMs } from "/app/core.js";
+import { api, coarse, ls, rel, toMs } from "/app/core.js";
 
 const SVG = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 const GAUGE = SVG('<path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l3.5-4"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/>');
@@ -283,10 +283,24 @@ function renderAgentPop(stats, problem) {
 const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }];
 const POLL_MS = 60_000;
 
+// The meter can be hidden on this device: "Hide" in its popover, and
+// Settings > Appearance shows it again. Every mounted meter follows the choice.
+const HIDE_KEY = "rudder.hidePlanUsage";
+let usageHidden = ls.get(HIDE_KEY, false) === true;
+const usageMeters = new Set();
+export const planUsageShown = () => !usageHidden;
+export function setPlanUsageShown(shown) {
+  usageHidden = !shown;
+  ls.set(HIDE_KEY, usageHidden);
+  for (const onToggle of usageMeters) onToggle();
+}
+
 /**
  * Plan usage for the cloud machine's signed-in Claude and Codex accounts: one
  * row each in the sidebar footer (the window closest to its limit), and every
- * window with its reset time in the popover. Mount `el` in the footer and call
+ * window with its reset time in the popover. Usage belongs to the machine's
+ * sign-ins, not to a project. When it cannot load, the meter says so and the
+ * popover gives the reason. Mount `el` in the footer and call
  * `update(store.state)` when the state changes; it fetches its own numbers.
  */
 export function PlanUsage() {
@@ -297,10 +311,19 @@ export function PlanUsage() {
   let signedIn = [];       // provider ids signed in on the machine
   let timer = 0, inflight = false, stopped = false;
 
-  const pop = popover(el, { label: "Plan usage", place: "above", render: () => renderUsagePop({ report, problem, signedIn, refresh: () => load(true) }) });
+  const pop = popover(el, { label: "Plan usage", place: "above", render: () => renderUsagePop({
+    report, problem, signedIn, refresh: () => load(true), hide: () => setPlanUsageShown(false),
+  }) });
+
+  const onToggle = () => {
+    paint();
+    if (usageHidden) clearTimeout(timer);
+    else { void load(); schedule(); }
+  };
+  usageMeters.add(onToggle);
 
   async function load(force = false) {
-    if (inflight || stopped) return;
+    if (inflight || stopped || usageHidden) return;
     inflight = true;
     try {
       report = await api(`/api/app/usage${force ? "?refresh=1" : ""}`);
@@ -313,20 +336,27 @@ export function PlanUsage() {
       paint();
     }
   }
-  const schedule = () => {
+  function schedule() {
     clearTimeout(timer);
-    if (stopped) return;
+    if (stopped || usageHidden) return;
     timer = setTimeout(() => { if (!document.hidden) void load(); schedule(); }, POLL_MS);
-  };
+  }
   const onVisible = () => { if (!document.hidden) void load(); };
   document.addEventListener("visibilitychange", onVisible);
 
   function paint() {
-    const accounts = PROVIDERS
-      .filter((p) => signedIn.includes(p.id))
-      .map((p) => ({ ...p, account: report?.accounts?.find((a) => a.provider === p.id) || null }));
-    el.hidden = !accounts.length || (!report && !problem);
+    el.hidden = usageHidden || !signedIn.length || (!report && !problem);
     if (el.hidden) { pop.close(); return; }
+    el.classList.toggle("stale", !!(report && problem));
+    // Nothing loaded: one plain line, no bars. The popover says why.
+    if (!report) {
+      const msg = h(`<span class="pu-msg">Plan usage unavailable</span>`);
+      rows.replaceChildren(msg);
+      el.setAttribute("aria-label", `Plan usage unavailable: ${problem}`);
+      if (pop.open) pop.paint();
+      return;
+    }
+    const accounts = reportedAccounts(report, signedIn);
     rows.replaceChildren(...accounts.map(({ label, account }) => {
       const top = bindingWindow(account);
       const row = h(`<span class="pu-row"><span class="pu-name"></span><span class="pu-bar"><i></i></span><span class="pu-pct mono"></span></span>`);
@@ -338,11 +368,10 @@ export function PlanUsage() {
         setText(row.querySelector(".pu-pct"), account.blocked ? "Limit" : `${top.percent}%`);
       } else {
         row.classList.add("pu-none");
-        setText(row.querySelector(".pu-pct"), account ? "n/a" : "");
+        setText(row.querySelector(".pu-pct"), "n/a");
       }
       return row;
     }));
-    el.classList.toggle("stale", !!problem);
     el.setAttribute("aria-label", `Plan usage: ${accounts.map(({ label, account }) => {
       const top = bindingWindow(account);
       return top ? `${label} ${top.percent}% of ${top.label}` : `${label} not available`;
@@ -366,10 +395,21 @@ export function PlanUsage() {
     destroy() {
       stopped = true;
       clearTimeout(timer);
+      usageMeters.delete(onToggle);
       document.removeEventListener("visibilitychange", onVisible);
       pop.destroy();
     },
   };
+}
+
+const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+// The signed-in providers the report has an account for, in display order.
+function reportedAccounts(report, signedIn) {
+  return PROVIDERS
+    .filter((p) => signedIn.includes(p.id))
+    .map((p) => ({ ...p, account: report.accounts?.find((a) => a.provider === p.id) || null }))
+    .filter(({ account }) => account);
 }
 
 // The window closest to its limit decides when the account is blocked.
@@ -379,25 +419,29 @@ function bindingWindow(account) {
   return windows.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
 }
 
-function renderUsagePop({ report, problem, signedIn, refresh }) {
+function renderUsagePop({ report, problem, signedIn, refresh, hide }) {
   const box = h(`<div class="st-body pu-pop"></div>`);
-  for (const p of PROVIDERS.filter((x) => signedIn.includes(x.id))) {
-    const account = report?.accounts?.find((a) => a.provider === p.id) || null;
+  if (!report) {
+    const e = h(`<div class="pu-fail"></div>`);
+    setText(e, sentence(problem));
+    box.appendChild(e);
+  }
+  for (const { label, account } of report ? reportedAccounts(report, signedIn) : []) {
     const sec = h(`<section class="st-sec">
       <div class="st-h"><span class="pu-acct"></span><b class="pu-plan"></b></div>
       <div class="pu-email"></div>
       <div class="pu-wins"></div>
     </section>`);
-    setText(sec.querySelector(".pu-acct"), p.label);
-    setText(sec.querySelector(".pu-plan"), account?.plan || "");
-    setText(sec.querySelector(".pu-email"), account?.email || "");
+    setText(sec.querySelector(".pu-acct"), label);
+    setText(sec.querySelector(".pu-plan"), account.plan || "");
+    setText(sec.querySelector(".pu-email"), account.email || "");
     const wins = sec.querySelector(".pu-wins");
-    if (account?.blocked) {
+    if (account.blocked) {
       const b = h(`<div class="pu-blocked"></div>`);
-      setText(b, account.blocked.charAt(0).toUpperCase() + account.blocked.slice(1));
+      setText(b, sentence(account.blocked));
       wins.appendChild(b);
     }
-    for (const w of account?.windows || []) {
+    for (const w of account.windows || []) {
       const extra = w.label === "Extra usage";
       const row = h(`<div class="pu-win"><div class="pu-wh"><span></span><b class="mono"></b></div><div class="st-meter"><i></i></div><div class="pu-reset"></div></div>`);
       setText(row.querySelector(".pu-wh span"), w.label);
@@ -407,19 +451,19 @@ function renderUsagePop({ report, problem, signedIn, refresh }) {
       setText(row.querySelector(".pu-reset"), resetText(w.resetsAt));
       wins.appendChild(row);
     }
-    if (account?.error) {
+    if (account.error) {
       const e = h(`<div class="pu-err"></div>`);
       setText(e, `Usage unavailable: ${account.error}`);
-      wins.appendChild(e);
-    } else if (!account) {
-      const e = h(`<div class="pu-err"></div>`);
-      setText(e, "Not loaded yet.");
       wins.appendChild(e);
     }
     box.appendChild(sec);
   }
-  const foot = h(`<div class="st-foot pu-foot"><span class="pu-when"></span><button type="button" class="pu-refresh" aria-label="Refresh plan usage" title="Refresh">${REFRESH}</button></div>`);
-  setText(foot.querySelector(".pu-when"), problem || (report?.fetchedAt ? `Checked with the providers ${ago(report.fetchedAt)}` : ""));
+  const foot = h(`<div class="st-foot pu-foot"><span class="pu-when"></span><button type="button" class="pu-hide" title="Show it again in Settings">Hide</button><button type="button" class="pu-refresh" aria-label="Refresh plan usage" title="Refresh">${REFRESH}</button></div>`);
+  // Last data with a failed refresh: the bars are from the last good check,
+  // and the foot says why the refresh failed.
+  const when = report?.fetchedAt ? `Checked with the providers ${ago(report.fetchedAt)}` : "";
+  setText(foot.querySelector(".pu-when"), report && problem ? sentence(problem) : when);
+  foot.querySelector(".pu-hide").addEventListener("click", (e) => { e.stopPropagation(); hide(); });
   foot.querySelector(".pu-refresh").addEventListener("click", (e) => { e.stopPropagation(); refresh(); });
   box.appendChild(foot);
   return box;

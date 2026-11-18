@@ -8,6 +8,7 @@ import { h, icon, setText, copyText } from "/app/render.js";
 import { app, api, ls, PLATFORM, rel, confirmDialog, openSheet, openExternal, showError, toast, track } from "/app/core.js";
 import { DOWNLOAD_MAC_URL } from "/app/onboarding.js";
 import { dropdown } from "/app/select.js";
+import { planUsageShown, setPlanUsageShown } from "/app/agent-stats.js";
 
 const ROLE_LABEL = { admin: "Admin", member: "Member" };
 const SCOPE_KEY = "rudder.org";
@@ -135,7 +136,20 @@ export function SettingsScreen() {
     for (const b of lookSeg.children) b.setAttribute("aria-checked", String(b.dataset.value === window.RudderTheme.get()));
   };
   paintLook();
-  look.body.appendChild(lookSeg);
+  // The plan usage meter (agent-stats.js), shown or hidden on this device.
+  const usageSeg = h(`<div class="seg set-usage" role="radiogroup" aria-label="Plan usage meter"></div>`);
+  for (const [shown, label] of [[true, "Show plan usage"], [false, "Hide plan usage"]]) {
+    const b = h(`<button type="button" role="radio"></button>`);
+    setText(b, label);
+    b.addEventListener("click", () => { setPlanUsageShown(shown); paintUsage(); });
+    b.dataset.shown = String(shown);
+    usageSeg.appendChild(b);
+  }
+  const paintUsage = () => {
+    for (const b of usageSeg.children) b.setAttribute("aria-checked", String(b.dataset.shown === String(planUsageShown())));
+  };
+  paintUsage();
+  look.body.append(lookSeg, usageSeg);
   // Claude Code and Codex on the cloud machine: sign in, or switch accounts.
   const agentsSec = section("Agents");
   const agentsCard = app.accountsCard?.();

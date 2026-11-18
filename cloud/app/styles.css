@@ -792,6 +792,7 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
   display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 6px 8px; cursor: pointer; transition: background 120ms, color 120ms; }
 .seg.modes { margin: 14px 0 12px; flex: none; }
 .seg.set-theme { max-width: 380px; }
+.seg.set-usage { max-width: 380px; margin-top: 10px; }
 .seg.modes button { flex-direction: row; gap: 7px; }
 .seg button svg { width: 17px; height: 17px; }
 .seg button small { font-size: 12px; font-weight: 400; color: var(--faint); }

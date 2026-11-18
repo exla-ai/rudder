@@ -95,6 +95,8 @@
 .pu-pct { text-align: right; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .pu-none .pu-pct { color: var(--faint); }
 .pu.stale .pu-rows { opacity: 0.55; }
+/* Nothing loaded: one muted line in place of the bars. */
+.pu-msg { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* On a phone: a card on the home screen under the Claude and Codex sign-ins,
    laid out like them. */
 .pu-card { margin-top: 10px; padding: 0; overflow: hidden; }
@@ -105,6 +107,7 @@
 .pu-card .pu-row { grid-template-columns: 56px 1fr 44px; gap: 10px; font-size: 14px; }
 .pu-card .pu-bar { height: 6px; }
 .pu-card .pu-pct { font-size: 13px; }
+.pu-card .pu-msg { font-size: 14px; }
 
 .pu-pop .st-h b { color: var(--muted); font-weight: 500; font-size: 12px; }
 .pu-email { color: var(--muted); font-size: 12px; margin-top: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -117,7 +120,11 @@
 .pu-reset:empty { display: none; }
 .pu-blocked { font-size: 12.5px; font-weight: 600; color: var(--failed); }
 .pu-err { font-size: 12px; color: var(--muted); }
-.pu-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; margin-top: -2px; }
+.pu-fail { font-size: 13px; color: var(--ink-2); }
+.pu-foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; margin-top: -2px; }
+.pu-when { flex: 1; min-width: 0; }
+.pu-hide { flex: none; height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.pu-hide:hover { background: var(--surface-2); color: var(--ink); }
 .pu-refresh { flex: none; display: flex; width: 28px; height: 28px; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
 .pu-refresh:hover { background: var(--surface-2); color: var(--ink); }
 .pu-refresh svg { width: 15px; height: 15px; }

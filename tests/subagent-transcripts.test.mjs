@@ -1,7 +1,8 @@
 // Subagents in the app's chat (cloud/worker/transcripts.mjs): a Claude Code
-// Agent call or a Codex spawn_agent call carries the subagent it started, read
-// from the subagent's own log and followed as that log grows. Fixtures are
-// synthetic, shaped like Claude Code 2.1.327 and Codex 0.169 logs.
+// Agent call or a Codex spawn_agent call carries the subagent (or Claude
+// teammate) it started, read from that agent's own log and followed as the log
+// grows. Fixtures are synthetic, shaped like Claude Code 2.1.327 and Codex
+// 0.169 logs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -41,9 +42,11 @@ test("Claude: each Agent call shows its subagent, done or running, and a running
     user("r1", "a1", launched("toolu_map", "amap"), 2, { toolUseResult: { status: "async_launched", agentId: "amap" } }),
     assistant("a2", "r1", [agentCall("toolu_pay", "Review payout rounding", "Check payout rounding.")], 3),
     user("r2", "a2", launched("toolu_pay", "apay"), 4),
-    // A teammate is an Agent call too, but its own session: no metadata, no card.
-    assistant("a3", "r2", [agentCall("toolu_team", "Teammate", "Work on the PR.")], 5),
-    user("r3", "a3", [{ type: "tool_result", tool_use_id: "toolu_team", content: "Spawned successfully." }], 6),
+    // A teammate is an Agent call too, but a session of its own.
+    assistant("a3", "r2", [agentCall("toolu_team", "Open the PR", "Work on the PR.")], 5),
+    user("r3", "a3", [{ type: "tool_result", tool_use_id: "toolu_team", content: "Spawned successfully." }], 6, {
+      toolUseResult: { status: "teammate_spawned", name: "pr", team_name: `session-${session.slice(0, 8)}`, agent_type: "general-purpose" },
+    }),
     // Claude reports the background subagent's end in a task notification.
     { type: "attachment", uuid: "n1", parentUuid: "r3", timestamp: at(40), attachment: { type: "queued_command", prompt: "<task-notification>\n<task-id>amap</task-id>\n<tool-use-id>toolu_map</tool-use-id>\n<status>completed</status>\n<result>Nothing settles bets.</result>\n</task-notification>", origin: { kind: "task-notification" } } },
     assistant("a4", "n1", [{ type: "text", text: "Writing the settlement job." }], 41),
@@ -66,10 +69,35 @@ test("Claude: each Agent call shows its subagent, done or running, and a running
     side("p2", "p1", "assistant", [{ type: "tool_use", id: "rd", name: "Read", input: { file_path: "src/payout.ts" } }], 12, "apay"),
   ]));
 
+  // The teammate's session, in the same project folder. Its first entry names
+  // its team and name and carries the call's prompt; an earlier "pr" of the
+  // team had another task.
+  const teammate = "7ea77a7e-0000-4000-8000-000000000002";
+  const told = (uuid, text, ts) => ({ type: "user", uuid, teamName: `session-${session.slice(0, 8)}`, agentName: "pr", timestamp: at(ts), message: { role: "user", content: `<teammate-message teammate_id="team-lead">\n${text}\n</teammate-message>` } });
+  fs.writeFileSync(path.join(project, "7ea77a7e-0000-4000-8000-000000000001.jsonl"), jsonl([told("o1", "Fix the old PR.", 7)]));
+  const teamLog = path.join(project, `${teammate}.jsonl`);
+  fs.writeFileSync(teamLog, jsonl([
+    { type: "agent-setting", agentSetting: "general-purpose", sessionId: teammate },
+    told("t1", "Work on the PR.", 7),
+    assistant("t2", "t1", [{ type: "tool_use", id: "gh", name: "Bash", input: { command: "gh pr create" } }], 8),
+    user("t3", "t2", [{ type: "tool_result", tool_use_id: "gh", content: "https://github.com/x/y/pull/7" }], 9),
+    assistant("t4", "t3", [{ type: "text", text: "Opened PR 7." }], 10),
+    { type: "system", subtype: "turn_duration", durationMs: 3000, timestamp: at(11) },
+  ]));
+
   const read = () => readTranscript(repo, "run_c", { home });
   const cards = (transcript) => transcript.messages.filter((m) => m.subagent).map((m) => m.subagent);
-  const [done, running] = cards(read());
-  assert.equal(cards(read()).length, 2, "the teammate gets no card");
+  const [done, running, team] = cards(read());
+  assert.deepEqual(
+    { id: team.id, kind: team.kind, name: team.name, description: team.description, status: team.status, result: team.result, endedAt: team.endedAt },
+    { id: teammate, kind: "general-purpose", name: "pr", description: "Open the PR", status: "done", result: "Opened PR 7.", endedAt: Date.parse(at(11)) },
+  );
+  assert.deepEqual(team.messages.map((m) => m.role), ["tool", "assistant"]);
+  // The lead writes again: a new turn, its message unwrapped. Then its process exits mid-turn.
+  fs.appendFileSync(teamLog, line(told("t5", "Also add a test.", 20)));
+  assert.deepEqual([cards(read())[2].status, cards(read())[2].messages.at(-1).text], ["running", "Also add a test."]);
+  fs.appendFileSync(teamLog, line({ type: "cost-state", sessionId: teammate }));
+  assert.equal(cards(read())[2].status, "stopped");
   assert.deepEqual(
     { id: done.id, kind: done.kind, description: done.description, prompt: done.prompt, status: done.status, toolCalls: done.toolCalls, result: done.result, endedAt: done.endedAt },
     { id: "amap", kind: "Explore", description: "Map resolution flow", prompt: "Find where markets resolve.", status: "done", toolCalls: 1, result: "Nothing settles bets.", endedAt: Date.parse(at(30)) },
@@ -124,9 +152,11 @@ test("Codex: spawn_agent shows the subagent from its own rollout, past the paren
     { timestamp: at(0), ordinal: 0, type: "session_meta", payload: { id: parentId, cli_version: "0.169.0" } },
     item(1, 1, { type: "message", role: "user", content: [{ type: "input_text", text: "list ports per project" }] }),
     spawnCall(2, 10),
-    item(3, 10, { type: "function_call_output", call_id: "call_spawn", output: JSON.stringify({ task_name: "/root/proc_net_parsing" }) }),
-    item(4, 11, { type: "function_call", name: "spawn_agent", call_id: "call_bad", arguments: JSON.stringify({ task_name: "docker_ports", message: "gAAAA" }) }),
-    item(5, 11, { type: "function_call_output", call_id: "call_bad", output: "agent limit reached" }),
+    // Codex records the thread the call started.
+    event(3, 10, { type: "item_completed", item: { type: "SubAgentActivity", id: "call_spawn", kind: "started", agent_thread_id: childId, agent_path: "/root/proc_net_parsing" } }),
+    item(4, 10, { type: "function_call_output", call_id: "call_spawn", output: JSON.stringify({ task_name: "/root/proc_net_parsing" }) }),
+    item(5, 11, { type: "function_call", name: "spawn_agent", call_id: "call_bad", arguments: JSON.stringify({ task_name: "docker_ports", message: "gAAAA" }) }),
+    item(6, 11, { type: "function_call_output", call_id: "call_bad", output: "agent limit reached" }),
   ]));
   const childMeta = (id, agentPath, parent) => ({ timestamp: at(10), ordinal: 0, type: "session_meta", payload: {
     id, forked_from_id: parent, subagent_history_start_ordinal: 4, agent_nickname: "Turing", agent_path: agentPath,
@@ -143,7 +173,7 @@ test("Codex: spawn_agent shows the subagent from its own rollout, past the paren
     item(5, 12, { type: "function_call", name: "exec_command", call_id: "c1", arguments: JSON.stringify({ cmd: "cat /proc/net/tcp6" }) }),
     item(6, 13, { type: "function_call_output", call_id: "c1", output: "sl local_address" }),
   ]));
-  // Another parent's subagent with the same task name, spawned at nearly the same time.
+  // Another parent's subagent with the same task name, spawned at nearly the same time: not the one the call started.
   fs.writeFileSync(path.join(day, `rollout-2026-11-18T09-00-10-${otherId}.jsonl`), jsonl([childMeta(otherId, "/root/proc_net_parsing", "someone-else")]));
 
   const read = () => readTranscript(repo, "run_x", { home }).messages.filter((m) => m.subagent);

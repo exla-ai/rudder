@@ -63,9 +63,9 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
   const shown = new Set(base.messages);
   const live = LIVE_RUN.has(record.status);
   if (codex) {
-    attachCodexSubagents(reader, { home, parentId: record.session.nativeSessionId, live, shown, depth: 0 });
+    attachCodexSubagents(reader, { home, live, shown, depth: 0 });
   } else {
-    attachClaudeSubagents(reader, { dir: path.join(file.replace(/\.jsonl$/, ""), "subagents"), live, shown, depth: 0 });
+    attachClaudeSubagents(reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
   }
   // The prompts the app may offer to edit (chat-edit.js).
   base.edits = editablePrompts(lines, codex ? "codex" : "claude");
@@ -272,20 +272,26 @@ function parseClaude(lines, stats = null) {
 const CLAUDE_SUBAGENT_TOOL = "Agent";
 
 // A Claude Code session read entry by entry. The parent's own file skips
-// sidechain entries; a subagent's file (`sidechain`) is nothing but those. Its
-// first user turn repeats the prompt from the parent's Agent call, and a fork's
-// file starts with a copy of that call (`self`), so neither shows again.
-function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
+// sidechain entries; a subagent's file is nothing but those, and a teammate's
+// file is its own session. Either one (`sub`) is shown from its first user
+// turn on, which repeats the prompt from the parent's Agent call, so it does
+// not show again; neither does the copy of that call a fork's file starts
+// with (`self`).
+function claudeReader({ stats = null, sub = false, self = null } = {}) {
   const tools = new Map(); // tool_use id -> message
-  const outputLimit = sidechain ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
+  const outputLimit = sub ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
   const reader = {
     messages: [],
-    // Agent tool_use id -> { message, ts, prompt, isError }
+    // Agent tool_use id -> { message, ts, prompt, description, isError, teammate }
     spawns: new Map(),
     // Agent tool_use id -> the status of its newest <task-notification>
     notifications: new Map(),
     toolCalls: 0,
     lastAt: null,
+    // A teammate's turn ended and it waits for its next message, or its
+    // process exited.
+    idle: false,
+    exited: false,
     dropped: 0,
     addLine(line) {
       if (!line.trim()) {
@@ -298,7 +304,7 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
         return;
       }
       add(entry);
-      if (sidechain && reader.messages.length > SUBAGENT_KEEP * 2) {
+      if (sub && reader.messages.length > SUBAGENT_KEEP * 2) {
         const extra = reader.messages.length - SUBAGENT_KEEP;
         reader.messages.splice(0, extra);
         reader.dropped += extra;
@@ -323,7 +329,17 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
       }));
       return;
     }
-    const own = sidechain || !entry.isSidechain;
+    const own = sub || !entry.isSidechain;
+    if (sub && entry.type === "system" && entry.subtype === "turn_duration") {
+      reader.idle = true;
+      reader.lastAt = toMillis(entry.timestamp) ?? reader.lastAt;
+      return;
+    }
+    // Claude Code saves a session's cost-state as its process exits.
+    if (sub && entry.type === "cost-state") {
+      reader.exited = true;
+      return;
+    }
     // A message typed while the agent works: Claude Code hands it to the running
     // turn as a queued_command attachment, never as a user entry.
     const queued = entry.type === "attachment" && own ? entry.attachment : null;
@@ -344,7 +360,9 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
       return;
     }
     const ts = toMillis(entry.timestamp);
-    if (sidechain && ts !== null) {
+    reader.idle = false;
+    reader.exited = false;
+    if (sub && ts !== null) {
       reader.lastAt = ts;
     }
     if (entry.isCompactSummary) {
@@ -364,11 +382,11 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
     const userText = (text) => {
       noteTaskNotification(text);
       const clean = cleanUserText(text);
-      if (clean && sidechain && !promptSeen) {
+      if (clean && sub && !promptSeen) {
         promptSeen = true;
         return "";
       }
-      return clean;
+      return sub ? teammateMessage(clean)?.body ?? clean : clean;
     };
     if (typeof content === "string") {
       const text = entry.type === "user" ? userText(content) : cleanUserText(content);
@@ -398,7 +416,14 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
         tools.set(block.id, message);
         reader.toolCalls += 1;
         if (block.name === CLAUDE_SUBAGENT_TOOL && block.id) {
-          reader.spawns.set(block.id, { message, ts, prompt: typeof block.input?.prompt === "string" ? block.input.prompt : null, isError: false });
+          reader.spawns.set(block.id, {
+            message,
+            ts,
+            prompt: typeof block.input?.prompt === "string" ? block.input.prompt : null,
+            description: typeof block.input?.description === "string" ? block.input.description : null,
+            isError: false,
+            teammate: null,
+          });
         }
         push(message);
       } else if (block?.type === "tool_result") {
@@ -413,6 +438,12 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
         const spawn = reader.spawns.get(block.tool_use_id);
         if (spawn) {
           spawn.isError = Boolean(block.is_error);
+          // A named Agent call starts a teammate: a session of its own, which
+          // the result names by team and name.
+          const result = entry.toolUseResult;
+          if (result?.status === "teammate_spawned" && typeof result.team_name === "string" && typeof result.name === "string") {
+            spawn.teammate = { team: result.team_name, name: result.name, kind: typeof result.agent_type === "string" ? result.agent_type : null };
+          }
         }
       }
     });
@@ -436,6 +467,13 @@ function claudeReader({ stats = null, sidechain = false, self = null } = {}) {
 function xmlTag(text, tag) {
   const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
   return match ? match[1].trim() : null;
+}
+
+// What a teammate is told arrives wrapped as
+// <teammate-message teammate_id="team-lead">\n<body>\n</teammate-message>.
+function teammateMessage(text) {
+  const match = /^<teammate-message teammate_id="[^"]*"[^>]*>\n([\s\S]*)\n<\/teammate-message>$/.exec(text);
+  return match ? { body: match[1] } : null;
 }
 
 // When an agent's context fills up, Claude Code and Codex summarize the
@@ -522,7 +560,7 @@ function codexReader({ stats = null, child = false } = {}) {
   let index = 0;
   const reader = {
     messages: [],
-    // spawn_agent call_id -> { message, ts, taskName, path, error }
+    // spawn_agent call_id -> { message, ts, taskName, threadId, error }
     spawns: new Map(),
     meta: null,
     start: 0,
@@ -580,6 +618,15 @@ function codexReader({ stats = null, child = false } = {}) {
       messages.push(compactMessage(`c${index}`, ts, { summary: String(entry.payload?.message || "").trim() }));
       return;
     }
+    if (entry.type === "event_msg" && entry.payload?.type === "item_completed") {
+      // The thread a spawn_agent call started.
+      const item = entry.payload.item;
+      const spawn = item?.type === "SubAgentActivity" && item.kind === "started" ? reader.spawns.get(item.id) : null;
+      if (spawn && typeof item.agent_thread_id === "string" && /^[A-Za-z0-9-]+$/.test(item.agent_thread_id)) {
+        spawn.threadId = item.agent_thread_id;
+      }
+      return;
+    }
     if (entry.type === "event_msg" && child) {
       const type = entry.payload?.type;
       if (type === "task_started") {
@@ -626,7 +673,7 @@ function codexReader({ stats = null, child = false } = {}) {
       if (payload.call_id) {
         calls.set(payload.call_id, message);
         if (payload.name === "spawn_agent") {
-          reader.spawns.set(payload.call_id, { message, ts, taskName: codexArguments(payload).task_name ?? null, path: null, error: null });
+          reader.spawns.set(payload.call_id, { message, ts, taskName: codexArguments(payload).task_name ?? null, threadId: null, error: null });
         }
       }
       reader.toolCalls += 1;
@@ -641,17 +688,15 @@ function codexReader({ stats = null, child = false } = {}) {
       }
       const spawn = reader.spawns.get(payload.call_id);
       if (spawn) {
-        // `{"task_name":"/root/<name>"}`, the path its rollout records; anything
-        // else is why the spawn failed.
+        // `{"task_name":"/root/<name>"}` when it started; anything else is
+        // why it did not.
         let spawned = null;
         try {
           spawned = JSON.parse(String(payload.output));
         } catch {
           spawned = null;
         }
-        if (typeof spawned?.task_name === "string") {
-          spawn.path = spawned.task_name;
-        } else {
+        if (typeof spawned?.task_name !== "string") {
           spawn.error = codexOutput(payload.output).output || "The subagent did not start.";
         }
       }
@@ -699,11 +744,13 @@ function codexOutput(value) {
 }
 
 function summarizeCodexInput(payload) {
-  if (payload.name === "spawn_agent") {
-    // Its message is encrypted; the task name is what can be shown.
-    const task = codexArguments(payload).task_name;
-    if (typeof task === "string") {
-      return oneLine(task);
+  if (payload.name === "spawn_agent" || payload.name === "send_message" || payload.name === "followup_task") {
+    // The message is encrypted; the task name or the agent it goes to is
+    // what can be shown.
+    const args = codexArguments(payload);
+    const who = args.task_name ?? args.target;
+    if (typeof who === "string") {
+      return oneLine(who);
     }
   }
   const raw = payload.arguments ?? payload.input ?? payload.action ?? "";
@@ -755,8 +802,11 @@ function summarizeCodexInput(payload) {
 // Claude Code 2.1 writes each subagent to <session>/subagents/agent-<id>.jsonl
 // with agent-<id>.meta.json beside it: the Agent call's toolUseId, its
 // description and agentType, and `finished` once it ended. Subagents of
-// subagents (parentAgentId) are in the same folder.
-function attachClaudeSubagents(reader, { dir, live, shown, depth }) {
+// subagents (parentAgentId) are in the same folder. A teammate (a named Agent
+// call in an agent team) has no metadata: it is a session of its own in the
+// same project folder (`projectDir`), done once a turn of its ends and
+// stopped when its process exits mid-turn.
+function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) {
   if (!reader.spawns.size) {
     return;
   }
@@ -765,28 +815,55 @@ function attachClaudeSubagents(reader, { dir, live, shown, depth }) {
     if (shown && !shown.has(spawn.message)) {
       continue;
     }
-    // No metadata: a teammate (its own session), not a subagent.
     const found = metas.get(toolUseId);
-    if (!found) {
-      continue;
+    let card;
+    if (found) {
+      const sub = followFile(path.join(dir, `agent-${found.agentId}.jsonl`), () => claudeReader({ sub: true, self: toolUseId }));
+      if (sub && depth + 1 < SUBAGENT_DEPTH) {
+        attachClaudeSubagents(sub, { dir, projectDir, live, shown: null, depth: depth + 1 });
+      }
+      const meta = found.meta;
+      const note = reader.notifications.get(toolUseId);
+      const status = !meta.finished
+        ? live ? "running" : "stopped"
+        : spawn.isError || note === "failed" ? "failed" : note && note !== "completed" ? "stopped" : "done";
+      card = {
+        id: found.agentId,
+        kind: typeof meta.agentType === "string" ? meta.agentType : null,
+        name: typeof meta.name === "string" ? meta.name : null,
+        description: typeof meta.description === "string" ? meta.description : null,
+        sub,
+        status,
+      };
+    } else if (spawn.teammate) {
+      const session = claudeTeammateFile(projectDir, toolUseId, spawn);
+      if (!session) {
+        continue; // not started yet
+      }
+      const sub = followFile(session, () => claudeReader({ sub: true }));
+      if (sub && depth + 1 < SUBAGENT_DEPTH) {
+        attachClaudeSubagents(sub, { dir: claudeSubagentsDir(session), projectDir, live, shown: null, depth: depth + 1 });
+      }
+      card = {
+        id: path.basename(session, ".jsonl"),
+        kind: spawn.teammate.kind,
+        name: spawn.teammate.name,
+        description: spawn.description,
+        sub,
+        status: sub?.idle ? "done" : live && !sub?.exited ? "running" : "stopped",
+      };
+    } else {
+      continue; // its metadata is not written yet
     }
-    const sub = followFile(path.join(dir, `agent-${found.agentId}.jsonl`), () => claudeReader({ sidechain: true, self: toolUseId }));
-    if (sub && depth + 1 < SUBAGENT_DEPTH) {
-      attachClaudeSubagents(sub, { dir, live, shown: null, depth: depth + 1 });
-    }
-    const meta = found.meta;
-    const note = reader.notifications.get(toolUseId);
-    const status = !meta.finished
-      ? live ? "running" : "stopped"
-      : spawn.isError || note === "failed" ? "failed" : note && note !== "completed" ? "stopped" : "done";
+    const { sub, status } = card;
     const messages = sub?.messages ?? [];
     const last = messages[messages.length - 1];
     spawn.message.subagent = {
-      id: found.agentId,
+      id: card.id,
       backend: "claude",
-      kind: typeof meta.agentType === "string" ? meta.agentType : null,
-      name: typeof meta.name === "string" ? meta.name : null,
-      description: typeof meta.description === "string" ? meta.description : null,
+      kind: card.kind,
+      name: card.name,
+      description: card.description,
       prompt: spawn.prompt ? clip(spawn.prompt, SUBAGENT_PROMPT_LIMIT) : null,
       status,
       startedAt: spawn.ts,
@@ -845,26 +922,133 @@ function readSubagentMeta(file) {
   return value;
 }
 
+function claudeSubagentsDir(session) {
+  return path.join(session.replace(/\.jsonl$/, ""), "subagents");
+}
+
+// Teammate spawn -> its session log, found once. A miss (its session is not
+// written yet) is searched again at most every CHILD_RECHECK_MS.
+const CHILD_RECHECK_MS = 5_000;
+const claudeTeammates = new Map(); // `${projectDir}|${toolUseId}` -> { file, checkedAt }
+
+function claudeTeammateFile(projectDir, toolUseId, spawn, now = Date.now()) {
+  const key = `${projectDir}|${toolUseId}`;
+  const known = claudeTeammates.get(key);
+  if (known?.file) {
+    return known.file;
+  }
+  if (known && now - known.checkedAt < CHILD_RECHECK_MS) {
+    return null;
+  }
+  const file = spawn.ts === null || spawn.prompt === null ? null : findClaudeTeammate(projectDir, spawn);
+  claudeTeammates.set(key, { file, checkedAt: now });
+  return file;
+}
+
+// A teammate's session opens with a user entry naming its team and its name
+// (`teamName`, `agentName`) and carrying the Agent call's prompt as a
+// <teammate-message>. A team reuses names, so the prompt has to match as well;
+// of sessions that match, the first to start after the call is the one.
+function findClaudeTeammate(projectDir, spawn) {
+  let best = null;
+  for (const name of fs.readdirSync(projectDir)) {
+    if (!name.endsWith(".jsonl")) {
+      continue;
+    }
+    const file = path.join(projectDir, name);
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue; // removed since the listing
+      }
+      throw error;
+    }
+    if (stat.mtimeMs < spawn.ts) {
+      continue; // last written before the call
+    }
+    const head = claudeSessionHead(file, stat.size);
+    if (
+      !head ||
+      head.team !== spawn.teammate.team ||
+      head.agent !== spawn.teammate.name ||
+      head.prompt !== spawn.prompt ||
+      head.ts === null ||
+      head.ts < spawn.ts ||
+      (best && head.ts >= best.ts)
+    ) {
+      continue;
+    }
+    best = { file, ts: head.ts };
+  }
+  return best?.file ?? null;
+}
+
+// A session's first user entry, as far as teammates go: { team, agent, prompt,
+// ts }, or null for a session that is not a teammate's. It never changes once
+// written, so it is read once; a session without one yet is read again.
+const HEAD_READ_BYTES = 64 * 1024;
+const claudeHeads = new Map(); // session log -> head or null
+
+function claudeSessionHead(file, size) {
+  if (claudeHeads.has(file)) {
+    return claudeHeads.get(file);
+  }
+  for (let length = Math.min(size, HEAD_READ_BYTES); length > 0; length = length === size ? 0 : Math.min(size, length * 4)) {
+    const buffer = Buffer.alloc(length);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buffer, 0, length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const lines = buffer.toString("utf8").split("\n");
+    lines.pop(); // still being written, or empty after the last newline
+    for (const line of lines) {
+      if (!line.includes('"type":"user"')) {
+        continue;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (entry.type !== "user") {
+        continue;
+      }
+      const message = typeof entry.message?.content === "string" ? teammateMessage(entry.message.content) : null;
+      const head = typeof entry.teamName === "string" && typeof entry.agentName === "string" && message
+        ? { team: entry.teamName, agent: entry.agentName, prompt: message.body, ts: toMillis(entry.timestamp) }
+        : null;
+      claudeHeads.set(file, head);
+      return head;
+    }
+  }
+  return null;
+}
+
 // Codex (multi-agent v2): spawn_agent({task_name, message}) answers with the
 // subagent's path, `/root/<task_name>`; the message itself is encrypted. The
-// subagent's rollout is created at that moment, named for a time-ordered id,
-// and its session_meta names the parent thread and the path.
-function attachCodexSubagents(reader, { home, parentId, live, shown, depth }) {
-  for (const [callId, spawn] of reader.spawns) {
+// parent's rollout records the thread each call started (SubAgentActivity),
+// and that thread's rollout opens with a session_meta naming it.
+function attachCodexSubagents(reader, { home, live, shown, depth }) {
+  for (const spawn of reader.spawns.values()) {
     if (shown && !shown.has(spawn.message)) {
       continue;
     }
-    const file = spawn.error ? null : codexChildFile(home, parentId, callId, spawn);
+    const file = spawn.threadId ? codexChildFile(home, spawn.threadId) : null;
     const child = file ? followFile(file, () => codexReader({ child: true })) : null;
-    if (child?.meta && depth + 1 < SUBAGENT_DEPTH) {
-      attachCodexSubagents(child, { home, parentId: child.meta.id, live, shown: null, depth: depth + 1 });
+    if (child && depth + 1 < SUBAGENT_DEPTH) {
+      attachCodexSubagents(child, { home, live, shown: null, depth: depth + 1 });
     }
     const status = spawn.error
       ? "failed"
       : child?.turn === "done" ? "done" : child?.turn === "aborted" ? "stopped" : live ? "running" : "stopped";
     const meta = child?.meta ?? {};
     spawn.message.subagent = {
-      id: typeof meta.id === "string" ? meta.id : null,
+      id: spawn.threadId,
       backend: "codex",
       kind: typeof meta.agent_role === "string" ? meta.agent_role : null,
       name: typeof meta.agent_nickname === "string" ? meta.agent_nickname : null,
@@ -888,89 +1072,22 @@ function shownMessages(reader) {
   return { messages, earlier: reader.dropped + reader.messages.length - messages.length };
 }
 
-// Spawn -> rollout, found once. A miss (the rollout is not written yet) is
-// searched again at most every CHILD_RECHECK_MS.
-const CHILD_RECHECK_MS = 5_000;
-const codexChildren = new Map(); // `${parentId}|${callId}` -> { file, checkedAt }
-const codexMetas = new Map(); // rollout -> its session_meta payload
+// A subagent's rollout, looked for again at most every CHILD_RECHECK_MS
+// while it is not written yet.
+const codexMisses = new Map(); // thread id -> when its rollout was last looked for
 
-function codexChildFile(home, parentId, callId, spawn, now = Date.now()) {
-  const key = `${parentId}|${callId}`;
-  const known = codexChildren.get(key);
-  if (known?.file) {
-    return known.file;
-  }
-  if (known && now - known.checkedAt < CHILD_RECHECK_MS) {
+function codexChildFile(home, threadId, now = Date.now()) {
+  const missedAt = codexMisses.get(threadId);
+  if (missedAt !== undefined && now - missedAt < CHILD_RECHECK_MS) {
     return null;
   }
-  const file = spawn.ts === null ? null : findCodexChild(home, parentId, spawn);
-  codexChildren.set(key, { file, checkedAt: now });
+  const file = codexRolloutFile(home, threadId);
+  if (file) {
+    codexMisses.delete(threadId);
+  } else {
+    codexMisses.set(threadId, now);
+  }
   return file;
-}
-
-function findCodexChild(home, parentId, spawn) {
-  const root = path.join(home, ".codex", "sessions");
-  // Rollouts are filed by local date; the days either side cover any zone.
-  const days = new Set([-1, 0, 1].map((offset) => new Date(spawn.ts + offset * 86_400_000).toISOString().slice(0, 10)));
-  let best = null;
-  for (const day of days) {
-    const dir = path.join(root, ...day.split("-"));
-    let names;
-    try {
-      names = fs.readdirSync(dir);
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        continue;
-      }
-      throw error;
-    }
-    for (const name of names) {
-      // A UUIDv7 thread id: its first 48 bits are when it was created, in ms.
-      const match = /([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/.exec(name);
-      if (!match) {
-        continue;
-      }
-      const distance = Math.abs(parseInt(match[1] + match[2], 16) - spawn.ts);
-      if (distance > 60_000 || (best && distance >= best.distance)) {
-        continue;
-      }
-      const file = path.join(dir, name);
-      const origin = codexSessionMeta(file)?.source?.subagent?.thread_spawn;
-      if (origin?.parent_thread_id !== parentId || typeof origin.agent_path !== "string") {
-        continue;
-      }
-      const matches = spawn.path ? origin.agent_path === spawn.path : origin.agent_path.endsWith(`/${spawn.taskName}`);
-      if (matches) {
-        best = { file, distance };
-      }
-    }
-  }
-  return best?.file ?? null;
-}
-
-const META_READ_BYTES = 1024 * 1024;
-
-function codexSessionMeta(file) {
-  if (codexMetas.has(file)) {
-    return codexMetas.get(file);
-  }
-  const buffer = Buffer.alloc(META_READ_BYTES);
-  const fd = fs.openSync(file, "r");
-  let length;
-  try {
-    length = fs.readSync(fd, buffer, 0, META_READ_BYTES, 0);
-  } finally {
-    fs.closeSync(fd);
-  }
-  const end = buffer.subarray(0, length).indexOf(10);
-  if (end < 0) {
-    // The first line is still being written.
-    return null;
-  }
-  const entry = JSON.parse(buffer.toString("utf8", 0, end));
-  const meta = entry?.type === "session_meta" ? entry.payload ?? null : null;
-  codexMetas.set(file, meta);
-  return meta;
 }
 
 // Logs followed by appended bytes: file -> { offset, carry, reader }. A log

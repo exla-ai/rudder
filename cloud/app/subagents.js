@@ -25,6 +25,8 @@ export function paintSubagent(box, m, open) {
 
 function build(box, top) {
   box.classList.add("subagent");
+  // A call shown as a plain tool row until its subagent's log turned up.
+  box.querySelector(":scope > .tool-out")?.remove();
   const row = box.querySelector(".sa-row") || box.querySelector(".tool-row");
   // The top card's row stays the chat's `.tool-row` so the chat opens it.
   row.className = top ? "tool-row sa-row" : "sa-row";
@@ -106,7 +108,8 @@ function paint(box, m, open) {
   const empty = body.querySelector(":scope > .sa-empty");
   empty.hidden = msgs.length > 0;
   setText(empty, msgs.length ? "" : s.status === "running" ? "Starting" : "Nothing recorded");
-  reconcile(body.querySelector(":scope > .sa-msgs"), msgs, (x) => x.id, createInner, updateInner);
+  // A call becomes a card once its subagent's log turns up: a new node.
+  reconcile(body.querySelector(":scope > .sa-msgs"), msgs, (x) => (x.subagent ? `sa:${x.id}` : x.id), createInner, updateInner);
 }
 
 function createInner(x) {

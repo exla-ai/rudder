@@ -8,6 +8,7 @@
 import { h, icon, setText, copyText } from "/app/render.js";
 import { app, api, ls, NATIVE, PLATFORM, rel, confirmDialog, openSheet, openExternal, showError, toast, track } from "/app/core.js";
 import { DOWNLOAD_MAC_URL } from "/app/onboarding.js";
+import { dropdown } from "/app/select.js";
 
 const ROLE_LABEL = { admin: "Admin", member: "Member" };
 const SCOPE_KEY = "rudder.org";
@@ -304,7 +305,7 @@ export function SettingsScreen() {
           } catch (err) { sel.value = m.role; showError(err); }
           finally { sel.disabled = false; }
         });
-        roleBox.appendChild(sel);
+        roleBox.appendChild(dropdown(sel));
         if (!m.you) {
           const rm = h(`<button type="button" class="icon-btn m-rm">${icon("x")}</button>`);
           rm.setAttribute("aria-label", `Remove ${m.name || m.email || "member"}`);
@@ -333,6 +334,7 @@ export function SettingsScreen() {
         <div class="invite-out" hidden><code class="io-url"></code><button type="button" class="btn small io-copy">${icon("copy")}<span>Copy</span></button></div>
       </div>`);
       const form = inv.querySelector("form");
+      dropdown(form.role);
       const out = inv.querySelector(".invite-out");
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -498,6 +500,7 @@ export function SettingsScreen() {
     const cur = s.channel;
     sel.appendChild(new Option(cur ? `#${cur.name}` : "Choose a channel", cur?.id || ""));
     sel.disabled = !data.canManage;
+    const pick = dropdown(sel);
     let loaded = false;
     const loadChannels = async () => {
       if (loaded) return;
@@ -510,7 +513,7 @@ export function SettingsScreen() {
         if (!chans.length) sel.appendChild(new Option("No channels the Rudder app can see", "", false, false));
       } catch (err) { loaded = false; showError(err); }
     };
-    if (data.canManage) { sel.addEventListener("focus", loadChannels); sel.addEventListener("pointerdown", loadChannels); loadChannels(); }
+    if (data.canManage) { pick.addEventListener("focusin", loadChannels); pick.addEventListener("pointerdown", loadChannels); loadChannels(); }
     sel.addEventListener("change", async () => {
       if (!sel.value) return;
       try {
@@ -520,7 +523,7 @@ export function SettingsScreen() {
       } catch (err) { showError(err); }
     });
     const hint = h(`<div class="hint">In Slack, type <code>/rudder link</code> once to connect your Slack account.</div>`);
-    extra.append(label, sel, hint);
+    extra.append(label, pick, hint);
     return card;
   }
 
@@ -603,7 +606,7 @@ function linearPanel(org) {
     // A suggestion is preselected only for someone who can confirm it.
     sel.value = item.link?.workspaceId || (setup.canManage ? item.suggestion?.workspaceId : "") || "";
     sel.disabled = !setup.canManage;
-    row.querySelector(".lmap-pick").appendChild(sel);
+    row.querySelector(".lmap-pick").appendChild(dropdown(sel));
     const act = row.querySelector(".lmap-act");
     if (!item.link && item.suggestion && setup.canManage) {
       const ok = h(`<button type="button" class="btn small accent">Confirm</button>`);
@@ -636,12 +639,14 @@ function linearPanel(org) {
     </div>`);
     const goal = box.querySelector("textarea");
     const sel = box.querySelector("select");
+    dropdown(sel);
     const btn = box.querySelector("button");
     const hint = box.querySelector(".lmap-gen-hint");
     const out = box.querySelector(".lmap-out");
     const targets = [
-      ...setup.linearProjects.filter((p) => p.link).map((p) => ({ value: `project:${p.id}`, label: `${p.name} · ${p.link.projectName || "project"}`, project: p.link.projectName })),
-      ...setup.teams.filter((t) => t.link).map((t) => ({ value: `team:${t.id}`, label: `${t.key} team · ${t.link.projectName || "project"}`, project: t.link.projectName })),
+      // The Linear project or team, with the Rudder project it feeds under it.
+      ...setup.linearProjects.filter((p) => p.link).map((p) => ({ value: `project:${p.id}`, label: p.name, sub: p.link.projectName || "project" })),
+      ...setup.teams.filter((t) => t.link).map((t) => ({ value: `team:${t.id}`, label: `${t.key} team`, sub: t.link.projectName || "project" })),
     ];
     if (!targets.length) {
       box.querySelector(".lmap-gen-row").hidden = true;
@@ -649,7 +654,11 @@ function linearPanel(org) {
       setText(hint, "Link a Linear project to a Rudder project above, then describe a goal here.");
       return box;
     }
-    for (const t of targets) sel.appendChild(new Option(t.label, t.value));
+    for (const t of targets) {
+      const o = new Option(t.label, t.value);
+      o.dataset.sub = t.sub;
+      sel.appendChild(o);
+    }
     setText(hint, setup.autoStart
       ? "Adds up to 10 small issues to Linear. Adding the rudder label to one starts an agent on it."
       : "Adds up to 10 small issues to Linear.");

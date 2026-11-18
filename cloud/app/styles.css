@@ -635,6 +635,42 @@ div.compact { margin: 18px 0; }
 .new-pill svg { width: 15px; height: 15px; }
 .chat-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
+/* Dropdowns (select.js): a button that reads like the inputs, and its list. */
+.dd-wrap { display: contents; }
+.dd {
+  display: inline-flex; align-items: center; gap: 8px; height: 40px; max-width: 100%; min-width: 0;
+  padding: 0 10px 0 13px; border-radius: 12px; border: 1px solid var(--line-strong); background: var(--bg);
+  color: var(--ink); font: 15px/1.2 var(--font); text-align: left; cursor: pointer;
+  transition: border-color 120ms, box-shadow 120ms;
+}
+.dd-v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd.dd-ph .dd-v { color: var(--faint); }
+.dd-chev { flex: none; width: 15px; height: 15px; color: var(--muted); transform: rotate(90deg); transition: transform 140ms; }
+.dd[aria-expanded="true"] .dd-chev { transform: rotate(-90deg); }
+.dd:focus-visible, .dd[aria-expanded="true"] { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.dd:disabled { cursor: default; opacity: 0.6; }
+.dd-pop {
+  position: fixed; z-index: 45; overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--shadow-2);
+  animation: pop 140ms cubic-bezier(.2,.7,.2,1);
+}
+.dd-list:focus { outline: none; }
+.dd-opt {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 10px 6px 12px;
+  border-radius: 10px; font-size: 15px; color: var(--ink); cursor: pointer; box-sizing: border-box;
+}
+.dd-opt.on { background: var(--surface-2); }
+.dd-opt[aria-disabled] { color: var(--faint); cursor: default; }
+.dd-ot { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dd-on, .dd-os { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-os { font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+.dd-ck { flex: none; width: 17px; height: 17px; color: var(--accent); visibility: hidden; }
+.dd-opt[aria-selected="true"] .dd-ck { visibility: visible; }
+.dd-opt[aria-selected="true"] .dd-on { font-weight: 600; }
+/* At phone width the list is a sheet: taller rows, and it scrolls when long. */
+.dd-sheet .dd-list { overflow-y: auto; overscroll-behavior: contain; margin: 0 -8px; max-height: 62vh; }
+.dd-sheet .dd-opt { min-height: 52px; font-size: 16px; }
+
 /* Menus, sheets, dialogs */
 .menu {
   position: absolute; right: calc(var(--sar) + 10px); top: calc(var(--sat) + 52px);

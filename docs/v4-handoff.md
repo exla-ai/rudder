@@ -207,6 +207,19 @@ download still serves 1.0.2; a signed build needs the Developer ID identity
 (the MacBook Pro, or a Developer ID Application .p12 as the
 MAC_DEVELOPER_ID_P12 and MAC_DEVELOPER_ID_PASSWORD secrets for mac.yml).
 
+5.0.5 is published as npm latest and deployed to Cloud (Fly release 210,
+2026-11-18 15:28Z, worker image `rudder-workers-exla:5.0.5`, also in
+`rudder-worker-images`). It qualified first on a `release-check/5.0.5` branch
+and the tag reused that run. Fixes from a real-Mac run of 5.0.4: a merge lands
+on the main bookmark (no empty commit, Git left on main) and moves the agent's
+workspace off the landed change; the second `m` in the diff panel merges; a
+dismissed Codex plan stops reading "needs input" (Plan mode left, or the menu
+gone from the screen); refusals show as errors; paused and merged rows keep
+their +N -M. The "/" menu probe now waits for Claude's process group to exit.
+Open: the phone card for a Codex plan dismissed with Esc only, the scheduler's
+legacy node merge (`mergeNodeIntoIntegration`) still merges into `@`, a
+Codex-only Mac defaults to Claude, and the signed Mac app (still 1.0.2).
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

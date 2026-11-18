@@ -185,6 +185,15 @@ button in the chat starts a new one; older chats are reachable only until the
 read/write/wait tools), `codex mcp list` for the project config, and headless
 screenshots against dev-mock. Needs a worker image for homes to get it.
 
+"/" menu (local, unreleased): Claude's list comes from Claude itself. The
+worker opens an interactive claude off-screen in a private tmux with the
+agent's env, cwd and model, types "/" and parses the popup (nothing is sent,
+no transcript; ~4s, cached on the Claude version, model and every file that
+changes the menu). Matched the real popup row for row on Claude 2.1.327 (198
+rows) and Codex 0.169/0.170 (56). Each build starts the user's MCP servers,
+as an agent start does. Not run on macOS yet. opencode agents still get
+"Commands unavailable" (the app starts only Claude and Codex agents).
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

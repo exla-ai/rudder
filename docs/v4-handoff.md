@@ -403,7 +403,11 @@ longer leave it "working". Questions (`request_user_input`, accepted
 "needs input". The rules mirror `pendingCodexAsks` in cloud/worker/asks.mjs;
 both sides are pinned to `tests/fixtures/codex-0.170-rollout*` (Rust
 `codex_rollout::tests`, JS `tests/codex-rollout-fixture.test.mjs`), so change
-them together.
+them together. After `/new`, `/clear` or "clear context and implement" the row
+moves to the new thread: the worker's SessionStart hook names it (measured on
+0.170: it fires at the new thread's first turn, `source: "clear"` for
+`/clear`), and the row adopts it when that rollout began after the pinned one
+in the same folder.
 
 Rudder's ignore entries (RUDDER.md, RUDDER_SHARED.md, `.rudder-workspaces/`,
 the orchestrator skills) go in `.git/info/exclude`, never `.gitignore`; jj

@@ -273,6 +273,10 @@ pub(crate) struct ScanResult {
     /// (its signal script's `<signal>.turn`, written before every `done`).
     pub(crate) new_turn: bool,
     pub(crate) waits: Vec<CodexWait>,
+    /// The worker moved to a newer thread (`/new`, `/clear`, "clear context
+    /// and implement"): `(pinned, newer)`. The App adopts `newer` only while
+    /// the row is still on `pinned`.
+    pub(crate) moved: Option<(String, String)>,
 }
 
 /// Reads each worker's rollout. Runs on the scan thread.
@@ -290,12 +294,27 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
             };
-            // The signal script records the conversation's thread at
-            // SessionStart; a Codex that moved to a new thread names it there
-            // first.
-            let thread = sidecar("session").or_else(|| request.session_id.clone());
-            let facts = match (&sessions, thread) {
-                (Some(sessions), Some(thread)) => rollout_file(sessions, &thread).map(|rollout| {
+            let rollout = |id: &str| sessions.as_ref().and_then(|sessions| rollout_file(sessions, id));
+            let pinned = request.session_id.as_deref().and_then(rollout);
+            // The thread this worker's own SessionStart hook last named (the
+            // signal script is per run, so no other process writes it).
+            let reported = sidecar("session")
+                .filter(|id| request.session_id.as_ref() != Some(id))
+                .and_then(|id| rollout(&id).map(|path| (id, path)));
+            let (read, moved) = match (&request.session_id, pinned, reported) {
+                // Not pinned yet (`ensure_session_ids_recorded` pins it).
+                (None, _, Some((_, path))) => (Some(path), None),
+                // A thread begun after the pinned one, in its folder, is where
+                // the conversation went. An older one is a report the row has
+                // moved past (an edit relaunch pins its fork before the new
+                // process reports it).
+                (Some(was), Some(pinned), Some((id, path))) if started_after(&pinned, &path) => {
+                    (Some(path), Some((was.clone(), id)))
+                }
+                (_, pinned, _) => (pinned, None),
+            };
+            let facts = read
+                .map(|rollout| {
                     let mut facts = read_facts(&rollout);
                     if let Some(since) = facts.plan_at_ms {
                         if newer_thread(&rollout, since) {
@@ -303,10 +322,8 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
                         }
                     }
                     facts
-                }),
-                _ => None,
-            }
-            .unwrap_or_default();
+                })
+                .unwrap_or_default();
             // Read after the rollout, so a turn that ended in between is seen
             // ended here.
             let done_turn = sidecar("turn");
@@ -315,9 +332,18 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
                 read_at,
                 new_turn: facts.open_turn.is_some() && facts.open_turn != done_turn,
                 waits: facts.waits,
+                moved,
             }
         })
         .collect()
+}
+
+/// Whether `later` began after `earlier` in the same folder.
+fn started_after(earlier: &Path, later: &Path) -> bool {
+    match (rollout_head(earlier), rollout_head(later)) {
+        (Some((then, folder)), Some((now, cwd))) => now > then && cwd == folder,
+        _ => false,
+    }
 }
 
 fn cache<K, V>(cell: &'static OnceLock<Mutex<HashMap<K, V>>>) -> std::sync::MutexGuard<'static, HashMap<K, V>> {
@@ -399,9 +425,12 @@ fn read_tail(path: &Path, bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
-/// When a rollout's session began and in which folder, from its first line
-/// (`{"timestamp":…,"type":"session_meta","payload":{…,"cwd":…`). Never
-/// changes once written, so it is kept.
+/// When a rollout's session began and in which folder, read as asks.mjs
+/// `codexHead` reads it: the first line's `{"timestamp":"…"` and the first
+/// `"cwd"` after `"type":"session_meta","payload":{`. Not a JSON parse: since
+/// 0.166 that line carries the base instructions and runs past 20 KiB (26 KiB
+/// on 0.170), while `cwd` comes before them. Never changes once written, so it
+/// is kept.
 fn rollout_head(path: &Path) -> Option<(i64, String)> {
     static HEADS: OnceLock<Mutex<HashMap<PathBuf, (i64, String)>>> = OnceLock::new();
     if let Some(head) = cache(&HEADS).get(path) {
@@ -410,13 +439,19 @@ fn rollout_head(path: &Path) -> Option<(i64, String)> {
     let mut buffer = Vec::new();
     std::fs::File::open(path).ok()?.take(HEAD_BYTES).read_to_end(&mut buffer).ok()?;
     let text = String::from_utf8_lossy(&buffer);
-    let first: serde_json::Value = serde_json::from_str(text.lines().next()?).ok()?;
-    if str_at(&first, "type") != Some("session_meta") {
-        return None;
-    }
-    let started = crate::cloudio::parse_iso8601_millis(str_at(&first, "timestamp")?)?;
-    let cwd = first.get("payload").and_then(|payload| str_at(payload, "cwd"))?.to_string();
-    cache(&HEADS).insert(path.to_path_buf(), (started, cwd.clone()));
+    let head = parse_head(text.lines().next()?)?;
+    cache(&HEADS).insert(path.to_path_buf(), head.clone());
+    Some(head)
+}
+
+fn parse_head(first_line: &str) -> Option<(i64, String)> {
+    let stamp = first_line.strip_prefix(r#"{"timestamp":""#)?;
+    let started = crate::cloudio::parse_iso8601_millis(&stamp[..stamp.find('"')?])?;
+    const META: &str = r#""type":"session_meta","payload":{"#;
+    let payload = &first_line[first_line.find(META)? + META.len()..];
+    let cwd = &payload[payload.find(r#""cwd":"#)? + r#""cwd":"#.len()..];
+    // One JSON string, whatever follows it.
+    let cwd = serde_json::Deserializer::from_str(cwd).into_iter::<String>().next()?.ok()?;
     Some((started, cwd))
 }
 
@@ -519,18 +554,29 @@ mod tests {
 
     #[test]
     fn a_waiting_plan_is_over_once_a_newer_thread_starts_in_the_same_folder() {
+        // Real `session_meta` lines carry the base instructions (26 KiB on
+        // 0.170), past the head that is read; the fixtures were trimmed.
+        let full_size = |rollout: &str| {
+            let (first, rest) = rollout.split_once('\n').unwrap();
+            let pad = "x".repeat(26 * 1024);
+            format!("{},\"base_instructions\":{{\"text\":\"{pad}\"}}}}}}\n{rest}", first.strip_suffix("}}").unwrap())
+        };
         let root = std::env::temp_dir().join(format!("rudder-codex-rollout-{}", std::process::id()));
         let day = root.join("2026").join("11").join("18");
         std::fs::create_dir_all(&day).unwrap();
         let rollout = day.join("rollout-2026-11-18T11-26-51-01a1ee68-da13-7822-a7de-75c3368eeed4.jsonl");
-        std::fs::write(&rollout, ROLLOUT).unwrap();
+        std::fs::write(&rollout, full_size(ROLLOUT)).unwrap();
         let facts = read_facts(&rollout);
         assert_eq!(facts.waits, vec![CodexWait::Plan]);
         let since = facts.plan_at_ms.unwrap();
         assert!(!newer_thread(&rollout, since));
         // "Yes, clear context and implement": the new thread's rollout.
-        std::fs::write(day.join("rollout-2026-11-18T11-31-28-01a1ee6d-12ce-7b62-adf4-508197eeb930.jsonl"), CLEARED).unwrap();
+        let cleared = day.join("rollout-2026-11-18T11-31-28-01a1ee6d-12ce-7b62-adf4-508197eeb930.jsonl");
+        std::fs::write(&cleared, full_size(CLEARED)).unwrap();
         assert!(newer_thread(&rollout, since));
+        // The row follows it there, and never back.
+        assert!(started_after(&rollout, &cleared));
+        assert!(!started_after(&cleared, &rollout));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

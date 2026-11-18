@@ -31433,7 +31433,7 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     app.agents.push(run);
     let deliver = |app: &mut App, read_at, new_turn, waits| {
         let (tx, rx) = mpsc::channel();
-        tx.send(vec![codex_rollout::ScanResult { run_id: "codex-1".to_string(), read_at, new_turn, waits }])
+        tx.send(vec![codex_rollout::ScanResult { run_id: "codex-1".to_string(), read_at, new_turn, waits, moved: None }])
             .unwrap();
         app.codex_rollout_rx = Some(rx);
         app.last_codex_rollout_scan = Instant::now();
@@ -31453,4 +31453,37 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     assert!(app.codex_waits.is_empty());
     app.agents[0].terminal = None;
     let _ = fs::remove_dir_all(&repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_codex_row_follows_its_worker_to_a_newer_thread_unless_it_moved_on_first() {
+    let mut app = App::new();
+    let mut run = test_agent_run("codex-2", "Plan the retry helper");
+    run.backend = Backend::Codex;
+    run.session_id = Some("thread-a".to_string());
+    app.agents.push(run);
+    let deliver = |app: &mut App, moved: (&str, &str)| {
+        let (tx, rx) = mpsc::channel();
+        let result = codex_rollout::ScanResult {
+            run_id: "codex-2".to_string(),
+            read_at: Instant::now(),
+            new_turn: false,
+            waits: Vec::new(),
+            moved: Some((moved.0.to_string(), moved.1.to_string())),
+        };
+        tx.send(vec![result]).unwrap();
+        app.codex_rollout_rx = Some(rx);
+        app.last_codex_rollout_scan = Instant::now();
+        app.poll_codex_rollouts();
+    };
+    // `/clear` in the pane: the worker's newer thread becomes the row's.
+    deliver(&mut app, ("thread-a", "thread-b"));
+    assert_eq!(app.agents[0].session_id.as_deref(), Some("thread-b"));
+    assert!(app.activity_log.iter().any(|line| line.contains("now on Codex session thread-b (was thread-a)")));
+    // A scan that started before the row moved again (an edit relaunch pinned
+    // its fork) does not pull it back.
+    app.agents[0].session_id = Some("thread-fork".to_string());
+    deliver(&mut app, ("thread-b", "thread-c"));
+    assert_eq!(app.agents[0].session_id.as_deref(), Some("thread-fork"));
 }

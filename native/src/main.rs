@@ -6190,16 +6190,29 @@ impl App {
     /// completed (an earlier read may predate the turn's end). A keystroke that
     /// starts nothing writes nothing there. What the rollout leaves waiting is
     /// "needs you": the Running arm of `poll_agents` adds it each tick, and a
-    /// Done row (a plan on "Implement this plan?") takes it here.
+    /// Done row (a plan on "Implement this plan?") takes it here. A newer
+    /// thread the worker moved to becomes the row's session.
     fn poll_codex_rollouts(&mut self) {
         if let Some(rx) = &self.codex_rollout_rx {
             match rx.try_recv() {
                 Ok(results) => {
                     self.codex_rollout_rx = None;
+                    let mut moved = Vec::new();
                     for result in results {
                         let Some(run) = self.agents.iter_mut().find(|run| run.id == result.run_id) else {
                             continue;
                         };
+                        // `/new`, `/clear` or "clear context and implement"
+                        // moved the conversation; the pin made at launch
+                        // (`ensure_session_ids_recorded`) would keep showing
+                        // and resuming the old thread.
+                        if let Some((was, newer)) = result.moved {
+                            if run.session_id.as_deref() == Some(was.as_str()) {
+                                run.session_id = Some(newer.clone());
+                                let _ = save_native_run_record(&self.cwd, run);
+                                moved.push(format!("{}: now on Codex session {newer} (was {was})", run.id));
+                            }
+                        }
                         if run.status == AgentStatus::Done
                             && result.new_turn
                             && run.completed_at.is_none_or(|at| at < result.read_at)
@@ -6214,6 +6227,10 @@ impl App {
                         } else {
                             self.codex_waits.insert(result.run_id, result.waits);
                         }
+                    }
+                    for line in moved {
+                        self.push_activity(line);
+                        self.dirty = true;
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}

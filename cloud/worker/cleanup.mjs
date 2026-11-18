@@ -29,7 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { statusFields, pidAlive } from "./agent-status.mjs";
-import { readAsks } from "./asks.mjs";
+import { readAsks, codexAsks } from "./asks.mjs";
 import { transcriptFile, userTask } from "./transcripts.mjs";
 import { queueSteer, readSteerReceipt } from "./steer-inbox.mjs";
 
@@ -221,7 +221,9 @@ export function readAgentRows({ codeDir, home, rudderHome, alive = pidAlive, now
         backend: record.backend ?? "claude",
         orchestrator: record.mode === "rudder-plan",
         sessionId: record.session?.nativeSessionId ?? null,
-        asks: /^[A-Za-z0-9._-]+$/.test(runId) ? readAsks(path.join(rudderHome, "signals", `${runId}.asks`)).length : 0,
+        asks: !/^[A-Za-z0-9._-]+$/.test(runId) ? 0
+          : record.backend === "codex" ? codexAsks(record, transcriptFile(record, home), { isAlive: alive }).length
+          : readAsks(path.join(rudderHome, "signals", `${runId}.asks`)).length,
         idleMinutes: lastActivity ? Math.max(0, Math.round((now - lastActivity) / MINUTE)) : null,
         lastInputMinutesAgo: lastInputAt ? Math.max(0, Math.round((now - lastInputAt) / MINUTE)) : null,
         active: transcriptAt !== null && now - transcriptAt < ACTIVE_WINDOW_MS,

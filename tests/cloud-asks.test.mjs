@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { readAsks, askDecision } from "../cloud/worker/asks.mjs";
+import { readAsks, askDecision, codexAsks, codexAskSteps } from "../cloud/worker/asks.mjs";
 
 const HOOK = path.resolve("native/src/permission_hook.mjs");
 
@@ -146,12 +146,130 @@ test("a plan is approved by key, sent back with a message by deny", () => {
   const plan = { tool: "ExitPlanMode", input: { plan: "1. do it" } };
   assert.deepEqual(askDecision(plan, { approve: true }), { keys: "1" });
   const decision = JSON.parse(askDecision(plan, { approve: false, message: "use plan-b.txt" }).output).hookSpecificOutput.decision;
-  assert.deepEqual(decision, { behavior: "deny", message: "use plan-b.txt" });
+  assert.equal(decision.behavior, "deny");
+  // Said to be the user's, or Claude may take it for an error and go on with its plan.
+  assert.match(decision.message, /^The user reviewed this plan in the Rudder app .* the user said:\nuse plan-b\.txt$/s);
 });
 
 test("a plain deny carries a reason Claude can act on", () => {
   const decision = JSON.parse(askDecision({ tool: "Bash", input: {} }, { behavior: "deny" }).output).hookSpecificOutput.decision;
   assert.equal(decision.behavior, "deny");
-  assert.match(decision.message, /denied/);
+  assert.equal(decision.message, "The user denied this from the Rudder app.");
+  const reasoned = JSON.parse(askDecision({ tool: "Bash", input: {} }, { behavior: "deny", message: "Use make clean" }).output).hookSpecificOutput.decision;
+  assert.match(reasoned.message, /the user said:\nUse make clean$/);
   assert.throws(() => askDecision({ tool: "Bash", input: {} }, {}), /allow or deny/);
+});
+
+// Codex 0.170 rollout records, trimmed from real sessions.
+const codexLine = (type, payload, timestamp = "2026-11-18T10:19:53.125Z") => `${JSON.stringify({ timestamp, type, payload })}\n`;
+const sessionMeta = (cwd, timestamp) => codexLine("session_meta", { session_id: "s", id: "s", timestamp, cwd, originator: "codex-tui" }, timestamp);
+const turnStarted = (turn) => codexLine("event_msg", { type: "task_started", turn_id: turn });
+const turnComplete = (turn) => codexLine("event_msg", { type: "task_complete", turn_id: turn });
+const askCall = (callId, questions) => codexLine("response_item", { type: "function_call", name: "request_user_input", arguments: JSON.stringify({ questions }), call_id: callId });
+const callOutput = (callId) => codexLine("response_item", { type: "function_call_output", call_id: callId, output: "{\"answers\":{}}" });
+const planItem = (turn, text) => codexLine("event_msg", { type: "item_completed", turn_id: turn, item: { type: "Plan", id: `${turn}-plan`, text } });
+const asyncCall = (callId, questions) => codexLine("response_item", { type: "function_call", name: "request_user_input_async", arguments: JSON.stringify({ questions }), call_id: callId });
+const asyncAccepted = (callId, output = "{\"accepted\":true}") => codexLine("response_item", { type: "function_call_output", call_id: callId, output });
+const asyncReply = (callId, index, answer) => codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: `<send_user_message_question_reply>\n${JSON.stringify([{ answer, question: "q", questionItemId: JSON.stringify(["request_user_input_async", callId, index]) }])}\n</send_user_message_question_reply>` }] });
+const COLOR = [{ id: "button_color", header: "Button color", question: "Which color should the button be?", options: [{ label: "Red (Recommended)", description: "Use a red button." }, { label: "Blue", description: "Use a blue button." }] }];
+const live = { process: { pid: process.pid } };
+
+test("a Codex question waits in the rollout until its call has an output", () => {
+  const dir = tmpdir();
+  const rollout = path.join(dir, "rollout.jsonl");
+  fs.writeFileSync(rollout, turnStarted("t1") + askCall("call_1", COLOR));
+  const [ask] = codexAsks(live, rollout);
+  assert.equal(ask.kind, "question");
+  assert.match(ask.id, /^[0-9]+-[0-9a-f]{8}$/);
+  assert.deepEqual(ask.input.questions, [{ question: "Which color should the button be?", header: "Button color", multiSelect: false, options: COLOR[0].options }]);
+  // Gone once the Codex process is.
+  assert.deepEqual(codexAsks({ process: { pid: 99999999 } }, rollout), []);
+  // Answered in the terminal.
+  fs.appendFileSync(rollout, callOutput("call_1"));
+  assert.deepEqual(codexAsks(live, rollout), []);
+  // Esc on the question ends the turn without an output.
+  fs.appendFileSync(rollout, turnStarted("t2") + askCall("call_2", COLOR) + codexLine("event_msg", { type: "turn_aborted", turn_id: "t2" }));
+  assert.deepEqual(codexAsks(live, rollout), []);
+});
+
+test("a Codex plan waits for its Implement menu until the next turn starts", () => {
+  const dir = tmpdir();
+  const rollout = path.join(dir, "rollout.jsonl");
+  fs.writeFileSync(rollout, turnStarted("t1") + planItem("t1", "1. Add README.md\n"));
+  assert.deepEqual(codexAsks(live, rollout), [], "the menu opens when the turn ends");
+  fs.appendFileSync(rollout, turnComplete("t1"));
+  const [ask] = codexAsks(live, rollout);
+  assert.equal(ask.kind, "plan");
+  assert.equal(ask.input.plan, "1. Add README.md\n");
+  fs.appendFileSync(rollout, turnStarted("t2"));
+  assert.deepEqual(codexAsks(live, rollout), []);
+});
+
+test("an async Codex question waits until each of its questions has a reply or the turn ends", () => {
+  const dir = tmpdir();
+  const rollout = path.join(dir, "rollout.jsonl");
+  const questions = [{ title: "Which editor?", options: ["Vim", "Emacs"] }, { title: "Your motto?" }];
+  // Arguments Codex refused never reach the pane.
+  fs.writeFileSync(rollout, turnStarted("t1") + asyncCall("call_bad", questions) + asyncAccepted("call_bad", "failed to parse function arguments"));
+  assert.deepEqual(codexAsks(live, rollout), []);
+  fs.appendFileSync(rollout, asyncCall("call_1", questions) + asyncAccepted("call_1") + asyncCall("call_2", [{ title: "Later?" }]) + asyncAccepted("call_2"));
+  const [ask] = codexAsks(live, rollout);
+  assert.equal(ask.tool, "request_user_input_async");
+  assert.deepEqual(ask.input.questions, [
+    { question: "Which editor?", header: "", multiSelect: false, options: [{ label: "Vim", description: "" }, { label: "Emacs", description: "" }] },
+    { question: "Your motto?", header: "", multiSelect: false, options: [] },
+  ]);
+  assert.equal(ask.paneQuestions, 3, "the later call's question sits in the same pane");
+  // Answered one at a time, in the terminal or not: the card keeps the rest.
+  fs.appendFileSync(rollout, asyncReply("call_1", 0, "Vim"));
+  const [rest] = codexAsks(live, rollout);
+  assert.notEqual(rest.id, ask.id);
+  assert.deepEqual(rest.input.questions.map((q) => q.question), ["Your motto?"]);
+  fs.appendFileSync(rollout, asyncReply("call_1", 1, "Ship it"));
+  assert.deepEqual(codexAsks(live, rollout).map((a) => a.input.questions[0].question), ["Later?"]);
+  // The pane closes with the turn.
+  fs.appendFileSync(rollout, turnComplete("t1"));
+  assert.deepEqual(codexAsks(live, rollout), []);
+});
+
+test("a Codex plan is over once Codex moves to a newer thread in the same folder", () => {
+  const day = path.join(tmpdir(), "sessions", "2026", "11", "18");
+  fs.mkdirSync(day, { recursive: true });
+  const rollout = path.join(day, "rollout-a.jsonl");
+  fs.writeFileSync(rollout, sessionMeta("/w/p", "2026-11-18T10:00:00.000Z") + turnStarted("t1") + planItem("t1", "1. Do it\n") + turnComplete("t1"));
+  assert.equal(codexAsks(live, rollout)[0].kind, "plan");
+  // Another agent's thread in another folder, or an older one here, is not it.
+  fs.writeFileSync(path.join(day, "rollout-b.jsonl"), sessionMeta("/w/other", "2026-11-18T10:30:00.000Z"));
+  fs.writeFileSync(path.join(day, "rollout-c.jsonl"), sessionMeta("/w/p", "2026-11-18T09:00:00.000Z"));
+  assert.equal(codexAsks(live, rollout)[0].kind, "plan");
+  // "Yes, clear context and implement" starts one and leaves this thread as it was.
+  fs.writeFileSync(path.join(day, "rollout-d.jsonl"), sessionMeta("/w/p", "2026-11-18T10:30:00.000Z"));
+  assert.deepEqual(codexAsks(live, rollout), []);
+});
+
+test("a Codex prompt is answered with keys in its pane", () => {
+  const question = { kind: "question", input: { questions: [
+    { question: "Color?", options: [{ label: "Red" }, { label: "Blue" }] },
+    { question: "Size?", options: [{ label: "S" }, { label: "L" }] },
+  ] } };
+  const keys = (instruction) => [{ kind: "keys", instruction }];
+  assert.deepEqual(codexAskSteps(question, { answers: { "Color?": "Blue", "Size?": "S" } }), keys("down,enter,enter"));
+  // Text of your own goes as a note on "None of the above", after the options.
+  const hex = Buffer.from("Green, please", "utf8").toString("hex");
+  assert.deepEqual(codexAskSteps(question, { answers: { "Color?": "Green, please", "Size?": "L" } }), keys(`down,down,paste:${hex},enter,down,enter`));
+  assert.throws(() => codexAskSteps(question, { answers: { "Color?": "Red" } }), /no answer/);
+  assert.deepEqual(codexAskSteps({ kind: "plan" }, { approve: true }), keys("1"));
+  assert.deepEqual(codexAskSteps({ kind: "plan" }, { approve: false, message: "Use docs/" }), [...keys("esc"), { kind: "steer", instruction: "Use docs/" }]);
+  assert.throws(() => codexAskSteps({ kind: "plan" }, { approve: false }), /what should change/);
+  // Async questions: back to the main prompt and into the pane first, in a write
+  // of its own; then the answers ("Other" after the options, or the only entry).
+  const queued = { kind: "question", tool: "request_user_input_async", paneQuestions: 3, input: { questions: [
+    { question: "Editor?", options: [{ label: "Vim" }, { label: "Emacs" }] },
+    { question: "Motto?", options: [] },
+  ] } };
+  const motto = Buffer.from("Ship it", "utf8").toString("hex");
+  assert.deepEqual(codexAskSteps(queued, { answers: { "Editor?": "Emacs", "Motto?": "Ship it" } }), [
+    ...keys("shift-right,shift-right,shift-right,shift-left"),
+    ...keys(`down,enter,paste:${motto},enter`),
+  ]);
 });

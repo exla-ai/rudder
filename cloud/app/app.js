@@ -3359,12 +3359,27 @@ function createAskCard(ask, { onAnswer }) {
       const otherText = h(`<input type="text" class="ask-other-text" placeholder="Type something" hidden>`);
       otherText.setAttribute("aria-label", `Your own answer to: ${q.question || "this question"}`);
       opts.append(other, otherText);
+      // Claude's options can carry a preview (a mockup, a snippet). As in its
+      // dialog, the card shows the picked option's, the first one's until then.
+      const withPreview = (Array.isArray(q.options) ? q.options : []).filter((o) => typeof o?.preview === "string" && o.preview);
+      const previewName = withPreview.length ? note("", "ask-more") : null;
+      const previewBox = withPreview.length ? pre("", "mono") : null;
+      if (previewBox) field.append(previewName, previewBox);
+      const paintPreview = () => {
+        if (!previewBox) return;
+        const picked = [...field.querySelectorAll("input:checked")].map((x) => x.value);
+        const shown = withPreview.find((o) => picked.includes(o.label)) || withPreview[0];
+        setText(previewName, `Preview: ${shown.label}`);
+        if (previewBox.textContent !== shown.preview) previewBox.textContent = shown.preview;
+      };
+      paintPreview();
       body.appendChild(field);
       const st = { q, multi, field, otherText };
       field.addEventListener("change", () => {
         const otherOn = other.querySelector("input").checked;
         otherText.hidden = !otherOn;
         if (otherOn && document.activeElement !== otherText) otherText.focus();
+        paintPreview();
         refreshValidity();
       });
       otherText.addEventListener("input", () => refreshValidity());

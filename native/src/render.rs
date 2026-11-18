@@ -7176,6 +7176,7 @@ fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
         Some(agent) if agent.status == AgentStatus::Running => vec![
             ("enter", "open"),
             ("x", "stop"),
+            ("b", "branch"),
             ("r", "rename"),
             ("?", "keys"),
         ],
@@ -7189,6 +7190,7 @@ fn context_agent_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
                     "merge"
                 },
             ),
+            ("b", "branch"),
             ("dd", "delete"),
             ("?", "keys"),
         ],

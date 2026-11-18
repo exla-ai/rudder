@@ -196,7 +196,7 @@ fn claude_session_file(cwd: &Path, session: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -462,18 +462,18 @@ fn await_rpc(
         }
         if let Some(error) = message.get("error") {
             let text = str_field(error, "message").unwrap_or("unknown error");
-            return Err(format!("Codex could not rewind the conversation: {text}"));
+            return Err(format!("Codex could not fork the conversation: {text}"));
         }
         return Ok(message.get("result").cloned().unwrap_or_default());
     }
 }
 
-fn codex_fork_exchange(child: &mut Child, thread: &str, last_turn: &str) -> Result<String, String> {
+fn codex_fork_exchange(child: &mut Child, params: serde_json::Value) -> Result<String, String> {
     let mut stdin = child.stdin.take().ok_or_else(|| "codex app-server has no stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "codex app-server has no stdout".to_string())?;
     let (tx, lines) = mpsc::channel();
     thread::Builder::new()
-        .name("rudder-chat-edit-codex".to_string())
+        .name("rudder-codex-fork".to_string())
         .spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 if tx.send(line).is_err() {
@@ -501,7 +501,7 @@ fn codex_fork_exchange(child: &mut Child, thread: &str, last_turn: &str) -> Resu
         serde_json::json!({
             "id": 2,
             "method": "thread/fork",
-            "params": { "threadId": thread, "lastTurnId": last_turn, "excludeTurns": true },
+            "params": params,
         }),
     )?;
     let result = await_rpc(&lines, 2, deadline)?;
@@ -515,14 +515,15 @@ fn codex_fork_exchange(child: &mut Child, thread: &str, last_turn: &str) -> Resu
         .and_then(serde_json::Value::as_str)
         .is_some_and(|path| Path::new(path).is_file());
     if !saved {
-        return Err(format!("Codex did not save the rewound conversation {session}"));
+        return Err(format!("Codex did not save the forked conversation {session}"));
     }
     Ok(session.to_string())
 }
 
-/// One `thread/fork` on a one-shot `codex app-server` (stdio JSON-RPC) with
-/// the same CODEX_HOME the agent uses. No turn runs.
-fn codex_fork_through(cwd: &Path, thread: &str, last_turn: &str) -> Result<String, String> {
+/// One `thread/fork` (`params`) on a one-shot `codex app-server` (stdio
+/// JSON-RPC) with the same CODEX_HOME the agent uses. No turn runs. Returns
+/// the new thread's id. Branching an agent (branch.rs) forks this way too.
+pub(crate) fn codex_fork(cwd: &Path, params: serde_json::Value) -> Result<String, String> {
     let mut child = Command::new(codex_program())
         .arg("app-server")
         .current_dir(cwd)
@@ -531,7 +532,7 @@ fn codex_fork_through(cwd: &Path, thread: &str, last_turn: &str) -> Result<Strin
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("could not start codex app-server: {error}"))?;
-    let result = codex_fork_exchange(&mut child, thread, last_turn);
+    let result = codex_fork_exchange(&mut child, params);
     // Its stdin is closed by now (dropped with the exchange): it exits on EOF.
     let stop_by = Instant::now() + Duration::from_secs(5);
     while Instant::now() < stop_by && matches!(child.try_wait(), Ok(None)) {
@@ -547,7 +548,10 @@ fn codex_fork_through(cwd: &Path, thread: &str, last_turn: &str) -> Result<Strin
 fn rewind_codex(cwd: &Path, session: &str, entry: &str) -> Result<Rewound, String> {
     let sessions = codex_home()?.join("sessions");
     let last_turn = codex_turn_before_edit(&sessions, session, entry)?;
-    let forked = codex_fork_through(cwd, session, &last_turn)?;
+    let forked = codex_fork(
+        cwd,
+        serde_json::json!({ "threadId": session, "lastTurnId": last_turn, "excludeTurns": true }),
+    )?;
     Ok(Rewound::Codex { session: forked })
 }
 

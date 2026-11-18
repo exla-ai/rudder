@@ -414,11 +414,23 @@ impl App {
         sessions.extend(run.session_id.clone());
         sessions.sort();
         sessions.dedup();
+        // A branch still being set up has no session of its own yet, but its
+        // fork reads the source's conversation (and a Codex fork keeps
+        // reading through it afterwards).
+        let branching = self.pending_launches.values().filter_map(|launch| match &launch.kind {
+            PendingLaunchKind::Branch(branch) => Some(branch.source_session.clone()),
+            _ => None,
+        });
         ConversationCleanup {
             backend: run.backend,
             cwd: run.cwd.clone(),
             sessions,
-            kept_sessions: self.agents.iter().filter_map(|other| other.session_id.clone()).collect(),
+            kept_sessions: self
+                .agents
+                .iter()
+                .filter_map(|other| other.session_id.clone())
+                .chain(branching)
+                .collect(),
             kept_records: self
                 .agents
                 .iter()

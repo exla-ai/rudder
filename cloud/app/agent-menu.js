@@ -1,12 +1,12 @@
-// Rename, pin, open beside and close an agent from its row. Desktop rows get
-// a menu on right click, the context-menu key or Shift+F10; a sidebar title
-// renames on double click, and the agent screen's title on a click. The
-// dashboard saves a name the way its own rename does (native
+// Rename, pin, branch, open beside and close an agent from its row. Desktop
+// rows get a menu on right click, the context-menu key or Shift+F10; a
+// sidebar title renames on double click, and the agent screen's title on a
+// click. The dashboard saves a name the way its own rename does (native
 // rename_agent_at), so every screen shows it. A pin keeps an agent from the
 // cleanup that deletes agents nobody touched for a day. Close is the app's
 // one delete (deleteAgent in app.js).
 import { h, icon } from "/app/render.js";
-import { api, toast } from "/app/core.js";
+import { app, api, openSheet, toast, track } from "/app/core.js";
 
 /** The longest name the dashboard keeps (native AGENT_TITLE_MAX_CHARS). */
 export const TITLE_MAX = 200;
@@ -89,6 +89,58 @@ export async function pinAgent({ ws, run, find, pinned, repaint }) {
     if (err.status !== 401) toast(`Couldn't ${pinned ? "pin" : "unpin"} it: ${err.message}`, { error: true });
     return false;
   }
+}
+
+/**
+ * Branch an agent: a sheet for an optional first message, then the
+ * dashboard starts a new agent with a copy of its conversation and files
+ * (native branch.rs). The agent itself keeps running as it is.
+ */
+export function branchAgent({ ws, run, title }) {
+  const { dlg, body, close } = openSheet({ title: "Branch agent", className: "branch-sheet" });
+  const form = h(`<form style="display:flex;flex-direction:column;gap:10px;min-height:0">
+    <p class="create-note" style="text-align:left;margin:0 2px"></p>
+    <textarea class="ask-other-text" rows="4" aria-label="First message for the branch" placeholder="What should the branch try? Leave it empty to start it waiting for you." style="max-height:50vh"></textarea>
+    <p class="repo-note err" role="alert" hidden style="padding:0 2px;margin:0"></p>
+    <div class="d-actions"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn accent">Branch</button></div>
+  </form>`);
+  form.querySelector(".create-note").textContent =
+    `A new agent starts with a copy of the conversation and files of "${title || "this agent"}", which keeps going as it is.`;
+  body.appendChild(form);
+  const textarea = form.querySelector("textarea");
+  const error = form.querySelector(".err");
+  const send = form.querySelector('[type="submit"]');
+  let sending = false;
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.querySelector('[data-act="cancel"]').addEventListener("click", close);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (sending) return;
+    sending = true;
+    send.disabled = true;
+    error.hidden = true;
+    const text = textarea.value.trim();
+    try {
+      const res = await api("/api/app/agent-branch", { method: "POST", body: { workspace: ws, run, text } });
+      track("agent_branched");
+      close();
+      // Making its workspace can outlast the wait for an answer.
+      toast(res?.status === "queued" ? "Branching. The new agent shows up in a moment" : "Branched into a new agent");
+      app.refreshState();
+    } catch (err) {
+      if (!dlg.open) return;
+      error.textContent = err.message || "Couldn't branch it";
+      error.hidden = false;
+      sending = false;
+      send.disabled = false;
+    }
+  });
+  textarea.focus();
 }
 
 /** Whether `node`'s text is being edited in place (paints must leave it alone). */

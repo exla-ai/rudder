@@ -130,6 +130,7 @@ use crate::agent_sync::*;
 mod subagents;
 mod chat_edit;
 mod agent_life;
+mod branch;
 use crate::chat_edit::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
@@ -2425,8 +2426,10 @@ struct PendingLaunch {
 enum PendingLaunchKind {
     /// `start_execute_task_node`: a typed task (`single_run`) or a plan node.
     Task { single_run: bool },
-    /// `spawn_forked_conversation`: `b` on an agent, or `/handoff`.
+    /// `spawn_forked_conversation`: `/handoff`.
     Fork(PendingFork),
+    /// `branch_agent` (branch.rs): `b` on an agent, or the app's Branch.
+    Branch(crate::branch::PendingBranch),
 }
 
 struct PendingFork {
@@ -2451,6 +2454,9 @@ struct WorkspacePrepJob {
     /// Claude fork: copy this session's transcript (source cwd, session id)
     /// into the new workspace's project folder so `--resume` finds it there.
     stage_claude_session: Option<(PathBuf, String)>,
+    /// Branch: the workspace starts from a copy of this agent's files, and
+    /// its conversation is forked into it (branch.rs).
+    branch: Option<crate::branch::BranchSource>,
 }
 
 /// Several `__launch-node` calls at once would race on one jj repo. The loop
@@ -2459,45 +2465,56 @@ static WORKSPACE_PREP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl WorkspacePrepJob {
     fn run(self, run_id: String) -> WorkspacePrepOutcome {
+        let mut outcome = WorkspacePrepOutcome {
+            run_id,
+            workspace: None,
+            branched: None,
+            error: None,
+        };
         let prepared = {
             let _serial = WORKSPACE_PREP_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            prepare_jj_workspace_as(
-                &self.cwd,
-                &self.label,
-                self.base_change.as_deref(),
-                Some(&run_id),
-            )
+            // A branch's copy of its source's files is a jj operation on the
+            // same repo, so it runs under the same lock.
+            let base = match &self.branch {
+                Some(source) => crate::branch::copy_code(&source.cwd, &outcome.run_id).map(Some),
+                None => Ok(self.base_change.clone()),
+            };
+            base.and_then(|base| {
+                prepare_jj_workspace_as(&self.cwd, &self.label, base.as_deref(), Some(&outcome.run_id))
+                    .map_err(|error| error.to_string())
+            })
         };
-        match prepared {
-            Err(error) => WorkspacePrepOutcome {
-                run_id,
-                workspace: None,
-                error: Some(error.to_string()),
-            },
-            Ok(workspace) => {
-                let error = self
-                    .stage_claude_session
-                    .and_then(|(source_cwd, session_id)| {
-                        stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path)
-                            .err()
-                    });
-                WorkspacePrepOutcome {
-                    run_id,
-                    workspace: Some(workspace),
-                    error,
-                }
+        let workspace = match prepared {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                outcome.error = Some(error);
+                return outcome;
             }
-        }
+        };
+        let finished = match (&self.branch, self.stage_claude_session) {
+            (Some(source), _) => crate::branch::fork_conversation(source, &workspace.path)
+                .map(|branched| outcome.branched = Some(branched)),
+            (None, Some((source_cwd, session_id))) => {
+                stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path)
+            }
+            (None, None) => Ok(()),
+        };
+        outcome.error = finished.err();
+        outcome.workspace = Some(workspace);
+        outcome
     }
 }
 
 /// A finished workspace preparation. `workspace` is set whenever one was
-/// created, even if a later step (transcript staging) failed.
+/// created, even if a later step (transcript staging, a branch's fork)
+/// failed.
 struct WorkspacePrepOutcome {
     run_id: String,
     workspace: Option<WorkspaceInfo>,
+    /// A branch's forked conversation.
+    branched: Option<crate::branch::Branched>,
     error: Option<String>,
 }
 
@@ -3044,6 +3061,84 @@ struct ForkedConversation {
     /// The fork finishes after its workspace is ready, so the caller hands over
     /// what to say then instead of reading an outcome back.
     notices: ForkNotices,
+}
+
+/// A worker row for a forked conversation (`/handoff`, a branch), before its
+/// workspace and process exist: in the dashboard checkout, running, with no
+/// session yet.
+fn fork_row(
+    run_id: String,
+    task: String,
+    task_summary: String,
+    (backend, model, effort): (Backend, String, Option<EffortLevel>),
+    cwd: PathBuf,
+) -> AgentRun {
+    let created_at = now_stamp();
+    AgentRun {
+        pinned: false,
+        id: run_id,
+        created_at: created_at.clone(),
+        mode: AgentMode::Execute,
+        task,
+        task_summary,
+        current_prompt: String::new(),
+        turns: Vec::new(),
+        last_user_input_at: created_at,
+        backend,
+        model,
+        effort,
+        status: AgentStatus::Running,
+        cwd,
+        workspace_branch: None,
+        workspace_path: None,
+        workspace_name: None,
+        jj_change_id: None,
+        integration: IntegrationEvidence::default(),
+        publish: PublishEvidence::default(),
+        delivery: DeliveryEvidence::default(),
+        // A fork gets its own session id when it starts.
+        session_id: None,
+        execution_profile: None,
+        terminal: None,
+        terminal_size: None,
+        last_output_at: Instant::now(),
+        completed_at: None,
+        autosteered: false,
+        plain_process: false,
+        interactive_orchestrator: false,
+        needs_permission: false,
+        needs_user_input: false,
+        wait_signal: None,
+        worker_exit_note: None,
+        parked: None,
+        last_error: None,
+        worker_input_draft: String::new(),
+        worker_input_cursor: 0,
+        worker_input_is_prompt: false,
+        last_drain_at: None,
+        review_source_ids: Vec::new(),
+        deps: Vec::new(),
+        soft_deps: Vec::new(),
+        node_id: None,
+        plan_id: None,
+        reviewed_at: None,
+        reconcile_planner: false,
+        swarm_experiment: false,
+        resume_turn: false,
+        plan_stream: None,
+        plan_output_cache: None,
+        last_worker_input_at: None,
+        merge_resolver: false,
+        merge_requested: false,
+        merge_conflict: false,
+        merge_conflict_operation: ConflictOperation::Merge,
+        merge_conflict_files: Vec::new(),
+        had_merge_conflict: false,
+        done_summary: None,
+        tokens_in: 0,
+        tokens_out: 0,
+        gam: None,
+    }
 }
 
 #[derive(Default)]
@@ -9450,6 +9545,7 @@ impl App {
             label: workspace_label,
             base_change: None,
             stage_claude_session: None,
+            branch: None,
         };
         self.begin_workspace_prep(run_id, PendingLaunchKind::Task { single_run }, job);
     }
@@ -9510,6 +9606,7 @@ impl App {
             self.finish_workspace_prep(WorkspacePrepOutcome {
                 run_id,
                 workspace: None,
+                branched: None,
                 error: Some(format!("could not start workspace preparation: {error}")),
             });
         }
@@ -9555,6 +9652,9 @@ impl App {
                 self.finish_task_launch(index, outcome, single_run, &typed);
             }
             PendingLaunchKind::Fork(fork) => self.finish_fork_launch(index, outcome, fork, &typed),
+            PendingLaunchKind::Branch(branch) => {
+                self.finish_branch_launch(index, outcome, branch, &typed);
+            }
         }
     }
 
@@ -16038,6 +16138,16 @@ Address the objection directly. If you disagree, say why inside \
                         continue;
                     }
                 },
+                // Branch an agent: `branch`, then the branch's first prompt
+                // on the next line when there is one. Accepted branches
+                // answer when they start (finish_branch_launch).
+                "branch" => match self.deliver_branch_request(&task_id, &instruction, &request_id) {
+                    Some(result) => result,
+                    None => {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                },
                 "steer" | "task" => self.deliver_steer_request(&task_id, &instruction),
                 // A kind from a newer sender must not reach an agent as typed
                 // text ("park"'s reason once would have been a prompt).
@@ -19374,126 +19484,29 @@ Address the objection directly. If you disagree, say why inside \
         self.dirty = true;
     }
 
-    /// `b` in the agents pane: BRANCH the selected agent's chat. The backend forks
-    /// the conversation (Claude: `--resume <sid> --fork-session`; Codex: `codex
-    /// fork <sid>`) into a brand-new session, so the original chat is left exactly
-    /// where it was, and the fork opens as a NEW agent row in its own jj workspace
-    /// seeded from the original's current change — the forked conversation's
-    /// memory of "the edits so far" matches the files it sees. The user then types
-    /// the new direction into the forked pane.
+    /// `b` in the agents pane (and under ^W): branch the selected agent. The
+    /// branch is selected and its pane focused, so the user can type the new
+    /// direction while its workspace is prepared (branch.rs).
     fn branch_selected_agent(&mut self) {
-        if self.refuse_while_preparing() {
-            return;
-        }
-        let Some(run) = self.agents.get(self.selected_agent) else {
-            self.notice = Some("no agent selected".to_string());
-            return;
-        };
-        // The orchestrator owns the plan and cannot be forked into a worker, but a
-        // MAIN or one-off row is just a conversation in the checkout — forking it
-        // into an isolated, mergeable worker is one of the more useful things you
-        // can do with it, and refusing was arbitrary.
-        if run.is_orchestrator() {
-            self.notice = Some("branch works on agents, not the orchestrator".to_string());
-            return;
-        }
-        let backend_for_notice = run.backend;
-        // Read the "has this pane said anything" state BEFORE the session lookup
-        // below, not after. That lookup walks the backend's whole session tree and
-        // can take minutes on a machine with thousands of rollouts, and the check
-        // is an elapsed-time one — measuring it afterwards folds the scan's own
-        // duration into the answer and reports "never started a conversation"
-        // about a pane that was talking when the key was pressed.
-        let never_spoke = self.agents.get(self.selected_agent).is_some_and(|run| {
-            run.turns.is_empty() || run.last_output_at.elapsed() > Duration::from_secs(600)
-        });
-        // Codex and opencode runs only learn their session id later; for a live
-        // branch, fall back to the newest session recorded for that workspace.
-        let session_id = run
-            .session_id
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| match run.backend {
-                Backend::Codex => latest_codex_session_id_for_cwd(&run.cwd),
-                // opencode records its sessions in a database and ships the query.
-                Backend::Opencode => recent_opencode_conversations(&run.cwd, 1)
-                    .into_iter()
-                    .next()
-                    .map(|candidate| candidate.session_id),
-                Backend::Claude => None,
-            });
-        let Some(session_id) = session_id else {
-            // Say WHY. Claude gets a session id at launch (Rudder mints it), but
-            // Codex and opencode only record one once the conversation exists, and
-            // Rudder finds it by the directory the session ran in.
-            // Say which of the two states this is. "No session yet" almost always
-            // means the pane never got past its first prompt (a codex fork asking
-            // which directory to use, an auth prompt), and the row still reads as
-            // running — so point at the pane rather than at the backend.
-            self.notice = Some(match (backend_for_notice, never_spoke) {
-                (Backend::Claude, _) => {
-                    "nothing to branch: this agent has no session yet".to_string()
-                }
-                (other, true) => format!(
-                    "nothing to branch: this {} pane never started a conversation — open it (Enter) and check whether it is waiting on a prompt",
-                    other.as_str()
-                ),
-                (other, false) => format!(
-                    "no {} session recorded for this workspace yet — it is written once the conversation starts; branch after its first reply",
-                    other.as_str()
-                ),
-            });
-            return;
-        };
-
-        let source_task = run.task.clone();
-        let source_summary = if run.task_summary.trim().is_empty() {
-            summarize_task(&run.task)
-        } else {
-            run.task_summary.clone()
-        };
-        let backend = run.backend;
-        let model = run.model.clone();
-        let effort = run.effort;
-        let base_change = run.jj_change_id.clone();
-        let source_cwd = run.cwd.clone();
-        // Claude resolves --resume against the CURRENT directory's transcripts; make
-        // sure the source session's transcript actually exists before creating a
-        // workspace we'd abandon on failure. (Codex sessions are global.)
-        if backend == Backend::Claude && claude_transcript_path(&source_cwd, &session_id).is_none()
-        {
-            self.notice = Some("branch failed: no session transcript found to branch".to_string());
-            return;
-        }
-
-        let label = format!("branch: {source_summary}");
-        self.spawn_forked_conversation(ForkedConversation {
-            backend,
-            model,
-            effort,
-            session_id,
-            source_cwd,
-            // Seed the fork's workspace from the source's CURRENT jj change (jj snapshots
-            // the source working copy in the process), so files match the forked memory.
-            base_change,
-            label,
-            task: format!("Branch of: {source_task}"),
-            seed: None,
-            notices: ForkNotices {
-                started: format!(
-                    "branched {source_summary}; type the new direction in the forked pane"
-                ),
-                spawn_failed: "branch failed to start",
-                failed: "branch failed",
-                activity: None,
-            },
-        });
         self.delete_pending = None;
+        self.dirty = true;
+        match self.branch_agent(self.selected_agent, None, None) {
+            // Gone already when it failed before its workspace was made; the
+            // notice says why.
+            Ok(run_id) => {
+                if let Some(index) = self.agents.iter().position(|run| run.id == run_id) {
+                    self.selected_agent = index;
+                    self.focus = FocusPane::Worker;
+                    self.worker_view = WorkerView::Terminal;
+                }
+            }
+            Err(reason) => self.notice = Some(reason),
+        }
     }
 
-    /// Fork a CLI conversation into a NEW jj workspace and open it as a worker row.
-    /// Shared by `b` (branch a live agent's chat) and `/handoff` (adopt a chat that
-    /// was happening OUTSIDE the dashboard). Always a fork, never a plain resume:
+    /// Fork a CLI conversation into a NEW jj workspace and open it as a worker row,
+    /// for `/handoff` (adopt a chat that was happening OUTSIDE the dashboard;
+    /// branching an agent is branch.rs). Always a fork, never a plain resume:
     /// the source conversation may still be open in another process, and two
     /// writers on one transcript corrupt it.
     ///
@@ -19533,77 +19546,18 @@ Address the objection directly. If you disagree, say why inside \
             // `--resume <sid> --fork-session` can find the conversation from its new cwd.
             stage_claude_session: (backend == Backend::Claude)
                 .then(|| (source_cwd, session_id.clone())),
+            branch: None,
         };
 
         // The row goes in now, in the dashboard checkout with no workspace and
         // no process; finish_fork_launch fills those in and records the seed.
-        let created_at = now_stamp();
-        let run = AgentRun {
-            pinned: false,
-            id: run_id.clone(),
-            created_at: created_at.clone(),
-            mode: AgentMode::Execute,
+        let run = fork_row(
+            run_id.clone(),
             task,
-            task_summary: truncate_chars(&label, 56),
-            current_prompt: String::new(),
-            turns: Vec::new(),
-            last_user_input_at: created_at,
-            backend,
-            model,
-            effort,
-            status: AgentStatus::Running,
-            cwd: self.cwd.clone(),
-            workspace_branch: None,
-            workspace_path: None,
-            workspace_name: None,
-            jj_change_id: None,
-            integration: IntegrationEvidence::default(),
-            publish: PublishEvidence::default(),
-            delivery: DeliveryEvidence::default(),
-            // The fork mints its own fresh session id (Claude --fork-session prints
-            // it; Codex records it under the fork's cwd, discovered at completion).
-            session_id: None,
-            execution_profile: None,
-            terminal: None,
-            terminal_size: None,
-            last_output_at: Instant::now(),
-            completed_at: None,
-            autosteered: false,
-            plain_process: false,
-            interactive_orchestrator: false,
-            needs_permission: false,
-            needs_user_input: false,
-            wait_signal: None,
-            worker_exit_note: None,
-            parked: None,
-            last_error: None,
-            worker_input_draft: String::new(),
-            worker_input_cursor: 0,
-            worker_input_is_prompt: false,
-            last_drain_at: None,
-            review_source_ids: Vec::new(),
-            deps: Vec::new(),
-            soft_deps: Vec::new(),
-            node_id: None,
-            plan_id: None,
-            reviewed_at: None,
-            reconcile_planner: false,
-            swarm_experiment: false,
-            resume_turn: false,
-            plan_stream: None,
-            plan_output_cache: None,
-            last_worker_input_at: None,
-            merge_resolver: false,
-            merge_requested: false,
-            merge_conflict: false,
-            merge_conflict_operation: ConflictOperation::Merge,
-            merge_conflict_files: Vec::new(),
-            had_merge_conflict: false,
-            done_summary: None,
-            tokens_in: 0,
-            tokens_out: 0,
-            gam: None,
-        };
+            truncate_chars(&label, 56),
+            (backend, model, effort),
+            self.cwd.clone(),
+        );
 
         self.agents.push(run);
         self.selected_agent = self.agents.len().saturating_sub(1);

@@ -9328,76 +9328,45 @@ fn fork_commands_branch_the_session_without_touching_the_original() {
 
 #[test]
 fn branch_guards_main_orchestrator_and_sessionless_runs() {
-    // HERMETIC HOME: the Codex arm below falls back to scanning
-    // ~/.codex/sessions for a session id. Against the developer's REAL home
-    // that walk once wedged this test for 25+ minutes at 0% CPU — a
-    // cloud-offload tool had replaced old rollouts with symlinks into a
-    // CloudStorage mount and a hung provider blocked the read forever. A unit
-    // test must never leave its sandbox; point HOME at an empty scratch dir.
+    // HERMETIC HOME: nothing here may read the developer's real sessions.
     let _env = env_guard();
     let home = unique_test_repo("branch-guards-home");
     std::env::set_var("HOME", &home);
     let mut app = App::new();
 
-    // A MAIN row is branchable now: it is just a conversation in the checkout, and
-    // forking it into an isolated worker is the useful move. With no session id
-    // there is still nothing to fork, so it stops for that reason instead.
+    // A MAIN row is branchable: it is just a conversation in the checkout. With
+    // no session there is nothing to copy yet.
     let mut main = test_agent_run(MAIN_AGENT_ID, "main branch");
     main.mode = AgentMode::Main;
     app.agents.push(main);
     app.selected_agent = 0;
     app.branch_selected_agent();
-    assert_eq!(app.agents.len(), 1, "no fork row without a session");
-    assert!(
-        app.notice
-            .as_deref()
-            .unwrap_or_default()
-            .contains("nothing to branch"),
-        "notice was {:?}",
-        app.notice
-    );
+    assert_eq!(app.agents.len(), 1, "no branch row without a session");
+    assert_eq!(app.notice.as_deref(), Some("Nothing to branch yet"));
 
     // Orchestrator: refused.
     app.agents.push(planner_run("orch-1", false));
     app.selected_agent = 1;
     app.branch_selected_agent();
-    assert_eq!(
-        app.agents.len(),
-        2,
-        "no fork row was created for the planner"
-    );
+    assert_eq!(app.agents.len(), 2, "no branch row for the planner");
+    assert_eq!(app.notice.as_deref(), Some("A plan's orchestrator can't be branched"));
 
-    // Claude worker with NO session id: nothing to fork yet.
-    let worker = test_agent_run("w-1", "some work");
+    // A Claude worker whose session has no file yet, and a Codex worker
+    // whose session Rudder has not found yet: nothing to branch either.
+    let mut worker = test_agent_run("w-1", "some work");
+    worker.cwd = app.cwd.clone();
+    worker.session_id = Some("33333333-3333-4333-8333-333333333333".to_string());
     app.agents.push(worker);
-    app.selected_agent = 2;
-    app.branch_selected_agent();
-    assert_eq!(app.agents.len(), 3, "no fork row without a session");
-    assert!(
-        app.notice
-            .as_deref()
-            .unwrap_or_default()
-            .contains("no session yet"),
-        "notice was {:?}",
-        app.notice
-    );
-
-    // A Codex worker with no recorded session says WHY, and what to do about it:
-    // Codex writes its session once the conversation starts, and Rudder finds it by
-    // the directory it ran in. "no resumable session" told the user nothing.
     let mut codex_worker = test_agent_run("w-2", "some work");
     codex_worker.backend = Backend::Codex;
-    codex_worker.cwd = app.cwd.join("does-not-exist");
     app.agents.push(codex_worker);
-    app.selected_agent = 3;
-    app.branch_selected_agent();
-    assert_eq!(app.agents.len(), 4, "no fork row without a session");
-    let notice = app.notice.as_deref().unwrap_or_default();
-    assert!(
-        notice.contains("no codex session recorded for this workspace")
-            && notice.contains("first reply"),
-        "notice was {notice:?}"
-    );
+    for index in [2, 3] {
+        app.notice = None;
+        app.selected_agent = index;
+        app.branch_selected_agent();
+        assert_eq!(app.agents.len(), 4, "no branch row without a conversation");
+        assert_eq!(app.notice.as_deref(), Some("Nothing to branch yet"));
+    }
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -9448,65 +9417,174 @@ fn stage_claude_session_copies_the_transcript_to_the_fork_cwd() {
 
 #[cfg(not(windows))]
 #[test]
-fn branch_spawns_a_new_forked_agent_row() {
+fn branch_starts_a_new_agent_from_a_copy_of_its_files_and_conversation() {
     let _env = env_guard();
-    let repo = unique_test_repo("branch-fork");
-    let fake = repo.join("fake-claude.sh");
-    write_fake_bin(&fake, "#!/bin/sh\nsleep 5\n");
-    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
-    // Claude scopes --resume by cwd; branching requires the source transcript to
-    // exist, so give this session one under an isolated HOME.
+    let repo = unique_test_repo("branch-agent");
     let home = repo.join("home");
-    let prior_home = std::env::var_os("HOME");
     std::env::set_var("HOME", &home);
+    let jj = |dir: &std::path::Path, args: &[&str]| {
+        let output = Command::new(jj_program())
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run jj");
+        assert!(output.status.success(), "jj {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    // The source agent works in its own jj workspace, with edits jj has not
+    // seen yet.
+    jj(&repo, &["git", "init"]);
+    fs::write(repo.join("app.txt"), "base\n").unwrap();
+    jj(&repo, &["commit", "-m", "base"]);
+    let source_ws = repo.join("source-ws");
+    jj(&repo, &["workspace", "add", source_ws.to_str().unwrap(), "--name", "source", "-r", "@-"]);
+    fs::write(source_ws.join("app.txt"), "half done\n").unwrap();
     let sid = "11111111-1111-4111-8111-111111111111";
-    let project_dir = home
-        .join(".claude")
-        .join("projects")
-        .join(encode_claude_project_dir(&repo));
-    fs::create_dir_all(&project_dir).expect("create fake claude project dir");
-    fs::write(project_dir.join(format!("{sid}.jsonl")), "{}\n").expect("seed transcript");
+    let source_dir = home.join(".claude").join("projects").join(encode_claude_project_dir(&source_ws));
+    fs::create_dir_all(&source_dir).unwrap();
+    let conversation = "{\"type\":\"user\",\"uuid\":\"u1\"}\n";
+    fs::write(source_dir.join(format!("{sid}.jsonl")), conversation).unwrap();
+
+    // `__launch-node` makes the branch's workspace and says where; the fake
+    // records what it was asked for.
+    let branch_ws = repo.join("branch-ws");
+    let launch_args = repo.join("launch-args.txt");
+    let fake_cli = repo.join("fake-rudder.sh");
+    write_fake_bin(
+        &fake_cli,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{args}'\nmkdir -p '{ws}'\necho '{{\"path\":\"{ws}\",\"workspaceName\":\"rudder-branch\",\"jjChangeId\":\"zzzz\"}}'\n",
+            args = launch_args.display(),
+            ws = branch_ws.display()
+        ),
+    );
+    std::env::set_var("RUDDER_CLI", &fake_cli);
+    let claude_args = repo.join("claude-args.txt");
+    let fake_claude = repo.join("fake-claude.sh");
+    write_fake_bin(
+        &fake_claude,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{tmp}'\nmv '{tmp}' '{args}'\nsleep 5\n",
+            tmp = claude_args.with_extension("partial").display(),
+            args = claude_args.display()
+        ),
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake_claude);
 
     let mut app = App::new();
     app.cwd = repo.clone();
     let mut source = test_agent_run("src-1", "implement the feature");
     source.task_summary = "implement the feature".to_string();
     source.session_id = Some(sid.to_string());
-    source.status = AgentStatus::Done;
-    source.cwd = repo.clone();
+    source.status = AgentStatus::Running;
+    source.cwd = source_ws.clone();
     app.agents.push(source);
+    app.agents.push(test_agent_run("other-1", "something else"));
     app.selected_agent = 0;
 
     app.branch_selected_agent();
-    match prior_home {
-        Some(value) => std::env::set_var("HOME", value),
-        None => std::env::remove_var("HOME"),
-    }
 
-    assert_eq!(app.agents.len(), 2, "a forked agent row was added");
-    let fork = &app.agents[1];
-    assert_eq!(fork.mode, AgentMode::Execute);
-    assert!(fork.task.starts_with("Branch of: "));
-    assert!(fork.task_summary.starts_with("branch: "));
-    assert_eq!(fork.backend, Backend::Claude);
-    assert_eq!(fork.status, AgentStatus::Running);
-    assert!(
-        fork.session_id.is_none(),
-        "the fork mints its own session id; it must NOT reuse the source's"
-    );
-    // The ORIGINAL run is untouched.
-    let source = &app.agents[0];
-    assert_eq!(source.status, AgentStatus::Done);
-    assert_eq!(
-        source.session_id.as_deref(),
-        Some("11111111-1111-4111-8111-111111111111")
-    );
-    // The fork is selected and focused so the user can type the new direction.
+    // The branch sits right after its source, selected, idle at its prompt.
+    assert_eq!(app.agents.len(), 3, "notice: {:?}", app.notice);
+    assert_eq!(app.agents[2].id, "other-1");
+    let branch = &app.agents[1];
+    assert_eq!(branch.task_summary, "implement the feature (branch)");
+    assert_eq!(branch.mode, AgentMode::Execute);
+    assert_eq!(branch.status, AgentStatus::Done, "no prompt: it waits; {:?}", branch.last_error);
+    assert!(branch.terminal.is_some());
+    assert_eq!(branch.workspace_path.as_deref(), Some(branch_ws.as_path()));
     assert_eq!(app.selected_agent, 1);
     assert_eq!(app.focus, FocusPane::Worker);
+    let session = branch.session_id.clone().expect("the branch has its own session");
+    assert_ne!(session, sid);
 
-    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    // Its workspace starts on a copy of the source's files, edits included.
+    let launched = fs::read_to_string(&launch_args).unwrap();
+    let base = launched
+        .lines()
+        .skip_while(|line| *line != "--base")
+        .nth(1)
+        .expect("the workspace starts on the copy")
+        .to_string();
+    assert_eq!(jj(&repo, &["--ignore-working-copy", "file", "show", "-r", &base, "app.txt"]), "half done");
+
+    // Claude resumes a copy of the whole conversation in the branch's own
+    // project folder, as a new session the branch's record owns.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !claude_args.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let args: Vec<String> = fs::read_to_string(&claude_args).unwrap().lines().map(str::to_string).collect();
+    let fork_from = args
+        .windows(2)
+        .find(|pair| pair[0] == "--resume")
+        .map(|pair| pair[1].clone())
+        .expect("--resume");
+    assert!(args.windows(3).any(|w| w[0] == "--fork-session" && w[1] == "--session-id" && w[2] == session));
+    assert!(!args.iter().any(|arg| arg == "--"), "no prompt was given: {args:?}");
+    let copy = home
+        .join(".claude")
+        .join("projects")
+        .join(encode_claude_project_dir(&branch_ws))
+        .join(format!("{fork_from}.jsonl"));
+    assert_eq!(fs::read_to_string(&copy).unwrap(), conversation);
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(native_run_dir(&repo, &app.agents[1].id).join("run.json")).unwrap())
+            .unwrap();
+    let recorded = recorded_session_ids(&record);
+    assert!(recorded.contains(&fork_from) && recorded.contains(&session), "{recorded:?}");
+
+    // The source is untouched.
+    let source = &app.agents[0];
+    assert_eq!(source.status, AgentStatus::Running);
+    assert_eq!(source.session_id.as_deref(), Some(sid));
+    assert_eq!(fs::read_to_string(source_dir.join(format!("{sid}.jsonl"))).unwrap(), conversation);
+    assert_eq!(fs::read_to_string(source_ws.join("app.txt")).unwrap(), "half done\n");
+
+    app.agents[1].terminal = None;
     let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn deleting_an_agent_keeps_its_conversation_while_a_branch_of_it_is_set_up() {
+    use crate::agent_life::{delete_conversation, ConversationRoots};
+    use crate::branch::PendingBranch;
+    let dir = unique_test_repo("branch-gc");
+    let roots = ConversationRoots { claude_projects: dir.join("projects"), codex_sessions: dir.join("sessions") };
+    let thread = "0193a000-0000-7000-8000-0000000000a1";
+    let rollout = roots.codex_sessions.join(format!("2026/11/18/rollout-2026-11-18T10-00-00-{thread}.jsonl"));
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    fs::write(&rollout, format!("{}\n", serde_json::json!({"type": "session_meta", "payload": {"id": thread}}))).unwrap();
+
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut source = test_agent_run("src-1", "source");
+    source.backend = Backend::Codex;
+    source.session_id = Some(thread.to_string());
+    // Its branch has no session of its own until the fork is made.
+    app.pending_launches.insert(
+        "src-1-branch".to_string(),
+        PendingLaunch {
+            kind: PendingLaunchKind::Branch(PendingBranch {
+                source_session: thread.to_string(),
+                source_label: "source".to_string(),
+                prompt: None,
+                request_id: None,
+            }),
+            typed: Vec::new(),
+        },
+    );
+    let job = app.conversation_of(&source);
+    assert_eq!(delete_conversation(&roots, &job).unwrap(), 0);
+    assert!(rollout.is_file(), "the fork being made still reads it");
+
+    // With no branch in the way, the source's conversation goes with it.
+    app.pending_launches.clear();
+    let job = app.conversation_of(&source);
+    assert_eq!(delete_conversation(&roots, &job).unwrap(), 1);
+    assert!(!rollout.exists());
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[cfg(not(windows))]

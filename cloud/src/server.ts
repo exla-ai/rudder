@@ -32,6 +32,7 @@ import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
 import { createProductAnalytics } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
+import { sendStaticFile } from "./app-static.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
@@ -833,7 +834,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       return;
     }
     if (req.method === "GET" && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
-      await serveAppFile(res, url.pathname);
+      await serveAppFile(req, res, url.pathname);
       return;
     }
     if (url.pathname.startsWith("/api/integrations/") && await integrations.handlePublicApi(req, res, url)) {
@@ -7204,34 +7205,32 @@ async function requireAccount(req: IncomingMessage): Promise<{ accountId: string
   return { accountId: String(id), email: typeof session?.user?.email === "string" ? session.user.email : undefined };
 }
 
-async function serveAppFile(res: ServerResponse, pathname: string): Promise<void> {
+async function serveAppFile(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
   if (pathname === "/app/terminal-recovery.js" || pathname === "/app/project-file-render.js") {
     const source=pathname === "/app/terminal-recovery.js" ? "./private-access/terminal-recovery.js" : "./project-files/browser-render.js";
-    const body=await fs.readFile(new URL(source,import.meta.url));
-    res.writeHead(200,{"content-type":"text/javascript; charset=utf-8","cache-control":"no-cache"});res.end(body);return;
+    await sendStaticFile(req, res, new URL(source, import.meta.url), { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
+    return;
   }
   const relative = pathname.replace(/^\/app\/?/, "") || "index.html";
   const resolved = path.resolve(appDir, relative);
   const insideApp = resolved === appDir || resolved.startsWith(`${appDir}${path.sep}`);
-  let target = insideApp ? resolved : path.join(appDir, "index.html");
-  let body: Buffer;
-  try {
-    body = await fs.readFile(target);
-  } catch {
-    // Client-side routes (/app/p/<id>) fall back to the shell.
-    target = path.join(appDir, "index.html");
-    body = await fs.readFile(target);
+  const shell = path.join(appDir, "index.html");
+  let target = insideApp ? resolved : shell;
+  // Client-side routes (/app/p/<id>) fall back to the shell.
+  if (!(await fs.stat(target).then((stat) => stat.isFile(), () => false))) {
+    target = shell;
   }
-  const type = APP_CONTENT_TYPES[path.extname(target)] ?? "application/octet-stream";
-  res.statusCode = 200;
-  res.setHeader("content-type", type);
   // The shell and the service worker must revalidate so a deploy shows up on
-  // the next open; hashed assets are not used, so everything revalidates.
-  res.setHeader("cache-control", "no-cache");
+  // the next open; hashed assets are not used, so everything revalidates
+  // (cheaply, through the ETag).
+  const headers: Record<string, string> = {
+    "content-type": APP_CONTENT_TYPES[path.extname(target)] ?? "application/octet-stream",
+    "cache-control": "no-cache",
+  };
   if (path.basename(target) === "sw.js") {
-    res.setHeader("service-worker-allowed", "/app");
+    headers["service-worker-allowed"] = "/app";
   }
-  res.end(body);
+  await sendStaticFile(req, res, target, headers);
 }
 
 // Where sign-in returns to: an invite or Slack link opened while signed out

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json && npm run build-editor",
-    "build-editor": "esbuild editor/codemirror.js --bundle --minify --format=esm --legal-comments=none --outfile=app/vendor/codemirror.js",
+    "build-editor": "esbuild editor/codemirror.js --bundle --minify --format=esm --legal-comments=none --outfile=app/vendor/codemirror.js && node editor/precompress.mjs app/vendor/codemirror.js",
     "start": "node dist/server.js"
   },
   "dependencies": {

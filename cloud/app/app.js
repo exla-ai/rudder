@@ -742,6 +742,7 @@ function DesktopShell() {
   const saveSide = () => { ls.set("rudder.sideWidth", sideWidth); ls.set("rudder.sideClosed", sideClosed); };
   const setSideClosed = (closed) => { sideClosed = closed; paintSide(); saveSide(); };
   const shortcut = /Mac/.test(navigator.platform) ? " (Ctrl+Cmd+S)" : "";
+  const alt = /Mac/.test(navigator.platform) ? "Option" : "Alt";
   hideBtn.title = `Hide sidebar${shortcut}`;
   showBtn.title = `Show sidebar${shortcut}`;
   hideBtn.addEventListener("click", () => { setSideClosed(true); showBtn.focus(); });
@@ -867,7 +868,7 @@ function DesktopShell() {
   // own group. The order is the account's, so every device shows it.
   const projSec = el.querySelector(".ds-psec");
   const insertEl = el.querySelector(".ds-insert");
-  setText(el.querySelector("#ds-move-hint"), `Drag to move, or ${/Mac/.test(navigator.platform) ? "Option" : "Alt"}+Up and Down`);
+  setText(el.querySelector("#ds-move-hint"), `Drag to move, or ${alt}+Up and Down`);
   const projRows = () => [...projectsEl.querySelectorAll(":scope > .ds-proj")];
   const groupRows = (ws) => {
     const pinned = projRows().find((r) => r.dataset.key === ws)?.classList.contains("pinned");
@@ -977,11 +978,45 @@ function DesktopShell() {
   });
   paintSide();
 
+  const stepHint = `${alt}+[ and ${alt}+] step through agents`;
   const sideAgent = (x) => {
     // The status line: in "Needs you" the project name gives way before the status does.
     const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
+    a.title = stepHint;
     return a;
   };
+  // A project's rows: live and recent agents (the project screen has the
+  // rest), plus the one on screen even when it is older.
+  const sideAgents = (p) => (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
+    .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
+
+  // Alt+[ and Alt+] step to the previous and next agent in the sidebar's
+  // project lists (folded projects included), wrapping at the ends, as the
+  // dashboard does. From any page and from the composer too. It matches
+  // e.code: on a Mac, Option+[ arrives in e.key as a typed quote.
+  function stepAgent(dir) {
+    // In the split, the focused pane steps; the other pane's agent is skipped.
+    const other = splitShown ? split.panes[1 - focused] : null;
+    const steps = sortProjects(store.state?.projects || []).flatMap((p) => sideAgents(p)
+      .filter((a) => !a.pending).map((a) => ({ ws: p.workspaceId, run: a.id })))
+      .filter((t) => !sameAgent(t, other));
+    if (!steps.length) return;
+    const here = agentOf(route);
+    const at = steps.findIndex((t) => sameAgent(t, here));
+    // Off an agent page: ] opens the first agent, [ the last.
+    const next = at < 0 ? steps[dir > 0 ? 0 : steps.length - 1] : steps[(at + dir + steps.length) % steps.length];
+    if (sameAgent(next, here)) return;
+    const typing = !!document.activeElement?.closest(".composer");
+    navigate(agentPath(next.ws, next.run));
+    // Keep typing where you were: in the new agent's composer.
+    if (typing) screen?.el.querySelector(".composer textarea")?.focus();
+  }
+  document.addEventListener("keydown", (e) => {
+    if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.code !== "BracketLeft" && e.code !== "BracketRight")) return;
+    if (document.querySelector("dialog[open]")) return;
+    e.preventDefault();
+    stepAgent(e.code === "BracketRight" ? 1 : -1);
+  }, { signal: life.signal, capture: true });
   const paintAgent = (a, { p, a: ag, showProject }) => {
     const st = agentStatus(ag);
     a.className = `ds-agent ${st.cls}`;
@@ -1068,9 +1103,7 @@ function DesktopShell() {
         const list = pEl.querySelector(".ds-agents");
         list.hidden = !open;
         if (!open) { list.replaceChildren(); pEl.querySelector(".ds-more")?.remove(); return; }
-        // Live and recent agents; the project screen has the rest.
-        const agents = (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
-          .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
+        const agents = sideAgents(p);
         if (agents.length) list.querySelector(":scope > .ds-none")?.remove();
         reconcile(list, agents, (a) => a.id, sideAgent, (a, ag) => paintAgent(a, { p, a: ag }));
         const hidden = (p.agents || []).length - agents.length;
@@ -4034,6 +4067,12 @@ setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
 
 // The iOS shell's 9:01 notification, tapped: open the newest digest.
 window.rudderOpenDigest = () => { if (!store.signedOut) navigate(digestPath(null)); };
+// The Mac shell opening a page (a notification, the menu bar, Cmd+,): move
+// within the app, never reload it.
+window.rudderOpenPath = ({ path } = {}) => {
+  if (store.signedOut || typeof path !== "string" || !/^\/app(\/|\?|$)/.test(path)) return;
+  navigate(path);
+};
 
 window.rudderRefresh = () => {
   nativeSignInRequested = false;

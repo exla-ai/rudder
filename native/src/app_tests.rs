@@ -22581,7 +22581,7 @@ fn repeating_a_task_does_not_double_up_the_history() {
 ///
 /// Only the MODEL is faked: RUDDER_CLAUDE_BIN / RUDDER_CODEX_BIN (which exist
 /// for exactly this) point at scripts that behave like the CLIs -- they fire the
-/// completion hook Rudder wired into their own argv, and the reviewer answers a
+/// lifecycle hooks Rudder wired into their own argv, and the reviewer answers a
 /// delivered packet with a verdict block.
 #[cfg(not(windows))]
 #[test]
@@ -22621,8 +22621,9 @@ cat >> {log}
         ),
     );
 
-    // Fake reviewer (codex): runs the notify script Rudder wired into its argv
-    // to report turn-end, then answers a delivered packet with a real verdict.
+    // Fake reviewer (codex): runs the UserPromptSubmit hook and the notify
+    // script Rudder wired into its argv to report turn start and end, then
+    // answers a delivered packet with a real verdict.
     let adv_log = dir.join("adv.log");
     let fake_codex = dir.join("fake-codex.sh");
     write_fake_bin(
@@ -22630,18 +22631,26 @@ cat >> {log}
         &format!(
             r#"#!/bin/sh
 notify=""
+prompt_hook=""
 for a in "$@"; do
   case "$a" in
     notify=*) notify=$(printf '%s' "$a" | sed 's/^notify=\["//; s/"\]$//') ;;
+    hooks.UserPromptSubmit=*) prompt_hook=$(printf '%s' "$a" | sed 's/.*command="\([^"]*\)".*/\1/') ;;
   esac
 done
 fire() {{ [ -n "$notify" ] && sh "$notify" '{{"type":"agent-turn-complete"}}' >/dev/null 2>&1; }}
+# Codex 0.170 runs its UserPromptSubmit hook (event JSON on stdin) for every
+# submitted prompt: the launch prompt and each pasted packet. That, not the
+# paste, is what reopens a Done Codex row.
+submit() {{ [ -n "$prompt_hook" ] && printf '{{"hook_event_name":"UserPromptSubmit"}}' | sh "$prompt_hook" >/dev/null 2>&1; }}
+submit
 printf 'standing by\n'
 fire
 while IFS= read -r line; do
   printf '%s\n' "$line" >> {log}
   case "$line" in
     *"pages the human"*)
+      submit
       sleep 1
       printf 'RUDDER_GAM_VERDICT_START\n'
       printf '{{"verdict":"accept","message":"satisfies the task"}}\n'
@@ -22717,12 +22726,6 @@ done
     );
 
     let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn tmp_dump_settings() {
-    let p = std::path::Path::new("/tmp/sig/run-x.json");
-    eprintln!("SET|{}", crate::signals::claude_settings_json(p, false));
 }
 
 /// The packet Rudder injects CONTAINS the output contract, sentinels and all,
@@ -29339,18 +29342,26 @@ cat >> {log}
     let fake_codex = dir.join("fake-codex.sh");
     write_fake_bin(&fake_codex, &format!(r#"#!/bin/sh
 notify=""
+prompt_hook=""
 for a in "$@"; do
   case "$a" in
     notify=*) notify=$(printf '%s' "$a" | sed 's/^notify=\["//; s/"\]$//') ;;
+    hooks.UserPromptSubmit=*) prompt_hook=$(printf '%s' "$a" | sed 's/.*command="\([^"]*\)".*/\1/') ;;
   esac
 done
 fire() {{ [ -n "$notify" ] && sh "$notify" '{{"type":"agent-turn-complete"}}' >/dev/null 2>&1; }}
+# Codex 0.170 runs its UserPromptSubmit hook (event JSON on stdin) for every
+# submitted prompt: the launch prompt and each pasted packet. That, not the
+# paste, is what reopens a Done Codex row.
+submit() {{ [ -n "$prompt_hook" ] && printf '{{"hook_event_name":"UserPromptSubmit"}}' | sh "$prompt_hook" >/dev/null 2>&1; }}
+submit
 printf 'standing by\n'
 fire
 while IFS= read -r line; do
   printf '%s\n' "$line" >> {log}
   case "$line" in
     *"pages the human"*)
+      submit
       sleep 1
       printf 'RUDDER_GAM_VERDICT_START\n'
       printf '{{"verdict":"accept","message":"satisfies the task"}}\n'

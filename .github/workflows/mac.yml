@@ -1,4 +1,6 @@
-# The Mac app on GitHub's Macs: every change under mac/ is compiled and its
+# The Mac app on an offstage Mac (runs-on: offstage-macos, a fresh account per
+# job with no root, so pinned tools go in the job's own folder): every change
+# under mac/ is compiled and its
 # core tested (the Linux home machine cannot), and a manual run with
 # `release: true` archives, signs with Developer ID, notarizes and staples the
 # app, wraps it in Rudder.dmg (notarized and stapled too) and publishes it as
@@ -36,17 +38,36 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: offstage-macos
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Xcode
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || echo /Applications/Xcode.app)"
-          xcodebuild -version
+          xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$xcode/Contents/Developer" xcodebuild -version
+      - name: Tools
+        run: |
+          # xcodegen, Python 3.12 for dmgbuild and gh, pinned and checked, in
+          # the job's own folder: the account has no root and no Homebrew.
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools" && cd "$tools"
+          fetch() { curl -fsSL -o "$2" "$1" && echo "$3  $2" | shasum -a 256 -c -; }
+          fetch https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip xcodegen.zip \
+            4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+          fetch https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-apple-darwin.tar.gz uv.tar.gz \
+            81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731
+          fetch https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_macOS_arm64.zip gh.zip \
+            d700207eae9ae98fe2b89535c2c087c07823d4628c56364695a5a07ef311c062
+          unzip -q xcodegen.zip && unzip -q gh.zip && tar xzf uv.tar.gz
+          export UV_PYTHON_INSTALL_DIR="$tools/python"
+          uv-aarch64-apple-darwin/uv python install 3.12
+          python_bin="$(dirname "$(uv-aarch64-apple-darwin/uv python find 3.12)")"
+          printf '%s\n' "$tools/xcodegen/bin" "$tools/gh_2.103.3_macOS_arm64/bin" "$python_bin" >> "$GITHUB_PATH"
       - name: Generate the project
         run: |
-          brew install xcodegen
+          xcodegen --version && gh --version | head -1 && python3 --version
           cd mac && xcodegen generate
       - name: Test the core
         run: |

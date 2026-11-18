@@ -816,20 +816,23 @@ impl EngineControl {
         if dir.join(&name).as_os_str().len() >= 100 {
             dir = PathBuf::from(format!("/tmp/rudder-engine-{}", unsafe { libc::getuid() }));
         }
-        fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         let path = dir.join(name);
+        // Every failure names the socket: a dashboard cannot start without it.
+        let at = || format!("engine control socket {}", path.display());
+        fs::create_dir_all(&dir).with_context(at)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).with_context(at)?;
         if path.exists() {
             anyhow::ensure!(
-                !attach_is_live(&path)?,
-                "an engine control socket is already live"
+                !attach_is_live(&path).with_context(at)?,
+                "an engine control socket is already live at {}",
+                path.display()
             );
-            fs::remove_file(&path)?;
+            fs::remove_file(&path).with_context(at)?;
         }
-        let listener = UnixListener::bind(&path).context("bind engine control socket")?;
-        let metadata = fs::symlink_metadata(&path)?;
+        let listener = UnixListener::bind(&path).with_context(at)?;
+        let metadata = fs::symlink_metadata(&path).with_context(at)?;
         let identity = (metadata.dev(), metadata.ino());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).with_context(at)?;
         listener.set_nonblocking(true)?;
         let (tx, rx) = mpsc::sync_channel(32);
         let observations=crate::engine_observations::EngineObservations::new(waker.clone())?;

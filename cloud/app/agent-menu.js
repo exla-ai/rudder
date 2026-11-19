@@ -188,9 +188,11 @@ export function branchAgent({ ws, run, title }) {
 export const isRenaming = (node) => !!node?.querySelector(":scope > input.rename");
 
 /**
- * Edit `node`'s text in place. Enter or leaving the field saves, Esc puts the
- * old text back. `onSave(text)` gets what was typed; `onEnd(byKey)` runs
- * either way, `byKey` when Enter or Esc ended it (not a click elsewhere).
+ * Edit `node`'s text in place, the way Finder renames a file: the field holds
+ * the text in its own place and type, as wide as what is typed, with all of
+ * it selected. Enter or leaving the field saves, Esc puts the old text back.
+ * `onSave(text)` gets what was typed; `onEnd(byKey)` runs either way, `byKey`
+ * when Enter or Esc ended it (not a click elsewhere).
  */
 export function editInPlace(node, { value, label, onSave, onEnd }) {
   if (isRenaming(node)) return;
@@ -198,8 +200,16 @@ export function editInPlace(node, { value, label, onSave, onEnd }) {
   input.maxLength = TITLE_MAX;
   input.value = value;
   input.setAttribute("aria-label", label);
+  // The text again, unseen, in the title's type: its width is the field's.
+  const measure = h(`<span class="rename-fit" aria-hidden="true"></span>`);
+  const fit = () => {
+    measure.textContent = input.value;
+    input.style.width = `${measure.scrollWidth + 2}px`;
+  };
   const before = node.textContent;
-  node.replaceChildren(input);
+  node.replaceChildren(input, measure);
+  fit();
+  input.addEventListener("input", fit);
   let done = false;
   const finish = (save, byKey) => {
     if (done) return;
@@ -220,6 +230,8 @@ export function editInPlace(node, { value, label, onSave, onEnd }) {
   input.addEventListener("dblclick", (e) => e.stopPropagation());
   input.focus();
   input.select();
+  // Selecting scrolls a long name to its end: show its start.
+  input.scrollLeft = 0;
 }
 
 let openMenu = null;

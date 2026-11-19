@@ -20,6 +20,7 @@ async function withTempRudderHome(t) {
   const previousUserHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
   const previousOpencode = process.env.RUDDER_OPENCODE_BIN;
+  const previousAgy = process.env.RUDDER_AGY_BIN;
   process.env.RUDDER_HOME = root;
   // Model discovery also reads ~/.codex and ~/.claude/projects. Keep those
   // lookups in the same disposable home instead of scanning the real account.
@@ -27,6 +28,8 @@ async function withTempRudderHome(t) {
   delete process.env.CODEX_HOME;
   // And asks `opencode`, here a stub that lists what a test writes.
   process.env.RUDDER_OPENCODE_BIN = await opencodeStub(root);
+  // And `agy`, here a stub: the real one may be on PATH.
+  process.env.RUDDER_AGY_BIN = await agyStub(root);
   t.after(async () => {
     if (previousHome === undefined) delete process.env.RUDDER_HOME;
     else process.env.RUDDER_HOME = previousHome;
@@ -36,6 +39,8 @@ async function withTempRudderHome(t) {
     else process.env.CODEX_HOME = previousCodexHome;
     if (previousOpencode === undefined) delete process.env.RUDDER_OPENCODE_BIN;
     else process.env.RUDDER_OPENCODE_BIN = previousOpencode;
+    if (previousAgy === undefined) delete process.env.RUDDER_AGY_BIN;
+    else process.env.RUDDER_AGY_BIN = previousAgy;
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   return root;
@@ -53,6 +58,27 @@ case "$1 $2" in
   "debug config") cat "${root}/opencode-config.json" 2>/dev/null || echo '{}' ;;
   *) echo "unexpected opencode $*" >&2; exit 1 ;;
 esac
+`, { mode: 0o755 });
+  return stub;
+}
+
+/**
+ * An `agy` whose `models --output-format json` prints `<root>/agy-models.json`,
+ * and with none is not signed in, as agy 1.5.0 says so.
+ */
+async function agyStub(root) {
+  const stub = path.join(root, "agy");
+  await fsp.writeFile(stub, `#!/bin/sh
+if [ "$*" != "models --output-format json" ]; then
+  echo "unexpected agy $*" >&2
+  exit 1
+fi
+if [ -f "${root}/agy-models.json" ]; then
+  cat "${root}/agy-models.json"
+  exit 0
+fi
+echo "Please sign in to view available models. Launch the CLI without arguments to sign in." >&2
+exit 1
 `, { mode: 0o755 });
   return stub;
 }
@@ -230,9 +256,17 @@ test("the picker sorts models by version, then tier, names them and offers only 
     opencodeModel("openrouter", "anthropic/claude-sonnet-4.5", { name: "Claude Sonnet 4.5", context: 1000000, variants: { high: effort("high"), ultra: effort("ultra") } }),
   ].join(""));
   await fsp.writeFile(path.join(root, "opencode-config.json"), JSON.stringify({ model: "opencode/big-pickle" }));
+  // Before agy is signed in, its section is empty.
+  assert.deepEqual(await modelsOf("antigravity"), []);
+  // agy's list, as its modelJSON prints it.
+  await fsp.writeFile(path.join(root, "agy-models.json"), JSON.stringify([
+    { id: "gemini-4-argon", label: "Gemini 4 Argon" },
+    { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
+    { id: "gemini-3.1-pro-high" },
+  ]));
 
   const harnesses = await discoverHarnesses();
-  assert.deepEqual(harnesses.map((h) => [h.id, h.label, h.account]), [["claude", "Claude", "Claude Code"], ["codex", "Codex", "ChatGPT"], ["opencode", "OpenCode", "OpenCode"]]);
+  assert.deepEqual(harnesses.map((h) => [h.id, h.label, h.account]), [["claude", "Claude", "Claude Code"], ["codex", "Codex", "ChatGPT"], ["opencode", "OpenCode", "OpenCode"], ["antigravity", "Antigravity", "Google"]]);
   const claude = harnesses[0].models;
   // Exactly Claude Code's models (no catalog-only Opus 4.5), the name and then
   // the version, the highest version first, Claude Code's family order within
@@ -299,6 +333,16 @@ test("the picker sorts models by version, then tier, names them and offers only 
   assert.equal(opencode.default, "opencode/big-pickle");
   assert.equal(modelName(harnesses, "opencode", null), "Big Pickle", "no model is the one OpenCode's config runs");
   assert.equal(modelName(harnesses, "opencode", "anthropic/claude-sonnet"), "Claude Sonnet", "a model OpenCode no longer lists");
+  // Exactly agy's models in its order, with its labels, and no efforts or
+  // default, which its list does not name.
+  const antigravity = harnesses[3];
+  assert.deepEqual(antigravity.models.map((row) => [row.value, row.label, row.efforts]), [
+    ["gemini-4-argon", "Gemini 4 Argon", []],
+    ["gemini-3.8-flash", "Gemini 3.8 Flash", []],
+    ["gemini-3.1-pro-high", "Gemini 3.1 Pro High", []],
+  ]);
+  assert.equal(antigravity.default, null);
+  assert.equal(modelName(harnesses, "antigravity", "gemini-4-argon"), "Gemini 4 Argon");
   // Model chips show the harness's logo in place of its name.
   for (const harness of harnesses) {
     assert.match(harnessLogo(harness.id), /^<svg /, `${harness.label} needs a logo in cloud/app/harness-logos.js`);

@@ -185,6 +185,9 @@ const logins = createLoginRunner({
     lastStateJson = "";
     scheduleStateSoon();
     if (session.status === "done") {
+      // A new sign-in can change what its CLI lists (agy lists models only
+      // when signed in): the next request reads the lists again.
+      models = null;
       void credentialsAfterLogin(provider);
     }
   },
@@ -1218,9 +1221,10 @@ async function keepModelsFresh() {
   }
   await refreshModels();
 }
-// What the CLIs' model lists come from, as one string: the claude, codex and
-// opencode binaries, the model list in Codex's cache, and the providers
-// OpenCode is signed in to with its model cache.
+// What the CLIs' model lists come from, as one string: the claude, codex,
+// opencode and agy binaries, the model list in Codex's cache, and the
+// providers OpenCode is signed in to with its model cache. agy's sign-in
+// (its list needs one) is caught when it finishes (createLoginRunner onChange).
 function modelSourcesStamp() {
   const codexHome = baseChildEnv.CODEX_HOME?.trim() || path.join(HOME, ".codex");
   const opencodeData = baseChildEnv.XDG_DATA_HOME?.trim() || path.join(HOME, ".local", "share");
@@ -1232,6 +1236,7 @@ function modelSourcesStamp() {
     modelCliStamp(baseChildEnv.RUDDER_OPENCODE_BIN?.trim() || "opencode"),
     fileStamp(path.join(opencodeData, "opencode", "auth.json")),
     fileStamp(path.join(opencodeCache, "opencode", "models.json")),
+    modelCliStamp(baseChildEnv.RUDDER_AGY_BIN?.trim() || "agy"),
   ].join("\n");
 }
 function fileStamp(file) {

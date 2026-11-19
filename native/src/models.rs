@@ -207,6 +207,11 @@ pub(crate) fn known_model_backend(model: &str) -> Option<Backend> {
             return Some(backend);
         }
     }
+    for model in cached_antigravity_models().unwrap_or_default() {
+        if model.eq_ignore_ascii_case(query) {
+            return Some(Backend::Antigravity);
+        }
+    }
     // Provider-qualified opencode ids ("anthropic/claude-sonnet-4-5"): a slash
     // whose head is NOT one of our provider keywords.
     if query.contains('/')
@@ -259,6 +264,12 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
     };
     let (backend, model) = match named {
         Some(backend) => known_model(backend, model).map(|known| (backend, known)).ok_or_else(|| {
+            // agy's cached list may be the reason: it could not be read.
+            if backend == Backend::Antigravity {
+                if let Err(reason) = cached_antigravity_models() {
+                    return format!("unknown antigravity model: {model}; {reason}");
+                }
+            }
             format!(
                 "unknown {backend} model: {model}; pick one from /model {backend}",
                 backend = backend.as_str()
@@ -374,7 +385,12 @@ pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<
             .into_iter()
             .find(|entry| entry.id == model)
             .map(|entry| entry.efforts),
-        Backend::Codex | Backend::Antigravity => None,
+        Backend::Antigravity => cached_antigravity_models()
+            .ok()?
+            .iter()
+            .any(|id| id == model)
+            .then(Vec::new),
+        Backend::Codex => None,
     }
 }
 
@@ -1384,6 +1400,13 @@ pub(crate) fn model_suggestions_for(backend_filter: Backend, query: &str) -> Vec
             push_model_suggestion(&mut suggestions, &mut seen, backend, &model, &detail);
         }
     }
+    // agy's own list for its account, in its order. A list that cannot be
+    // read offers nothing here; `/model antigravity` says why.
+    if backend_filter == Backend::Antigravity {
+        for model in cached_antigravity_models().unwrap_or_default() {
+            push_model_suggestion(&mut suggestions, &mut seen, Backend::Antigravity, &model, "");
+        }
+    }
     for (backend, model, detail) in cached_models_dev_rows() {
         if backend == backend_filter {
             push_model_suggestion(&mut suggestions, &mut seen, backend, &model, &detail);
@@ -1793,6 +1816,104 @@ fn maybe_refresh_opencode_models_cache() {
             let _ = child.wait();
         });
     }
+}
+
+/// Where `agy models --output-format json` is cached for the picker and the
+/// `/model antigravity` check. agy lists models only when signed in, so a
+/// missing list is asked for again each minute: a sign-in from the phone
+/// shows up without a restart.
+pub(crate) fn antigravity_models_cache_path() -> Option<PathBuf> {
+    std::env::var_os("RUDDER_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rudder")))
+        .map(|home| home.join("antigravity-models.json"))
+}
+
+/// A detached `agy models` refresh when the cache is missing or a day old, at
+/// most once a minute. agy prints only the list on stdout; signed out it
+/// prints none, which leaves the cache as it was.
+fn maybe_refresh_antigravity_models_cache() {
+    static LAST_TRY: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    if cfg!(test) {
+        return;
+    }
+    let Some(path) = antigravity_models_cache_path() else {
+        return;
+    };
+    let stale = fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|age| age > Duration::from_secs(24 * 60 * 60))
+        .unwrap_or(true);
+    if !stale {
+        return;
+    }
+    {
+        let Ok(mut last) = LAST_TRY.lock() else {
+            return;
+        };
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Write to a temp and rename so a half-written list is never read.
+    let script = format!(
+        "{program} models --output-format json > '{path}'.tmp 2>/dev/null && [ -s '{path}'.tmp ] && mv -f '{path}'.tmp '{path}'",
+        program = antigravity_program(),
+        path = path.display()
+    );
+    if let Ok(mut child) = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+/// agy's cached list, the slugs `--model` takes: none before agy lists them
+/// (not installed, not signed in or not read yet), or why the list could not
+/// be read.
+pub(crate) fn cached_antigravity_models() -> Result<Vec<String>, String> {
+    maybe_refresh_antigravity_models_cache();
+    let Some(path) = antigravity_models_cache_path() else {
+        return Ok(Vec::new());
+    };
+    match fs::read_to_string(&path) {
+        Ok(raw) => parse_antigravity_models(&raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// `agy models --output-format json`: an array of `{"id": "...", "label":
+/// "..."}` (agy 1.5.0's modelJSON). It names no efforts, so a listed model
+/// offers none and runs at agy's default thinking level.
+/// src/models.ts parseAntigravityModels reads the same output for the app.
+pub(crate) fn parse_antigravity_models(raw: &str) -> Result<Vec<String>, String> {
+    let list: Vec<serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|error| format!("agy models --output-format json printed no list: {error}"))?;
+    list.iter()
+        .map(|entry| {
+            entry
+                .get("id")
+                .and_then(|id| id.as_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("agy models --output-format json listed a model with no id: {entry}"))
+        })
+        .collect()
 }
 
 /// The models `opencode models` reported. That command knows which providers

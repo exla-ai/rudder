@@ -370,19 +370,26 @@ provider in with ChatGPT's device code; with no sign-in it runs OpenCode Zen's
 free models. Open: OpenCode subagents in the app's tray, the app's "/" list
 for it, and token use in the dashboard's timeline.
 
-Antigravity (`agy`, pinned at 1.5.0) is a fourth agent backend. The dashboard,
-the CLI, Cloud homes and the phone app can start, resume and read it. Its turn
-state comes from hooks in `~/.gemini/config/hooks.json` (a `rudder` entry that
-does nothing unless `RUDDER_AGY_HOOK` is set). Permission prompts and
-questions come from its OSC 7501 terminal status (`AGY_CLI_OSC7501=on`).
-Transcripts are read from
+Antigravity (`agy`, pinned at 1.5.13 in the worker image) is a fourth agent
+backend. The dashboard, the CLI, Cloud homes and the phone app can start,
+resume and read it. Its turn state comes from hooks in
+`~/.gemini/config/hooks.json` (a `rudder` entry that does nothing unless
+`RUDDER_AGY_HOOK` is set). Permission prompts and questions come from its OSC
+7501 terminal status (`AGY_CLI_OSC7501=on`). Transcripts are read from
 `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`,
 and the folder is trusted through `trustedWorkspaces` in its `settings.json`.
 Rudder refuses with a plain reason where agy has no way in: fork, branch and
 handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global
-file only). Open: phone answers to its permission prompts, the app's "/" list
-for it, and the files hub showing `~/.gemini` instructions and skills.
+file only). The app's Settings agents list signs it in to Google with a
+pasted code, and a chat can switch to and from it in the model picker. Its
+models come from `agy models --output-format json`, which agy prints only
+when signed in: an array of `{id, label}` (read from the types in agy 1.5.0
+and 1.5.13, not yet from a signed-in run). It names no efforts or default, so
+the pickers offer none for it. Open: phone answers to its permission
+prompts, the app's "/" list for it, the files an edit wrote in a handoff
+from it (its CODE_ACTION step), and the files hub showing `~/.gemini`
+instructions and skills.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

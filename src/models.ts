@@ -275,6 +275,67 @@ async function readOpencodeConfiguredModel(): Promise<string | null> {
   return model?.providerID && model.model ? `${model.providerID}/${model.model}` : null;
 }
 
+const AGY_TIMEOUT_MS = 20_000;
+
+/** The Antigravity CLI; RUDDER_AGY_BIN points tests at a stub, as in the dashboard. */
+function agyBin(): string {
+  return process.env.RUDDER_AGY_BIN?.trim() || "agy";
+}
+
+/**
+ * `agy models --output-format json`, whose stdout holds the list alone (agy
+ * 1.5.0 prints its errors and spinner on stderr). None when agy is not
+ * installed or not signed in: it then says "Please sign in to view available
+ * models". Any other failure is an error with its reason.
+ */
+async function readAntigravityModels(): Promise<CliModel[]> {
+  const bin = agyBin();
+  const args = ["models", "--output-format", "json"];
+  return await new Promise((resolve, reject) => {
+    const child = execFile(bin, args, { cwd: os.homedir(), timeout: AGY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT" || /Please sign in to view available models/.test(`${stdout}\n${stderr}`)) {
+        resolve([]);
+      } else if (error) {
+        const reason = String(stderr).trim().split("\n")[0] || error.message;
+        reject(new Error(`${bin} ${args.join(" ")} failed: ${reason}`));
+      } else {
+        try {
+          resolve(parseAntigravityModels(String(stdout)));
+        } catch (parseError) {
+          reject(parseError);
+        }
+      }
+    });
+    // agy waits on an open stdin pipe it inherits.
+    child.stdin?.end();
+  });
+}
+
+/**
+ * agy's JSON model list: an array of `{"id": "...", "label": "..."}`, agy
+ * 1.5.0's modelJSON (id, the slug `--model` takes, and a label when it has
+ * one). It names no efforts and no default, so the section offers neither:
+ * agy runs a model at its own default thinking level.
+ */
+export function parseAntigravityModels(out: string): CliModel[] {
+  let list: unknown;
+  try {
+    list = JSON.parse(out);
+  } catch (error) {
+    throw new Error(`agy models --output-format json printed no JSON: ${(error as Error).message}`);
+  }
+  if (!Array.isArray(list)) {
+    throw new Error("agy models --output-format json printed no list");
+  }
+  return list.map((entry: unknown) => {
+    const { id, label } = (entry ?? {}) as { id?: unknown; label?: unknown };
+    if (typeof id !== "string" || !id || (label !== undefined && typeof label !== "string")) {
+      throw new Error(`agy models --output-format json listed a model with no id: ${JSON.stringify(entry)}`);
+    }
+    return { id, name: label || undefined, efforts: [], alias: false, resolved: id };
+  });
+}
+
 async function readModelsDev(): Promise<ModelCatalog> {
   if (modelCatalogInFlight) {
     return modelCatalogInFlight;
@@ -873,7 +934,24 @@ const OPENCODE: Harness = {
   efforts: ["low", "medium", "high", "xhigh", "max"],
 };
 
-const HARNESSES: Harness[] = [CLAUDE, CODEX, OPENCODE];
+const ANTIGRAVITY: Harness = {
+  id: "antigravity",
+  label: "Antigravity",
+  account: "Google",
+  catalog: null,
+  listed: readAntigravityModels,
+  // agy's list does not say which model it runs when given none.
+  defaultModel: async () => null,
+  parse: parseAntigravityId,
+  // agy's names already read "Gemini 4 Argon".
+  name: (display) => display,
+  // Models in the order agy lists them.
+  tiers: tiersByListOrder,
+  // `agy --effort` (native launch.rs); none offered while agy's list names none.
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+};
+
+const HARNESSES: Harness[] = [CLAUDE, CODEX, OPENCODE, ANTIGRAVITY];
 
 const CONTEXT_SUFFIX = /\[(\d+)([km])\]$/i;
 
@@ -951,6 +1029,15 @@ function parseOpencodeId(id: string): ParsedModelId {
   const { base, context } = splitContext(id);
   const slash = base.indexOf("/");
   return { ...unknownId(base, context), series: 0, family: slash > 0 ? base.slice(0, slash) : base };
+}
+
+/**
+ * "gemini-4-argon" reads "Gemini 4 Argon", as agy names it. agy's list spans
+ * model makers, so each model is its own family, ranked in list order.
+ */
+function parseAntigravityId(id: string): ParsedModelId {
+  const { base, context } = splitContext(id);
+  return { series: 0, version: [], family: base, name: words(base), context };
 }
 
 /** "claude-opus-5-5" is Opus 5.5, "claude-haiku-4-5-20251001" Haiku 4.5. */

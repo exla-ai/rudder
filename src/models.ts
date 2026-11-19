@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
@@ -130,7 +130,7 @@ export async function discoverHarnesses(): Promise<HarnessModels[]> {
     id: harness.id,
     label: harness.label,
     account: harness.account,
-    models: pickerRows(harness, catalog.data[harness.catalog]?.models ?? {}, await harness.listed(catalog)),
+    models: pickerRows(harness, (harness.catalog && catalog.data[harness.catalog]?.models) || {}, await harness.listed(catalog)),
     default: await harness.defaultModel(catalog),
   })));
 }
@@ -191,6 +191,88 @@ async function readCodexCliModels(): Promise<CliModel[]> {
     alias: false,
     resolved: model.slug!,
   }));
+}
+
+const OPENCODE_TIMEOUT_MS = 20_000;
+
+/** The OpenCode CLI; RUDDER_OPENCODE_BIN points tests at a stub, as in the dashboard. */
+function opencodeBin(): string {
+  return process.env.RUDDER_OPENCODE_BIN?.trim() || "opencode";
+}
+
+/**
+ * `opencode <args>` run from the home directory: its stdout, or null when
+ * OpenCode is not installed. Any other failure is an error with its reason.
+ */
+async function opencodeOutput(args: string[]): Promise<string | null> {
+  const bin = opencodeBin();
+  return await new Promise((resolve, reject) => {
+    execFile(bin, args, { cwd: os.homedir(), timeout: OPENCODE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+        resolve(null);
+      } else if (error) {
+        const reason = String(stderr).trim().split("\n")[0] || error.message;
+        reject(new Error(`${bin} ${args.join(" ")} failed: ${reason}`));
+      } else {
+        resolve(String(stdout));
+      }
+    });
+  });
+}
+
+/** OpenCode's model list for this machine's sign-ins, with names and variants. */
+async function readOpencodeModels(): Promise<CliModel[]> {
+  const out = await opencodeOutput(["models", "--verbose"]);
+  return out === null ? [] : parseOpencodeModels(out);
+}
+
+/**
+ * `opencode models --verbose`: each model's `provider/model` id on a line of
+ * its own, then its JSON (name, limit.context, release_date and `variants`,
+ * the reasoning levels it runs at, keyed by name).
+ */
+export function parseOpencodeModels(out: string): CliModel[] {
+  const lines = out.split("\n");
+  const models: CliModel[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const id = lines[index].trim();
+    if (!/^[^\s{}"]+\/\S+$/.test(id) || lines[index + 1] !== "{") {
+      continue;
+    }
+    const end = lines.indexOf("}", index + 1);
+    if (end < 0) {
+      throw new Error(`opencode models --verbose cut off in ${id}`);
+    }
+    const model = JSON.parse(lines.slice(index + 1, end + 1).join("\n")) as {
+      name?: string; limit?: { context?: number }; release_date?: string; variants?: Record<string, unknown>;
+    };
+    models.push({
+      id,
+      name: model.name,
+      description: catalogDetail({ limit: model.limit, release_date: model.release_date }),
+      efforts: Object.keys(model.variants ?? {}),
+      alias: false,
+      resolved: id,
+    });
+    index = end;
+  }
+  return models;
+}
+
+/**
+ * The model OpenCode runs when it is given none: the `model` its resolved
+ * config sets (`opencode debug config`), or null when none does.
+ */
+async function readOpencodeConfiguredModel(): Promise<string | null> {
+  const out = await opencodeOutput(["debug", "config"]);
+  if (out === null) {
+    return null;
+  }
+  const model = (JSON.parse(out) as { model?: string | { providerID?: string; model?: string } }).model;
+  if (typeof model === "string") {
+    return model || null;
+  }
+  return model?.providerID && model.model ? `${model.providerID}/${model.model}` : null;
 }
 
 async function readModelsDev(): Promise<ModelCatalog> {
@@ -721,8 +803,12 @@ type Harness = {
   label: string;
   /** What it signs in with, for the picker's account line. */
   account: string;
-  /** The catalog provider (models.dev, `models-dev.json`) for detail lines and prices. */
-  catalog: "anthropic" | "openai";
+  /**
+   * The catalog provider (models.dev, `models-dev.json`) for detail lines and
+   * prices. Null when the CLI's own list carries them (OpenCode's spans every
+   * provider).
+   */
+  catalog: "anthropic" | "openai" | null;
   /** The CLI's own list of models: the rows of its section. */
   listed: (catalog: ModelCatalog) => Promise<CliModel[]>;
   /** The model it runs when given none (HarnessModels.default). */
@@ -768,7 +854,26 @@ const CODEX: Harness = {
   efforts: ["low", "medium", "high", "xhigh"],
 };
 
-const HARNESSES: Harness[] = [CLAUDE, CODEX];
+const OPENCODE: Harness = {
+  id: "opencode",
+  label: "OpenCode",
+  // OpenCode runs its own free models with no sign-in, and the models of any
+  // provider it is signed in to.
+  account: "OpenCode",
+  catalog: null,
+  listed: () => readOpencodeModels(),
+  defaultModel: () => readOpencodeConfiguredModel(),
+  parse: parseOpencodeId,
+  // OpenCode's names already read "Big Pickle", "Claude Sonnet 4.5".
+  name: (display) => display,
+  // Providers in the order OpenCode lists them.
+  tiers: tiersByListOrder,
+  // A model's variants of these names (`opencode models --verbose`); the
+  // dashboard runs one as the agent's `variant` (native launch.rs).
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+};
+
+const HARNESSES: Harness[] = [CLAUDE, CODEX, OPENCODE];
 
 const CONTEXT_SUFFIX = /\[(\d+)([km])\]$/i;
 
@@ -835,6 +940,17 @@ function splitContext(id: string): { base: string; context?: string } {
 /** An id of no known shape reads as its words, without a provider prefix: "anthropic/my-model" is "My Model". */
 function unknownId(base: string, context?: string): ParsedModelId {
   return { series: 2, version: [], family: base, name: words(base.slice(base.lastIndexOf("/") + 1)), context };
+}
+
+/**
+ * "opencode/big-pickle" reads "Big Pickle". OpenCode's ids carry no version
+ * Rudder can read across providers, so each provider is a family, ranked in
+ * list order, and its models go by id.
+ */
+function parseOpencodeId(id: string): ParsedModelId {
+  const { base, context } = splitContext(id);
+  const slash = base.indexOf("/");
+  return { ...unknownId(base, context), series: 0, family: slash > 0 ? base.slice(0, slash) : base };
 }
 
 /** "claude-opus-5-5" is Opus 5.5, "claude-haiku-4-5-20251001" Haiku 4.5. */

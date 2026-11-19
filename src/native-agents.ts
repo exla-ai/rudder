@@ -1,6 +1,7 @@
 import type { RunRecord } from "./types.js";
 import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-config.js";
 import { codexEffortConfigArgs, normalizeEffortForBackend } from "./effort.js";
+import { opencodeVariantConfig } from "./opencode.js";
 import { PLAN_MODE_CONTRACT } from "./plan-mode.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel } from "./state.js";
 import { taskDisplayLabel } from "./task-summary.js";
@@ -21,7 +22,7 @@ export function nativeAgentCommand(params: {
     : params.run.backend === "codex"
       ? codexArgs(params.run, prompt, params.contract, params.codexCommand)
       : params.run.backend === "opencode"
-        ? opencodeArgs(params.run, prompt, params.contract)
+        ? opencodeArgs(params.run, [params.contract, "", prompt].join("\n"), "build")
         : claudeArgs(params.run, prompt, params.contract);
   return args.map(shellQuote).join(" ");
 }
@@ -52,18 +53,28 @@ function claudeArgs(run: RunRecord, prompt: string, contract: string): string[] 
 }
 
 /**
- * opencode's interactive TUI: `--auto` approves what is not explicitly denied (the
- * worker is already isolated in its own workspace), `--prompt` carries the first
- * turn. Models are `provider/model`; an empty model uses opencode's own default.
+ * OpenCode's interactive TUI, as the dashboard launches it (native
+ * launch.rs). Workers run its build agent with `--auto`, which approves what
+ * no rule denies (the worker is isolated in its own workspace); planners run
+ * its plan agent, which does not edit. `--prompt` carries the first turn and
+ * `--session` continues the run's own session. Models are `provider/model`;
+ * an empty model is OpenCode's own default. An effort is the model's variant.
  */
-function opencodeArgs(run: RunRecord, prompt: string, contract: string): string[] {
+function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): string[] {
+  const session = run.session?.nativeSessionId;
+  const variant = opencodeVariantConfig(agent, run.model, run.effort);
   return compact([
+    variant ? "env" : undefined,
+    variant ? `OPENCODE_CONFIG_CONTENT=${variant}` : undefined,
     "opencode",
-    "--auto",
+    agent === "build" ? "--auto" : "--agent",
+    agent === "build" ? undefined : "plan",
     run.model ? "-m" : undefined,
     run.model || undefined,
+    session ? "--session" : undefined,
+    session,
     "--prompt",
-    [contract, "", prompt].join("\n"),
+    prompt,
   ]);
 }
 
@@ -89,7 +100,9 @@ function codexArgs(run: RunRecord, prompt: string, contract: string, codexComman
 function planArgs(run: RunRecord, prompt: string, codexCommand?: string): string[] {
   return run.backend === "codex"
     ? codexPlanArgs(run, prompt, codexCommand)
-    : claudePlanArgs(run, prompt);
+    : run.backend === "opencode"
+      ? opencodeArgs(run, `${PLAN_MODE_CONTRACT}\n\n${prompt}`, "plan")
+      : claudePlanArgs(run, prompt);
 }
 
 function claudePlanArgs(run: RunRecord, prompt: string): string[] {

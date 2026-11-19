@@ -16,11 +16,7 @@ export function normalizeEffortForBackend(backend: BackendId, effort: EffortLeve
   if (!effort) {
     return undefined;
   }
-  // opencode exposes no reasoning-effort flag at all, so a stored effort is
-  // dropped rather than passed to a CLI that would reject it.
-  if (backend === "opencode") {
-    return undefined;
-  }
+  // OpenCode takes the effort as the model's variant of that name.
   if (backend === "codex" && effort === "max") {
     return "xhigh";
   }

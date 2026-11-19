@@ -184,8 +184,8 @@ test("parseOpencodeSessions: this repo's opencode chats, newest first", () => {
   );
 });
 
-test("opencode carries no reasoning effort: it has no flag to pass one to", () => {
-  assert.equal(normalizeEffortForBackend("opencode", "high"), undefined);
+test("an effort reaches each backend by its own name; OpenCode's is the model's variant", () => {
+  assert.equal(normalizeEffortForBackend("opencode", "high"), "high");
   assert.equal(normalizeEffortForBackend("claude", "high"), "high");
   assert.equal(normalizeEffortForBackend("codex", "max"), "xhigh");
 });

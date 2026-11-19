@@ -219,12 +219,12 @@ function codexBackend(): BackendAdapter {
 }
 
 /**
- * opencode (https://opencode.ai). `opencode run --format json` streams JSONL parts
+ * OpenCode (https://opencode.ai). `opencode run --format json` streams JSONL parts
  * and reports the session id on every one, so a follow-up turn resumes the same
  * conversation with `--session`. Models are named `provider/model`; an empty model
- * means "whatever opencode is configured with", which is a legitimate choice here.
- *
- * No effort flag exists, so `run.effort` is deliberately not translated.
+ * means "whatever OpenCode is configured with", which is a legitimate choice here.
+ * Workers run unattended with `--auto`, as Claude and Codex workers do, and an
+ * effort is the model's `--variant` of that name.
  */
 function opencodeBackend(): BackendAdapter {
   return {
@@ -238,12 +238,16 @@ function opencodeBackend(): BackendAdapter {
       const prompt = stripRudderPromptWrappers(request.prompt);
       const sessionId = request.run.session?.nativeSessionId;
       const isFollowUp = (request.run.turns?.length ?? 0) > 1 && Boolean(sessionId);
+      const effort = normalizeEffortForBackend("opencode", request.run.effort);
       const args = compact([
         "run",
         "--format",
         "json",
+        "--auto",
         request.run.model ? "-m" : undefined,
         request.run.model || undefined,
+        effort ? "--variant" : undefined,
+        effort,
         isFollowUp ? "--session" : undefined,
         isFollowUp ? sessionId : undefined,
         `${request.contract}\n\n${prompt}`,
@@ -654,6 +658,10 @@ function textFromBackendData(data: unknown, sawStreamingText: boolean): string {
   }
   if (isRecord(record.error) && typeof record.error.message === "string") {
     return record.error.message;
+  }
+  // OpenCode's error event: {"type":"error","error":{"name":"...","data":{"message":"..."}}}.
+  if (record.type === "error" && isRecord(record.error) && isRecord(record.error.data) && typeof record.error.data.message === "string") {
+    return record.error.data.message;
   }
   // opencode: text parts carry the assistant prose; step_start/step_finish do not.
   if (record.type === "text" && isRecord(record.part) && typeof record.part.text === "string") {

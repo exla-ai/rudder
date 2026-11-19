@@ -954,9 +954,8 @@ function effortForBackend(backend: BackendId, config: Awaited<ReturnType<typeof 
   if (backend === "codex") {
     return config.backends.codex?.reasoningEffort ?? config.backends.codex?.effort;
   }
-  // opencode has no effort flag; normalizeEffortForBackend drops it anyway.
   if (backend === "opencode") {
-    return undefined;
+    return config.backends.opencode?.effort;
   }
   return config.backends.acpx?.reasoningEffort ?? config.backends.acpx?.effort;
 }

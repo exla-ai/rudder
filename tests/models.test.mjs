@@ -19,11 +19,14 @@ async function withTempRudderHome(t) {
   const previousHome = process.env.RUDDER_HOME;
   const previousUserHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
+  const previousOpencode = process.env.RUDDER_OPENCODE_BIN;
   process.env.RUDDER_HOME = root;
   // Model discovery also reads ~/.codex and ~/.claude/projects. Keep those
   // lookups in the same disposable home instead of scanning the real account.
   process.env.HOME = root;
   delete process.env.CODEX_HOME;
+  // And asks `opencode`, here a stub that lists what a test writes.
+  process.env.RUDDER_OPENCODE_BIN = await opencodeStub(root);
   t.after(async () => {
     if (previousHome === undefined) delete process.env.RUDDER_HOME;
     else process.env.RUDDER_HOME = previousHome;
@@ -31,9 +34,33 @@ async function withTempRudderHome(t) {
     else process.env.HOME = previousUserHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
+    if (previousOpencode === undefined) delete process.env.RUDDER_OPENCODE_BIN;
+    else process.env.RUDDER_OPENCODE_BIN = previousOpencode;
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   return root;
+}
+
+/**
+ * An `opencode` whose `models --verbose` prints `<root>/opencode-models.txt`
+ * and whose `debug config` prints `<root>/opencode-config.json` (none: `{}`).
+ */
+async function opencodeStub(root) {
+  const stub = path.join(root, "opencode");
+  await fsp.writeFile(stub, `#!/bin/sh
+case "$1 $2" in
+  "models --verbose") cat "${root}/opencode-models.txt" 2>/dev/null || true ;;
+  "debug config") cat "${root}/opencode-config.json" 2>/dev/null || echo '{}' ;;
+  *) echo "unexpected opencode $*" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+  return stub;
+}
+
+/** One model as `opencode models --verbose` prints it. */
+function opencodeModel(provider, id, { name, context, variants = {} }) {
+  const json = JSON.stringify({ id, providerID: provider, name, limit: { context, output: 32000 }, release_date: "2026-10-17", variants }, null, 2);
+  return `${provider}/${id}\n${json}\n`;
 }
 
 /** A `claude` that answers the headless initialize request with `models`. */
@@ -195,8 +222,17 @@ test("the picker sorts models by version, then tier, names them and offers only 
     });
   };
 
+  // OpenCode's own list, in its provider order, and the model its config runs.
+  const effort = (name) => ({ reasoningEffort: name });
+  await fsp.writeFile(path.join(root, "opencode-models.txt"), [
+    opencodeModel("opencode", "deepseek-v4.1-flash-free", { name: "DeepSeek V4.1 Flash Free", context: 1000000, variants: { low: effort("low"), high: effort("high"), max: effort("max") } }),
+    opencodeModel("opencode", "big-pickle", { name: "Big Pickle", context: 200000 }),
+    opencodeModel("openrouter", "anthropic/claude-sonnet-4.5", { name: "Claude Sonnet 4.5", context: 1000000, variants: { high: effort("high"), ultra: effort("ultra") } }),
+  ].join(""));
+  await fsp.writeFile(path.join(root, "opencode-config.json"), JSON.stringify({ model: "opencode/big-pickle" }));
+
   const harnesses = await discoverHarnesses();
-  assert.deepEqual(harnesses.map((h) => [h.id, h.label, h.account]), [["claude", "Claude", "Claude Code"], ["codex", "Codex", "ChatGPT"]]);
+  assert.deepEqual(harnesses.map((h) => [h.id, h.label, h.account]), [["claude", "Claude", "Claude Code"], ["codex", "Codex", "ChatGPT"], ["opencode", "OpenCode", "OpenCode"]]);
   const claude = harnesses[0].models;
   // Exactly Claude Code's models (no catalog-only Opus 4.5), the name and then
   // the version, the highest version first, Claude Code's family order within
@@ -252,7 +288,17 @@ test("the picker sorts models by version, then tier, names them and offers only 
   assert.equal(modelName(harnesses, "codex", "gpt-5.5"), "GPT-5.5", "a model Codex no longer lists");
   assert.equal(modelName([], "claude", "opus[1m]"), "Opus · 1M", "before the first list, an alias reads by its shape");
   assert.equal(modelName(harnesses, "codex", "my_custom-model"), "My Custom Model", "an id of no known shape reads as its words");
-  assert.equal(modelName(harnesses, "opencode", "anthropic/claude-sonnet"), "Claude Sonnet", "a harness without a picker section");
+  // Exactly OpenCode's models with its own names, providers in its order,
+  // and the variants that are efforts the dashboard runs.
+  const opencode = harnesses[2];
+  assert.deepEqual(opencode.models.map((row) => [row.value, row.label, row.detail, row.efforts]), [
+    ["opencode/big-pickle", "Big Pickle", "200K context · 2026-10-17", []],
+    ["opencode/deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free", "1M context · 2026-10-17", ["low", "high", "max"]],
+    ["openrouter/anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5", "1M context · 2026-10-17", ["high"]],
+  ]);
+  assert.equal(opencode.default, "opencode/big-pickle");
+  assert.equal(modelName(harnesses, "opencode", null), "Big Pickle", "no model is the one OpenCode's config runs");
+  assert.equal(modelName(harnesses, "opencode", "anthropic/claude-sonnet"), "Claude Sonnet", "a model OpenCode no longer lists");
   // Model chips show the harness's logo in place of its name.
   for (const harness of harnesses) {
     assert.match(harnessLogo(harness.id), /^<svg /, `${harness.label} needs a logo in cloud/app/harness-logos.js`);

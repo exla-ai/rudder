@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { statusFields, pidAlive } from "./agent-status.mjs";
 import { readAsks, codexAsks } from "./asks.mjs";
 import { transcriptFile, userTask } from "./transcripts.mjs";
+import { opencodeUpdatedAt } from "./opencode.mjs";
 import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
 
 export const CLI_PATH = fileURLToPath(import.meta.url);
@@ -201,8 +202,13 @@ export function readAgentRows({ codeDir, home, rudderHome, alive = pidAlive, now
       const live = Number.isInteger(pid) && pid > 1 && alive(pid);
       let transcriptAt = null;
       try {
-        const file = transcriptFile(record, home);
-        if (file) transcriptAt = fs.statSync(file).mtimeMs;
+        if (record.backend === "opencode") {
+          // One database for every session, whose file time WAL mode leaves stale.
+          transcriptAt = opencodeUpdatedAt(home, record.session?.nativeSessionId);
+        } else {
+          const file = transcriptFile(record, home);
+          if (file) transcriptAt = fs.statSync(file).mtimeMs;
+        }
       } catch {
         // no transcript yet
       }

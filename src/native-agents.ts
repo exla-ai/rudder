@@ -56,12 +56,12 @@ function claudeArgs(run: RunRecord, prompt: string, contract: string): string[] 
  * OpenCode's interactive TUI, as the dashboard launches it (native
  * launch.rs). Workers run its build agent with `--auto`, which approves what
  * no rule denies (the worker is isolated in its own workspace); planners run
- * its plan agent, which does not edit. `--prompt` carries the first turn and
- * `--session` continues the run's own session. Models are `provider/model`;
- * an empty model is OpenCode's own default. An effort is the model's variant.
+ * its plan agent, which does not edit. `--prompt` carries the first turn of
+ * a new session, whose id OpenCode mints (its TUI ignores `--prompt` in a
+ * session it opens with `--session`). Models are `provider/model`; an empty
+ * model is OpenCode's own default. An effort is the model's variant.
  */
 function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): string[] {
-  const session = run.session?.nativeSessionId;
   const variant = opencodeVariantConfig(agent, run.model, run.effort);
   return compact([
     variant ? "env" : undefined,
@@ -71,8 +71,6 @@ function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): 
     agent === "build" ? undefined : "plan",
     run.model ? "-m" : undefined,
     run.model || undefined,
-    session ? "--session" : undefined,
-    session,
     "--prompt",
     prompt,
   ]);

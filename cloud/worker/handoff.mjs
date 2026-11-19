@@ -27,6 +27,7 @@ const TOOL_MAX = 100;
 const TOOLS_PER_STEP = 6;
 const FILES_MAX = 30;
 const CLAUDE_EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const OPENCODE_EDIT_TOOLS = new Set(["edit", "write", "multiedit"]);
 // A Codex patch's file headers, also inside a code-mode script's string
 // (`tools.apply_patch("*** Begin Patch\n*** Update File: ...")`).
 const PATCH_FILE = /\*\*\* (?:Add|Update|Delete) File: (.+?)(?=\\n|\n|"|$)/g;
@@ -41,10 +42,11 @@ const clip = (text, max) => {
 /**
  * The handoff prompt. `messages` are the chat's newest messages as the app
  * shows them (transcripts.mjs recentConversation), `lines` the session's
- * JSONL lines they came from, `from` and `to` the harness and model in words
+ * JSON lines they came from (OpenCode's: its tool parts), `backend` the old
+ * harness, `from` and `to` the harness and model in words
  * ("Claude · Opus 5.5"), `working` whether the old one was mid-turn.
  */
-export function handoffPrompt({ goal, messages, lines, codex, cwd, from, to, instructions, working }) {
+export function handoffPrompt({ goal, messages, lines, backend, cwd, from, to, instructions, working }) {
   const fromHarness = from.split(" · ")[0];
   const parts = [
     `${HEADER}${from}.`,
@@ -59,7 +61,7 @@ export function handoffPrompt({ goal, messages, lines, codex, cwd, from, to, ins
   }
   const shown = messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool" || m.kind === "compact" || m.kind === "handoff" || (m.kind === "peer" && m.text));
   parts.push("", "## Where it stopped", stopped(shown, working, cwd));
-  const files = changedFiles(lines, codex, cwd);
+  const files = changedFiles(lines, backend, cwd);
   if (files.length) {
     parts.push("", "## Files it changed, newest first", ...files.map((file) => `- ${file}`));
   }
@@ -172,9 +174,20 @@ function toolLine(tool, cwd) {
 }
 
 // The files the session's edit calls wrote, newest first: Claude's Edit,
-// Write, MultiEdit and NotebookEdit, and Codex's patches. Only lines that can
-// hold one are parsed.
-function changedFiles(lines, codex, cwd) {
+// Write, MultiEdit and NotebookEdit, Codex's patches, and OpenCode's edit,
+// write and multiedit calls and patches. Only lines that can hold one are
+// parsed.
+const MAY_CHANGE = {
+  claude: (line) => line.includes('"tool_use"'),
+  codex: (line) => line.includes(" File: "),
+  opencode: (line) => line.includes('"tool"'),
+};
+
+function changedFiles(lines, backend, cwd) {
+  const mayChange = MAY_CHANGE[backend];
+  if (!mayChange) {
+    throw new Error(`no handoff reads ${backend} sessions`);
+  }
   const seen = new Set();
   const files = [];
   const add = (file) => {
@@ -188,9 +201,16 @@ function changedFiles(lines, codex, cwd) {
   };
   for (let i = lines.length - 1; i >= 0 && files.length < FILES_MAX; i -= 1) {
     const line = lines[i];
-    if (codex ? !line.includes(" File: ") : !line.includes('"tool_use"')) continue;
+    if (!mayChange(line)) continue;
     const entry = parseLine(line);
-    if (codex) {
+    if (backend === "opencode") {
+      const input = entry?.type === "tool" ? entry.state?.input : null;
+      if (OPENCODE_EDIT_TOOLS.has(entry?.tool)) {
+        add(input?.filePath);
+      } else if (typeof input?.patchText === "string") {
+        [...input.patchText.matchAll(PATCH_FILE)].map((match) => match[1]).reverse().forEach(add);
+      }
+    } else if (backend === "codex") {
       const payload = entry?.payload;
       if (payload?.type !== "custom_tool_call" && payload?.type !== "function_call") continue;
       const text = String(payload.input ?? payload.arguments ?? "");

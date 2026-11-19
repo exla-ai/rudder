@@ -61,7 +61,7 @@ const rowFor = (backend, model) => rowsOf(modelsCache, backend).find((o) => o.va
 
 /**
  * A harness's name ("Claude"), from the list; one the list does not have
- * (opencode) reads as its id. Before this device has a list, none: the first
+ * reads as its id. Before this device has a list, none: the first
  * call fetches it, and the screen repaints when it lands.
  */
 function harnessLabel(backend) {

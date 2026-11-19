@@ -183,15 +183,20 @@ RUN groupadd --gid 1500 rudder \
 # exactly it. Bump both together after checking codex-rs/tui/src/slash_command.rs.
 ARG CODEX_VERSION=0.170.0
 ENV RUDDER_CODEX_VERSION=${CODEX_VERSION}
+# OpenCode stays at the version whose session database Rudder reads
+# (cloud/worker/opencode.mjs, native/src/opencode.rs); its own updater is off.
+ARG OPENCODE_VERSION=1.19.5
+ENV OPENCODE_DISABLE_AUTOUPDATE=1
 WORKDIR /home/rudder
 USER rudder
 RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH} \
   && curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
-  && npm install -g @openai/codex@${CODEX_VERSION} acpx@latest hunkdiff@latest pnpm@latest \
+  && npm install -g @openai/codex@${CODEX_VERSION} opencode-ai@${OPENCODE_VERSION} acpx@latest hunkdiff@latest pnpm@latest \
   && npm cache clean --force \
-  && codex --version | grep -qx "codex-cli ${CODEX_VERSION}"
+  && codex --version | grep -qx "codex-cli ${CODEX_VERSION}" \
+  && opencode --version | grep -qx "${OPENCODE_VERSION}"
 USER root
 
 # Backend archives depend on this tool layer, independently of Rudder's native

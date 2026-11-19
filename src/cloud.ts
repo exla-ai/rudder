@@ -4356,13 +4356,34 @@ async function localIdentities(): Promise<Record<string, string | null>> {
   } catch {
     codex = null;
   }
-  return { github, claude, codex, aws };
+  return { github, claude, codex, opencode: await opencodeIdentity(), aws };
+}
+
+// The providers OpenCode holds credentials for, named as the home names them
+// (cloud/worker/home.mjs opencodeStatus); only auth.json's keys are read.
+const OPENCODE_PROVIDER_NAMES: Record<string, string> = { openai: "ChatGPT", anthropic: "Anthropic", openrouter: "OpenRouter", "github-copilot": "GitHub Copilot", opencode: "OpenCode Zen", google: "Google" };
+
+async function opencodeIdentity(): Promise<string | null> {
+  if (!commandExists("opencode")) {
+    return null;
+  }
+  const data = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  let providers: string[] = [];
+  try {
+    providers = Object.keys(JSON.parse(await fsp.readFile(path.join(data, "opencode", "auth.json"), "utf8")) as Record<string, unknown>);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return providers.length ? providers.map((id) => OPENCODE_PROVIDER_NAMES[id] ?? id).join(", ") : "Free models only";
 }
 
 const CREDENTIAL_FIXES: Record<string, string> = {
   github: "run `rudder cloud` in a repo here (it offers to copy `gh auth token` into the vault)",
   claude: "run `rudder cloud`, then `/login` in a Claude pane there (the cloud keeps its own login)",
   codex: "run `rudder cloud`, then `$ codex login --device-auth` in the task pane there",
+  opencode: "sign OpenCode in from the app's agent sign-in, or run `rudder cloud`, then `$ opencode providers login` in the task pane there",
   aws: "run `rudder cloud` in a repo here: it offers to copy your current ~/.aws into the vault",
 };
 
@@ -4372,7 +4393,7 @@ async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[
     client.request<{ home: { credentials?: Record<string, CredentialCheck> & { checkedAt?: string } } | null }>("/api/rudder/home", { method: "GET" }),
   ]);
   const cloud = home.home?.credentials ?? null;
-  const rows: ParityRow[] = (["github", "claude", "codex", "aws"] as const).map((tool) => {
+  const rows: ParityRow[] = (["github", "claude", "codex", "opencode", "aws"] as const).map((tool) => {
     const remote = (cloud?.[tool] as CredentialCheck | undefined) ?? null;
     const mine = local[tool];
     if (!remote) {
@@ -4399,12 +4420,12 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
   if (problemsOnly && problems.length === 0) {
     return 0;
   }
-  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex", aws: "AWS" })[tool] ?? tool;
+  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex", opencode: "OpenCode", aws: "AWS" })[tool] ?? tool;
   for (const row of problemsOnly ? problems : rows) {
     const here = row.local ?? "not logged in";
     const there = row.cloud ? (row.cloud.ok ? row.cloud.account ?? "logged in" : `not working (${row.cloud.detail ?? "unknown"})`) : "not checked yet";
     const mark = row.status === "match" ? "✓" : row.status === "unknown" ? "·" : row.status === "different" ? "⚠" : "✗";
-    process.stderr.write(`${mark} ${label(row.tool).padEnd(7)} here: ${here}   cloud: ${there}\n`);
+    process.stderr.write(`${mark} ${label(row.tool).padEnd(8)} here: ${here}   cloud: ${there}\n`);
     if (row.fix) {
       process.stderr.write(`    fix: ${row.fix}\n`);
     }

@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createLoginRunner, localCallback, claudeCodeUrl, codexDeviceCode } from "../cloud/worker/logins.mjs";
+import { createLoginRunner, localCallback, claudeCodeUrl, chatgptDeviceCode } from "../cloud/worker/logins.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,8 +45,8 @@ function pipePty(file, args, { env, cwd }) {
 // One script plays both CLIs. Browser logins: start a callback server on a
 // free port, hand the authorize URL to $BROWSER, print the paste-a-code URL
 // (Claude), then exit 0 on a callback with the right state and a code, or 1
-// on a wrong state, like Claude does. Device login: print Codex's steps and
-// "complete" after FAKE_DEVICE_MS.
+// on a wrong state, like Claude does. Device login: print Codex's or
+// OpenCode's steps and "complete" after FAKE_DEVICE_MS.
 const FAKE = String.raw`#!/usr/bin/env node
 const http = require("node:http");
 const { execFileSync } = require("node:child_process");
@@ -60,7 +60,17 @@ const done = (code) => {
   if (code === 0) fs.writeFileSync(path.join(process.env.HOME, which + "-login.json"), JSON.stringify({ ok: true }));
   process.exit(code);
 };
-if (args.includes("--device-auth")) {
+if (which === "opencode") {
+  // opencode 1.19.5, its ChatGPT device login.
+  if (args.join("|") !== "providers|login|-p|openai|-m|ChatGPT Pro/Plus (headless)") {
+    console.log("unexpected arguments: " + args.join(" "));
+    done(1);
+  }
+  console.log("┌  Add credential\n│\n●  Go to: https://auth.openai.com/codex/device\n│\n●  Enter code: QQIC-FBUHM\n│");
+  process.stdout.write("◒  Waiting for authorization");
+  setTimeout(() => done(0), Number(process.env.FAKE_DEVICE_MS || 800));
+  setInterval(() => {}, 1000);
+} else if (args.includes("--device-auth")) {
   console.log("\nFollow these steps to sign in with ChatGPT using device code authorization:\n");
   console.log("1. Open this link in your browser and sign in to your account\n   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n");
   console.log("2. Enter this one-time code \u001b[90m(expires in 15 minutes)\u001b[0m\n   \u001b[94mABCD-EFGHI\u001b[0m\n");
@@ -107,7 +117,7 @@ function setup(t) {
   const home = path.join(dir, "home");
   fs.mkdirSync(bin);
   fs.mkdirSync(home);
-  for (const name of ["claude", "codex"]) {
+  for (const name of ["claude", "codex", "opencode"]) {
     fs.writeFileSync(path.join(bin, name), FAKE, { mode: 0o755 });
   }
   const terms = [];
@@ -143,7 +153,7 @@ test("parsing what the real CLIs print", () => {
     { host: "127.0.0.1", port: 1455, path: "/auth/callback", state: "Px" },
   );
   const device = "1. Open this link in your browser and sign in to your account\r\n   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\r\n\r\n2. Enter this one-time code \u001b[90m(expires in 15 minutes)\u001b[0m\r\n   \u001b[94m1QV4-VGXTW\u001b[0m\r\n";
-  assert.deepEqual(codexDeviceCode(device), { verifyUrl: "https://auth.openai.com/codex/device", userCode: "1QV4-VGXTW" });
+  assert.deepEqual(chatgptDeviceCode(device), { verifyUrl: "https://auth.openai.com/codex/device", userCode: "1QV4-VGXTW" });
   // Anything that would send the callback somewhere else is not a local one.
   assert.equal(localCallback("https://x/authorize?redirect_uri=https%3A%2F%2Fevil.example%2Fcb&state=s"), null);
   assert.equal(localCallback("https://x/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A99999%2Fcb&state=s"), null);
@@ -221,6 +231,17 @@ test("Codex: browser callback, device code, and a new start replacing the old on
   assert.equal(device.url, "https://auth.openai.com/codex/device");
   await waitFor(() => runner.snapshot().codex.status === "done");
   assert.ok(fs.existsSync(path.join(home, "codex-login.json")), "the device login finished on its own");
+});
+
+test("OpenCode: its OpenAI provider signs in with ChatGPT's device code, never a pasted one", async (t) => {
+  const { runner, home } = setup(t);
+  const started = await runner.start("opencode");
+  assert.equal(started.mode, "device", "with or without the iOS app");
+  assert.equal(started.userCode, "QQIC-FBUHM");
+  assert.equal(started.url, "https://auth.openai.com/codex/device");
+  await assert.rejects(runner.finish("opencode", started.id, { code: "abc" }), /OpenCode signs in with its device code/);
+  await waitFor(() => runner.snapshot().opencode.status === "done");
+  assert.ok(fs.existsSync(path.join(home, "opencode-login.json")), "the device login finished on its own");
 });
 
 test("cancel ends the CLI, and an API key in the machine's env never decides the login", async (t) => {

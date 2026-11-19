@@ -174,7 +174,7 @@ function tailnetOffline(message) {
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
-// Claude Code and Codex sign-ins started from the phone (cloud/worker/logins.mjs).
+// Claude Code, Codex and OpenCode sign-ins started from the phone (cloud/worker/logins.mjs).
 const logins = createLoginRunner({
   spawnPty: pty.spawn,
   env: baseChildEnv,
@@ -1216,15 +1216,30 @@ async function keepModelsFresh() {
   }
   await refreshModels();
 }
-// What the CLIs' model lists come from, as one string: the claude and codex
-// binaries and the model list in Codex's cache.
+// What the CLIs' model lists come from, as one string: the claude, codex and
+// opencode binaries, the model list in Codex's cache, and the providers
+// OpenCode is signed in to with its model cache.
 function modelSourcesStamp() {
   const codexHome = baseChildEnv.CODEX_HOME?.trim() || path.join(HOME, ".codex");
+  const opencodeData = baseChildEnv.XDG_DATA_HOME?.trim() || path.join(HOME, ".local", "share");
+  const opencodeCache = baseChildEnv.XDG_CACHE_HOME?.trim() || path.join(HOME, ".cache");
   return [
     modelCliStamp(baseChildEnv.RUDDER_CLAUDE_BIN?.trim() || "claude"),
     modelCliStamp(baseChildEnv.RUDDER_CODEX_BIN?.trim() || "codex"),
     codexModelCacheStamp(path.join(codexHome, "models_cache.json")),
+    modelCliStamp(baseChildEnv.RUDDER_OPENCODE_BIN?.trim() || "opencode"),
+    fileStamp(path.join(opencodeData, "opencode", "auth.json")),
+    fileStamp(path.join(opencodeCache, "opencode", "models.json")),
   ].join("\n");
+}
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${file}:${stat.mtimeMs}:${stat.size}`;
+  } catch (error) {
+    if (error.code === "ENOENT") return `${file}:-`;
+    throw error;
+  }
 }
 function modelCliStamp(name) {
   const candidates = name.includes("/") ? [name] : String(baseChildEnv.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, name));
@@ -1303,13 +1318,12 @@ const HANDOFF_MESSAGES = 120;
 
 // `<harness> <model> <effort>`, then the handoff the new harness starts on.
 function harnessHandoff(project, runId, { backend, model, effort, instructions }) {
-  const { record, codex, lines, messages } = recentConversation(project.dir, runId, { home: HOME, limit: HANDOFF_MESSAGES });
-  const from = record.backend ?? "claude";
+  const { record, backend: from, lines, messages } = recentConversation(project.dir, runId, { home: HOME, limit: HANDOFF_MESSAGES });
   const handoff = handoffPrompt({
     goal: userTask(record.task),
     messages,
     lines,
-    codex,
+    backend: from,
     cwd: record.workspace?.path || project.dir,
     from: modelWords(from, record.model ?? null),
     to: modelWords(backend, model),
@@ -1730,15 +1744,15 @@ async function checkCredentials() {
   credentialsAgain = false;
   try {
     const env = { ...baseChildEnv };
-    const [github, claude, codex, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkAws(env)]);
-    credentials = { github, claude, codex, aws, checkedAt: new Date().toISOString() };
+    const [github, claude, codex, opencode, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkOpencode(env), checkAws(env)]);
+    credentials = { github, claude, codex, opencode, aws, checkedAt: new Date().toISOString() };
     // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
     // look again shortly instead of reporting a broken login for 30 minutes.
-    if ([github, claude, codex, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
+    if ([github, claude, codex, opencode, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
     lastStateJson = "";
-    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"}`);
+    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"} opencode=${opencode.ok ? opencode.account : "no"}`);
   } catch (error) {
     log(`credential check: ${error.message}`);
   } finally {
@@ -1754,7 +1768,7 @@ async function checkCredentials() {
 // the login works with one real request.
 async function credentialsAfterLogin(provider) {
   const env = { ...baseChildEnv };
-  const quick = provider === "claude" ? await claudeStatus(env) : await codexStatus(env);
+  const quick = provider === "claude" ? await claudeStatus(env) : provider === "opencode" ? opencodeStatus(env) : await codexStatus(env);
   if (quick.loggedIn) {
     credentials = {
       ...(credentials ?? {}),
@@ -1781,6 +1795,47 @@ async function codexStatus(env) {
   const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
   const { account, plan } = codexAccount();
   return { loggedIn: status.code === 0, account, plan };
+}
+
+// OpenCode runs on the providers it holds credentials for (its auth.json,
+// which `opencode providers login` writes; only the provider names are read
+// here) and on OpenCode Zen's free models with none. The phone signs its
+// OpenAI provider in with ChatGPT (logins.mjs).
+const OPENCODE_PROVIDER_NAMES = { openai: "ChatGPT", anthropic: "Anthropic", openrouter: "OpenRouter", "github-copilot": "GitHub Copilot", opencode: "OpenCode Zen", google: "Google" };
+
+function opencodeStatus(env) {
+  const file = path.join(env.XDG_DATA_HOME || path.join(HOME, ".local", "share"), "opencode", "auth.json");
+  let providers = [];
+  try {
+    providers = Object.keys(JSON.parse(fs.readFileSync(file, "utf8")) ?? {});
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const names = providers.map((id) => OPENCODE_PROVIDER_NAMES[id] ?? id);
+  return { loggedIn: providers.includes("openai"), account: names.length ? names.join(", ") : "Free models only", plan: null };
+}
+
+// One real request on OpenCode's default model proves it works, signed in
+// or on the free models.
+async function checkOpencode(env) {
+  const { account } = opencodeStatus(env);
+  const probe = await capture("opencode", ["run", "--format", "json", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  const events = probe.stdout.split("\n").flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+  if (probe.code === 0 && events.some((event) => event.type === "text" && /\bOK\b/.test(event.part?.text ?? ""))) {
+    return { ok: true, account, plan: null, detail: null };
+  }
+  const error = events.find((event) => event.type === "error")?.error;
+  const text = String(error?.data?.message ?? error?.name ?? "") || `${probe.stdout}\n${probe.stderr}`;
+  const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account, plan: null, detail };
 }
 
 // "max", "pro", ... for a subscription; "API" for a Console login.

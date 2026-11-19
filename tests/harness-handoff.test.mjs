@@ -15,7 +15,7 @@ test("a handoff keeps the newest messages that fit, the files changed and where 
     '{"type":"assistant","message":{"content":[{"type":"tool_use"', // still being written
   ];
   const text = handoffPrompt({
-    goal: "Make the tests pass", messages, lines, codex: false, cwd,
+    goal: "Make the tests pass", messages, lines, backend: "claude", cwd,
     from: "Claude · Opus 5.5", to: "Codex · Sol 6.1", instructions: "Focus on the open bug", working: true,
   });
   assert.match(text, /^Rudder handoff: this chat moved to you from Claude · Opus 5\.5\.\nYou are Codex · Sol 6\.1\./);
@@ -33,7 +33,7 @@ test("a handoff keeps the newest messages that fit, the files changed and where 
 test("Codex patches name their files, also from a code-mode script", () => {
   const patch = (body) => JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec", input: `text(await tools.apply_patch("*** Begin Patch\\n${body}\\n*** End Patch"))` } });
   const lines = [patch(`*** Update File: ${cwd}/a.rs\\n@@`), patch(`*** Add File: ${cwd}/b.rs\\n+x\\n*** Delete File: ${cwd}/c.rs`)];
-  const text = handoffPrompt({ goal: "g", messages: [], lines, codex: true, cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
+  const text = handoffPrompt({ goal: "g", messages: [], lines, backend: "codex", cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
   assert.match(text, /## Files it changed, newest first\n- c\.rs\n- b\.rs\n- a\.rs\n/);
   assert.doesNotMatch(text, /instructions for this handoff/);
   assert.match(text, /waiting for the user\./);
@@ -41,7 +41,7 @@ test("Codex patches name their files, also from a code-mode script", () => {
 });
 
 test("the chat shows a handoff as where it came from and what was handed over", () => {
-  const text = handoffPrompt({ goal: "Ship it", messages: [say("user", "go")], lines: [], codex: false, cwd, from: "Claude · Opus 5.5", to: "Codex · Sol 6.1", instructions: "", working: false });
+  const text = handoffPrompt({ goal: "Ship it", messages: [say("user", "go")], lines: [], backend: "claude", cwd, from: "Claude · Opus 5.5", to: "Codex · Sol 6.1", instructions: "", working: false });
   // As the dashboard frames it for a worker (native tasks.rs execution_prompt).
   const shown = handoffShown(`${text}\n\nRudder: you work in your own jj workspace. Stay in it.`);
   assert.equal(shown.from, "Claude · Opus 5.5");
@@ -51,9 +51,9 @@ test("the chat shows a handoff as where it came from and what was handed over", 
 });
 
 test("a chat that moves again hands on what the last move handed over", () => {
-  const first = handoffPrompt({ goal: "Ship it", messages: [say("user", "go")], lines: [], codex: false, cwd, from: "Claude · Opus 5.5", to: "Codex · Sol 6.1", instructions: "", working: false });
+  const first = handoffPrompt({ goal: "Ship it", messages: [say("user", "go")], lines: [], backend: "claude", cwd, from: "Claude · Opus 5.5", to: "Codex · Sol 6.1", instructions: "", working: false });
   const marker = { role: "system", kind: "handoff", handoff: handoffShown(first) };
-  const text = handoffPrompt({ goal: "Ship it", messages: [marker, say("assistant", "Summary: ready")], lines: [], codex: true, cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
+  const text = handoffPrompt({ goal: "Ship it", messages: [marker, say("assistant", "Summary: ready")], lines: [], backend: "codex", cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
   assert.match(text, /\(Earlier, Codex took this chat over from Claude · Opus 5\.5, which handed it this:\)\n### Goal\nShip it\n[\s\S]*User: go\n\nCodex: Summary: ready/);
 });
 
@@ -65,4 +65,16 @@ test("a chat can't move to a harness the machine's sign-in check found signed ou
   assert.equal(handoffRefusal(credentials, "codex", "Codex"), "Codex isn't signed in on your cloud machine.");
   assert.equal(handoffRefusal(credentials, "claude", "Claude"), null);
   assert.equal(handoffRefusal(null, "codex", "Codex"), null, "before the first check nothing is known");
+});
+
+test("OpenCode's edit, write and patch calls name the files it changed", () => {
+  const part = (tool, input) => JSON.stringify({ type: "tool", tool, callID: `call_${tool}`, state: { status: "completed", input } });
+  const lines = [
+    part("edit", { filePath: `${cwd}/src/a.ts`, oldString: "x", newString: "y" }),
+    part("read", { filePath: `${cwd}/README.md` }),
+    part("apply_patch", { patchText: `*** Begin Patch\n*** Add File: ${cwd}/b.rs\n+x\n*** End Patch` }),
+    part("write", { filePath: `${cwd}/src/c.ts`, content: "z" }),
+  ];
+  const text = handoffPrompt({ goal: "g", messages: [], lines, backend: "opencode", cwd, from: "OpenCode · Big Pickle", to: "Claude · Opus 5.5", instructions: "", working: false });
+  assert.match(text, /## Files it changed, newest first\n- src\/c\.ts\n- b\.rs\n- src\/a\.ts\n\n/);
 });

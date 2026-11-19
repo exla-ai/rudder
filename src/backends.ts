@@ -224,7 +224,9 @@ function codexBackend(): BackendAdapter {
  * conversation with `--session`. Models are named `provider/model`; an empty model
  * means "whatever OpenCode is configured with", which is a legitimate choice here.
  * Workers run unattended with `--auto`, as Claude and Codex workers do, and an
- * effort is the model's `--variant` of that name.
+ * effort is the model's `--variant` of that name. The message goes in on
+ * stdin: OpenCode 1.19 stores a message argument that has spaces in it
+ * wrapped in quote marks.
  */
 function opencodeBackend(): BackendAdapter {
   return {
@@ -250,11 +252,11 @@ function opencodeBackend(): BackendAdapter {
         effort,
         isFollowUp ? "--session" : undefined,
         isFollowUp ? sessionId : undefined,
-        `${request.contract}\n\n${prompt}`,
       ]);
       return await spawnAndStream({
         command: "opencode",
         args,
+        stdin: `${request.contract}\n\n${prompt}`,
         cwd: request.run.workspace.path,
         env: process.env,
         request,
@@ -375,6 +377,8 @@ function firstProfile(store: AuthProfileStore, ids: string[]) {
 async function spawnAndStream(params: {
   command: string;
   args: string[];
+  /** The message, for a CLI that reads it from stdin; stdin is empty otherwise. */
+  stdin?: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
   request: RunRequest;
@@ -388,11 +392,13 @@ async function spawnAndStream(params: {
     data: { command: params.command, args: params.args },
   });
   const launch = inFork(params.cwd, params.command, params.args);
-  const child = spawn(launch.command, launch.args, {
-    cwd: params.cwd,
-    env: params.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const options = { cwd: params.cwd, env: params.env };
+  const child = params.stdin === undefined
+    ? spawn(launch.command, launch.args, { ...options, stdio: ["ignore", "pipe", "pipe"] })
+    : spawn(launch.command, launch.args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+  if (params.stdin !== undefined) {
+    child.stdin?.end(params.stdin);
+  }
   params.request.run.process = {
     ...(params.request.run.process ?? {}),
     pid: child.pid,

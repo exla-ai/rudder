@@ -7600,7 +7600,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await openRepoOnHome(account.accountId, { repo: typeof repo === "string" ? repo : "" }));
     return;
   }
-  // Signing Claude Code or Codex in on the cloud machine from the phone
+  // Signing Claude Code, Codex or OpenCode in on the cloud machine from the phone
   // (cloud/worker/logins.mjs): the CLI's own login runs there, the phone opens
   // its link and hands back the callback or code. Starting one wakes the
   // machine, or creates it for a new account.
@@ -8447,10 +8447,10 @@ function wakeHomeInBackground(accountId: string): void {
     });
 }
 
-function loginProvider(body: Json): "claude" | "codex" {
+function loginProvider(body: Json): "claude" | "codex" | "opencode" {
   const provider = stringField(body, "provider");
-  if (provider !== "claude" && provider !== "codex") {
-    throw badRequest("provider must be claude or codex");
+  if (provider !== "claude" && provider !== "codex" && provider !== "opencode") {
+    throw badRequest("provider must be claude, codex or opencode");
   }
   return provider;
 }

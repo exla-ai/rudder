@@ -787,7 +787,7 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
     fs.writeFileSync(path.join(hostState, "desired.failed.reason"), `${reason}\n`);
     const bin = path.join(scratch, "bin");
     fs.mkdirSync(bin);
-    for (const tool of ["codex", "gh", "aws", "tailscaled", "tailscale"]) {
+    for (const tool of ["codex", "opencode", "gh", "aws", "tailscaled", "tailscale"]) {
       fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n", { mode: 0o755 });
     }
     // Claude signs in like the real CLI: `auth login` hands $BROWSER a URL

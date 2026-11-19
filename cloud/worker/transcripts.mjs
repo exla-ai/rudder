@@ -13,6 +13,7 @@ import { contextUsage } from "./context-usage.mjs";
 import { activeGoal } from "./chat-goal.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
 import { handoffShown } from "./handoff.mjs";
+import { isOpencodeSessionId, opencodeContextWindow, opencodeDb, opencodeLastText, opencodeMessages, opencodeSessionExists } from "./opencode.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
@@ -48,6 +49,9 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   }
   if (before !== null && after !== null) {
     throw new Error("a chat page is read before a cursor or after one, not both");
+  }
+  if (record.backend === "opencode") {
+    return opencodeTranscript(record, { home, limit, before, after });
   }
   const file = transcriptFile(record, home);
   const conversation = file ? record.session.nativeSessionId : null;
@@ -132,7 +136,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
 // history, session-lineage.mjs codexLineage) a page starts at, and the leaf
 // is the Claude entry the conversation continues from before it
 // (activeClaudeLines). The app passes it back as it got it.
-const CURSOR = /^([A-Za-z0-9-]+):(\d+):([A-Za-z0-9-]*)$/;
+const CURSOR = /^([A-Za-z0-9_-]+):(\d+):([A-Za-z0-9-]*)$/;
 
 function readCursor(value) {
   const match = CURSOR.exec(String(value));
@@ -270,6 +274,9 @@ function firstAbove(sorted, value) {
 const PREVIEW_REFRESH_MS = 5_000;
 
 export function lastAssistantText(record, { home, cache, now = Date.now() }) {
+  if (record.backend === "opencode") {
+    return opencodePreview(record, { home, cache, now });
+  }
   const file = transcriptFile(record, home, now);
   if (!file) {
     return null;
@@ -367,13 +374,20 @@ export function recentConversation(repoDir, runId, { home, limit }) {
   if (!record) {
     throw new Error("agent not found");
   }
-  const codex = record.backend === "codex";
+  const backend = record.backend || "claude";
+  if (backend === "opencode") {
+    const page = opencodeSessionPage(record, home, { end: null, start: null, limit, stats: false });
+    return page
+      ? { record, backend, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) }
+      : { record, backend, lines: [], messages: showUserTask(recordedTurns(record), record) };
+  }
+  const codex = backend === "codex";
   const file = transcriptFile(record, home);
   if (!file) {
-    return { record, codex, lines: [], messages: showUserTask(recordedTurns(record), record) };
+    return { record, backend, lines: [], messages: showUserTask(recordedTurns(record), record) };
   }
   const page = readPage(sessionSegments(record, file, home), { codex, end: null, start: null, leaf: "", limit, stats: null });
-  return { record, codex, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) };
+  return { record, backend, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) };
 }
 
 // Photos and files sent from the app reach the agent as saved paths listed
@@ -526,6 +540,225 @@ function codexNewRollout(home, threadId, now) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode: its database (opencode.mjs). A page is a run of the session's
+// messages, and a cursor's offset is the index of the page's first message.
+// ---------------------------------------------------------------------------
+
+// The session the run is on, when OpenCode has it.
+function opencodeConversation(record, home) {
+  const id = record.session?.nativeSessionId;
+  return isOpencodeSessionId(id) && opencodeSessionExists(home, id) ? id : null;
+}
+
+function opencodeTranscript(record, { home, limit, before, after }) {
+  const conversation = opencodeConversation(record, home);
+  const end = before === null ? null : readCursor(before);
+  if (end && end.conversation !== conversation) {
+    throw new Error("This chat started a new conversation since it opened. Reopen the chat to see it.");
+  }
+  const from = after === null ? null : readCursor(after);
+  const start = from && from.conversation === conversation ? from.offset : null;
+  const base = { runId: record.id, conversation, earlier: null, messages: [] };
+  if (!end) {
+    base.title = (record.taskSummary || record.task || record.id || "").toString();
+    base.backend = "opencode";
+    base.status = record.status || null;
+  }
+  const page = conversation ? opencodeSessionPage(record, home, { end: end?.offset ?? null, start, limit, stats: !end }) : null;
+  if (!page) {
+    base.messages = showAttachments(recordedTurns(record).map(showHandoff));
+    return base;
+  }
+  base.messages = showAttachments(showUserTask(page.messages, record));
+  base.earlier = page.start > 0 ? `${conversation}:${page.start}:` : null;
+  if (end) {
+    return base;
+  }
+  // An OpenCode chat is not edited from an earlier turn (the dashboard's
+  // chat edit forks Claude and Codex conversations only).
+  base.edits = [];
+  base.suggestion = promptSuggestion(home, record.id);
+  base.stats = page.stats;
+  base.context = page.context;
+  return base;
+}
+
+/**
+ * The chat messages of a page of the run's OpenCode session, the parts they
+ * came from as JSON lines (`lines`, for a handoff's changed files) and, with
+ * `stats`, the speed and context numbers. Null when OpenCode lacks the session.
+ */
+function opencodeSessionPage(record, home, { end, start, limit, stats }) {
+  const id = opencodeConversation(record, home);
+  const rows = id ? opencodeMessages(home, id, { start, end, limit }) : null;
+  if (!rows) {
+    return null;
+  }
+  const { messages, lines } = opencodeChat(rows.messages);
+  const page = { messages, lines, start: rows.start, stats: null, context: null };
+  if (stats) {
+    // The numbers are extra: a model list that cannot be read says so and
+    // the conversation still shows.
+    try {
+      Object.assign(page, opencodeNumbers(rows.messages, home));
+    } catch (error) {
+      const message = { error: error instanceof Error ? error.message : String(error) };
+      Object.assign(page, { stats: message, context: message });
+    }
+  }
+  return page;
+}
+
+// OpenCode's rows as chat messages: a user's text, the agent's text and
+// tool calls (each with its result), a compaction's marker with its summary,
+// and a finished turn's duration.
+function opencodeChat(rows) {
+  const messages = [];
+  const lines = [];
+  let turn = null; // { at: the prompt's time, last: the turn's newest reply }
+  const endTurn = () => {
+    const done = turn?.last?.time?.completed;
+    if (done && turn.last.finish && turn.last.finish !== "tool-calls" && !turn.last.error) {
+      messages.push(turnMessage(`${turn.id}:turn`, done, done - turn.at));
+    }
+    turn = null;
+  };
+  for (const row of rows) {
+    const data = row.data ?? {};
+    const ts = toMillis(data.time?.created);
+    if (data.role === "user") {
+      endTurn();
+      const compaction = row.parts.find((part) => part.type === "compaction");
+      if (compaction) {
+        messages.push(compactMessage(row.id, ts, { trigger: compaction.auto ? "auto" : "manual" }));
+        continue;
+      }
+      const text = row.parts
+        .filter((part) => part.type === "text" && !part.synthetic)
+        .map((part) => String(part.text || ""))
+        .join("\n")
+        .trim();
+      if (text) {
+        messages.push({ id: row.id, role: "user", ts, text });
+      }
+      turn = { id: row.id, at: ts };
+      continue;
+    }
+    if (data.role !== "assistant") {
+      continue;
+    }
+    if (data.summary === true) {
+      // The summary OpenCode carries on from belongs to its marker.
+      const marker = [...messages].reverse().find((message) => message.kind === "compact");
+      if (marker) {
+        marker.compact.summary = row.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+      }
+      continue;
+    }
+    if (turn) {
+      turn.last = data;
+    }
+    row.parts.forEach((part, index) => {
+      const id = `${row.id}:${index}`;
+      const at = toMillis(part.time?.start) ?? ts;
+      if (part.type === "text" && !part.synthetic) {
+        const text = String(part.text || "").trim();
+        if (text) {
+          messages.push({ id, role: "assistant", ts: at, text });
+        }
+      } else if (part.type === "tool") {
+        const state = part.state ?? {};
+        lines.push(JSON.stringify(part));
+        messages.push({
+          id: part.callID || id,
+          role: "tool",
+          ts: toMillis(state.time?.start) ?? ts,
+          text: "",
+          tool: {
+            name: String(part.tool || "tool"),
+            input: summarizeOpencodeInput(state.input),
+            output: state.status === "completed" ? clip(state.output) : state.status === "error" ? clip(state.error) : null,
+            isError: state.status === "error",
+          },
+        });
+      }
+    });
+  }
+  if (turn?.last) {
+    endTurn();
+  }
+  return { messages, lines };
+}
+
+function summarizeOpencodeInput(input) {
+  if (!input || typeof input !== "object") {
+    return "";
+  }
+  const pick = input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? input.query ?? input.description ?? input.prompt ?? null;
+  if (typeof pick === "string") {
+    return oneLine(pick);
+  }
+  if (Array.isArray(input.todos)) {
+    return `${input.todos.length} todo(s)`;
+  }
+  return oneLine(JSON.stringify(input));
+}
+
+// The speed of the page's replies and how full the context is after the
+// newest: its input, cache and output tokens against the model's window.
+function opencodeNumbers(rows, home) {
+  const responses = [];
+  let last = null;
+  for (const row of rows) {
+    const data = row.data ?? {};
+    if (data.role !== "assistant" || data.summary === true) {
+      continue;
+    }
+    const start = toMillis(data.time?.created);
+    const end = toMillis(data.time?.completed);
+    const tokens = Number(data.tokens?.output) + Number(data.tokens?.reasoning || 0);
+    if (start !== null && end !== null) {
+      keepResponse(responses, { start, end, tokens: Number.isFinite(tokens) ? tokens : 0, done: true });
+    }
+    if (data.tokens && end !== null) {
+      last = data;
+    }
+  }
+  const model = last?.providerID && last?.modelID ? `${last.providerID}/${last.modelID}` : null;
+  if (!last) {
+    return { stats: { model, speed: speedOf(responses), context: null }, context: null };
+  }
+  const t = last.tokens;
+  const used = [t.input, t.output, t.reasoning, t.cache?.read, t.cache?.write].reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const window = opencodeContextWindow(home, last.providerID, last.modelID);
+  const at = toMillis(last.time.completed);
+  return {
+    stats: { model, speed: speedOf(responses), context: { used, window, at, modelWindow: window, autoCompactWindow: null, compactedAt: null } },
+    context: { used, window, autoCompactAt: null, source: null, at },
+  };
+}
+
+// The chat list's preview line: the agent's newest text, read again at most
+// every PREVIEW_REFRESH_MS.
+function opencodePreview(record, { home, cache, now }) {
+  const id = record.session?.nativeSessionId;
+  if (!isOpencodeSessionId(id)) {
+    return null;
+  }
+  const key = `${opencodeDb(home)}#${id}`;
+  if (cache && cache.file === key && now - (cache.readAt ?? 0) < PREVIEW_REFRESH_MS) {
+    return { text: cache.text, remoteUrl: null, cacheEntry: cache };
+  }
+  const last = opencodeLastText(home, id);
+  if (last === null) {
+    return null;
+  }
+  const text = last.replace(/\s+/g, " ").trim().slice(0, 280) || null;
+  const entry = { file: key, readAt: now, text, remoteUrl: null };
+  return { text, remoteUrl: null, cacheEntry: entry };
 }
 
 // ---------------------------------------------------------------------------

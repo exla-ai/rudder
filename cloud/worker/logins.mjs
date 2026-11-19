@@ -1,7 +1,9 @@
-// Signing the cloud machine's Claude Code and Codex in from the phone.
+// Signing the cloud machine's Claude Code, Codex and OpenCode in from the
+// phone.
 //
-// Every login is the CLI's own: `claude auth login`, `codex login`, or
-// `codex login --device-auth`, run in a pty. Nothing here sees a password or a
+// Every login is the CLI's own: `claude auth login`, `codex login`,
+// `codex login --device-auth`, or `opencode providers login` for its OpenAI
+// provider with ChatGPT, run in a pty. Nothing here sees a password or a
 // token; the CLI does the exchange and stores its own login file.
 //
 // Both browser logins open a URL whose redirect is a server the CLI runs on
@@ -17,6 +19,9 @@
 //     state, so either way completes the one login.
 //   - Codex: a device-code login (link + one-time code) that finishes on its
 //     own; the app watches the status.
+//
+// OpenCode signs in with ChatGPT's device code only (OpenCode 1.19's
+// "ChatGPT Pro/Plus (headless)" method), the same page and code as Codex's.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -32,7 +37,9 @@ const EXIT_WAIT_MS = 60_000;
 
 const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]/g;
 
-export const LOGIN_PROVIDERS = ["claude", "codex"];
+export const LOGIN_PROVIDERS = ["claude", "codex", "opencode"];
+const PROVIDER_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+const OPENCODE_LOGIN = ["providers", "login", "-p", "openai", "-m", "ChatGPT Pro/Plus (headless)"];
 
 export function stripAnsi(text) {
   return String(text).replace(ANSI, "").replace(/\r/g, "");
@@ -79,12 +86,13 @@ export function claudeCodeUrl(output) {
   return null;
 }
 
-// Codex's device login: "Open this link ... https://auth.openai.com/codex/device"
+// ChatGPT's device login. Codex: "Open this link ... https://auth.openai.com/codex/device"
 // then "Enter this one-time code (expires in 15 minutes)  ABCD-EFGHI".
-export function codexDeviceCode(output) {
+// OpenCode: "Go to: https://auth.openai.com/codex/device" then "Enter code: ABCD-EFGHI".
+export function chatgptDeviceCode(output) {
   const text = stripAnsi(output);
   const link = /https:\/\/auth\.openai\.com\/[^\s"'<>]*device[^\s"'<>]*/.exec(text)?.[0];
-  const code = /one-time code[^\n]*\n\s*([A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+)/i.exec(text)?.[1];
+  const code = /(?:one-time code[^\n]*\n\s*|Enter code:\s*)([A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+)/i.exec(text)?.[1];
   return link && code ? { verifyUrl: link, userCode: code } : null;
 }
 
@@ -171,7 +179,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       end(previous, "cancelled", "replaced by a new sign-in");
     }
     const id = randomUUID();
-    const mode = provider === "codex" && device ? "device" : "browser";
+    const mode = provider === "opencode" || (provider === "codex" && device) ? "device" : "browser";
     const urlFile = path.join(dir, `${id}.url`);
     const session = {
       id,
@@ -198,7 +206,8 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     const file = commands[provider] || provider;
     const args = provider === "claude"
       ? ["auth", "login", "--claudeai"]
-      : mode === "device" ? ["login", "--device-auth"] : ["login"];
+      : provider === "opencode" ? OPENCODE_LOGIN
+        : mode === "device" ? ["login", "--device-auth"] : ["login"];
     const childEnv = { ...env, BROWSER: browserScript, RUDDER_LOGIN_URL_FILE: urlFile, TERM: "xterm-256color" };
     // An API key in the environment would decide the login for the CLI.
     delete childEnv.ANTHROPIC_API_KEY;
@@ -239,7 +248,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       await sleep(150);
     }
     if (!session.endedAt) {
-      end(session, "failed", `${provider === "claude" ? "Claude Code" : "Codex"} did not show a sign-in link (${lastLines(session.output) || "no output"})`);
+      end(session, "failed", `${PROVIDER_NAMES[provider]} did not show a sign-in link (${lastLines(session.output) || "no output"})`);
     }
     throw new Error(session.error || "sign-in failed to start");
   }
@@ -267,7 +276,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       return Boolean(session.url && session.callback && session.codeUrl);
     }
     if (session.mode === "device") {
-      const device = codexDeviceCode(session.output);
+      const device = chatgptDeviceCode(session.output);
       if (device) {
         session.userCode = device.userCode;
         session.verifyUrl = device.verifyUrl;
@@ -318,7 +327,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       }
     } else if (typeof code === "string" && code.trim()) {
       if (provider !== "claude") {
-        throw new Error("Codex signs in with its device code, not a pasted one.");
+        throw new Error(`${PROVIDER_NAMES[provider]} signs in with its device code, not a pasted one.`);
       }
       const cleaned = code.trim().replace(/\s+/g, "");
       if (!/^[A-Za-z0-9._~#=-]+$/.test(cleaned) || cleaned.length > 4000) {

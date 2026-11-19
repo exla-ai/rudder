@@ -1939,10 +1939,13 @@ function emptyState({ ic, title, body, action }) {
 // the phone opens its page. In the iOS app the page's redirect comes straight
 // back to the app (AgentLogin.swift), so there is nothing to copy. Without it,
 // Claude shows a code to paste here and Codex a code to type on its page.
+// OpenCode signs its OpenAI provider in with ChatGPT's device code, always.
 const AGENTS = [
   { id: "claude", label: "Claude Code", ic: "spark", account: "Claude" },
   { id: "codex", label: "Codex", ic: "code", account: "ChatGPT" },
+  { id: "opencode", label: "OpenCode", ic: "terminal", account: "ChatGPT" },
 ];
+const DEVICE_ONLY = new Set(["opencode"]);
 const agentName = (provider) => AGENTS.find((x) => x.id === provider)?.label || provider;
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 const planLabel = (plan) => (plan ? PLAN_LABEL[plan] || plan[0].toUpperCase() + plan.slice(1) : "");
@@ -2079,7 +2082,7 @@ function openAgentSignIn(provider) {
     }
     // In the iOS app the page normally hands its answer straight back; if
     // that did not work, the code routes still do.
-    if (NATIVE_LOGIN) {
+    if (NATIVE_LOGIN && !DEVICE_ONLY.has(provider)) {
       const alt = h(`<button type="button" class="btn block ls-alt"></button>`);
       setText(alt, provider === "claude" ? "Use a code instead" : "Use a device code instead");
       alt.addEventListener("click", () => void begin(provider === "claude" ? "code" : "device"));
@@ -2135,7 +2138,7 @@ function openAgentSignIn(provider) {
 
   async function begin(mode = "auto") {
     ended = false;
-    const device = provider === "codex" && (mode === "device" || !NATIVE_LOGIN);
+    const device = DEVICE_ONLY.has(provider) || (provider === "codex" && (mode === "device" || !NATIVE_LOGIN));
     // Claude's paste-a-code page belongs to the same run as its callback, so
     // a run still waiting is reused rather than started over.
     const reuse = mode === "code" && session && session.codeUrl && store.state?.home?.logins?.[provider]?.id === session.id

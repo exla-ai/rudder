@@ -24,12 +24,6 @@ import { createForkWorkspace, removeForkState, startWarmBuild } from "./warm-sna
 // works through the documented fallbacks.
 const MIN_JJ = "0.21.0";
 
-export type MergeNodeResult = {
-  mergeChangeId: string;
-  opId: string;
-  conflictedFiles: string[];
-};
-
 /**
  * Hard requirement: jj must be installed. Throws MissingToolError otherwise.
  */
@@ -294,52 +288,6 @@ export async function jjDiff(workspacePath: string): Promise<string> {
     .join("\n\n");
 }
 
-/**
- * Create a new empty change parented on the given changes. Reads the new change
- * id back by querying a unique marker embedded in the description, never by
- * scraping stdout. Returns the new change id.
- */
-export async function createEmptyChange(params: {
-  repoRoot: string;
-  parents: string[];
-  description: string;
-}): Promise<string> {
-  ensureJj();
-  const marker = `rudder-node:${shortHash(`${params.description}:${Date.now()}:${Math.random()}`)}`;
-  const description = `${marker} ${params.description}`.trim();
-  const args = ["new", ...params.parents.filter(Boolean), "-m", description, "--no-edit"];
-  // Same stale exposure as `workspace add`: the scheduler creates a node's base
-  // change in the main checkout moments before its workspace, so one stale main
-  // checkout would fail the plan a step earlier instead.
-  const created = await jjWriteWithStaleRecovery(params.repoRoot, args);
-  if (created.code !== 0) {
-    throw new Error(created.stderr.trim() || created.stdout.trim() || "jj new failed.");
-  }
-  // jj normalizes descriptions to end with a trailing newline, and
-  // `description(exact:...)` matches the full stored description, so the revset
-  // literal must include the trailing "\n".
-  const exact = JSON.stringify(`${description}\n`);
-  const result = await runCommand(
-    "jj",
-    ["log", "--no-graph", "-r", `description(exact:${exact})`, "-T", "change_id"],
-    { cwd: params.repoRoot, allowFailure: true },
-  );
-  let changeId = result.stdout.trim().split(/\s+/)[0] ?? "";
-  if (!changeId) {
-    // Fallback: match on the unique marker as a substring.
-    const bySubstring = await runCommand(
-      "jj",
-      ["log", "--no-graph", "-r", `description(substring:${JSON.stringify(marker)})`, "-T", "change_id"],
-      { cwd: params.repoRoot, allowFailure: true },
-    );
-    changeId = bySubstring.stdout.trim().split(/\s+/)[0] ?? "";
-  }
-  if (!changeId) {
-    throw new Error(`Could not read back the change id for the new empty change (${marker}).`);
-  }
-  return changeId;
-}
-
 export async function describeChange(repoRoot: string, changeId: string, message: string): Promise<void> {
   await runCommand("jj", ["describe", changeId, "-m", message], { cwd: repoRoot });
 }
@@ -479,13 +427,13 @@ export function workspaceNameFor(id: string): string {
 export async function mergeJjRunIntoCurrentWorkspace(
   run: RunRecord,
   allowDirty = false,
-  options: { abortOnConflict?: boolean } = {},
+  options: { abortOnConflict?: boolean; subject?: string } = {},
 ): Promise<RunRecord> {
   // Integration is one-at-a-time ACROSS PROCESSES: a `rudder merge` CLI call
   // and a daemon tick are separate processes sharing the same checkout, and a
   // second merge starting mid-flight would stack a merge on a moving target.
   return withIntegrationLock(run.repoRoot, () =>
-    mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty, options.abortOnConflict === true),
+    mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty, options.abortOnConflict === true, options.subject ?? run.task),
   );
 }
 
@@ -493,6 +441,7 @@ async function mergeJjRunIntoCurrentWorkspaceLocked(
   run: RunRecord,
   allowDirty: boolean,
   abortOnConflict: boolean,
+  subject: string,
 ): Promise<RunRecord> {
   if (!run.workspace.workspaceName) {
     throw new Error("Run has no jj workspace name to merge.");
@@ -546,8 +495,8 @@ async function mergeJjRunIntoCurrentWorkspaceLocked(
   await saveRunRecord(run);
 
   // The agent's change still carries Rudder's live status ("rudder: <task> [done]");
-  // it lands in main's history under the task's plain subject.
-  const message = `rudder: ${commitSubject(run.task)}`;
+  // it lands in main's history under the task's plain subject (a plan node's title).
+  const message = `rudder: ${commitSubject(subject)}`;
   const described = await jjWriteWithStaleRecovery(run.workspace.path, ["describe", "-m", message]);
   if (described.code !== 0) {
     const error = described.stderr.trim() || "jj could not describe the run's change.";
@@ -727,6 +676,30 @@ async function integrationBase(repoRoot: string, bookmark: string): Promise<stri
   return commits[0];
 }
 
+/** Where scheduled work starts and lands: the integration bookmark and the
+ * commit it points at. Never the checkout's `@`, which holds the user's own
+ * uncommitted edits. */
+export async function integrationTrunk(repoRoot: string): Promise<{ bookmark: string; commit: string }> {
+  const bookmark = await integrationBookmark(repoRoot, "");
+  return { bookmark, commit: await integrationBase(repoRoot, bookmark) };
+}
+
+/** Move a resolver's work into the conflicted merge it started on top of. The
+ * main checkout holds that merge, and the merge is what lands. */
+export async function squashResolutionIntoMerge(workspacePath: string, mergeChangeId: string): Promise<void> {
+  const squashed = await jjWriteWithStaleRecovery(workspacePath, [
+    "squash",
+    "--from",
+    `${mergeChangeId}..@`,
+    "--into",
+    mergeChangeId,
+    "--use-destination-message",
+  ]);
+  if (squashed.code !== 0) {
+    throw new Error(squashed.stderr.trim() || squashed.stdout.trim() || `jj squash exited ${squashed.code}`);
+  }
+}
+
 async function jjIsAncestor(repoRoot: string, ancestor: string, descendant: string): Promise<boolean> {
   return (await jjCommitIds(repoRoot, `(${ancestor}) & ::(${descendant})`)).length > 0;
 }
@@ -794,32 +767,6 @@ async function remoteContainsCommit(repoRoot: string, bookmark: string, commit: 
     allowFailure: true,
   });
   return contains.code === 0;
-}
-
-/**
- * Merge two changes into a new change. Captures the op id (after the merge),
- * returns the new merge change id and any conflicted files. jj merges never
- * fail on conflict; the conflict is recorded in the merge change.
- */
-export async function mergeNode(params: {
-  repoRoot: string;
-  nodeChangeId: string;
-  intoChangeId: string;
-  message: string;
-}): Promise<MergeNodeResult> {
-  ensureJjRepo(params.repoRoot);
-  const merge = await runCommand(
-    "jj",
-    ["new", params.intoChangeId, params.nodeChangeId, "-m", params.message],
-    { cwd: params.repoRoot, allowFailure: true },
-  );
-  if (merge.code !== 0) {
-    throw new Error(merge.stderr.trim() || merge.stdout.trim() || "jj merge failed.");
-  }
-  const mergeChangeId = await currentJjChangeId(params.repoRoot);
-  const opId = await currentOpId(params.repoRoot);
-  const conflictedFiles = await jjConflictedFiles(params.repoRoot);
-  return { mergeChangeId, opId, conflictedFiles };
 }
 
 export async function jjConflictedFiles(workspacePath: string, revision = "@"): Promise<string[]> {

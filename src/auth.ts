@@ -255,6 +255,11 @@ export async function runOnboard(options?: { nonInteractive?: boolean; json?: bo
     store = await configureOpenAI(store, config);
   }
 
+  // New agents start on a CLI that is installed and signed in here, never on
+  // one assumed to be.
+  const { chooseReadyBackend, readyBackends } = await import("./onboarding.js");
+  const backend = chooseReadyBackend(config, readyBackends());
+
   await saveAuthStore(store);
   await saveConfig(config);
 
@@ -275,6 +280,11 @@ export async function runOnboard(options?: { nonInteractive?: boolean; json?: bo
   console.log("Rudder configured");
   console.log(`  auth: ${shortenHome(authStorePath())}`);
   console.log(`  profiles: ${Object.keys(store.profiles).sort().join(", ") || "(none)"}`);
+  if (!backend) {
+    console.log("  agents: neither Claude Code nor Codex is signed in. Run `claude auth login` or `codex login`, then `rudder onboard`.");
+    return;
+  }
+  console.log(`  agents: new ones start on ${backend}`);
   console.log('  try: rudder "fix the failing tests"');
 }
 

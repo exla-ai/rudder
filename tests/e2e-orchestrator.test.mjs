@@ -75,7 +75,7 @@ async function makeWorkspace(t) {
   // `version: 1` is REQUIRED: loadConfig ignores a config without it and silently
   await fsp.writeFile(
     path.join(home, "config.json"),
-    JSON.stringify({ version: 1, orchestrator: { maxParallel: 2 } }),
+    JSON.stringify({ version: 1, defaultBackend: "claude", orchestrator: { maxParallel: 2 } }),
   );
   // Non-empty auth store so `maybeOnboard` short-circuits in the subprocess.
   await fsp.writeFile(
@@ -85,7 +85,7 @@ async function makeWorkspace(t) {
 
   const git = (args) =>
     assert.equal(spawnSync("git", args, { cwd: repo, stdio: "ignore" }).status, 0, `git ${args.join(" ")}`);
-  git(["init", "-q"]);
+  git(["init", "-q", "-b", "main"]);
   git(["config", "user.email", "e2e@rudder.test"]);
   git(["config", "user.name", "Rudder E2E"]);
   await fsp.writeFile(path.join(repo, "README.md"), "# e2e fixture\n");
@@ -252,7 +252,6 @@ test("e2e: hard-edge DAG serializes, isolates workers, and merges through jj", {
   // Both merged through a real jj merge (a status flip alone can't advance the trunk).
   assert.equal(impl.status, "merged", `impl merged (got ${impl.status})`);
   assert.equal(tst.status, "merged", `test merged (got ${tst.status})`);
-  assert.ok(graph.integrationChangeId, "merging advanced the integration trunk");
 
   // Each worker ran in its OWN isolated workspace, never the main repo.
   const implRun = await readJson(path.join(ws.repo, ".rudder", "runs", impl.runId, "run.json"));
@@ -270,11 +269,11 @@ test("e2e: hard-edge DAG serializes, isolates workers, and merges through jj", {
     `hard dep violated: test started ${tstRun.process.startedAt} before impl ended ${implRun.process.endedAt}`,
   );
 
-  // Merged CONTENT really flowed into the integration trunk.
-  const implShow = jjShow(ws.repo, graph.integrationChangeId, "mathutils.py");
+  // Merged CONTENT really landed on main.
+  const implShow = jjShow(ws.repo, "main", "mathutils.py");
   assert.equal(implShow.status, 0, `jj read mathutils.py:\n${implShow.stderr}`);
   assert.match(implShow.stdout, /def add\(a, b\)/, "merged impl present");
-  const tstShow = jjShow(ws.repo, graph.integrationChangeId, "test_mathutils.py");
+  const tstShow = jjShow(ws.repo, "main", "test_mathutils.py");
   assert.equal(tstShow.status, 0, `jj read test_mathutils.py:\n${tstShow.stderr}`);
   assert.match(tstShow.stdout, /from mathutils import add/, "merged test present");
 
@@ -285,7 +284,7 @@ test("e2e: hard-edge DAG serializes, isolates workers, and merges through jj", {
 
 // ---------------------------------------------------------------------------
 // Scenario 2: two INDEPENDENT nodes (no edges). They schedule in parallel and
-// both fan in to the integration trunk. Exercises concurrent launch + fan-in
+// both land on main. Exercises concurrent launch + fan-in
 // merge (a different path than the serialized hard-edge case).
 // ---------------------------------------------------------------------------
 test("e2e: independent nodes run in parallel and both fan in to the trunk", { skip: !jjAvailable, timeout: 180_000 }, async (t) => {
@@ -313,15 +312,14 @@ test("e2e: independent nodes run in parallel and both fan in to the trunk", { sk
   assert.equal(nodes.length, 2, "two nodes");
   assert.equal(Object.values(graph.edges).length, 0, "no edges — fully independent work");
   assert.ok(nodes.every((n) => n.status === "merged"), `both merged (got ${nodes.map((n) => n.status).join(",")})`);
-  assert.ok(graph.integrationChangeId, "integration trunk advanced");
 
-  // Both independent changes fanned in: both files coexist in the merged trunk.
+  // Both independent changes fanned in: both files coexist on main.
   for (const file of ["alpha.py", "beta.py"]) {
-    const shown = jjShow(ws.repo, graph.integrationChangeId, file);
+    const shown = jjShow(ws.repo, "main", file);
     assert.equal(shown.status, 0, `jj read ${file}:\n${shown.stderr}`);
   }
-  const alpha = jjShow(ws.repo, graph.integrationChangeId, "alpha.py");
+  const alpha = jjShow(ws.repo, "main", "alpha.py");
   assert.match(alpha.stdout, /ALPHA = 1/, "alpha content merged");
-  const beta = jjShow(ws.repo, graph.integrationChangeId, "beta.py");
+  const beta = jjShow(ws.repo, "main", "beta.py");
   assert.match(beta.stdout, /BETA = 2/, "beta content merged");
 });

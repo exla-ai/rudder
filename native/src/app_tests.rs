@@ -31695,3 +31695,17 @@ fn a_codex_row_follows_its_worker_to_a_newer_thread_unless_it_moved_on_first() {
     deliver(&mut app, ("thread-b", "thread-c"));
     assert_eq!(app.agents[0].session_id.as_deref(), Some("thread-fork"));
 }
+
+/// New work never starts on an assumed backend: with none chosen the dashboard
+/// does not start, and the one onboarding recorded is what it uses.
+#[test]
+fn initial_selection_needs_a_chosen_backend() {
+    let _env = env_guard();
+    let home = unique_test_repo("no-backend");
+    std::env::set_var("RUDDER_HOME", &home);
+    let error = initial_selection().err().expect("started with no backend chosen");
+    assert!(error.to_string().contains("No agent backend is set"), "{error}");
+    std::fs::write(home.join("config.json"), r#"{"version":1,"defaultBackend":"codex"}"#).unwrap();
+    assert_eq!(initial_selection().unwrap().backend, Backend::Codex);
+    let _ = std::fs::remove_dir_all(&home);
+}

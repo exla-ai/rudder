@@ -71,12 +71,22 @@ export function pathExistsSync(filePath: string): boolean {
   }
 }
 
+/** A JSON file's contents, or null when the file does not exist. Any other
+ * read failure throws, and so does a file that is not valid JSON. */
 export async function readJson<T>(filePath: string): Promise<T | null> {
+  let raw: string;
   try {
-    const raw = await fsp.readFile(filePath, "utf8");
+    raw = await fsp.readFile(filePath, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  try {
     return JSON.parse(raw) as T;
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`${shortenHome(filePath)} is not valid JSON (${(error as Error).message}). Fix or delete it.`);
   }
 }
 

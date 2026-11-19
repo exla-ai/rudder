@@ -447,8 +447,6 @@ pub(crate) fn ensure_config_defaults(config: &mut serde_json::Value) {
     root.remove("autoMerge");
     root.entry("version".to_string())
         .or_insert(serde_json::json!(1));
-    root.entry("defaultBackend".to_string())
-        .or_insert(serde_json::json!("claude"));
     root.entry("colorMode".to_string())
         .or_insert(serde_json::json!("terminal"));
     root.entry("runPolicy".to_string()).or_insert_with(|| {
@@ -466,7 +464,6 @@ pub(crate) fn ensure_config_defaults(config: &mut serde_json::Value) {
 pub(crate) fn default_config_value() -> serde_json::Value {
     serde_json::json!({
         "version": 1,
-        "defaultBackend": "claude",
         "colorMode": "terminal",
         "runPolicy": {
             "sameCheckout": "single-active",

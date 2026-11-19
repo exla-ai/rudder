@@ -11,11 +11,10 @@ import type {
 } from "./types.js";
 import { callTextModel } from "./task-summary.js";
 import { loadInstructionFiles, suggestTests } from "./brain.js";
-import { createEmptyChange, currentJjChangeId } from "./jj.js";
 import { newEdgeId, newNodeId, updateGraph } from "./graph.js";
 import { nowIso } from "./util.js";
 import { DEFAULT_SUCCESS, deriveGoal, formatGoalPrompt, normalizeGoalLine } from "./goal.js";
-import { ensureProjectRuntimeIgnored } from "./state.js";
+import { configuredBackend, loadConfig } from "./state.js";
 
 export { loadInstructionFiles } from "./brain.js";
 
@@ -548,48 +547,21 @@ export function buildFanoutDag(task: string, n: number, opts: FanoutOptions = {}
 }
 
 // ---------------------------------------------------------------------------
-// Scaffold: turn a PlanDag into real graph.json nodes + edges, each backed by
-// an empty jj change parented on its hard+soft deps' changes (plan section 3a).
-// Dependents exist as real merge changes before parents do work.
+// Scaffold: turn a PlanDag into graph.json nodes + edges. The edges are the
+// whole dependency record; no jj change is made here. Each worker starts from
+// the integration bookmark when it launches, and a hard dependent launches
+// only after its parents have landed there.
 // ---------------------------------------------------------------------------
 
 export async function scaffoldPlan(repoRoot: string, dag: PlanDag): Promise<void> {
-  // Install the runtime exclusions before the first jj command snapshots @, so
-  // graph.json and worker ledgers can never become parents of task changes.
-  await ensureProjectRuntimeIgnored(repoRoot);
-  const order = topoOrderHard(dag);
-  const trunk = (await currentJjChangeId(repoRoot)) || "@";
-
-  // Map plan id -> created jj change id, filled as we walk in topo order so a
-  // child can parent on its already-created parents.
-  const changeByPlanId = new Map<string, string>();
+  const backend = configuredBackend(await loadConfig());
   // Map plan id -> the final graph node id (content-hashed, mergeable).
-  const nodeIdByPlanId = new Map<string, string>();
-
-  for (const node of order) {
-    // hard+soft deps contribute jj-change parentage (the change stacks on them).
-    // judge deps do NOT: a judge node produces its own implementation off the
-    // trunk and the variants it compares are never merged.
-    const parentChangeIds = node.deps
-      .filter((dep) => dep.type !== "judge")
-      .map((dep) => changeByPlanId.get(dep.on))
-      .filter((value): value is string => Boolean(value));
-    const parents = parentChangeIds.length ? parentChangeIds : [trunk];
-    const nodeId = newNodeId(node.title);
-    const changeId = await createEmptyChange({
-      repoRoot,
-      parents,
-      description: `rudder-node:${nodeId} ${node.title}`,
-    });
-    changeByPlanId.set(node.id, changeId);
-    nodeIdByPlanId.set(node.id, nodeId);
-  }
+  const nodeIdByPlanId = new Map(dag.nodes.map((node) => [node.id, newNodeId(node.title)]));
 
   const createdAt = nowIso();
   await updateGraph(repoRoot, (graph) => {
     for (const node of dag.nodes) {
       const nodeId = nodeIdByPlanId.get(node.id);
-      const changeId = changeByPlanId.get(node.id);
       if (!nodeId) {
         continue;
       }
@@ -619,11 +591,10 @@ export async function scaffoldPlan(repoRoot: string, dag: PlanDag): Promise<void
         prompt: formatGoalPrompt({ goal, success, body: node.prompt }),
         goal,
         success,
-        backend: node.backend ?? "claude",
+        backend: node.backend ?? backend,
         ...(node.model ? { model: node.model } : {}),
         ...(node.effort ? { effort: node.effort } : {}),
         status: "planned",
-        ...(changeId ? { jjChangeId: changeId } : {}),
         deps: incomingEdgeIds,
         source: "planner",
         createdAt,
@@ -634,47 +605,3 @@ export async function scaffoldPlan(repoRoot: string, dag: PlanDag): Promise<void
   });
 }
 
-/**
- * Topological order over HARD edges (the ones that gate scaffolding parentage).
- * parsePlanBlock already rejected hard cycles, so Kahn's algorithm completes;
- * any node left over (only possible via a soft-only cycle) is appended.
- */
-function topoOrderHard(dag: PlanDag): PlanNode[] {
-  const byId = new Map(dag.nodes.map((node) => [node.id, node]));
-  const indegree = new Map<string, number>(dag.nodes.map((node) => [node.id, 0]));
-  const adjacency = new Map<string, string[]>(dag.nodes.map((node) => [node.id, []]));
-  for (const edge of dag.edges) {
-    if (edge.type !== "hard" || !indegree.has(edge.to) || !adjacency.has(edge.from)) {
-      continue;
-    }
-    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
-    adjacency.get(edge.from)?.push(edge.to);
-  }
-  const queue = dag.nodes.filter((node) => (indegree.get(node.id) ?? 0) === 0).map((node) => node.id);
-  const ordered: PlanNode[] = [];
-  const seen = new Set<string>();
-  while (queue.length) {
-    const id = queue.shift() as string;
-    if (seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    const node = byId.get(id);
-    if (node) {
-      ordered.push(node);
-    }
-    for (const next of adjacency.get(id) ?? []) {
-      const degree = (indegree.get(next) ?? 0) - 1;
-      indegree.set(next, degree);
-      if (degree === 0) {
-        queue.push(next);
-      }
-    }
-  }
-  for (const node of dag.nodes) {
-    if (!seen.has(node.id)) {
-      ordered.push(node);
-    }
-  }
-  return ordered;
-}

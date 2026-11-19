@@ -216,15 +216,26 @@ workspace off the landed change; the second `m` in the diff panel merges; a
 dismissed Codex plan stops reading "needs input" (Plan mode left, or the menu
 gone from the screen); refusals show as errors; paused and merged rows keep
 their +N -M. The "/" menu probe now waits for Claude's process group to exit.
-Open: the phone card for a Codex plan dismissed with Esc only, the scheduler's
-legacy node merge (`mergeNodeIntoIntegration`) still merges into `@`, a
-Codex-only Mac defaults to Claude.
+Open: the phone card for a Codex plan dismissed with Esc only, a Codex-only Mac
+defaults to Claude. Fixed on main since: the scheduler's node merge
+(`mergeNodeIntoIntegration`) lands on main through the dashboard's merge, and
+plan nodes start from main instead of the checkout's `@`.
 
 Rudder for Mac 1.1.0 (4) is the latest Mac release (`mac-v1.1.0-4`, 2026-11-18),
 Developer ID signed, notarized and stapled; `/download/mac` serves it. Xcode
 hung on the MacBook (macOS pipe buffers shrunk to 512 bytes after 12 days up,
 so the build service deadlocks on clang's probe), so an offstage Mac built the
 unsigned Release archive and the MacBook signed, notarized and packaged it.
+
+The Mac app updates itself from the next Mac release, 1.2.0 (not released
+yet): Sparkle 2.10.1, a daily check that downloads in the background and
+installs on quit, and Rudder > Check for Updates…. The feed is `appcast.xml`
+on the latest GitHub release, EdDSA-signed by `mac/scripts/publish.sh` with
+the key in `~/.rudder-sparkle-ed25519` on the Linux home;
+`mac/scripts/package.sh` signs Sparkle's helpers. Open: the
+`SPARKLE_ED_PRIVATE_KEY` repo secret for the CI route, a backup of the key,
+and a server-side web app version so the Mac app can reload after a Cloud
+deploy.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

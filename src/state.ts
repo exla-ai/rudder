@@ -235,10 +235,23 @@ export async function loadConfig(): Promise<RudderConfig> {
   return defaultConfig();
 }
 
+/** Said wherever new work needs a backend and none is chosen. The native
+ * dashboard (native/src/main.rs) prints the same words. */
+export const NO_BACKEND_MESSAGE =
+  "No agent backend is set. Sign in to Claude Code (`claude auth login`) or Codex (`codex login`) and run `rudder onboard`, or pick one with `--backend claude` or `--backend codex`.";
+
+/** The backend new agents start on: the one last picked, else the one onboarding recorded. */
+export function configuredBackend(config: RudderConfig): BackendId {
+  const backend = config.lastUsedBackend ?? config.defaultBackend;
+  if (!backend) {
+    throw new Error(NO_BACKEND_MESSAGE);
+  }
+  return backend;
+}
+
 export function defaultConfig(): RudderConfig {
   return {
     version: 1,
-    defaultBackend: "claude",
     colorMode: "terminal",
     runPolicy: {
       sameCheckout: "single-active",

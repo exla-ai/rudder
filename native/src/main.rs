@@ -3422,7 +3422,17 @@ impl App {
             .unwrap_or_else(|| self.active_plan_index())
     }
 
+    /// A test App never reads the developer's own config: new work starts on
+    /// Claude's default model unless the test picks another.
+    #[cfg(test)]
     fn new() -> Self {
+        let backend = Backend::Claude;
+        let model = default_model_for(backend).to_string();
+        let effort = default_effort_for(backend, &model);
+        Self::with_selection(InitialSelection { backend, model, effort })
+    }
+
+    fn with_selection(selection: InitialSelection) -> Self {
         // In tests, default to a UNIQUE temp dir, never the real repo: App methods write
         // real files (DECISIONS.md, .rudder/, RUDDER.md, graph.json) keyed on cwd, so a test
         // that forgets to override app.cwd would otherwise pollute the working repo (this is
@@ -3434,7 +3444,7 @@ impl App {
             #[cfg(not(test))]
             { std::env::current_dir().map(|path| dashboard_root(&path)).unwrap_or_else(|_| PathBuf::from(".")) }
         };
-        let (cwd, selection) = (legacy_cwd(), initial_selection());
+        let cwd = legacy_cwd();
         // Read the per-repo cloud-mode flag BEFORE the struct literal takes
         // ownership of `cwd`. Tests pin it off (they share repo dirs).
         let cloud_mode = if cfg!(test) {
@@ -16237,7 +16247,7 @@ Address the objection directly. If you disagree, say why inside \
                 "pin" => self.deliver_pin_request(&task_id, &instruction),
                 // The chat's model control: `<model> <effort|auto>` for one agent.
                 "model" => self.deliver_model_request(&task_id, &instruction),
-                // Edit the chat's latest prompt: `<entry>\n<text>`. Accepted
+                // Edit a sent prompt: `<entry> <latest>\n<text>`. Accepted
                 // edits answer when their rewind finishes (drain_chat_edits).
                 "edit" => match self.deliver_edit_request(&task_id, &instruction, &request_id) {
                     Some(result) => result,
@@ -22776,8 +22786,9 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    let selection = initial_selection()?;
     let mut lifecycle = app_engine_lifecycle::AppEngineLifecycle::prepare(&mut ownership)?;
-    let mut app = App::new();
+    let mut app = App::with_selection(selection);
     app.cwd = ownership.app_identity().0.to_path_buf();
     if let Some(records)=ownership.take_migration_records() {v4_migration_adoption::apply(&mut app,records)?;}
     app.engine_headless = terminal.is_none();
@@ -23394,7 +23405,7 @@ fn load_plan_queue(cwd: &Path) -> Option<PlanQueueFile> {
 }
 
 /// The whole startup restore: persisted run records plus `.rudder/plan-queue.json` in,
-/// the reconciled fleet and the live plans out. `App::new()` calls this and nothing else
+/// the reconciled fleet and the live plans out. `App::with_selection` calls this and nothing else
 /// to rebuild what the last process was doing.
 ///
 /// It is one function rather than two because the two answers are entangled: a plan's
@@ -23615,13 +23626,20 @@ fn handle_event(app: &mut App, event: Event) -> bool {
     }
 }
 
-fn initial_selection() -> InitialSelection {
+/// Said when new work needs a backend and none is chosen; the TS CLI
+/// (src/state.ts NO_BACKEND_MESSAGE) says the same words.
+const NO_BACKEND_MESSAGE: &str = "No agent backend is set. Sign in to Claude Code (`claude auth login`) or Codex (`codex login`) and run `rudder onboard`, or pick one with `--backend claude` or `--backend codex`.";
+
+/// What new agents start on: `--backend`/`--model` when given (and then
+/// remembered), else the config onboarding wrote. With neither naming a
+/// backend the dashboard does not start, rather than guess one.
+fn initial_selection() -> Result<InitialSelection> {
     let cli = cli_selection();
     let config = load_rudder_config();
     let backend = cli
         .backend
         .or_else(|| config.as_ref().and_then(config_backend))
-        .unwrap_or(Backend::Claude);
+        .context(NO_BACKEND_MESSAGE)?;
     let cli_model = cli.model.filter(|model| !model.trim().is_empty());
     let should_remember = cli.backend.is_some() || cli_model.is_some();
     let model = cli_model
@@ -23642,14 +23660,14 @@ fn initial_selection() -> InitialSelection {
     };
 
     if should_remember {
-        let _ = save_model_defaults(backend, &model, effort);
+        save_model_defaults(backend, &model, effort)?;
     }
 
-    InitialSelection {
+    Ok(InitialSelection {
         backend,
         model,
         effort,
-    }
+    })
 }
 
 fn cli_selection() -> CliSelection {

@@ -619,10 +619,10 @@ test("updateGraph never replaces an unreadable existing graph with an empty DAG"
 
   await assert.rejects(
     updateGraph(repo, (graph) => {
-      graph.integrationChangeId = "must-not-land";
+      graph.updatedAt = "must-not-land";
       return graph;
     }),
-    /Refusing to replace an unreadable existing graph/,
+    /graph\.json is not valid JSON/,
   );
   assert.equal(await fsp.readFile(graphPath(repo), "utf8"), "{not-json");
 });

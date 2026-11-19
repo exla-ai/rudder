@@ -66,7 +66,8 @@ export type AuthProfileStore = {
 
 export type RudderConfig = {
   version: 1;
-  defaultBackend: BackendId;
+  /** Set by onboarding to a CLI that is installed and signed in. */
+  defaultBackend?: BackendId;
   lastUsedBackend?: BackendId;
   colorMode?: "terminal" | "paper";
   /** Anonymous usage events. Undefined means on; see src/analytics.ts. */
@@ -228,7 +229,6 @@ export type TaskNode = {
 export type RudderGraph = {
   version: 1;
   repoRoot: string;
-  integrationChangeId?: string; // the jj "trunk" all merged nodes stack onto
   nodes: Record<string, TaskNode>; // keyed by id -> mergeable union, no line conflicts
   edges: Record<string, GraphEdge>; // keyed by id
   updatedAt: string;

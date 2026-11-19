@@ -3,15 +3,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { BackendId } from "./types.js";
-import type { AuthProfileCredential, AuthProfileStore } from "./types.js";
+import type { AuthProfileCredential } from "./types.js";
 import { loadAuthStore, loadConfig } from "./state.js";
-import { rudderHome, writeJson } from "./util.js";
+import { readJson, rudderHome, writeJson } from "./util.js";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=100";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MODELS_DEV_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 2500;
 const MODEL_PICKER_LIMIT = 24;
 
 export type ModelOption = {
@@ -201,56 +202,24 @@ async function readModelsDev(): Promise<ModelsDevCache> {
 
 async function readMergedModelCatalog(): Promise<ModelsDevCache> {
   const cached = await readModelsDevCache();
-  let base: ModelsDevCache | undefined;
-  let shouldWrite = false;
-  if (cached && Date.now() - cached.mtimeMs < MODELS_DEV_CACHE_MAX_AGE_MS) {
-    base = cached.data;
-  } else {
-    const fresh = await fetchModelsDev().catch(() => null);
-    if (fresh) {
-      base = fresh;
-      shouldWrite = true;
-    } else {
-      base = cached?.data ?? {};
-    }
-  }
+  const current = cached !== null && Date.now() - cached.mtimeMs < MODELS_DEV_CACHE_MAX_AGE_MS;
+  const base = current ? cached.data : await fetchJsonWithTimeout<ModelsDevCache>(MODELS_DEV_URL, {});
 
   const merged = cloneModelCatalog(base);
   const added = await mergeLiveAndLocalModels(merged);
-  if (shouldWrite || added) {
+  if (!current || added) {
     await writeModelsDevCache(merged);
   }
   return merged;
 }
 
-async function fetchModelsDev(): Promise<ModelsDevCache> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
-  try {
-    const response = await fetch(MODELS_DEV_URL, { signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`models.dev returned ${response.status}`);
-    }
-    return await response.json() as ModelsDevCache;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
+/** The cached catalog, or null when there is none yet. A cache that does not
+ * parse is an error that names the file. */
 async function readModelsDevCache(): Promise<{ data: ModelsDevCache; mtimeMs: number } | null> {
   const file = modelsDevCachePath();
-  const [raw, stat] = await Promise.all([
-    fsp.readFile(file, "utf8").catch(() => ""),
-    fsp.stat(file).catch(() => null),
-  ]);
-  if (!raw || !stat) {
-    return null;
-  }
-  try {
-    return { data: JSON.parse(raw) as ModelsDevCache, mtimeMs: stat.mtimeMs };
-  } catch {
-    return null;
-  }
+  const stat = await fsp.stat(file).catch(ignoreMissing);
+  const data = stat ? await readJson<ModelsDevCache>(file) : null;
+  return stat && data ? { data, mtimeMs: stat.mtimeMs } : null;
 }
 
 async function writeModelsDevCache(data: ModelsDevCache): Promise<void> {
@@ -337,10 +306,10 @@ function scoreCodexModel(id: string, model: ModelsDevModel): number {
 async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<boolean> {
   let changed = false;
   const [openai, anthropic, codexLocal, claudeLocal] = await Promise.all([
-    fetchOpenAIModelCatalog().catch(() => []),
-    fetchAnthropicModelCatalog().catch(() => []),
-    readCodexLocalModels().catch(() => []),
-    readClaudeLocalModelIds().catch(() => []),
+    fetchOpenAIModelCatalog(),
+    fetchAnthropicModelCatalog(),
+    readCodexLocalModels(),
+    readClaudeLocalModelIds(),
   ]);
 
   for (const model of openai) {
@@ -361,8 +330,8 @@ async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<boolean> {
 async function fetchOpenAIModelCatalog(): Promise<Array<{ id: string; meta: ModelsDevModel }>> {
   const authHeaders = await openAIAuthHeaders();
   for (const headers of authHeaders) {
-    const response = await fetchJsonWithTimeout<OpenAIModelsResponse>(OPENAI_MODELS_URL, { headers }).catch(() => null);
-    const rows = response?.data ?? [];
+    const response = await fetchJsonWithTimeout<OpenAIModelsResponse>(OPENAI_MODELS_URL, { headers });
+    const rows = response.data ?? [];
     if (rows.length === 0) {
       continue;
     }
@@ -389,8 +358,8 @@ async function fetchOpenAIModelCatalog(): Promise<Array<{ id: string; meta: Mode
 async function fetchAnthropicModelCatalog(): Promise<Array<{ id: string; meta: ModelsDevModel }>> {
   const authHeaders = await anthropicAuthHeaders();
   for (const headers of authHeaders) {
-    const response = await fetchJsonWithTimeout<AnthropicModelsResponse>(ANTHROPIC_MODELS_URL, { headers }).catch(() => null);
-    const rows = response?.data ?? [];
+    const response = await fetchJsonWithTimeout<AnthropicModelsResponse>(ANTHROPIC_MODELS_URL, { headers });
+    const rows = response.data ?? [];
     if (rows.length === 0) {
       continue;
     }
@@ -480,10 +449,7 @@ async function providerCredentials(provider: "openai" | "anthropic"): Promise<Ar
   if (envKey) {
     values.push({ kind: "api_key", value: envKey });
   }
-  const [store, config] = await Promise.all([
-    loadAuthStore().catch((): AuthProfileStore => ({ version: 1, profiles: {} })),
-    loadConfig().catch(() => undefined),
-  ]);
+  const [store, config] = await Promise.all([loadAuthStore(), loadConfig()]);
   const ids = provider === "openai"
     ? [
         config?.backends?.codex?.profileId,
@@ -523,22 +489,32 @@ function addCredential(values: Array<{ kind: "api_key" | "token"; value: string 
   if (!credential) {
     return;
   }
+  // Rudder's copy of a CLI login stops working once the CLI refreshes it, and
+  // an expired token is only ever refused, so it is not offered at all.
+  const expired = "expires" in credential && typeof credential.expires === "number" && credential.expires <= Date.now();
   if (credential.type === "api_key" && credential.key) {
     values.push({ kind: "api_key", value: credential.key });
-  } else if (credential.type === "token" && credential.token) {
+  } else if (credential.type === "token" && credential.token && !expired) {
     values.push({ kind: "token", value: credential.token });
-  } else if (credential.type === "oauth" && credential.access) {
+  } else if (credential.type === "oauth" && credential.access && !expired) {
     values.push({ kind: "token", value: credential.access });
   }
 }
 
 async function fetchJsonWithTimeout<T>(url: string, init: RequestInit): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal }).catch((error: unknown) => {
+      if (controller.signal.aborted) {
+        throw new Error(`${url} did not answer within ${FETCH_TIMEOUT_MS / 1000} s`);
+      }
+      const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+      throw new Error(`could not reach ${url}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    });
     if (!response.ok) {
-      throw new Error(`${url} returned ${response.status}`);
+      const body = (await response.text()).trim().slice(0, 200);
+      throw new Error(`${url} returned ${response.status}${body ? `: ${body}` : ""}`);
     }
     return await response.json() as T;
   } finally {

@@ -16,6 +16,7 @@ import { mergeGeneratedRudderMd, withRudderMdLock } from "./rudder-md.js";
 import {
   createRunRecord,
   agentContextPath,
+  configuredBackend,
   ensureProjectRuntimeIgnored,
   eventsPath,
   listRuns,
@@ -121,7 +122,7 @@ export async function startRun(params: {
   await registerProject(repoRoot).catch(() => undefined);
   await captureSharedContextFromInput(repoRoot, params.task).catch(() => false);
   const config = await loadConfig();
-  const backend = params.backend ?? config.lastUsedBackend ?? config.defaultBackend;
+  const backend = params.backend ?? configuredBackend(config);
   if (!commandExists(backend)) {
     throw new MissingToolError(backend);
   }
@@ -1640,8 +1641,8 @@ async function autoIntegrateFinishedWorker(repoRoot: string, run: RunRecord): Pr
   if (process.env.RUDDER_NO_AUTO_INTEGRATE === "1") return;
   try {
     // Planned nodes integrate through the scheduler's trunk, not here.
-    const graph = await readGraph(repoRoot).catch(() => undefined);
-    if (graph && Object.values(graph.nodes ?? {}).some((node) => node.runId === run.id)) return;
+    const graph = await readGraph(repoRoot);
+    if (Object.values(graph.nodes ?? {}).some((node) => node.runId === run.id)) return;
     const failed = runProjectCheck(repoRoot, run);
     if (failed !== undefined) {
       await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: checks failed\n${failed}` });

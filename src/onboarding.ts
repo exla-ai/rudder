@@ -5,6 +5,8 @@
 // both rotate refresh tokens, and a shared copy signs one side out.
 import { spawnSync } from "node:child_process";
 import readline from "node:readline/promises";
+import { loadConfig, saveConfig } from "./state.js";
+import type { BackendId, RudderConfig } from "./types.js";
 import { commandEnv, commandExists } from "./util.js";
 
 type AgentCli = {
@@ -38,6 +40,28 @@ const AGENT_CLIS: AgentCli[] = [
     signedIn: () => spawnSync("codex", ["login", "status"], { stdio: "ignore", timeout: 20_000, env: commandEnv() }).status === 0,
   },
 ];
+
+/** The agent CLIs installed and signed in here, in the order onboarding lists them. */
+export function readyBackends(): BackendId[] {
+  return AGENT_CLIS.filter((cli) => commandExists(cli.command) && cli.signedIn()).map((cli) => cli.command);
+}
+
+/**
+ * Point new agents at a CLI that can start them here. The current choice stays
+ * when it is ready, or when onboarding does not check it (acpx, opencode);
+ * otherwise the first ready CLI becomes the default. With none ready nothing
+ * changes. Returns the backend new agents start on, if any.
+ */
+export function chooseReadyBackend(config: RudderConfig, ready: BackendId[]): BackendId | undefined {
+  const current = config.lastUsedBackend ?? config.defaultBackend;
+  const checked = AGENT_CLIS.some((cli) => cli.command === current);
+  if (ready.length === 0 || (current && (!checked || ready.includes(current)))) {
+    return current;
+  }
+  config.defaultBackend = ready[0];
+  delete config.lastUsedBackend;
+  return ready[0];
+}
 
 export type CloudRepoSummary = { repo: string; agents: number };
 
@@ -109,6 +133,14 @@ export async function runLaptopOnboarding(options: OnboardingOptions = {}): Prom
   }
   if (!AGENT_CLIS.some((cli) => commandExists(cli.command))) {
     console.log("Install one later with `npm i -g @anthropic-ai/claude-code` or `npm i -g @openai/codex`.");
+  }
+  const config = await loadConfig();
+  const before = config.lastUsedBackend ?? config.defaultBackend;
+  const backend = chooseReadyBackend(config, readyBackends());
+  const chosen = AGENT_CLIS.find((cli) => cli.command === backend);
+  if (backend !== before && chosen) {
+    await saveConfig(config);
+    console.log(`New agents start on ${chosen.label}.`);
   }
 
   const repos = options.cloudRepos ? await options.cloudRepos().catch(() => null) : null;

@@ -305,13 +305,11 @@ export async function main(): Promise<void> {
     case "__models": {
       // The phone's /model picker, through the home supervisor: the same
       // options as the dashboard's, and the backend + model new agents use.
-      const [claude, codex] = await Promise.all([
-        discoverModelOptions("claude").catch(() => []),
-        discoverModelOptions("codex").catch(() => []),
-      ]);
-      const config = await loadConfig().catch(() => null);
-      const backend = config?.lastUsedBackend ?? config?.defaultBackend ?? "claude";
-      const current = { backend, model: config?.backends?.[backend]?.model ?? null };
+      const [claude, codex] = await Promise.all([discoverModelOptions("claude"), discoverModelOptions("codex")]);
+      const config = await loadConfig();
+      // None chosen yet is an answer too: this picker is where one gets chosen.
+      const backend = config.lastUsedBackend ?? config.defaultBackend;
+      const current = backend ? { backend, model: config.backends[backend]?.model ?? null } : null;
       process.stdout.write(`${JSON.stringify({ current, claude, codex })}\n`);
       return;
     }
@@ -862,27 +860,32 @@ async function maybeOnboard(): Promise<void> {
 async function openDashboard(parsed: Parsed): Promise<void> {
   // The model cache refreshes behind the dashboard, which never waits on that
   // network discovery: the native picker re-reads the file when it changes.
-  void refreshModelCache();
-  if (await attachSocketLive()) {
-    await runNativeCommand(["attach", "--dashboard"]);
-    return;
+  // A refresh that failed is reported once the dashboard gives the screen back.
+  const refresh = refreshModelCache().then(() => null, (error: unknown) => error);
+  try {
+    if (await attachSocketLive()) {
+      await runNativeCommand(["attach", "--dashboard"]);
+      return;
+    }
+    if (persistentProjectEngineRequested(findRepoRoot())) {
+      await ensureEngineRunning(findRepoRoot());
+      await runNativeCommand(["attach", "--dashboard"]);
+      return;
+    }
+    if (await runNativeDashboard()) {
+      return;
+    }
+    throw new Error("rudder-native binary is not available. Reinstall or rebuild Rudder, then run `rudder` again.");
+  } finally {
+    const failure = await refresh;
+    if (failure) {
+      console.error(`Could not refresh the model list: ${failure instanceof Error ? failure.message : String(failure)}`);
+    }
   }
-  if (persistentProjectEngineRequested(findRepoRoot())) {
-    await ensureEngineRunning(findRepoRoot());
-    await runNativeCommand(["attach", "--dashboard"]);
-    return;
-  }
-  if (await runNativeDashboard()) {
-    return;
-  }
-  throw new Error("rudder-native binary is not available. Reinstall or rebuild Rudder, then run `rudder` again.");
 }
 
 async function refreshModelCache(): Promise<void> {
-  await Promise.all([
-    discoverModelOptions("claude").catch(() => []),
-    discoverModelOptions("codex").catch(() => []),
-  ]);
+  await Promise.all([discoverModelOptions("claude"), discoverModelOptions("codex")]);
 }
 
 async function runNativeDashboard(): Promise<boolean> {

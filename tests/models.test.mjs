@@ -129,3 +129,29 @@ test("Claude fallback choices mirror Claude Code without synthetic 1m aliases", 
   assert.match(options.find((option) => option.value === "opus")?.detail ?? "", /1M context/);
   assert.ok(!options.some((option) => option.value?.includes("[1m]")));
 });
+
+test("an expired stored login is not sent, and a refused key fails discovery with the reason", async (t) => {
+  const root = await withTempRudderHome(t);
+  await fsp.writeFile(path.join(root, "auth-profiles.json"), JSON.stringify({ version: 1, profiles: {
+    "anthropic:claude-code": { type: "oauth", provider: "anthropic", access: "expired-fixture-bearer", refresh: "r", expires: Date.now() - 1000 },
+  } }));
+  const oldFetch = globalThis.fetch, oldAnthropic = process.env.ANTHROPIC_API_KEY, oldOpenAI = process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  t.after(() => {
+    globalThis.fetch = oldFetch;
+    if (oldAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldAnthropic;
+    if (oldOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldOpenAI;
+  });
+  globalThis.fetch = async (url, init) => {
+    assert.ok(!JSON.stringify(init ?? {}).includes("expired-fixture-bearer"), "expired login was sent");
+    if (String(url).startsWith("https://api.anthropic.com/")) {
+      return { ok: false, status: 401, text: async () => '{"error":{"message":"invalid x-api-key"}}' };
+    }
+    return jsonResponse({});
+  };
+  assert.ok((await discoverModelOptions("claude")).length > 1);
+
+  process.env.ANTHROPIC_API_KEY = "refused-key";
+  await assert.rejects(discoverModelOptions("claude"), /api\.anthropic\.com\/v1\/models.* returned 401: .*invalid x-api-key/);
+});

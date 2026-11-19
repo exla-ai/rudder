@@ -1172,7 +1172,8 @@ async function loadCloudAuth(): Promise<CloudAuthState | null> {
 }
 
 async function logout(options: CloudCommandOptions): Promise<void> {
-  const existed = (await loadCloudAuth()) !== null;
+  // Not parsed: logging out is how a damaged login file gets cleared.
+  const existed = await pathExists(cloudAuthPath());
   await fsp.rm(cloudAuthPath(), { force: true });
   if (options.json) {
     printJson({ ok: true, loggedOut: existed });

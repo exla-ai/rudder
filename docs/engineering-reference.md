@@ -1776,8 +1776,8 @@ on the user's own Claude Code / Codex subscription.
   once. `tests/coordinator.test.mjs` covers the event diff, the early return
   and the MCP round trip.
 - **Not built yet**: the cloud agent using the Mac as a runner (xcodebuild /
-  simulator on the user's Mac on the agent's behalf), Sparkle auto-update for the
-  Mac app, and org-level shared credentials / SSO.
+  simulator on the user's Mac on the agent's behalf), and org-level shared
+  credentials / SSO. The Mac app's Sparkle updates are in `mac/README.md`.
 
 ### 9.9 Known limitations (current state, not action items)
 Documented so they are not rediscovered: workspace re-use ignores a newer snapshot with
@@ -2833,22 +2833,30 @@ section 5 / `src/jj.ts` for the run-level merge plumbing.
 **Serialization invariant (`withSchedulerLock`, `src/scheduler.ts`).** The daemon fires
 `scheduleTick` (1s interval), `onRunTransition` (per-run `fs.watch`), and the board's
 manual approve/merge endpoints — all in ONE process as un-awaited `void` calls. Every op
-that reads then advances `integrationChangeId` MUST go through `withSchedulerLock(repoRoot, …)`,
-which chains them onto a per-repo promise so they run one-at-a-time. Without it, two nodes
-reaching `review` in the same instant get merged concurrently against the SAME integration
-head, producing two sibling merges; the second `updateGraph` clobbers `integrationChangeId`
-and one node is marked `merged` while its diff is orphaned off the trunk (silent data loss).
-The public entry points lock; internal recursion uses the unlocked `*Core` variants to avoid
-self-deadlock (the lock is NOT reentrant). This bug is invisible to unit tests and only
-shows under near-simultaneous completions — it is covered by `tests/e2e-orchestrator.test.mjs`.
+that reads or moves the graph and the integration bookmark MUST go through
+`withSchedulerLock(repoRoot, …)`, which chains them onto a per-repo promise so they run
+one-at-a-time. The public entry points lock; internal recursion uses the unlocked `*Core`
+variants to avoid self-deadlock (the lock is NOT reentrant). Near-simultaneous
+completions are covered by `tests/e2e-orchestrator.test.mjs`.
+
+**Scheduler merges are dashboard merges.** `mergeNodeIntoIntegration` loads the node's
+run and calls `mergeJjRunIntoCurrentWorkspace(run, true)`: main gains the node's change,
+the checkout follows with its own edits uncommitted, and the node's workspace is sealed.
+The commit lands as "rudder: <node title>". Plans make no jj changes (graph edges are
+the dependency record); every worker starts from the commit the integration bookmark
+points at (`integrationTrunk`), never the checkout's `@`, so a hard dependent sees its
+landed parents and `main` gains no empty bookkeeping commits. A conflict leaves the merge as the
+checkout's `@` and spawns a resolver in a change on top of it; when the resolver
+finishes, `squashResolutionIntoMerge` folds its work into the merge and the same call
+lands it. Any other merge failure holds the node blocked with the error.
 
 **Cross-process integration lock (v2.6.x).** `withSchedulerLock` serializes only one
 process; a `rudder merge` CLI invocation (what the TUI shells out to) and a daemon tick
-are SEPARATE processes sharing the same `@`. Both outer merge seams —
-`mergeJjRunIntoCurrentWorkspace` (jj.ts) and `mergeNodeIntoIntegration` (scheduler.ts) —
-therefore take `.rudder/integrate.lock` (`withIntegrationLock`, src/rudder-md.ts: mkdir
-lock, 30s wait, 120s stale takeover, proceed-unlocked on timeout so a crashed holder
-never deadlocks). NOT reentrant: `mergeNode` inside those seams must never re-take it.
+are SEPARATE processes sharing the same `@`. The one merge seam,
+`mergeJjRunIntoCurrentWorkspace` (jj.ts), takes `.rudder/integrate.lock`
+(`withIntegrationLock`, src/rudder-md.ts: mkdir lock, 30s wait, 120s stale takeover,
+proceed-unlocked on timeout so a crashed holder never deadlocks). NOT reentrant: its
+callers, the scheduler included, must never take it around the call.
 
 ### 14.7b Cross-process coordination and locking (the full map)
 Multiple OS processes share state: the Rust TUI, each `rudder <cmd>` CLI invocation

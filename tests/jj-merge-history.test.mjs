@@ -5,8 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createRunJjWorkspace, ensureColocated, mergeJjRunIntoCurrentWorkspace } from "../dist/jj.js";
-import { createRunRecord } from "../dist/state.js";
+import {
+  createNodeWorkspace,
+  createRunJjWorkspace,
+  ensureColocated,
+  integrationTrunk,
+  mergeJjRunIntoCurrentWorkspace,
+} from "../dist/jj.js";
+import { readGraph, updateGraph } from "../dist/graph.js";
+import { scaffoldPlan } from "../dist/planner.js";
+import { mergeNodeIntoIntegration } from "../dist/scheduler.js";
+import { createRunRecord, saveRunRecord } from "../dist/state.js";
 
 // Real jj and git: the shapes these pin are jj's colocation behavior (where
 // Git's HEAD and index end up), which no fake can stand in for.
@@ -191,4 +200,52 @@ test("a merged agent's workspace moves off main, so later edits there never rewr
   assert.equal(jj(agent.path, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), main);
   assert.equal(jj(agent.path, ["diff", "--name-only"]), "late.txt", "the edit is a new change on top of main");
   assert.equal(gitStatus(repo), "## main");
+});
+
+test("a scheduled node lands on main and leaves the checkout's own edits uncommitted", { skip: !haveJj() }, async (t) => {
+  const repo = await userRepo(t);
+  const before = git(repo, ["rev-parse", "main"]);
+  await fsp.writeFile(path.join(repo, "a.txt"), "a, edited by the user\n");
+  await fsp.mkdir(process.env.RUDDER_HOME, { recursive: true });
+  await fsp.writeFile(path.join(process.env.RUDDER_HOME, "config.json"), JSON.stringify({ version: 1, defaultBackend: "codex" }));
+  await scaffoldPlan(repo, { nodes: [{ id: "n0", title: "add b", prompt: "add b", deps: [] }], edges: [] });
+  const node = Object.values((await readGraph(repo)).nodes)[0];
+  // What launchNode does, minus spawning the worker.
+  const base = (await integrationTrunk(repo)).commit;
+  const workspace = await createNodeWorkspace({ repoRoot: repo, nodeId: node.id, atChangeId: base, task: node.title });
+  assert.equal(await fsp.readFile(path.join(workspace.path, "a.txt"), "utf8"), "a\n", "the node starts from main, not the checkout");
+  await fsp.writeFile(path.join(workspace.path, "b.txt"), "b\n");
+  const record = await createRunRecord({
+    id: "add-b-k7r8s",
+    repoRoot: repo,
+    task: node.prompt,
+    backend: "codex",
+    targetBranch: base,
+    baseCommit: base,
+    useWorkspace: true,
+    workspacePath: workspace.path,
+    workspaceName: workspace.workspaceName,
+  });
+  await saveRunRecord({ ...record, status: "completed" });
+  await updateGraph(repo, (graph) => {
+    Object.assign(graph.nodes[node.id], { status: "review", runId: record.id, workspace });
+    return graph;
+  });
+
+  await mergeNodeIntoIntegration(repo, (await readGraph(repo)).nodes[node.id], { publish() {} });
+
+  assert.equal((await readGraph(repo)).nodes[node.id].status, "merged");
+  const main = git(repo, ["rev-parse", "main"]);
+  assert.notEqual(main, before, "main moves");
+  assert.deepEqual(
+    git(repo, ["log", "--format=%s", `${before}..main`]).split("\n"),
+    ["rudder: add b"],
+    "main gains one commit, titled by the node, and no plan scaffold",
+  );
+  assert.equal(jj(repo, ["log", "--no-graph", "-r", `${before}..main & empty()`, "-T", "change_id"]), "");
+  assert.equal(git(repo, ["show", "main:b.txt"]), "b");
+  assert.equal(git(repo, ["show", "main:a.txt"]), "a", "the user's edit is not merged into main");
+  assert.notEqual(jj(repo, ["log", "--no-graph", "-r", "@", "-T", "commit_id"]), main, "the checkout is not the merge");
+  assert.equal(jj(repo, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), main);
+  assert.equal(gitStatus(repo), "## main\n M a.txt");
 });

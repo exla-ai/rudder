@@ -38,7 +38,8 @@ function emptyGraph(repoRoot: string): RudderGraph {
 
 /**
  * Read the graph for a repo. Returns an empty graph (not null) when graph.json
- * is absent or malformed, so callers never special-case the first-write path.
+ * is absent or holds no version 1 graph, so callers never special-case the
+ * first-write path. A graph.json that is not valid JSON throws.
  */
 export async function readGraph(repoRoot: string): Promise<RudderGraph> {
   const graph = await readJson<RudderGraph>(graphPath(repoRoot));
@@ -48,7 +49,6 @@ export async function readGraph(repoRoot: string): Promise<RudderGraph> {
       ...((graph as PlanningGraph).planningOwnership ? { planningOwnership: (graph as PlanningGraph).planningOwnership } : {}),
       ...((graph as PlanningGraph).launchReservations ? { launchReservations: (graph as PlanningGraph).launchReservations } : {}),
       repoRoot: graph.repoRoot || repoRoot,
-      ...(graph.integrationChangeId ? { integrationChangeId: graph.integrationChangeId } : {}),
       nodes: graph.nodes,
       edges: graph.edges,
       updatedAt: graph.updatedAt || nowIso(),
@@ -279,7 +279,6 @@ function sortGraph(graph: RudderGraph): RudderGraph {
     repoRoot: graph.repoRoot,
     ...((graph as PlanningGraph).planningOwnership ? { planningOwnership: (graph as PlanningGraph).planningOwnership } : {}),
     ...((graph as PlanningGraph).launchReservations ? { launchReservations: (graph as PlanningGraph).launchReservations } : {}),
-    ...(graph.integrationChangeId ? { integrationChangeId: graph.integrationChangeId } : {}),
     nodes,
     edges,
     updatedAt: graph.updatedAt,

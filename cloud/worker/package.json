@@ -12,7 +12,7 @@
     "@opentelemetry/resources": "^2.12.0",
     "@opentelemetry/sdk-metrics": "^2.12.0",
     "node-pty": "^1.0.0",
-    "vibeprint": "0.10.0",
+    "vibeprint": "0.11.0",
     "ws": "^8.18.0"
   }
 }

@@ -178,6 +178,12 @@ in `mac/dmg/settings.py`: 660x420, 128pt icons, Rudder at (170, 196) and
 Applications at (490, 196), LZFSE-compressed, the app icon as the volume icon.
 The release workflow (`.github/workflows/mac.yml`) uses the same script.
 
+Applications is a Finder alias to `/Applications` that carries the folder's
+icon as its own custom icon (`mac/dmg/applications.js`, run by make-dmg.sh with
+`osascript`), not a symlink. Finder on macOS 26 (seen on 26.3) draws every
+symlink and plain alias as an empty dashed square; it draws a custom icon as
+is. Dropping Rudder on the alias still copies it into `/Applications`.
+
 The art is light on purpose: Finder keeps icon labels dark on a background
 picture. `mac/dmg/background.py` writes `background.svg` (paper, faint chart
 contours, a wake from Rudder into ripples around Applications, with a gap in the
@@ -194,7 +200,7 @@ for s in 1 2; do
 done
 ```
 
-Bump `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in `project.yml` per release.
+The Mac app carries Rudder's version: `npm version` runs `scripts/mac-version.mjs`, which sets `MARKETING_VERSION` and the derived build number in `project.yml`. Never bump them by hand.
 
 ## Releasing: the DMG and the appcast
 

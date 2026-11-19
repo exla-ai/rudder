@@ -1,12 +1,17 @@
 # dmgbuild settings for Rudder.dmg; mac/scripts/make-dmg.sh passes
-# -D app=<Rudder.app> -D dmgdir=<this folder>.
+# -D app=<Rudder.app> -D applications=<the alias applications.js wrote>
+# -D dmgdir=<this folder>.
 #
 # The Finder window: Rudder on the left, Applications on the right, and the
 # art in background.png (+ @2x, which dmgbuild joins into one Retina TIFF).
 # Icon centers here must match APP and APPS in background.py.
+#
+# Applications is a Finder alias with its own icon, not a symlink: Finder on
+# macOS 26 draws a symlink as an empty dashed square (applications.js).
 import os.path
 
 app = defines["app"]
+applications = defines["applications"]
 dmgdir = defines["dmgdir"]
 
 volume_icon = os.path.join(app, "Contents", "Resources", "AppIcon.icns")
@@ -15,8 +20,7 @@ if not os.path.isfile(volume_icon):
 
 format = "ULFO"
 filesystem = "HFS+"
-files = [app]
-symlinks = {"Applications": "/Applications"}
+files = [app, applications]
 hide_extensions = ["Rudder.app"]
 icon = volume_icon
 

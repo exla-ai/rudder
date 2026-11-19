@@ -16,6 +16,8 @@ export type DigestRun = {
   mode?: string | null;
   backend?: string | null;
   model?: string | null;
+  /** The name the home gives the model: "Opus 5.5" (src/models.ts modelName). */
+  modelName?: string | null;
   nodeId?: string | null;
   summary?: string | null;
   merged?: boolean;

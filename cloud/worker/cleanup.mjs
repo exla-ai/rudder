@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { statusFields, pidAlive } from "./agent-status.mjs";
 import { readAsks, codexAsks } from "./asks.mjs";
 import { transcriptFile, userTask } from "./transcripts.mjs";
-import { queueSteer, readSteerReceipt } from "./steer-inbox.mjs";
+import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
 
 export const CLI_PATH = fileURLToPath(import.meta.url);
 const MINUTE = 60_000;
@@ -367,17 +367,13 @@ export async function parkAgent(project, runId, reason, { paths = cleanupPaths()
   }
   const instruction = String(reason || "").trim().slice(0, 240) || "idle";
   const requestId = queueSteer(repoDir, { kind: "park", taskId: runId, instruction });
-  const deadline = Date.now() + waitMs;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const receipt = readSteerReceipt(repoDir, requestId);
-    if (receipt?.status === "delivered") {
-      log(paths, { action: "park", project, runId, reason: instruction });
-      return { ok: true, project, runId, asleep: true };
-    }
-    if (receipt?.status === "failed") {
-      return { ok: false, project, runId, refused: receipt.error || "the dashboard refused" };
-    }
+  const receipt = await waitSteerReceipt(repoDir, requestId, waitMs);
+  if (receipt?.status === "delivered") {
+    log(paths, { action: "park", project, runId, reason: instruction });
+    return { ok: true, project, runId, asleep: true };
+  }
+  if (receipt?.status === "failed") {
+    return { ok: false, project, runId, refused: receipt.error || "the dashboard refused" };
   }
   return { ok: false, project, runId, refused: "the dashboard did not answer (is it running?)" };
 }

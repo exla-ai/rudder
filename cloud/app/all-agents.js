@@ -9,6 +9,7 @@
 import { h, icon, setText } from "/app/render.js";
 import { api, coarse, track } from "/app/core.js";
 import { modelChip } from "/app/model-picker.js";
+import { UpdateNow } from "/app/home-update.js";
 
 export const ALL_PATH = "/app/all";
 export const allAgentPath = (ws, run) => `${ALL_PATH}/${encodeURIComponent(ws)}/${encodeURIComponent(run)}`;
@@ -163,20 +164,56 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
     examples.appendChild(b);
   }
 
+  // On a phone the intro runs past the composer. Only this page's scroller
+  // moves: scrollIntoView also scrolls every ancestor, the page itself
+  // included (body is overflow: hidden), which can push the top bar sideways.
+  const scroller = el.querySelector(".scroller");
+  const reveal = () => {
+    const below = statusEl.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom;
+    if (below > 0) scroller.scrollTop += below + 12;
+  };
   // One line under the intro: what sending is doing, or what went wrong with
   // Try again (which sends the composer's text again).
-  const say = (text, failed = false) => {
+  const say = (text, failed = false, again = failed ? "Try again" : "") => {
+    dropUpdate();
     statusEl.hidden = !text;
     statusEl.classList.toggle("err", failed);
     statusEl.replaceChildren(text || "");
-    if (failed) {
-      const again = h(`<button type="button" class="all-retry">Try again</button>`);
-      again.addEventListener("click", () => composer.el.querySelector("form").requestSubmit());
-      statusEl.append(" ", again);
+    if (again) {
+      const b = h(`<button type="button" class="all-retry"></button>`);
+      setText(b, again);
+      b.addEventListener("click", () => composer.el.querySelector("form").requestSubmit());
+      statusEl.append(" ", b);
     }
-    // On a phone the intro runs past the composer.
-    if (text) statusEl.scrollIntoView({ block: "nearest" });
+    if (text) reveal();
   };
+  // The machine runs a Rudder too old for this chat: the server's line and
+  // Update now (home-update.js), shown as soon as the state says so. Once the
+  // machine is back on the new version the page is the usual start page.
+  let updateCard = null;
+  function dropUpdate() {
+    updateCard?.destroy();
+    updateCard = null;
+  }
+  function offerUpdate(why) {
+    updateCard ??= UpdateNow({
+      state: store.state,
+      // The card already says which version it runs now; the old line goes at once.
+      onDone: () => { statusEl.querySelector(".all-why")?.remove(); void refreshState().then(updated); },
+    });
+    const line = h(`<p class="all-why"></p>`);
+    setText(line, why);
+    statusEl.hidden = false;
+    statusEl.classList.remove("err");
+    statusEl.replaceChildren(line, updateCard.el);
+    reveal();
+  }
+  function updated() {
+    if (!updateCard || gone) return;
+    const version = store.state?.home?.version;
+    const text = `Your cloud machine now runs ${version ? `Rudder ${version}` : "the newest Rudder"}.`;
+    say(text, false, composer.textarea.value.trim() ? "Send your message" : "");
+  }
   let waitingFor = null; // ids that existed before our first message
   let gone = false;
   let autoOpened = false;
@@ -197,7 +234,9 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
 
   const projectReady = () => {
     const project = store.state?.coordinator;
-    if (project?.dashboard === "failed") throw new Error(project.failureReason || "The All agents chat could not start on the cloud machine.");
+    if (project?.dashboard === "failed") {
+      throw Object.assign(new Error(project.failureReason || "The All agents chat could not start on the cloud machine."), { needsUpdate: project.needsUpdate === true });
+    }
     return project?.dashboard === "running";
   };
 
@@ -222,6 +261,7 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
       // Left the page: the draft stays unless the message went in.
       if (gone) return sent;
       if (err.status === 401) say("");
+      else if (err.needsUpdate) offerUpdate(err.message);
       else say(err.message, true);
       return false;
     }
@@ -233,6 +273,14 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
     if (store.state && !store.state.coordinator && !autoOpened) {
       autoOpened = true;
       ensure().catch(() => {});
+    }
+    // Too old for this chat: Update now before anyone types into a chat that cannot start.
+    const project = store.state?.coordinator;
+    if (project?.needsUpdate) {
+      if (updateCard) updateCard.update(store.state);
+      else offerUpdate(project.failureReason);
+    } else if (updateCard && store.state?.home?.stateLive) {
+      updated();
     }
     const started = waitingFor && coordinatorAgents(store.state).find((a) => !waitingFor.has(a.id));
     const target = started?.id || (!fresh && !waitingFor ? latestCoordinatorRun(store.state) : null);
@@ -246,6 +294,6 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
   return {
     el,
     update,
-    destroy() { gone = true; },
+    destroy() { gone = true; dropUpdate(); },
   };
 }

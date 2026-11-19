@@ -204,6 +204,8 @@ COPY --chmod=0644 package.json package-lock.json ./
 COPY scripts ./scripts
 RUN RUDDER_SKIP_POSTINSTALL=1 npm ci --omit=dev
 COPY --from=dist-source /dist ./dist
+# The home loads Rudder's shared modules from here (cloud/worker/home.mjs).
+ENV RUDDER_DIST=/opt/rudder/dist
 COPY assets ./assets
 # Local npm builds can contain platform-keyed binaries that the resolver would
 # prefer over our fresh container build. Install exactly the builder's pair.
@@ -222,6 +224,7 @@ COPY cloud/worker/home.mjs ./home.mjs
 COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
+COPY cloud/worker/subagents.mjs ./subagents.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
 COPY cloud/worker/context-usage.mjs ./context-usage.mjs
 COPY cloud/worker/suggestion.mjs ./suggestion.mjs

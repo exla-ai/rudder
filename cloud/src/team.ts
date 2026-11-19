@@ -160,6 +160,7 @@ export type TeamSourceAgent = {
   phase?: unknown;
   backend?: unknown;
   model?: unknown;
+  modelName?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
   pending?: unknown;
@@ -190,6 +191,8 @@ export type TeamAgent =
       phase: string | null;
       backend: string | null;
       model: string | null;
+      /** The name the agent's home gives its model: "Opus 5.5" (src/models.ts modelName). */
+      modelName: string | null;
       asking: string | null;
       needsYou: boolean;
       reason: string | null;
@@ -235,6 +238,7 @@ export function teamAgentView(agent: TeamSourceAgent, visibility: Visibility): T
     phase: str(agent.phase),
     backend: str(agent.backend),
     model: str(agent.model),
+    modelName: str(agent.modelName),
     asking,
     needsYou,
     reason,
@@ -408,7 +412,10 @@ export async function handleTeamApi(
         throw new TeamError(503, `${deps.displayName(ownerId)}'s cloud machine is asleep. Their agents show here again when it wakes.`, { asleep: true });
       }
       const limit = Math.min(800, Math.max(20, Number(url.searchParams.get("limit") || 300) || 300));
-      const result = await deps.rpc(homeId, "transcript", { workspaceId, runId, limit });
+      // Page cursors (worker/transcripts.mjs readTranscript): the messages before one, or from one on.
+      const before = url.searchParams.get("before");
+      const after = url.searchParams.get("after");
+      const result = await deps.rpc(homeId, "transcript", { workspaceId, runId, limit, before, after });
       deps.sendJson(res, 200, { ...body(result), readOnly: ownerId !== account.accountId, owner: { accountId: ownerId, name: deps.displayName(ownerId) } });
       return true;
     }

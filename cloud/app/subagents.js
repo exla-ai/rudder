@@ -7,10 +7,12 @@
 // The top card's open state is the chat's (app.js toggles it from the
 // `.tool-row` click and repaints through paintTool). Cards inside a card keep
 // their own on the element, so they stay open across polls while their parent is.
+// The subagent tray (subagent-tray.js) says the same of each (subagentFacts)
+// and shows the same activity for the one it has open (paintSubagentActivity).
 
 import { icon, toolIcon, h, setText, reconcile, renderMarkdown, markdownReady } from "/app/render.js";
 
-const STATUS = {
+export const SUBAGENT_STATUS = {
   running: { label: "Running", cls: "s-working", live: true },
   done: { label: "Done", cls: "s-done" },
   failed: { label: "Failed", cls: "s-failed" },
@@ -36,46 +38,83 @@ function build(box, top) {
       <span class="sa-meta"><span class="sa-state"><span class="dot"></span><span class="sa-label"></span></span><span class="sa-facts"></span></span>
       <span class="sa-line"></span>
     </span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}`;
-  box.appendChild(h(`<div class="sa-body" hidden>
+  const body = h(BODY);
+  body.hidden = true;
+  box.appendChild(body);
+  // Cards nested in this one open and close here; app.js never sees them.
+  if (top) box.addEventListener("click", toggleNested);
+}
+
+const BODY = `<div class="sa-body">
     <details class="sa-prompt" hidden><summary>${icon("chevron")}Prompt</summary><div class="md"></div></details>
     <div class="sa-earlier" hidden></div>
     <div class="sa-msgs"></div>
     <div class="sa-empty" hidden></div>
-  </div>`));
-  if (top) {
-    // Cards nested in this one open and close here; app.js never sees them.
-    box.addEventListener("click", (e) => {
-      const inner = e.target.closest(".sa-row:not(.tool-row)");
-      if (!inner) return;
-      const card = inner.closest(".subagent");
-      card._open = !card._open;
-      paint(card, card._msg, card._open);
-    });
-  }
+  </div>`;
+
+function toggleNested(e) {
+  const inner = e.target.closest(".sa-row:not(.tool-row)");
+  if (!inner) return;
+  const card = inner.closest(".subagent");
+  card._open = !card._open;
+  paint(card, card._msg, card._open);
 }
 
-function paint(box, m, open) {
-  const s = m.subagent;
-  box._msg = m;
-  const now = Date.now();
-  const st = STATUS[s.status] || STATUS.stopped;
+/** Paint a subagent's activity (its prompt, messages, tool calls and the subagents it started) into `container`. */
+export function paintSubagentActivity(container, s) {
+  let body = container.querySelector(":scope > .sa-body");
+  if (!body) {
+    body = h(BODY);
+    container.appendChild(body);
+  }
+  if (!container._saNested) {
+    container._saNested = true;
+    container.addEventListener("click", toggleNested);
+  }
+  const sig = activitySig(s);
+  if (body._saSig === sig) return;
+  body._saSig = sig;
+  paintBody(body, s);
+}
+
+// What the activity shows changed. Subagents of this one change without its
+// own messages changing.
+function activitySig(s) {
+  const msgs = s.messages || [];
+  const last = msgs[msgs.length - 1];
+  const nested = msgs.filter((x) => x.subagent).map((x) => `${x.subagent.status}.${x.subagent.toolCalls}.${x.subagent.messages?.length}`).join(",");
+  return [s.status, s.toolCalls, msgs.length, last?.id, last?.tool?.output?.length, last?.text?.length, s.result?.length, s.prompt?.length, s.earlier, nested, markdownReady()].join("|");
+}
+
+/**
+ * What a subagent's card says of it, in the chat and in the tray alike: its
+ * status, title, kind and name (`who`), how long it has run or ran, and how
+ * many tools it used.
+ */
+export function subagentFacts(s, now) {
+  const st = SUBAGENT_STATUS[s.status] || SUBAGENT_STATUS.stopped;
   const elapsed = s.startedAt == null ? null
     : s.status === "running" ? now - s.startedAt
     : s.endedAt != null ? s.endedAt - s.startedAt : null;
   const title = s.description || s.name || s.kind || "Subagent";
   const who = [s.kind, s.name].filter((x, i, all) => x && x !== title && all.indexOf(x) === i).join(" · ");
   const calls = s.toolCalls || s.status === "running" ? `${s.toolCalls} tool ${s.toolCalls === 1 ? "call" : "calls"}` : "";
-  const facts = [who, elapsed == null ? "" : duration(elapsed), calls].filter(Boolean);
+  return { st, title, who, time: elapsed == null ? "" : duration(elapsed), calls };
+}
+
+function paint(box, m, open) {
+  const s = m.subagent;
+  box._msg = m;
+  const { st, title, who, time, calls } = subagentFacts(s, Date.now());
+  const facts = [who, time, calls].filter(Boolean);
   const msgs = s.messages || [];
   const last = msgs[msgs.length - 1];
-  // Subagents of this one change without its own messages changing.
-  const nested = msgs.filter((x) => x.subagent).map((x) => `${x.subagent.status}.${x.subagent.toolCalls}.${x.subagent.messages?.length}`).join(",");
-  const sig = [s.status, elapsed == null ? "" : duration(elapsed), s.toolCalls, msgs.length, last?.id, last?.tool?.output?.length, last?.text?.length, s.result?.length, s.earlier, nested, open, markdownReady()].join("|");
+  const sig = [activitySig(s), time, open].join("|");
   if (box._saSig === sig) return;
   box._saSig = sig;
 
   box.classList.toggle("open", open);
-  for (const c of Object.values(STATUS)) box.classList.remove(c.cls);
+  for (const c of Object.values(SUBAGENT_STATUS)) box.classList.remove(c.cls);
   box.classList.add(st.cls);
   const row = box.querySelector(".sa-row");
   row.setAttribute("aria-expanded", String(open));
@@ -94,7 +133,11 @@ function paint(box, m, open) {
 
   const body = box.querySelector(":scope > .sa-body");
   body.hidden = !open;
-  if (!open) return;
+  if (open) paintBody(body, s);
+}
+
+function paintBody(body, s) {
+  const msgs = s.messages || [];
   const prompt = body.querySelector(":scope > .sa-prompt");
   prompt.hidden = !s.prompt;
   if (s.prompt) {

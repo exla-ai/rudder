@@ -1,0 +1,88 @@
+/* Subagent tray (subagent-tray.js): every subagent and teammate of the agent,
+   above the composer. One line when hidden; a strip of cards, or the open
+   subagent's activity, when shown; one Update now row on a machine too old
+   for it. */
+.sa-tray {
+  flex: none; position: relative; z-index: 4;
+  padding: 0 calc(var(--sar) + 10px) 0 calc(var(--sal) + 10px);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  backdrop-filter: saturate(1.6) blur(18px);
+}
+@media (min-width: 760px) { .sa-tray { background: color-mix(in srgb, var(--bg-elev) 88%, transparent); } }
+.sa-tray[hidden], .sa-tray [hidden] { display: none; }
+/* The composer's own top border would double the tray's. */
+.sa-tray:not([hidden]) ~ .composer { border-top-color: transparent; }
+
+.sat-toggle {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  min-height: 36px; padding: 6px 2px; border: 0; background: none;
+  color: var(--muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.sat-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.sat-ic { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; background: var(--surface-2); color: var(--ink-2); flex: none; }
+.sa-tray.live .sat-ic { background: var(--working-soft); color: var(--working); }
+.sat-ic svg { width: 14px; height: 14px; }
+.sat-title { font-weight: 600; color: var(--ink-2); flex: none; }
+.sat-count { flex: none; font-variant-numeric: tabular-nums; }
+/* How many run, or that the machine needs an update: seen with the tray hidden too. */
+.sat-badge { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--working-soft); color: var(--working); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sa-tray.outdated .sat-badge { background: var(--needs-soft); color: var(--needs); }
+.sat-act { flex: none; margin-left: auto; font-size: 12.5px; color: var(--faint); }
+.sat-caret { width: 14px; height: 14px; color: var(--faint); flex: none; transform: rotate(90deg); transition: transform 160ms; }
+.sa-tray.collapsed .sat-caret { transform: rotate(-90deg); }
+
+.sat-note { margin: 0 2px 8px; font-size: 12.5px; color: var(--muted); }
+
+/* A machine too old to list subagents: one row, its Update now (home-update.js) beside it. */
+.sat-update { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 2px 10px; }
+.sat-update-text { flex: 1 1 240px; margin: 0; font-size: 13px; line-height: 1.4; color: var(--ink-2); }
+.sat-update .hu { display: contents; }
+.sat-update .hu-act { order: 1; flex: none; }
+.sat-update .hu-go { min-height: 32px; }
+/* Its button already says what it restarts; the line returns to follow the update. */
+.sat-update .hu-act:not([hidden]) ~ .hu-line { display: none; }
+.sat-update .hu-fail, .sat-update .hu-line { order: 2; flex: 1 0 100%; max-width: none; justify-content: flex-start; text-align: left; font-size: 12px; }
+
+.sat-strip {
+  display: flex; gap: 8px; overflow-x: auto; padding: 0 0 10px;
+  scroll-snap-type: x proximity; overscroll-behavior-x: contain; scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+.sat-card {
+  flex: none; width: 236px; display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); color: inherit; box-shadow: var(--shadow-1);
+  font: inherit; text-align: left; cursor: pointer; scroll-snap-align: start;
+  transition: border-color 120ms, transform 120ms;
+}
+.sat-card:hover { border-color: var(--line-strong); }
+.sat-card:active { transform: scale(0.98); }
+.sat-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sat-c-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.sat-c-top .dot { width: 7px; height: 7px; }
+.sat-c-name { min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sat-c-who { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sat-c-meta { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.sat-c-state { color: var(--c); font-weight: 600; }
+.sat-c-step { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sat-card.s-working .sat-c-step { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+.sat-open {
+  display: flex; flex-direction: column; margin: 0 0 10px; overflow: hidden;
+  max-height: min(52vh, calc(var(--vvh) * 0.5));
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1);
+}
+.sat-open-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 2px 10px 2px 2px; border-bottom: 1px solid var(--line); }
+.sat-open-head .icon-btn { width: 40px; height: 40px; }
+.sat-open-titles { flex: 1; min-width: 0; padding: 4px 0; }
+.sat-open-title { font-size: 14px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sat-open-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sat-open-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.sat-open-body > .sa-body { border-top: 0; }
+.sat-loading { padding: 12px; font-size: 12.5px; color: var(--faint); }
+
+@media (max-width: 420px) {
+  .sat-card { width: 204px; }
+}

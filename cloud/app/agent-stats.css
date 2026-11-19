@@ -5,14 +5,10 @@
 /* The agent header in a narrow pane (Files, Canvas or a split open) or on a
    phone: the title keeps its room. Files, Canvas, the team lock and the Mac
    copy move into the More menu (AgentScreen in app.js lists what the bar
-   hides there), and in the narrowest bars the terminal too unless it is open.
-   Sizes are the bar's content width. */
+   hides there). Sizes are the bar's content width. */
 .agent-bar { container-type: inline-size; }
 @container (max-width: 719px) {
   .agent-bar > :is(.lock-toggle, .mac-copy, .cv-toggle, .fp-toggle) { display: none; }
-}
-@container (max-width: 439px) {
-  .agent-bar > .term-toggle:not(.on) { display: none; }
 }
 
 /* Header line: "· ◔ 64% left · 86 tok/s" after "Working · Claude · opus".

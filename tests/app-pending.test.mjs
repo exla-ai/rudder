@@ -15,12 +15,12 @@ test("a sent message settles on its own transcript entry, once", () => {
     { id: "u1", role: "user", ts: now + skew - 60_000, text: "earlier" },
     { id: "a1", role: "assistant", ts: now + skew - 30_000, text: "reply" },
   ];
-  const first = { id: "p1", text: typed, sentText: typed, ts: now, state: "sent", after: sentAfter(before) };
+  const first = { id: "p1", text: typed, ts: now, state: "sent", after: sentAfter(before) };
   const withFirst = [...before, { id: "u2", role: "user", ts: now + skew + 500, text: recorded }];
   assert.deepEqual(settlePending([first], withFirst, now + 2000), [], "whitespace and clock skew do not leave a second bubble");
 
   // The same text sent again: the first entry is not this one.
-  const again = { id: "p2", text: typed, sentText: typed, ts: now + 90_000, state: "sent", after: sentAfter(withFirst) };
+  const again = { id: "p2", text: typed, ts: now + 90_000, state: "sent", after: sentAfter(withFirst) };
   assert.deepEqual(settlePending([again], withFirst, now + 91_000), [again], "a second send shows until its own entry arrives");
   const withBoth = [...withFirst, { id: "u3", role: "user", ts: now + skew + 90_500, text: recorded }];
   assert.deepEqual(settlePending([again], withBoth, now + 92_000), []);
@@ -30,4 +30,13 @@ test("a sent message settles on its own transcript entry, once", () => {
   const twin2 = { ...first, id: "p2b", after: sentAfter(before) };
   assert.deepEqual(settlePending([twin, twin2], withFirst, now + 2000), [twin2]);
   assert.deepEqual(settlePending([twin, twin2], withBoth, now + 92_000), []);
+});
+
+test("a message sent with files settles on the transcript entry with the same words and files", () => {
+  const shot = "/workspace/code/rudder/.rudder/uploads/20261119-044218-image.png";
+  const sent = { id: "p3", text: "use chrome", files: [{ name: "image.png", path: shot }], ts: now, state: "sent", after: now + skew };
+  const wordsOnly = { id: "u4", role: "user", ts: now + skew + 500, text: "use chrome" };
+  assert.deepEqual(settlePending([sent], [wordsOnly], now + 2000), [sent], "the same words without the file are another message");
+  const withFile = { ...wordsOnly, id: "u5", attachments: [shot] };
+  assert.deepEqual(settlePending([sent], [wordsOnly, withFile], now + 2000), []);
 });

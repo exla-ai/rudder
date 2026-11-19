@@ -60,15 +60,28 @@
 }
 .model-chip:hover, .tool-chip:hover { background: var(--surface-2); }
 .model-chip svg, .tool-chip svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
-.model-chip .mc-l { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.model-chip .mc-caret { width: 13px; height: 13px; transform: rotate(90deg); }
+/* [logo] Opus 5.5 · high: the harness's logo (harness-logos.js), the name in
+   ink, the effort quieter. A long name ellipsizes; the effort stays. At
+   16px the logo sits on whole pixels in the 32px pill, so Codex's cut out
+   prompt stays legible on a 1x screen. The caret's box is mostly air, so the
+   right padding is the smaller one. */
+.model-chip { max-width: min(100%, 260px); padding: 0 7px 0 9px; }
+.model-chip .mc-logo { display: flex; flex: none; }
+.model-chip .harness-logo { width: 16px; height: 16px; color: var(--ink); }
+.model-chip .mc-l { display: flex; min-width: 0; line-height: 16px; }
+.model-chip .mc-n { overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--ink); }
+.model-chip .mc-e { flex: none; white-space: pre; color: var(--muted); font-weight: 400; }
+.model-chip .mc-caret { width: 13px; height: 13px; margin-left: -2px; transform: rotate(90deg); }
 .head-model { height: 34px; margin-right: 2px; max-width: 168px; }
 @media (max-width: 480px) { .head-model { display: none; } }
 
 /* ---------- Model picker ---------- */
-.model-sheet .mp-providers { margin: 14px 0 6px; }
-.mp-account { font-size: 13px; color: var(--muted); margin: 0 2px 10px; min-height: 18px; overflow-wrap: anywhere; }
-.mp-models { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 80px; max-height: 40vh; margin: 0 -2px; padding: 2px; overscroll-behavior: contain; }
+.mp-models { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 0 1 auto; min-height: 80px; margin: 10px -2px 0; padding: 0 2px 2px; overscroll-behavior: contain; }
+/* One section per harness: its name and sign-in stay on top while its models scroll. */
+.mp-harness { position: sticky; top: 0; z-index: 1; display: flex; align-items: baseline; gap: 8px; padding: 12px 2px 2px; background: var(--surface); }
+.mp-harness:first-child { padding-top: 2px; }
+.mp-hn { font-weight: 700; font-size: 15px; flex: none; }
+.mp-ha { font-size: 12.5px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-model {
   display: grid; grid-template-columns: 1fr auto; grid-template-areas: "t r" "d r"; align-items: center; column-gap: 12px; row-gap: 2px;
   width: 100%; text-align: left; padding: 11px 12px 11px 14px; border-radius: 14px; border: 1.5px solid var(--line-strong);
@@ -81,8 +94,7 @@
 .mp-id { font-family: var(--mono); font-size: 12px; }
 .mp-desc:not(:empty)::before { content: " · "; }
 .mp-group { font-size: 12px; font-weight: 600; color: var(--muted); margin: 6px 4px -2px; }
-.mp-group:first-child { margin-top: 0; }
-.mp-error { padding: 0 2px; margin: -4px 0 10px; font-size: 13px; }
+.mp-error { padding: 0 2px; margin: 6px 0 0; font-size: 13px; }
 .mp-radio { grid-area: r; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-strong); display: grid; place-items: center; color: transparent; }
 .mp-radio svg { width: 13px; height: 13px; stroke-width: 3; }
 .mp-model[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -303,12 +315,7 @@ body.desktop .toasts { left: var(--side); }
 .ds-add svg { width: 17px; height: 17px; }
 .ds-list, .ds-agents { display: flex; flex-direction: column; gap: 1px; }
 .ds-agent { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 9px; text-decoration: none; color: var(--ink); min-height: 40px; }
-.ds-agent { position: relative; }
 .ds-agent.on { background: var(--surface-3); }
-/* Open on the right: on hover or keyboard focus, over the end of the row. */
-.ds-open-r { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); width: 28px; height: 28px; border: 0; border-radius: 7px; background: var(--surface-2); color: var(--muted); display: grid; place-items: center; opacity: 0; }
-.ds-open-r svg { width: 16px; height: 16px; }
-.ds-open-r:focus-visible { opacity: 1; }
 .ds-at { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ds-an { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ds-as { display: flex; gap: 4px; min-width: 0; font-size: 12px; color: var(--c, var(--muted)); white-space: nowrap; }
@@ -346,7 +353,6 @@ body.desktop .toasts { left: var(--side); }
 .ds-gap { flex: none; border-radius: 9px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
 .sorting > .ds-agent { transition: transform 160ms cubic-bezier(0.2, 0.7, 0.2, 1); }
 .ds-lift { position: fixed; z-index: 40; left: 0; top: 0; margin: 0; padding: 5px 8px; box-sizing: border-box; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-2); pointer-events: none; will-change: transform; }
-.ds-lift .ds-open-r { display: none; }
 .ds-lift.refused > * { opacity: 0.4; }
 .ds-lift.settling { transition: transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms, box-shadow 180ms; box-shadow: none; }
 .ds-lift.gone { opacity: 0; }
@@ -375,8 +381,6 @@ body.ds-moving, body.ds-moving * { cursor: grabbing !important; }
   .ds-grip:hover::after { opacity: 0.6; transition-delay: 150ms; }
   .ds-pn:hover { background: var(--surface-2); }
   .ds-prow:hover .ds-pin { opacity: 1; }
-  .ds-agent:hover .ds-open-r { opacity: 1; }
-  .ds-open-r:hover { background: var(--surface-3); color: var(--ink); }
   .ds-pin:hover { background: var(--surface-2); color: var(--ink-2); }
   .ds-proj.pinned .ds-pin:hover { color: var(--accent); }
   .ds-more:hover { color: var(--ink); }
@@ -468,4 +472,4 @@ body.desktop.mac .ds-top { padding-top: 28px; }
 .ds-apin { display: grid; place-items: center; color: var(--faint); }
 .ds-apin svg { width: 13px; height: 13px; }
 .ds-agent.renaming { background: var(--surface-3); }
-.ds-agent.renaming .ds-open-r, .ds-agent.renaming .ds-apin { display: none; }
+.ds-agent.renaming .ds-apin { display: none; }

@@ -1,0 +1,43 @@
+/* The Cmd+K palette (command-palette.js): a search box over the page, toward
+   the top so the list grows down without the box moving. Colors come from the
+   app's tokens in styles.css; the backdrop is every dialog's. */
+dialog.cmdk {
+  max-width: min(580px, calc(100vw - 32px));
+  margin: calc(var(--sat) + min(12vh, 120px)) auto auto;
+}
+.cmdk-box {
+  display: flex; flex-direction: column;
+  max-height: min(480px, calc(var(--vvh) - var(--sat) - min(12vh, 120px) - 24px));
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 16px;
+  box-shadow: var(--shadow-2); overflow: hidden;
+}
+.cmdk-in { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); flex: none; }
+.cmdk-in svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.cmdk-in input {
+  flex: 1; min-width: 0; height: 52px; padding: 0; border: 0; outline: none; background: none;
+  font-size: 16px; color: var(--ink);
+}
+.cmdk-in input::placeholder { color: var(--faint); }
+.cmdk-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; }
+.cmdk-opt {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 46px; padding: 6px 10px; border-radius: 10px; cursor: pointer;
+}
+.cmdk-opt[aria-selected="true"] { background: var(--accent-soft); }
+.cmdk-ic {
+  width: 28px; height: 28px; border-radius: 8px; flex: none;
+  display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2);
+}
+.cmdk-ic svg { width: 16px; height: 16px; }
+.cmdk-opt[aria-selected="true"] .cmdk-ic { background: var(--surface); color: var(--accent); }
+.cmdk-t { display: flex; flex-direction: column; min-width: 0; }
+.cmdk-l, .cmdk-d { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmdk-l { font-size: 14.5px; line-height: 1.3; color: var(--ink); }
+.cmdk-d { font-size: 12.5px; line-height: 1.3; color: var(--muted); }
+.cmdk-d:empty { display: none; }
+.cmdk-none { padding: 20px 12px; text-align: center; font-size: 14px; color: var(--muted); }
+.cmdk-foot {
+  display: flex; gap: 16px; flex: none; padding: 8px 16px;
+  border-top: 1px solid var(--line); font-size: 12px; color: var(--faint);
+}
+@media (pointer: coarse) { .cmdk-foot { display: none; } }

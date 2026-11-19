@@ -7,10 +7,12 @@
 // message and runs the new text in its place, so the agent forgets the turns
 // after it (native chat_edit.rs). Editing the first message starts the
 // conversation over. Mid-turn, the turn is stopped first. Files the agent
-// changed stay as they are, and the old conversation stays on disk.
+// changed stay as they are, and the old conversation stays on disk. Files
+// attached to the message go with the edited text.
 import { h, copyText } from "/app/render.js";
 import { app, api, coarse, toast } from "/app/core.js";
 import { showAgentMenu } from "/app/agent-menu.js";
+import { withAttachments } from "/app/pending.js";
 
 const BUSY = new Set(["starting", "working"]);
 const LONG_PRESS_MS = 450;
@@ -21,9 +23,10 @@ const LONG_PRESS_MS = 450;
  * the transcript's `edits` lists gets the action, every other one loses it.
  * `paint.editing()` says whether a message is open for editing, so the chat
  * does not scroll it away. `agent` returns the chat's agent row now;
- * `onSent` reloads the transcript.
+ * `onSent` reloads the transcript. `onReply(text)`, when given, adds Reply to
+ * a phone's message menu: there the bubble's text can't be selected to quote.
  */
-export function chatEdit({ workspace, run, agent, readOnly, onSent }) {
+export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = null }) {
   // The message open for editing: one at a time.
   let open = null;
   const busy = () => BUSY.has(agent()?.status);
@@ -35,7 +38,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent }) {
     const show = !readOnly && !!a && !a.pending && !!target;
     // The request names the chat's latest prompt (the list's last) so a
     // chat that got newer messages since is refused, not cut short unseen.
-    node._edit = show ? { entry: target.entry, latest: edits[edits.length - 1].entry, text: message.text || "" } : null;
+    node._edit = show ? { entry: target.entry, latest: edits[edits.length - 1].entry, text: message.text || "", attachments: message.attachments || [] } : null;
     node.classList.toggle("editable", show);
     node._editor?.note(busy());
     let foot = node.querySelector(":scope > .edit-foot");
@@ -96,6 +99,8 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent }) {
       items: [
         { label: "Edit", icon: "edit", run: () => startEdit(node) },
         { label: "Copy", icon: "copy", run: () => copyMessage(text) },
+        // The text as shown: without a quote it replied to or its files (quote-reply.js).
+        ...(onReply ? [{ label: "Reply", icon: "reply", run: () => onReply(node.querySelector(":scope > .bubble").innerText) }] : []),
       ],
     });
   }
@@ -106,7 +111,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent }) {
     if (!node._edit) return;
     open?._editor?.close();
     // Taken now: a newer prompt arriving while this is open refuses the edit.
-    const { entry, latest, text } = node._edit;
+    const { entry, latest, text, attachments } = node._edit;
     const form = h(`<form class="msg-edit">
       <textarea rows="1" aria-label="Edit your message"></textarea>
       <p class="me-note"></p>
@@ -159,7 +164,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent }) {
       sync();
       error.hidden = true;
       try {
-        const res = await api("/api/app/agent-edit", { method: "POST", body: { workspace, run, entry, latest, text: value } });
+        const res = await api("/api/app/agent-edit", { method: "POST", body: { workspace, run, entry, latest, text: withAttachments(value, attachments) } });
         editor.close();
         const queued = stopping ? "Stopping the turn, then sending the edited message" : "Editing when the cloud machine picks it up";
         toast(res?.status === "queued" ? queued : "Sent the edited message");

@@ -229,7 +229,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   const action = await (await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "merge" }) })).json();
   assert.deepEqual(action.params, { workspaceId: "libra-test", runId: "r1", action: "merge" });
   const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5`, { headers: auth })).json();
-  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20 });
+  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20, before: null, after: null });
 
   // Add project: the repo list and creating a repo run on the home machine.
   const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();
@@ -819,6 +819,8 @@ esac
         RUDDER_HOME_TOOLCHAINS: "0",
         RUDDER_HOST_KIND: "external",
         RUDDER_HOST_IMAGE: "registry.fly.io/workers:old",
+        // The checkout's build (`npm run build`), as the image's /opt/rudder/dist.
+        RUDDER_DIST: path.join(repoRoot, "dist"),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1204,7 +1206,7 @@ serverTest("the All agents project reaches the supervisor and the app, and a sup
 
   // An older supervisor runs it as a plain project, without the tools.
   let next = await reported({ dashboard: "running" }, "failed");
-  assert.match(next.coordinator.failureReason, /older Rudder without All agents\. Update it: press Alt\+r/);
+  assert.match(next.coordinator.failureReason, /^Your cloud machine runs an older Rudder\. The All agents chat needs a newer version\.$/);
   next = await reported({ dashboard: "running", coordinator: true }, "running");
   assert.equal(next.coordinator.workspaceId, opened.workspace);
   assert.equal(next.coordinator.failureReason, null);

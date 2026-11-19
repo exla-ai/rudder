@@ -3,13 +3,15 @@
 // Claude Code keeps one JSONL per session at
 //   ~/.claude/projects/<cwd with every non-alphanumeric char as "->/<id>.jsonl
 // and Codex keeps rollouts at ~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl.
-// Both are normalized to { id, role, ts, text, tool } messages.
+// Both are normalized to { id, role, ts, text, tool } messages; a user message
+// with files sent from the app also has `attachments`.
 
 import fs from "node:fs";
 import path from "node:path";
+import { pidAlive } from "./agent-status.mjs";
 import { contextUsage } from "./context-usage.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
-import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexRolloutFile, codexTypedText, editablePrompts, readCodexLineage, unwrapPastedContent } from "./session-lineage.mjs";
+import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
@@ -21,61 +23,93 @@ const SUBAGENT_OUTPUT_LIMIT = 2_000;
 const SUBAGENT_PROMPT_LIMIT = 6_000;
 // Subagents of subagents are shown this many levels deep.
 const SUBAGENT_DEPTH = 3;
-// The run is alive, so its unfinished subagents are still running. Otherwise
-// they stopped with it.
-const LIVE_RUN = new Set(["created", "running", "steering", "verifying"]);
+// The agent's process is up, so its unfinished subagents and teammates are
+// still running: they go on after the agent's own turn ends. Otherwise they
+// stopped with it.
+function subagentsLive(record) {
+  const pid = record.process?.pid;
+  return Number.isInteger(pid) && pidAlive(pid);
+}
 
-export function readTranscript(repoDir, runId, { limit = 300, home }) {
+/**
+ * One page of an agent's chat: its newest messages, or with `before` (a
+ * cursor from a page's `earlier`) the messages before that page, or with
+ * `after` (one too) every message from that point on. A page reads back at
+ * most TAIL_BYTES of the session and keeps about `limit` messages; `earlier`
+ * is the cursor for the page before it, null at the start of the session.
+ * Pages read before a cursor carry only their messages.
+ */
+export function readTranscript(repoDir, runId, { limit = 300, home, before = null, after = null }) {
   const record = readRunRecord(repoDir, runId);
   if (!record) {
     throw new Error("agent not found");
   }
+  if (before !== null && after !== null) {
+    throw new Error("a chat page is read before a cursor or after one, not both");
+  }
   const file = transcriptFile(record, home);
+  const conversation = file ? record.session.nativeSessionId : null;
+  const end = before === null ? null : readCursor(before);
+  if (end && end.conversation !== conversation) {
+    throw new Error("This chat started a new conversation since it opened. Reopen the chat to see it.");
+  }
+  // A cursor from the run's previous conversation (an edit starts a new one)
+  // does not apply: the page is the new conversation's newest messages, and
+  // its `conversation` tells the app to drop the pages it loaded before.
+  const from = after === null ? null : readCursor(after);
+  const start = from && from.conversation === conversation ? from.offset : null;
   const base = {
     runId: record.id,
-    title: (record.taskSummary || record.task || record.id || "").toString(),
-    backend: record.backend || "claude",
-    status: record.status || null,
-    truncated: false,
+    conversation,
+    earlier: null,
     messages: [],
   };
+  if (!end) {
+    base.title = (record.taskSummary || record.task || record.id || "").toString();
+    base.backend = record.backend || "claude";
+    base.status = record.status || null;
+  }
   if (!file) {
     // No session on disk yet (just launched, or a backend without transcripts):
     // show the prompts Rudder itself recorded.
-    base.messages = (record.turns || []).map((turn, index) => ({
+    base.messages = showAttachments((record.turns || []).map((turn, index) => ({
       id: `turn-${index}`,
       role: "user",
       ts: toMillis(turn.ts),
       text: String(turn.prompt || ""),
-    }));
+    })));
     return base;
   }
   const codex = record.backend === "codex";
-  // A Codex fork references its parent's history; a Claude rewind leaves the
-  // old branch in the file. Both read as the one conversation the agent has.
-  const { text, truncated } = codex ? readCodexLineage(file, home, TAIL_BYTES) : readTail(file, TAIL_BYTES);
-  const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
-  const stats = codex ? codexStats() : claudeStats();
-  const reader = codex ? parseCodex(lines, stats) : parseClaude(lines, stats);
-  const messages = showUserTask(reader.messages, record);
-  base.truncated = truncated || messages.length > limit;
-  base.messages = messages.slice(-limit);
-  // Subagents the shown part of the chat started, each on its spawn call.
+  const page = readPage(sessionSegments(record, file, home), {
+    codex,
+    end: end?.offset ?? null,
+    start,
+    leaf: end?.leaf ?? "",
+    limit,
+    stats: end ? null : codex ? codexStats : claudeStats,
+  });
+  base.messages = showAttachments(showUserTask(page.messages, record));
+  base.earlier = page.start > 0 ? `${conversation}:${page.start}:${page.leaf}` : null;
+  // Subagents the page started, each on its spawn call.
   const shown = new Set(base.messages);
-  const live = LIVE_RUN.has(record.status);
+  const live = subagentsLive(record);
   if (codex) {
-    attachCodexSubagents(reader, { home, live, shown, depth: 0 });
+    attachCodexSubagents(page.reader, { home, live, shown, depth: 0 });
   } else {
-    attachClaudeSubagents(reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
+    attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
+  }
+  if (end) {
+    return base;
   }
   // The prompts the app may offer to edit (chat-edit.js).
-  base.edits = editablePrompts(lines, codex ? "codex" : "claude");
+  base.edits = editablePrompts(page.lines, codex ? "codex" : "claude");
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // The numbers are extra: a model catalog or settings file that cannot be
   // read says so in `stats.error` and the conversation still shows.
   try {
-    base.stats = stats.result(home);
+    base.stats = page.stats.result(home);
   } catch (error) {
     base.stats = { error: error instanceof Error ? error.message : String(error) };
   }
@@ -87,6 +121,142 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
     base.context = { error: error instanceof Error ? error.message : String(error) };
   }
   return base;
+}
+
+// A page cursor: `<conversation>:<offset>:<leaf>`. The conversation is the
+// session the page came from, the offset is the byte (across a Codex fork's
+// history, session-lineage.mjs codexLineage) a page starts at, and the leaf
+// is the Claude entry the conversation continues from before it
+// (activeClaudeLines). The app passes it back as it got it.
+const CURSOR = /^([A-Za-z0-9-]+):(\d+):([A-Za-z0-9-]*)$/;
+
+function readCursor(value) {
+  const match = CURSOR.exec(String(value));
+  if (!match) {
+    throw new Error(`${JSON.stringify(String(value))} is not a chat page cursor`);
+  }
+  return { conversation: match[1], offset: Number(match[2]), leaf: match[3] };
+}
+
+// A session's conversation as byte ranges, oldest first: a Codex fork's
+// history, then its own rollout (session-lineage.mjs); a Claude session is
+// its one file.
+function sessionSegments(record, file, home) {
+  return record.backend === "codex" ? codexLineage(file, home) : [{ file, end: fs.statSync(file).size }];
+}
+
+// The messages from byte `start` (when given) or about `limit` messages back
+// to byte `end` (the end of the session when null). Without `start`, it reads
+// back TAIL_BYTES, and twice as far each time that holds no message, until
+// one does or it reaches the session's start.
+function readPage(segments, { codex, end, start, leaf, limit, stats }) {
+  const total = segments.reduce((sum, segment) => sum + segment.end, 0);
+  const stop = end ?? total;
+  if (stop > total || (start ?? 0) > stop) {
+    throw new Error("This chat's session file is shorter than the page asked for. Reopen the chat.");
+  }
+  for (let bytes = TAIL_BYTES; ; bytes *= 2) {
+    const from = start ?? Math.max(0, stop - bytes);
+    const window = readSessionLines(segments, from, stop);
+    const branch = codex ? null : activeClaudeLines(window.lines, leaf, from === 0);
+    const lines = branch ? window.lines.filter((_, index) => branch.keep[index]) : window.lines;
+    const offsets = branch ? window.offsets.filter((_, index) => branch.keep[index]) : window.offsets;
+    const page = parsePage(lines, offsets, { codex, stats: stats?.() ?? null });
+    if (start === null && from > 0 && !page.reader.messages.length) {
+      continue;
+    }
+    const cut = start ?? pageStart(page, { first: from === 0 ? 0 : window.offsets[0], limit });
+    const kept = page.born.findIndex((offset) => offset >= cut);
+    const firstLine = window.offsets.findIndex((offset) => offset >= cut);
+    return {
+      messages: kept < 0 ? [] : page.reader.messages.slice(kept),
+      reader: page.reader,
+      lines,
+      stats: page.stats,
+      start: cut,
+      leaf: branch ? branch.leafBefore(firstLine < 0 ? window.offsets.length : firstLine) : "",
+    };
+  }
+}
+
+// A session's lines read into chat messages: the reader, each message's
+// line (`born`, by offset) and each tool result's span (`results`: the
+// offset of its call's line, -1 when that came before these lines, and its
+// own).
+function parsePage(lines, offsets, { codex, stats }) {
+  const reader = codex ? codexReader({ stats }) : claudeReader({ stats });
+  const born = [];
+  const bornAt = new Map(); // message -> offset of its line
+  const results = [];
+  let offset = 0;
+  reader.onResult = (call) => results.push([call ? bornAt.get(call) : -1, offset]);
+  lines.forEach((line, index) => {
+    offset = offsets[index];
+    const count = reader.messages.length;
+    reader.addLine(line, offset);
+    for (let at = count; at < reader.messages.length; at += 1) {
+      born.push(offset);
+      bornAt.set(reader.messages[at], offset);
+    }
+  });
+  return { reader, born, results, stats };
+}
+
+// Where a page starts: the newest line that still keeps `limit` messages
+// (all of them when there are fewer), moved to where no tool call is split
+// from its result, so the page before holds each of its calls' results. The
+// candidates are the read's first line (`first`, 0 at the session's start)
+// and each line a message starts on.
+function pageStart({ born, results }, { first, limit }) {
+  const candidates = [first];
+  const keeps = [0]; // the first message each candidate keeps
+  born.forEach((offset, index) => {
+    if (offset > candidates[candidates.length - 1]) {
+      candidates.push(offset);
+      keeps.push(index);
+    }
+  });
+  // A candidate splits a call from its result when the call's line is
+  // before it and the result's at or after it.
+  const split = new Array(candidates.length + 1).fill(0);
+  for (const [call, result] of results) {
+    const low = firstAbove(candidates, call);
+    const high = firstAbove(candidates, result) - 1;
+    if (low <= high) {
+      split[low] += 1;
+      split[high + 1] -= 1;
+    }
+  }
+  let depth = 0;
+  const whole = candidates.map((candidate, index) => {
+    depth += split[index];
+    return depth === 0 || candidate === 0;
+  });
+  const most = Math.max(0, born.length - limit);
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    if (keeps[index] <= most && whole[index]) {
+      // Of the read's first line and its first message's, which keep the
+      // same messages, the first line leaves no empty page before it.
+      return index === 1 && keeps[0] === keeps[1] && whole[0] ? candidates[0] : candidates[index];
+    }
+  }
+  const later = whole.findIndex((ok, index) => ok && keeps[index] > most);
+  return candidates[later < 0 ? 0 : later];
+}
+
+// The index of the first sorted value above `value`.
+function firstAbove(sorted, value) {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (sorted[middle] > value) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
 }
 
 // The newest assistant text, for the agent list's preview line. Re-reads only
@@ -108,9 +278,13 @@ export function lastAssistantText(record, { home, cache, now = Date.now() }) {
     return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
   }
   const codex = record.backend === "codex";
-  const { text } = codex ? readCodexLineage(file, home, PREVIEW_TAIL_BYTES) : readTail(file, PREVIEW_TAIL_BYTES);
-  const lines = codex ? text.split("\n") : activeClaudeLines(text.split("\n"));
-  const { messages } = codex ? parseCodex(lines) : parseClaude(lines);
+  const segments = sessionSegments(record, file, home);
+  const total = segments.reduce((sum, segment) => sum + segment.end, 0);
+  const window = readSessionLines(segments, Math.max(0, total - PREVIEW_TAIL_BYTES), total);
+  const branch = codex ? null : activeClaudeLines(window.lines);
+  const lines = branch ? window.lines.filter((_, index) => branch.keep[index]) : window.lines;
+  const offsets = branch ? window.offsets.filter((_, index) => branch.keep[index]) : window.offsets;
+  const { messages } = parsePage(lines, offsets, { codex, stats: null }).reader;
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
   const remoteUrl = codex ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
@@ -152,6 +326,24 @@ function showUserTask(messages, record) {
       return message;
     }
     return task ? { ...message, text: task } : message;
+  });
+}
+
+// Photos and files sent from the app reach the agent as saved paths listed
+// after the message (cloud/app/pending.js withAttachments; home.mjs
+// receiveUpload saves them in the repo's .rudder/uploads). The chat shows the
+// words as the text and the files as `attachments`. A list the user typed or
+// pasted, of files saved anywhere else, stays part of their words.
+const ATTACHED_FILES = /(?:^|\n\n)Attached files:\n((?:- \/[^\n]*\/\.rudder\/uploads\/[^\n]+(?:\n|$))+)\s*$/;
+
+export function showAttachments(messages) {
+  return messages.map((message) => {
+    const match = message.role === "user" ? ATTACHED_FILES.exec(message.text) : null;
+    if (!match) {
+      return message;
+    }
+    const attachments = match[1].trim().split("\n").map((line) => line.slice(2).trim());
+    return { ...message, text: message.text.slice(0, match.index).trim(), attachments };
   });
 }
 
@@ -289,36 +481,9 @@ function codexNewRollout(home, threadId, now) {
   return null;
 }
 
-function readTail(file, maxBytes) {
-  const stat = fs.statSync(file);
-  const start = Math.max(0, stat.size - maxBytes);
-  const length = stat.size - start;
-  const buffer = Buffer.alloc(length);
-  const fd = fs.openSync(file, "r");
-  try {
-    fs.readSync(fd, buffer, 0, length, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-  let text = buffer.toString("utf8");
-  if (start > 0) {
-    // Drop the partial first line.
-    text = text.slice(text.indexOf("\n") + 1);
-  }
-  return { text, truncated: start > 0 };
-}
-
 // ---------------------------------------------------------------------------
 // Claude Code JSONL.
 // ---------------------------------------------------------------------------
-
-function parseClaude(lines, stats = null) {
-  const reader = claudeReader({ stats });
-  for (const line of lines) {
-    reader.addLine(line);
-  }
-  return reader;
-}
 
 // The tool Claude Code starts a subagent with.
 const CLAUDE_SUBAGENT_TOOL = "Agent";
@@ -339,13 +504,23 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     // Agent tool_use id -> the status of its newest <task-notification>
     notifications: new Map(),
     toolCalls: 0,
+    // A subagent's or teammate's task (its first user turn) and when it came.
+    prompt: null,
+    firstAt: null,
     lastAt: null,
     // A teammate's turn ended and it waits for its next message, or its
     // process exited.
     idle: false,
     exited: false,
+    // A teammate agreed to shut down: its work is over, its process exits next.
+    shutDown: false,
     dropped: 0,
-    addLine(line) {
+    // Told of each tool result with its call's message (null when the call
+    // is not in what was read), for where a chat page may start.
+    onResult: null,
+    // `offset`: the line's byte offset in the session, which names messages
+    // that have no id of their own.
+    addLine(line, offset) {
       if (!line.trim()) {
         return;
       }
@@ -355,7 +530,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       } catch {
         return;
       }
-      add(entry);
+      add(entry, offset);
       if (sub && reader.messages.length > SUBAGENT_KEEP * 2) {
         const extra = reader.messages.length - SUBAGENT_KEEP;
         reader.messages.splice(0, extra);
@@ -371,11 +546,11 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
   const messages = reader.messages;
   const push = (message) => messages.push(message);
   let promptSeen = false;
-  function add(entry) {
+  function add(entry, offset) {
     stats?.add(entry);
     if (entry.type === "system" && entry.subtype === "compact_boundary") {
       const meta = entry.compactMetadata || {};
-      push(compactMessage(entry.uuid || `compact-${messages.length}`, toMillis(entry.timestamp), {
+      push(compactMessage(entry.uuid || `compact-${offset}`, toMillis(entry.timestamp), {
         trigger: typeof meta.trigger === "string" ? meta.trigger : null,
         preTokens: Number(meta.preTokens) || null,
       }));
@@ -390,7 +565,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     // Claude Code writes how long each turn took once it ends.
     if (entry.type === "system" && entry.subtype === "turn_duration") {
       if (own && Number(entry.durationMs) > 0) {
-        push(turnMessage(entry.uuid || `turn-${messages.length}`, toMillis(entry.timestamp), Number(entry.durationMs)));
+        push(turnMessage(entry.uuid || `turn-${offset}`, toMillis(entry.timestamp), Number(entry.durationMs)));
       }
       return;
     }
@@ -422,6 +597,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     reader.idle = false;
     reader.exited = false;
     if (sub && ts !== null) {
+      reader.firstAt ??= ts;
       reader.lastAt = ts;
     }
     if (entry.isCompactSummary) {
@@ -432,17 +608,18 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       if (last?.kind === "compact" && !last.compact.summary) {
         last.compact.summary = summary;
       } else {
-        push(compactMessage(entry.uuid || `compact-${messages.length}`, ts, { summary }));
+        push(compactMessage(entry.uuid || `compact-${offset}`, ts, { summary }));
       }
       return;
     }
     const content = entry.message?.content;
-    const uuid = entry.uuid || `${messages.length}`;
+    const uuid = entry.uuid || `${offset}`;
     const userText = (text) => {
       noteTaskNotification(text);
       const clean = cleanUserText(text);
       if (clean && sub && !promptSeen) {
         promptSeen = true;
+        reader.prompt = teammateMessage(clean)?.body ?? clean;
         return "";
       }
       return sub ? teammateMessage(clean)?.body ?? clean : clean;
@@ -481,6 +658,10 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         };
         tools.set(block.id, message);
         reader.toolCalls += 1;
+        const reply = block.name === "SendMessage" ? block.input?.message : null;
+        if (reply?.type === "shutdown_response" && reply.approve === true) {
+          reader.shutDown = true;
+        }
         if (block.name === CLAUDE_SUBAGENT_TOOL && block.id) {
           reader.spawns.set(block.id, {
             message,
@@ -494,6 +675,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         push(message);
       } else if (block?.type === "tool_result") {
         const target = tools.get(block.tool_use_id);
+        reader.onResult?.(target ?? null);
         if (target) {
           target.tool.output = clip(toolResultText(block.content), outputLimit);
           target.tool.isError = Boolean(block.is_error);
@@ -614,14 +796,6 @@ function summarizeClaudeInput(name, input) {
 // Codex rollout JSONL.
 // ---------------------------------------------------------------------------
 
-function parseCodex(lines, stats = null) {
-  const reader = codexReader({ stats });
-  for (const line of lines) {
-    reader.addLine(line);
-  }
-  return reader;
-}
-
 // A Codex rollout read entry by entry: the agent's own, or a subagent's
 // (`child`). A subagent's rollout opens with its session_meta (who spawned it,
 // its `/root/<task>` path and nickname) and may carry its parent's history
@@ -629,7 +803,6 @@ function parseCodex(lines, stats = null) {
 function codexReader({ stats = null, child = false } = {}) {
   const calls = new Map(); // call_id -> message
   const outputLimit = child ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
-  let index = 0;
   const reader = {
     messages: [],
     // spawn_agent call_id -> { message, ts, taskName, threadId, error }
@@ -642,7 +815,11 @@ function codexReader({ stats = null, child = false } = {}) {
     endedAt: null,
     toolCalls: 0,
     dropped: 0,
-    addLine(line) {
+    // As claudeReader's.
+    onResult: null,
+    // `offset`: the line's byte offset in the conversation, which names
+    // messages that have no id of their own.
+    addLine(line, offset) {
       if (!line.trim()) {
         return;
       }
@@ -652,7 +829,7 @@ function codexReader({ stats = null, child = false } = {}) {
       } catch {
         return;
       }
-      add(entry);
+      add(entry, offset);
       if (child && reader.messages.length > SUBAGENT_KEEP * 2) {
         const extra = reader.messages.length - SUBAGENT_KEEP;
         reader.messages.splice(0, extra);
@@ -670,7 +847,7 @@ function codexReader({ stats = null, child = false } = {}) {
     },
   };
   const messages = reader.messages;
-  function add(entry) {
+  function add(entry, offset) {
     if (child) {
       if (entry.type === "session_meta") {
         if (!reader.meta) {
@@ -684,10 +861,10 @@ function codexReader({ stats = null, child = false } = {}) {
       }
     }
     stats?.add(entry);
-    index += 1;
+    const id = `c${offset}`;
     const ts = toMillis(entry.timestamp);
     if (entry.type === "compacted") {
-      messages.push(compactMessage(`c${index}`, ts, { summary: String(entry.payload?.message || "").trim() }));
+      messages.push(compactMessage(id, ts, { summary: String(entry.payload?.message || "").trim() }));
       return;
     }
     if (entry.type === "event_msg" && entry.payload?.type === "item_completed") {
@@ -718,7 +895,7 @@ function codexReader({ stats = null, child = false } = {}) {
     // stopped turn (turn_aborted) shows no time.
     if (entry.type === "event_msg" && entry.payload?.type === "task_complete") {
       if (Number(entry.payload.duration_ms) > 0) {
-        messages.push(turnMessage(`c${index}`, ts, Number(entry.payload.duration_ms)));
+        messages.push(turnMessage(id, ts, Number(entry.payload.duration_ms)));
       }
       return;
     }
@@ -726,7 +903,6 @@ function codexReader({ stats = null, child = false } = {}) {
       return;
     }
     const payload = entry.payload || {};
-    const id = `c${index}`;
     if (payload.type === "message") {
       const text = (payload.content || [])
         .map((part) => part?.text || "")
@@ -760,6 +936,7 @@ function codexReader({ stats = null, child = false } = {}) {
       messages.push(message);
     } else if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output" || payload.type === "local_shell_call_output") {
       const target = calls.get(payload.call_id);
+      reader.onResult?.(target ?? null);
       if (target) {
         const { output, isError } = codexOutput(payload.output);
         target.tool.output = clip(output, outputLimit);
@@ -917,7 +1094,7 @@ function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) 
       const meta = found.meta;
       const note = reader.notifications.get(toolUseId);
       const status = !meta.finished
-        ? live ? "running" : "stopped"
+        ? live && !claudeInterrupted(sub) ? "running" : "stopped"
         : spawn.isError || note === "failed" ? "failed" : note && note !== "completed" ? "stopped" : "done";
       card = {
         id: found.agentId,
@@ -942,7 +1119,7 @@ function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) 
         name: spawn.teammate.name,
         description: spawn.description,
         sub,
-        status: sub?.idle ? "done" : live && !sub?.exited ? "running" : "stopped",
+        status: sub?.idle || sub?.shutDown ? "done" : live && !sub?.exited && !claudeInterrupted(sub) ? "running" : "stopped",
       };
     } else {
       continue; // its metadata is not written yet
@@ -1016,6 +1193,13 @@ function readSubagentMeta(file) {
 
 function claudeSubagentsDir(session) {
   return path.join(session.replace(/\.jsonl$/, ""), "subagents");
+}
+
+// A subagent stopped from outside (TaskStop, Esc in its pane) ends on Claude's
+// interrupt note and is never marked finished.
+function claudeInterrupted(reader) {
+  const last = reader?.messages[reader.messages.length - 1];
+  return last?.role === "user" && last.text.startsWith("[Request interrupted by user");
 }
 
 // Teammate spawn -> its session log, found once. A miss (its session is not
@@ -1211,6 +1395,8 @@ function followFile(file, makeReader) {
     followed.delete(followed.keys().next().value);
   }
   if (stat.size > state.offset) {
+    // The byte offset of the buffer's first byte, which the carried part starts at.
+    const at = state.offset - (state.carry?.length ?? 0);
     const chunk = Buffer.alloc(stat.size - state.offset);
     const fd = fs.openSync(file, "r");
     let length;
@@ -1224,7 +1410,7 @@ function followFile(file, makeReader) {
     let start = 0;
     for (let end = buffer.indexOf(10, start); end !== -1; end = buffer.indexOf(10, start)) {
       if (end > start && !state.reader.skip(buffer.toString("utf8", start, Math.min(end, start + 160)))) {
-        state.reader.addLine(buffer.toString("utf8", start, end));
+        state.reader.addLine(buffer.toString("utf8", start, end), at + start);
       }
       start = end + 1;
     }
@@ -1486,3 +1672,6 @@ function toMillis(value) {
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : null;
 }
+
+// The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
+export { SUBAGENT_PROMPT_LIMIT, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, shownMessages, subagentsLive };

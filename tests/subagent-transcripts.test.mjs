@@ -28,7 +28,7 @@ const at = (seconds) => new Date(Date.UTC(2026, 10, 18, 9, 0, seconds)).toISOStr
 
 test("Claude: each Agent call shows its subagent, done or running, and a running one updates as its log grows", (t) => {
   const session = "5e551011-0000-4000-8000-000000000001";
-  const { home, repo } = setup(t, { id: "run_c", backend: "claude", status: "running", session: { nativeSessionId: session } });
+  const { home, repo } = setup(t, { id: "run_c", backend: "claude", status: "running", process: { pid: process.pid }, session: { nativeSessionId: session } });
   const project = path.join(home, ".claude", "projects", "-x");
   const subagents = path.join(project, session, "subagents");
   fs.mkdirSync(subagents, { recursive: true });
@@ -126,10 +126,11 @@ test("Claude: each Agent call shows its subagent, done or running, and a running
   pay = cards(read())[1];
   assert.deepEqual({ status: pay.status, result: pay.result, endedAt: pay.endedAt }, { status: "done", result: "Rounded down to whole cents.", endedAt: Date.parse(at(50)) });
 
-  // An unfinished subagent of a run that is no longer alive stopped with it.
+  // An unfinished subagent of an agent whose process is gone stopped with it
+  // (a paused agent has no process).
   fs.writeFileSync(path.join(subagents, "agent-apay.meta.json"), JSON.stringify({ agentType: "general-purpose", description: "Review payout rounding", toolUseId: "toolu_pay" }));
   const runFile = path.join(repo, ".rudder", "runs", "run_c", "run.json");
-  fs.writeFileSync(runFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(runFile, "utf8")), status: "paused" }));
+  fs.writeFileSync(runFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(runFile, "utf8")), status: "paused", process: undefined }));
   assert.equal(cards(read())[1].status, "stopped");
 });
 
@@ -142,7 +143,7 @@ test("Codex: spawn_agent shows the subagent from its own rollout, past the paren
   const parentId = uuid7(Date.parse(at(0)), "000-8000-000000000001");
   const childId = uuid7(spawnAt + 40, "000-8000-000000000002");
   const otherId = uuid7(spawnAt + 60, "000-8000-000000000003");
-  const { home, repo } = setup(t, { id: "run_x", backend: "codex", status: "running", session: { nativeSessionId: parentId } });
+  const { home, repo } = setup(t, { id: "run_x", backend: "codex", status: "running", process: { pid: process.pid }, session: { nativeSessionId: parentId } });
   const day = path.join(home, ".codex", "sessions", "2026", "11", "18");
   fs.mkdirSync(day, { recursive: true });
   const item = (ordinal, ts, payload) => ({ timestamp: at(ts), ordinal, type: "response_item", payload });

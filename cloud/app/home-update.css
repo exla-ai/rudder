@@ -1,0 +1,30 @@
+/* Update now for the cloud machine (home-update.js): under the All agents
+   intro, in the plan usage popover and in the sheet an error toast opens. */
+.hu { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 12px; }
+.hu-act[hidden] { display: none; }
+.hu-go { min-height: 36px; }
+.hu-go:disabled { opacity: 0.6; }
+.hu-line { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 0; max-width: 440px; font-size: 13.5px; line-height: 1.45; color: var(--muted); text-align: center; }
+.hu-line .spin { width: 14px; height: 14px; border-width: 2px; }
+.hu-line .spin[hidden] { display: none; }
+.hu-text { min-width: 0; overflow-wrap: anywhere; }
+.hu-fail { margin: 0; max-width: 440px; font-size: 13.5px; line-height: 1.45; color: var(--failed); text-align: center; overflow-wrap: anywhere; }
+.hu-fail[hidden] { display: none; }
+
+/* All agents: the server's line above the card. */
+.all-why { margin: 0; color: var(--ink-2); }
+
+/* The plan usage popover: left aligned like the rest of it. */
+.pu-pop .hu { align-items: flex-start; margin-top: 10px; }
+.pu-pop .hu-line { justify-content: flex-start; text-align: left; }
+.pu-pop .hu-fail { text-align: left; }
+
+/* The sheet a "too old" error toast opens. */
+.hu-sheet .hu-why { margin: 0 0 6px; font-size: 15px; line-height: 1.5; color: var(--ink-2); }
+.hu-sheet .hu { align-items: stretch; }
+.hu-sheet .hu-go { width: 100%; min-height: 46px; }
+.hu-sheet .hu-line, .hu-sheet .hu-fail { max-width: none; }
+
+/* Update now on an error toast. */
+.toast-act { flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
+.toast-act:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

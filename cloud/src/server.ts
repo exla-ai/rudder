@@ -868,7 +868,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       const route = new URL(req.url, "http://x").pathname.replace(/\/[^/]*[0-9][^/]*/g, "/:id");
       captureProductEvent("server", "app_error", { route, status, platform: requestPlatform(req) });
     }
-    sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
+    // needsUpdate: the cloud machine runs a Rudder too old for this, and the
+    // app offers "Update now" next to the message (homeNeedsUpdate).
+    const needsUpdate = error && typeof error === "object" && "needsUpdate" in error && error.needsUpdate === true;
+    sendJson(res, status, { error: error instanceof Error ? error.message : String(error), ...(needsUpdate ? { needsUpdate: true } : {}) });
   }
 });
 
@@ -5813,16 +5816,18 @@ function controlSnapshot(): ControlSnapshot {
   return { homes, sails, perHome, ws: { worker, client, homeControl: homeControls.size }, ...(builderPool ? { builders: builderPool.snapshot() } : {}) };
 }
 
-function homeAgentsBusy(projects: HomeProject[]): boolean {
-  return projects.some((project) => (project.agents ?? []).some((agent) => {
+// Agents an update would cut off: mid-turn, or holding a prompt (a restart
+// drops the hook holding it). The app counts them the same way (home-update.js).
+function homeBusyAgents(projects: HomeProject[]): number {
+  return projects.reduce((busy, project) => busy + (project.agents ?? []).filter((agent) => {
     const status = typeof agent.status === "string" ? agent.status : "";
     const asks = Array.isArray(agent.asks) ? agent.asks.length : 0;
     return status === "working" || status === "starting" || asks > 0;
-  }));
+  }).length, 0);
 }
 
 function noteHomeBusy(homeId: string, projects: HomeProject[]): void {
-  const busy = homeAgentsBusy(projects);
+  const busy = homeBusyAgents(projects) > 0;
   homeBusyNow.set(homeId, busy);
   if (busy || !homeBusyAt.has(homeId)) {
     homeBusyAt.set(homeId, Date.now());
@@ -5934,7 +5939,8 @@ async function updateFlyHome(home: Workspace, raw: Record<string, unknown>, now:
 
 const UP_TO_DATE = "this machine already runs the newest Rudder";
 
-// The user pressed Alt+r in a dashboard on the home: update now, busy or not. Its
+// The user asked to update now: Alt+r in a dashboard on the home, or Update now
+// in the app (POST /api/app/home/update), busy or not once they said so. Its
 // agents restart, and their dashboards reopen each one where it was.
 async function updateHomeNow(homeId: string): Promise<void> {
   const raw = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
@@ -5944,6 +5950,8 @@ async function updateHomeNow(homeId: string): Promise<void> {
   if (homeUpdatePending(raw) || homeUpdateFlights.has(homeId)) {
     throw new Error("an update is already on its way");
   }
+  // A new attempt: why the last one failed no longer describes this machine.
+  setHomeUpdateError.run({ homeId, error: null, updatedAt: new Date().toISOString() });
   const home = rowToWorkspace(raw);
   const now = Date.now();
   const failure = home.hostKind === "external"
@@ -6563,19 +6571,29 @@ async function homeRpc(homeId: string, method: string, params: JsonRecord, timeo
   }
 }
 
+// The Rudder version a worker image is tagged with (`...:5.0.10`), or null.
+function rudderVersion(image: string | null | undefined): string | null {
+  return image?.split("@")[0]?.match(/:(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$/)?.[1] ?? null;
+}
+
+// What a home's Rudder is, as the app says it: "Rudder 5.0.5", from the worker
+// image the home reports (home.mjs hostInfo).
+function homeRunsLabel(homeId: string): string {
+  const version = rudderVersion(optionalString(homeStates.get(homeId)?.host?.image));
+  return version ? `Rudder ${version}` : "an older Rudder";
+}
+
 // A home on an older worker than this Cloud answers a method it lacks with
 // "unknown method <name>", or, for one that names no project, with its
-// project-lookup error. Either way the user sees one plain line about updating.
+// project-lookup error. Either way the user sees one plain line, and the app
+// puts Update now next to it (`needsUpdate`).
 function homeNeedsUpdate(homeId: string, method: string, params: JsonRecord, error: unknown): Error | null {
   if (!(error instanceof Error)) return null;
   const lacksMethod = error.message === `unknown method ${method}`
     || (params.workspaceId === undefined && error.message === "that project is not open on the home machine");
   if (!lacksMethod) return null;
-  // The home reports its worker image (home.mjs hostInfo), tagged with its Rudder version.
-  const version = optionalString(homeStates.get(homeId)?.host?.image)?.split("@")[0]?.match(/:(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$/)?.[1];
-  const runs = version ? `Rudder ${version}` : "an older Rudder";
   // 400, as every error a home answers with (HomeControlSessions.reply).
-  return Object.assign(new Error(`Your cloud machine runs ${runs}, which does not have this yet. Update it: press Alt+r in its dashboard.`), { status: 400 });
+  return Object.assign(new Error(`Your cloud machine runs ${homeRunsLabel(homeId)}, which does not have this yet.`), { status: 400, needsUpdate: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -6916,6 +6934,8 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     return null;
   }
   const state = homeStates.get(home.id);
+  const image = optionalString(state?.host?.image) ?? null;
+  const target = image ? homeUpdateTarget(home.id, image) || null : null;
   return {
     id: home.id,
     status: home.status,
@@ -6930,7 +6950,13 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     stateUpdatedAt: state?.updatedAt ?? null,
     stateLive: homeStateLive(home.id),
     hostKind: home.hostKind ?? "fly",
-    hostImage: optionalString(state?.host?.image) ?? null,
+    hostImage: image,
+    // The app's Update now (home-update.js): the Rudder it runs, the one Cloud
+    // would move it to (null when it already runs that), and whether an update
+    // is on its way until the machine connects on the new version.
+    version: rudderVersion(image),
+    updateTo: target && target !== image ? rudderVersion(target) : null,
+    updating: homeUpdateFlights.has(home.id) || homeUpdatePending(findWorkspaceById.get(home.id) as Record<string, unknown> | undefined),
     updateError: home.updateError ?? null,
   };
 }
@@ -6945,8 +6971,10 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
   const lastSeen = state ? Date.parse(state.updatedAt) || null : null;
   return allHomeRepos(home.id).filter((row) => isCoordinatorRow(row) === coordinator).map((row) => {
     const project = live.get(row.id);
-    // A supervisor older than All agents runs this project as a plain one,
-    // whose agents have no tools over the others: it never marks it (home.mjs).
+    // The home marks the project it serves as All agents (home.mjs publishState)
+    // from 5.0.7 on. One that does not (5.0.4 to 5.0.6 run the chat without
+    // that marker or its framing, older ones as a plain project) needs an
+    // update first; the app offers Update now (`needsUpdate`).
     const tooOld = coordinator && project !== undefined && project.coordinator !== true;
     // Each agent says whether teammates may see it (team.ts), and whether it
     // needs you and why (agent-status.ts).
@@ -6961,9 +6989,10 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       ref: row.gitRef ?? null,
       status: row.status,
       failureReason: tooOld
-        ? "Your cloud machine runs an older Rudder without All agents. Update it: press Alt+r in its dashboard."
+        ? `Your cloud machine runs ${homeRunsLabel(home.id)}. The All agents chat needs a newer version.`
         : project?.error ?? row.failureReason ?? null,
       dashboard: tooOld ? "failed" : project?.dashboard ?? null,
+      ...(tooOld ? { needsUpdate: true } : {}),
       // false: what follows is the last state seen, at stateAt, not now.
       live: stateLive,
       stateAt: lastSeen,
@@ -7680,12 +7709,32 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw Object.assign(new Error(`the cloud machine is not connected yet (${reason})`), { status: 503 });
     }
   }
+  // Update now from the app (home-update.js): the same update as Alt+r in a
+  // dashboard on the machine. Agents mid-turn or holding a prompt restart with
+  // it, so the app says so first and only then sends `interrupt: true`.
+  if (req.method === "POST" && url.pathname === "/api/app/home/update") {
+    const body = await readJsonBody(req);
+    const busy = homeBusyAgents(homeStates.get(home.id)?.projects ?? []);
+    if (busy > 0 && (body as JsonRecord)?.interrupt !== true) {
+      throw Object.assign(new Error(`${busy === 1 ? "1 agent is" : `${busy} agents are`} working or waiting on you, and updating restarts ${busy === 1 ? "it" : "them"}`), { status: 409 });
+    }
+    try {
+      await updateHomeNow(home.id);
+    } catch (error) {
+      throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { status: 409 });
+    }
+    sendJson(res, 200, { home: homeSummary(home) });
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/app/transcript") {
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     const result = await homeRpc(home.id, "transcript", {
       workspaceId: repo.id,
       runId: url.searchParams.get("run") ?? "",
       limit: Math.min(800, Math.max(20, Number(url.searchParams.get("limit") || 300))),
+      // Page cursors (worker/transcripts.mjs readTranscript): the messages before one, or from one on.
+      before: url.searchParams.get("before"),
+      after: url.searchParams.get("after"),
     });
     sendJson(res, 200, result);
     return;
@@ -7694,6 +7743,17 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     // The chat's "/" menu: the commands of the agent's own CLI (cloud/worker/slash-commands.mjs).
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     sendJson(res, 200, await homeRpc(home.id, "slashCommands", { workspaceId: repo.id, runId: url.searchParams.get("run") ?? "" }));
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/app/subagents") {
+    // The chat's subagent tray: every subagent and teammate the agent started,
+    // and the activity of the one open in it (cloud/worker/subagents.mjs).
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    sendJson(res, 200, await homeRpc(home.id, "subagents", {
+      workspaceId: repo.id,
+      runId: url.searchParams.get("run") ?? "",
+      open: url.searchParams.get("open"),
+    }));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/send") {

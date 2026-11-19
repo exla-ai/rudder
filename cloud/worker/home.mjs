@@ -18,12 +18,13 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile } from "./transcripts.mjs";
+import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
 import { statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
@@ -32,7 +33,7 @@ import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
 import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
-import { queueSteer, readSteerReceipt } from "./steer-inbox.mjs";
+import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
@@ -42,10 +43,20 @@ import { createVibeprintHosts } from "./vibeprint-host.mjs";
 import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
 import { createCoordinatorTools, startCoordinatorBroker, writeCoordinatorFiles } from "./coordinator.mjs";
 
+// Rudder's own build, which the home loads its shared modules from: the
+// image's /opt/rudder/dist (RUDDER_DIST in the worker Dockerfile), or a
+// checkout's dist/ in tests.
+const rudderDist = (process.env.RUDDER_DIST || "").trim();
+if (!rudderDist) {
+  throw new Error("RUDDER_DIST is not set: it names the Rudder dist/ directory the home loads (the worker image sets /opt/rudder/dist)");
+}
+const fromDist = (file) => pathToFileURL(path.join(rudderDist, file)).href;
+const { modelName } = await import(fromDist("models.js"));
+
 let projectFiles;
 async function fileService() {
   if (!projectFiles) {
-    const { HomeProjectFiles } = await import("/opt/rudder/dist/project-files/home.js");
+    const { HomeProjectFiles } = await import(fromDist("project-files/home.js"));
     projectFiles ??= new HomeProjectFiles();
   }
   return projectFiles;
@@ -56,7 +67,7 @@ async function fileService() {
 let agentSetup;
 async function agentSetupService() {
   if (!agentSetup) {
-    const { AgentSetup } = await import("/opt/rudder/dist/project-files/agent-setup.js");
+    const { AgentSetup } = await import(fromDist("project-files/agent-setup.js"));
     agentSetup ??= new AgentSetup({ projectDirs: () => [...projects.values()].map((p) => p.dir) });
   }
   return agentSetup;
@@ -120,7 +131,7 @@ let privatePreviews;
 async function privatePreviewService() {
   if (!privatePreviews) {
     const [{ HomePrivatePreviews }, { PrivatePreviewDirectory }] = await Promise.all([
-      import("/opt/rudder/dist/private-access/home.js"), import("/opt/rudder/dist/private-access/previews.js"),
+      import(fromDist("private-access/home.js")), import(fromDist("private-access/previews.js")),
     ]);
     privatePreviews ??= new HomePrivatePreviews(homeId, new PrivatePreviewDirectory({
       execute: async (args, signal) => {
@@ -715,7 +726,7 @@ async function handleRpc(method, params) {
   if (method === "usage") {
     // Plan usage for the app's sidebar: the providers' own meters for this
     // machine's Claude and Codex sign-ins (src/usage.ts caches them).
-    const { fetchQuota } = await import("/opt/rudder/dist/usage.js");
+    const { fetchQuota } = await import(fromDist("usage.js"));
     return await fetchQuota({ force: params.refresh === true });
   }
   if (method === "createRepo") {
@@ -764,7 +775,7 @@ async function handleRpc(method, params) {
         workspaceId: project.workspaceId,
         name: project.name,
         repo: project.descriptor.repo,
-        runs: collectDigestRuns(project.dir, { since, until }),
+        runs: collectDigestRuns(project.dir, { since, until }).map(withModelName),
       });
     }
     return { since, until, projects: list };
@@ -805,14 +816,23 @@ async function handleRpc(method, params) {
     if (project.status === "cloning") {
       throw new Error("This project is still cloning");
     }
-    const { projectNotes } = await import("/opt/rudder/dist/project-files/notes.js");
+    const { projectNotes } = await import(fromDist("project-files/notes.js"));
     return await projectNotes(project.dir, params.request);
   }
   if (method === "transcript") {
-    return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });
+    return readTranscript(project.dir, String(params.runId || ""), {
+      limit: Number(params.limit) || 300,
+      home: HOME,
+      before: typeof params.before === "string" ? params.before : null,
+      after: typeof params.after === "string" ? params.after : null,
+    });
   }
   if (method === "slashCommands") {
     return await slashCommands.forRun(project.dir, String(params.runId || ""));
+  }
+  if (method === "subagents") {
+    // The chat's subagent tray, and the activity of the one it has open.
+    return listSubagents(project.dir, String(params.runId || ""), { home: HOME, open: params.open ? String(params.open) : null });
   }
   if (method === "send") {
     const runId = String(params.runId || "");
@@ -869,9 +889,9 @@ async function handleRpc(method, params) {
     return (await privatePreviewService()).snapshot(project.workspaceId);
   }
   if (method === "screen") {
-    const { projectEngineAuthority } = await import("/opt/rudder/dist/engine-authority.js");
+    const { projectEngineAuthority } = await import(fromDist("engine-authority.js"));
     if (projectEngineAuthority(project.dir) === "fabric") {
-      const { readOwnedScreen } = await import("/opt/rudder/dist/terminal-screen.js");
+      const { readOwnedScreen } = await import(fromDist("terminal-screen.js"));
       const runId = String(params.runId || "");
       const frame = await readOwnedScreen(project.dir, runId);
       return frame.type === "terminal-history"
@@ -1240,6 +1260,22 @@ async function discoverModels() {
 void refreshModels();
 setInterval(() => keepModelsFresh().catch((error) => log(`models: ${error.message}`)), MODELS_CHECK_MS);
 
+// Every model the app shows comes named from here, by the pickers' rules
+// (src/models.ts modelName): agents, plan nodes and digest runs carry
+// `modelName` next to the id, and the app never names one itself. Until the
+// first list arrives, an id reads by its shape alone. An agent started
+// without a model reads as what its harness runs then (src/models.ts
+// HarnessModels.default), and null when the harness does not say.
+function nameModel(backend, model) {
+  return modelName(models?.value?.harnesses ?? [], backend, model ?? null);
+}
+function withModelName(row) {
+  return { ...row, modelName: nameModel(row.backend, row.model) };
+}
+function planWithModelNames(plan) {
+  return plan && { ...plan, nodes: plan.nodes.map(withModelName) };
+}
+
 // "Add project" on the phone: the repos this GitHub login can open (its own,
 // collaborations and its orgs'), newest first, plus where a new one can go.
 // Fetching them takes GitHub about a second, so the list is ready before the
@@ -1360,22 +1396,18 @@ async function steer(project, { kind, taskId, instruction }) {
     throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
   }
   const requestId = queueSteer(project.dir, { kind, taskId, instruction });
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    await sleep(300);
-    const receipt = readSteerReceipt(project.dir, requestId);
-    if (receipt?.status === "delivered") {
-      // The state goes out before the answer, on the same socket, so Cloud's
-      // copy already shows the change (a closed agent gone, a new name) when
-      // the app refreshes on the answer. Waiting for the next publish brought
-      // a closed agent's row back for seconds.
-      lastStateJson = "";
-      await publishState().catch((error) => log(`state: ${error.message}`));
-      return { ok: true, status: "delivered" };
-    }
-    if (receipt?.status === "failed") {
-      throw new Error(receipt.error || "the dashboard could not deliver it");
-    }
+  const receipt = await waitSteerReceipt(project.dir, requestId, 12_000);
+  if (receipt?.status === "delivered") {
+    // The state goes out before the answer, on the same socket, so Cloud's
+    // copy already shows the change (a closed agent gone, a new name) when
+    // the app refreshes on the answer. Waiting for the next publish brought
+    // a closed agent's row back for seconds.
+    lastStateJson = "";
+    await publishState().catch((error) => log(`state: ${error.message}`));
+    return { ok: true, status: "delivered" };
+  }
+  if (receipt?.status === "failed") {
+    throw new Error(receipt.error || "the dashboard could not deliver it");
   }
   return { ok: true, status: "queued" };
 }
@@ -1400,7 +1432,7 @@ async function publishState() {
       // Serving the All agents tools: Cloud refuses the chat on a home without them.
       ...(project.coordinator ? { coordinator: true } : {}),
       agents: project.status === "cloning" ? [] : project.agents(),
-      plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
+      plan: project.status === "cloning" ? null : planWithModelNames(readProjectPlan(project.dir)),
       // The engine-proven role, PID token and attempt travel with every URL.
       // Control-plane authorization binds these to this authenticated Home.
       previews: privatePreviews?.snapshot(project.workspaceId) ?? [],
@@ -1530,6 +1562,7 @@ function agentSummary(record, options = {}) {
     ...statusFields(record, options),
     backend: record.backend ?? "claude",
     model: record.model ?? null,
+    modelName: nameModel(record.backend ?? "claude", record.model),
     // null: the agent decides (the dashboard's "auto").
     effort: record.effort ?? null,
     mode: record.mode ?? null,

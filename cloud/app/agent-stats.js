@@ -4,6 +4,7 @@
 // Each shows a popover with the detail: on hover with a mouse, on tap.
 import { h, setText } from "/app/render.js";
 import { api, coarse, ls, rel, toMs } from "/app/core.js";
+import { UpdateNow } from "/app/home-update.js";
 
 const SVG = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 const GAUGE = SVG('<path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l3.5-4"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/>');
@@ -247,11 +248,12 @@ export function PlanUsage() {
   const rows = el.querySelector(".pu-rows");
   let report = null;       // the last QuotaReport from the home
   let problem = null;      // why the last fetch failed, shown in the popover
+  let updater = null;      // Update now, while the machine is too old to report usage
   let signedIn = [];       // provider ids signed in on the machine
   let timer = 0, inflight = false, stopped = false;
 
   const pop = popover(el, { label: "Plan usage", place: "above", render: () => renderUsagePop({
-    report, problem, signedIn, refresh: () => load(true), hide: () => setPlanUsageShown(false),
+    report, problem, updater, signedIn, refresh: () => load(true), hide: () => setPlanUsageShown(false),
   }) });
 
   const onToggle = () => {
@@ -267,9 +269,12 @@ export function PlanUsage() {
     try {
       report = await api(`/api/app/usage${force ? "?refresh=1" : ""}`);
       problem = null;
+      updater?.destroy();
+      updater = null;
     } catch (err) {
       if (err.status === 401) return;
       problem = err.status === 503 ? "The cloud machine is asleep. Usage shows once it wakes." : err.message;
+      if (err.needsUpdate) updater ??= UpdateNow({ onDone: () => load(true) });
     } finally {
       inflight = false;
       paint();
@@ -319,6 +324,7 @@ export function PlanUsage() {
   }
 
   function update(state) {
+    updater?.update(state);
     const creds = state?.home?.credentials;
     // An asleep machine sends no credentials: keep what was last shown.
     if (creds) {
@@ -334,6 +340,7 @@ export function PlanUsage() {
     destroy() {
       stopped = true;
       clearTimeout(timer);
+      updater?.destroy();
       usageMeters.delete(onToggle);
       document.removeEventListener("visibilitychange", onVisible);
       pop.destroy();
@@ -358,12 +365,13 @@ function bindingWindow(account) {
   return windows.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
 }
 
-function renderUsagePop({ report, problem, signedIn, refresh, hide }) {
+function renderUsagePop({ report, problem, updater, signedIn, refresh, hide }) {
   const box = h(`<div class="st-body pu-pop"></div>`);
   if (!report) {
     const e = h(`<div class="pu-fail"></div>`);
     setText(e, sentence(problem));
     box.appendChild(e);
+    if (updater) box.appendChild(updater.el);
   }
   for (const { label, account } of report ? reportedAccounts(report, signedIn) : []) {
     const sec = h(`<section class="st-sec">

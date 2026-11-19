@@ -11,7 +11,7 @@ import { h, icon } from "/app/render.js";
 const SAVE_DELAY_MS = 700;
 const CHECK_MS = 15000;
 const FILE = "RUDDER_NOTES.md";
-const NOTES_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h9.5L19 7v12.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M8.5 9.5h7M8.5 13h7M8.5 16.5h4.5"/></svg>`;
+export const NOTES_ICON =`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h9.5L19 7v12.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1z"/><path d="M8.5 9.5h7M8.5 13h7M8.5 16.5h4.5"/></svg>`;
 
 export const notesPath = (ws) => `/app/p/${encodeURIComponent(ws)}/notes`;
 

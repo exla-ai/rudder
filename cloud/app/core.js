@@ -46,7 +46,10 @@ export const TIME_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOpt
 
 /* API ---------------------------------------------------------------- */
 
-export class ApiError extends Error { constructor(msg, status, waking = false) { super(msg); this.status = status; this.waking = waking; } }
+export class ApiError extends Error { constructor(msg, status, waking = false, needsUpdate = false) { super(msg); this.status = status; this.waking = waking; this.needsUpdate = needsUpdate; } }
+// Errors the server marked `needsUpdate` (the cloud machine is too old for the
+// request): a toast showing one offers Update now (home-update.js).
+const needsUpdateMessages = new Set();
 
 function authHeaders() {
   const headers = { Accept: "application/json" };
@@ -76,7 +79,11 @@ export async function api(path, { method = "GET", body, raw, signal } = {}) {
   if (res.status === 401) { app.onSignedOut?.(); throw new ApiError("Signed out", 401); }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) throw new ApiError(data?.error || `${res.status} ${res.statusText || "Request failed"}`.trim(), res.status, !!data?.waking);
+  if (!res.ok) {
+    const err = new ApiError(data?.error || `${res.status} ${res.statusText || "Request failed"}`.trim(), res.status, !!data?.waking, data?.needsUpdate === true);
+    if (err.needsUpdate) needsUpdateMessages.add(err.message);
+    throw err;
+  }
   return data;
 }
 
@@ -110,8 +117,17 @@ export function toast(text, { error = false } = {}) {
   lastToast = { text, at: Date.now() };
   const el = h(`<div class="toast${error ? " error" : ""}"></div>`);
   el.textContent = text;
+  const offerUpdate = error && needsUpdateMessages.has(text);
+  if (offerUpdate) {
+    const act = h(`<button type="button" class="toast-act">Update now</button>`);
+    act.addEventListener("click", () => {
+      el.remove();
+      void import("/app/home-update.js").then((m) => m.openUpdateSheet(text));
+    });
+    el.append(act);
+  }
   box.appendChild(el);
-  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, error ? 4200 : 2800);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, offerUpdate ? 9000 : error ? 4200 : 2800);
 }
 
 export function confirmDialog({ title, body, confirm = "Confirm", danger = false }) {

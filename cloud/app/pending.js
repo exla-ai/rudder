@@ -3,14 +3,28 @@
 // A sent message keeps no id on its way: the dashboard types it into the
 // agent's terminal (sanitize_steer_instruction collapses runs of spaces and
 // trims every line) and Claude Code or Codex records what arrived. So a sent
-// bubble settles on a user message that the transcript added after the send and
-// that reads the same once whitespace is ignored. Each message settles one
-// bubble: the same text sent twice shows twice until the transcript has both.
+// bubble settles on a user message that the transcript added after the send,
+// that reads the same once whitespace is ignored and that has the same files
+// attached. Each message settles one bubble: the same text sent twice shows
+// twice until the transcript has both.
 
 const KEEP_MS = 5 * 60 * 1000;
 
+/**
+ * The text sent for a message with files: the saved paths listed after it,
+ * which the agent opens like any file. The worker reads the list back out
+ * (worker/transcripts.mjs showAttachments), so a transcript message carries
+ * the words as `text` and the paths as `attachments`.
+ */
+export function withAttachments(text, paths) {
+  if (!paths.length) return text;
+  const list = paths.map((p) => `- ${p}`).join("\n");
+  return text ? `${text}\n\nAttached files:\n${list}` : `Attached files:\n${list}`;
+}
+
 /** A message as the transcript can match it: whitespace and controls ignored. */
 export const sentKey = (text) => String(text || "").replace(/[\s\p{Cc}]+/gu, " ").trim();
+const matchKey = (text, paths) => [sentKey(text), ...paths].join("\n");
 
 /**
  * The newest time the transcript shows, taken when a message is sent: only a
@@ -30,8 +44,8 @@ export function settlePending(list, messages, now) {
   return list.filter((p) => {
     if (p.state === "failed") return true;
     if (now - p.ts > KEEP_MS) return false;
-    const key = sentKey(p.sentText || p.text);
-    const hit = users.find((m) => !taken.has(m) && m.ts > p.after && sentKey(m.text) === key);
+    const key = matchKey(p.text, (p.files || []).map((f) => f.path));
+    const hit = users.find((m) => !taken.has(m) && m.ts > p.after && matchKey(m.text, m.attachments || []) === key);
     if (!hit) return true;
     taken.add(hit);
     return false;

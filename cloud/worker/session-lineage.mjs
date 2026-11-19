@@ -79,34 +79,54 @@ function parseLines(lines) {
 }
 
 /**
- * The lines of a Claude session file without the branches it went back from.
+ * Which lines of a read of a Claude session file are on the conversation it
+ * is on now, without the branches it went back from: `{ keep, leafBefore }`,
+ * `keep` holding one boolean per line.
  *
- * The active path runs from the newest entry back along parentUuid. A compact
- * boundary starts a new chain (no parent), so the path continues from the
- * entry written just before it. Entries off the path stay unless their branch
- * starts with a typed prompt: parallel tool calls branch too (each result
- * hangs off its own call) and belong to the conversation, while a branch
- * starting with a prompt is one the user went back from.
+ * The active path runs back along parentUuid from `leaf` (an entry's uuid),
+ * or from the newest entry when `leaf` is "". A compact boundary starts a new
+ * chain (no parent), so the path continues from the entry written just before
+ * it. Entries off the path stay unless their branch starts with a typed
+ * prompt: parallel tool calls branch too (each result hangs off its own call)
+ * and belong to the conversation, while a branch starting with a prompt is
+ * one the user went back from. A `leaf` that is not in these lines comes
+ * before them: they all lie on a branch the user went back from. When the
+ * lines start the file (`fromStart`) such a leaf is in no line at all, and
+ * like a whole read, which finds no path through them, they all stay.
+ *
+ * `leafBefore(index)` is the `leaf` a read of the lines before `index` starts
+ * from, so a chat read page by page shows the branch a whole read would.
  */
-export function activeClaudeLines(lines) {
+export function activeClaudeLines(lines, leaf = "", fromStart = false) {
   const entries = parseLines(lines);
   const byUuid = new Map();
-  let leaf = -1;
+  let newest = -1;
   entries.forEach((entry, index) => {
     if (entry?.uuid && !entry.isSidechain) {
       byUuid.set(entry.uuid, index);
-      leaf = index;
+      newest = index;
     }
   });
-  if (leaf < 0) {
-    return lines;
+  const start = leaf ? byUuid.get(leaf) : newest;
+  if (start === undefined) {
+    return { keep: entries.map((entry) => fromStart || !entry?.uuid || !!entry.isSidechain), leafBefore: () => leaf };
+  }
+  if (start < 0) {
+    return { keep: lines.map(() => true), leafBefore: () => "" };
   }
   const onPath = new Set();
-  for (let index = leaf; index >= 0 && !onPath.has(index);) {
+  // Where the path goes on before these lines: an entry's uuid, or "" for
+  // the newest entry before them (after a compact boundary or a read's start).
+  let beyond = "";
+  for (let index = start; index >= 0 && !onPath.has(index);) {
     onPath.add(index);
     const entry = entries[index];
     if (entry.parentUuid) {
-      index = byUuid.get(entry.parentUuid) ?? -1;
+      const parent = byUuid.get(entry.parentUuid);
+      if (parent === undefined) {
+        beyond = entry.parentUuid;
+      }
+      index = parent ?? -1;
     } else if (entry.type === "system" && entry.subtype === "compact_boundary") {
       index -= 1;
       while (index >= 0 && !(entries[index]?.uuid && !entries[index].isSidechain)) {
@@ -117,9 +137,9 @@ export function activeClaudeLines(lines) {
     }
   }
   const abandoned = new Map(); // index -> whether its branch was gone back from
-  const isAbandoned = (start) => {
+  const isAbandoned = (from) => {
     const walked = [];
-    let index = start;
+    let index = from;
     let verdict = false;
     while (true) {
       if (abandoned.has(index)) {
@@ -129,7 +149,7 @@ export function activeClaudeLines(lines) {
       walked.push(index);
       const parent = byUuid.get(entries[index].parentUuid);
       if (parent === undefined || walked.includes(parent)) {
-        break; // the start of the file (or of a tail read)
+        break; // the start of the file (or of a read)
       }
       if (onPath.has(parent)) {
         verdict = claudeTypedPrompt(entries[index]);
@@ -142,13 +162,16 @@ export function activeClaudeLines(lines) {
     }
     return verdict;
   };
-  return lines.filter((_, index) => {
-    const entry = entries[index];
-    if (!entry?.uuid || entry.isSidechain || onPath.has(index)) {
-      return true;
+  const keep = entries.map((entry, index) => !entry?.uuid || entry.isSidechain || onPath.has(index) || !isAbandoned(index));
+  const leafBefore = (index) => {
+    for (let at = Math.min(index, entries.length) - 1; at >= 0; at -= 1) {
+      if (onPath.has(at)) {
+        return entries[at].uuid;
+      }
     }
-    return !isAbandoned(index);
-  });
+    return beyond;
+  };
+  return { keep, leafBefore };
 }
 
 // ---------------------------------------------------------------------------
@@ -253,37 +276,58 @@ export function codexLineage(file, home) {
 }
 
 /**
- * The last `maxBytes` of a Codex thread's whole conversation (readTail's
- * shape: a cut first line is dropped and `truncated` says so).
+ * The whole lines of a conversation between byte offsets `start` and `end`:
+ * `{ lines, offsets }`, one offset per line. `segments` are the conversation's
+ * byte ranges, oldest first (codexLineage; a Claude session is its one file),
+ * and offsets count across them. A line cut by `start` is dropped. The piece
+ * after the last newline is kept: a line still being written fails to parse
+ * and is passed over.
  */
-export function readCodexLineage(file, home, maxBytes) {
-  const segments = codexLineage(file, home);
-  const total = segments.reduce((sum, segment) => sum + segment.end, 0);
-  const parts = [];
-  let left = maxBytes;
-  for (let index = segments.length - 1; index >= 0 && left > 0; index -= 1) {
-    const { file: segmentFile, end } = segments[index];
-    const length = Math.min(left, end);
-    const buffer = Buffer.alloc(length);
-    const fd = fs.openSync(segmentFile, "r");
-    try {
-      fs.readSync(fd, buffer, 0, length, end - length);
-    } finally {
-      fs.closeSync(fd);
+export function readSessionLines(segments, start, end) {
+  const lines = [];
+  const offsets = [];
+  let base = 0;
+  for (const segment of segments) {
+    const from = Math.max(start, base);
+    const to = Math.min(end, base + segment.end);
+    if (from < to) {
+      // One byte more before `from` says whether a line starts there. A
+      // segment starts a line (a fork point is a line's end).
+      const lead = from > base ? 1 : 0;
+      const buffer = readBytes(segment.file, from - base - lead, to - from + lead);
+      let at = lead;
+      if (lead && buffer[0] !== 0x0a) {
+        const newline = buffer.indexOf(0x0a, lead);
+        at = newline < 0 ? buffer.length : newline + 1;
+      }
+      while (at < buffer.length) {
+        const newline = buffer.indexOf(0x0a, at);
+        const stop = newline < 0 ? buffer.length : newline;
+        lines.push(buffer.toString("utf8", at, stop));
+        offsets.push(from - lead + at);
+        at = stop + 1;
+      }
     }
-    let text = buffer.toString("utf8");
-    if (index < segments.length - 1 && text && !text.endsWith("\n")) {
-      text += "\n";
+    base += segment.end;
+  }
+  return { lines, offsets };
+}
+
+function readBytes(file, position, length) {
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(file, "r");
+  try {
+    for (let done = 0; done < length;) {
+      const read = fs.readSync(fd, buffer, done, length - done, position + done);
+      if (read === 0) {
+        throw new Error(`${file} ended ${length - done} bytes early`);
+      }
+      done += read;
     }
-    parts.unshift(text);
-    left -= length;
+  } finally {
+    fs.closeSync(fd);
   }
-  let text = parts.join("");
-  const truncated = total > maxBytes;
-  if (truncated) {
-    text = text.slice(text.indexOf("\n") + 1);
-  }
-  return { text, truncated };
+  return buffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +341,8 @@ export function readCodexLineage(file, home, maxBytes) {
  * first one starts the conversation over when edited (native chat_edit.rs).
  * The last one is the chat's latest prompt, which the request also names so
  * native chat_edit.rs can refuse when a newer one has arrived since; when
- * that cannot hold the list is empty. Pass Claude lines through
- * activeClaudeLines first.
+ * that cannot hold the list is empty. Pass only the Claude lines
+ * activeClaudeLines keeps.
  */
 export function editablePrompts(lines, backend) {
   return backend === "codex" ? codexEditable(lines) : claudeEditable(lines);

@@ -14,21 +14,36 @@ const ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models?limit=100";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MODELS_DEV_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 2500;
-const MODEL_PICKER_LIMIT = 24;
 
 export type EffortId = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ModelOption = {
-  /** What the picker shows: "Opus 5.5", "GPT-6.1 Sol", "Opus 5.5 · 1M". */
+  /** What the pickers show, the name and then the version: "Opus 5.5", "Sol 6.1", "Opus 5.5 · 1M". */
   label: string;
   /** The exact id the agent's CLI is started with. */
-  value?: string;
-  detail?: string;
-  backend?: BackendId;
-  /** The generation it is listed under, newest first: "Claude 5.5", "GPT-6.1". */
-  group?: string;
+  value: string;
+  detail: string;
   /** The effort levels it can run at. Empty: it has no effort setting. */
-  efforts?: EffortId[];
+  efforts: EffortId[];
+  /** A CLI alias ("opus") that moves to each new release of its family. */
+  alias?: true;
+};
+
+/** One harness's section of the pickers. */
+export type HarnessModels = {
+  /** The backend id `/model <id> <model>` takes. */
+  id: BackendId;
+  /** "Claude", "Codex". */
+  label: string;
+  /** What it signs in with: "Claude Code", "ChatGPT". */
+  account: string;
+  /** Sorted: the highest version first, the harness's tier order within one; aliases last. */
+  models: ModelOption[];
+  /**
+   * The model it runs for an agent that names none: Claude Code's default,
+   * the `model` in Codex's config.toml. Null when it does not say.
+   */
+  default: string | null;
 };
 
 type CodexCacheModel = {
@@ -98,27 +113,26 @@ type AnthropicModelsResponse = {
 };
 
 /** The merged catalog, and Claude Code's own list that went into it. */
-type ModelCatalog = { data: ModelsDevCache; claudeCode: CliModel[] };
+type ModelCatalog = { data: ModelsDevCache; claudeCode: ClaudeCodeList };
 
 let modelCatalogInFlight: Promise<ModelCatalog> | undefined;
 
-export async function discoverModelOptions(
-  backend: BackendId,
-  configuredDefault?: string,
-): Promise<ModelOption[]> {
-  const defaultDetail = configuredDefault || "CLI default";
-  const picker = backend === "claude" ? "claude" : "codex";
-  // The catalog (models.dev, the provider APIs, local history, Claude Code's
-  // list) and the CLI's own list: Claude Code's /model list or Codex's model
-  // cache. The CLI's list names a model, its effort levels and its display
-  // name as soon as the CLI learns it.
-  const [{ data, claudeCode }, codex] = await Promise.all([
-    readModelsDev(),
-    picker === "claude" ? [] : readCodexCliModels(),
-  ]);
-  const cli = picker === "claude" ? claudeCode : codex;
-  const catalog = (picker === "claude" ? data.anthropic : data.openai)?.models ?? {};
-  return [{ label: "Default", value: undefined, detail: defaultDetail }, ...pickerRows(picker, catalog, cli)];
+/**
+ * Every harness's models, one section per HARNESSES row, in its order. A
+ * section lists exactly what the harness's CLI lists for this account, with
+ * the CLI's names and effort levels; the merged catalog (models.dev, the
+ * provider APIs, local history, Claude Code's list) adds detail lines and
+ * prices. Reading it also refreshes the catalog the dashboard reads.
+ */
+export async function discoverHarnesses(): Promise<HarnessModels[]> {
+  const catalog = await readModelsDev();
+  return Promise.all(HARNESSES.map(async (harness) => ({
+    id: harness.id,
+    label: harness.label,
+    account: harness.account,
+    models: pickerRows(harness, catalog.data[harness.catalog]?.models ?? {}, await harness.listed(catalog)),
+    default: await harness.defaultModel(catalog),
+  })));
 }
 
 /** Refreshes the models.dev catalog the dashboard's own picker reads. */
@@ -145,12 +159,27 @@ async function readCodexCacheModels(): Promise<CodexCacheModel[]> {
     .filter((model) => model.slug && model.slug !== "codex-auto-review" && model.visibility !== "hide");
 }
 
-async function discoverCodexModelsLocal(): Promise<ModelOption[]> {
-  return (await readCodexCacheModels()).map((model) => ({
-    label: model.slug || model.display_name || "model",
-    value: model.slug,
-    detail: model.display_name || model.description || "local Codex cache",
-  }));
+/**
+ * The model Codex runs when it is given none: the top-level `model` in its
+ * config.toml, or null when the file sets none.
+ */
+async function readCodexConfiguredModel(): Promise<string | null> {
+  const file = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml");
+  const raw = await fsp.readFile(file, "utf8").catch(ignoreMissing);
+  if (!raw) {
+    return null;
+  }
+  // Top-level keys come before the first [table].
+  for (const line of raw.split("\n")) {
+    if (/^\s*\[/.test(line)) {
+      break;
+    }
+    const match = /^\s*model\s*=\s*"([^"]+)"/.exec(line);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
 }
 
 async function readCodexCliModels(): Promise<CliModel[]> {
@@ -160,6 +189,7 @@ async function readCodexCliModels(): Promise<CliModel[]> {
     description: model.description,
     efforts: (model.supported_reasoning_levels ?? []).flatMap((level) => (level.effort ? [level.effort] : [])),
     alias: false,
+    resolved: model.slug!,
   }));
 }
 
@@ -207,17 +237,6 @@ function modelsDevCachePath(): string {
   return path.join(rudderHome(), "models-dev.json");
 }
 
-function isUsableTextModel(id: string, model: ModelsDevModel): boolean {
-  if (model.tool_call === false) {
-    return false;
-  }
-  if (isExcludedOpenAiTextModel(id)) {
-    return false;
-  }
-  const output = model.modalities?.output;
-  return !output || output.includes("text");
-}
-
 function isClaudePickerModel(id: string): boolean {
   // No family-name allowlist: a brand-new model family (fable, and whatever
   // comes after it) must show up in the picker without a Rudder release. Only
@@ -232,7 +251,7 @@ function isCodexRelevantModel(id: string): boolean {
   return id.includes("codex") || isGptTextModel(id) || isOSeriesModel(id);
 }
 
-async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<{ changed: boolean; claudeCode: CliModel[] }> {
+async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<{ changed: boolean; claudeCode: ClaudeCodeList }> {
   let changed = false;
   const [openai, anthropic, codexLocal, claudeLocal, claudeCode] = await Promise.all([
     fetchOpenAIModelCatalog(),
@@ -254,7 +273,7 @@ async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<{ changed:
   for (const model of claudeLocal) {
     changed = mergeProviderModel(data, "anthropic", model.id, model.meta) || changed;
   }
-  for (const model of claudeCodeCatalogModels(data, claudeCode)) {
+  for (const model of claudeCodeCatalogModels(data, claudeCode.models)) {
     changed = mergeProviderModel(data, "anthropic", model.id, model.meta) || changed;
   }
   return { changed, claudeCode };
@@ -271,7 +290,7 @@ function claudeCodeCatalogModels(data: ModelsDevCache, listed: CliModel[]): Arra
   const efforts = new Map<string, EffortId[]>();
   const names = new Map<string, string | undefined>();
   for (const model of listed) {
-    efforts.set(model.id, RUDDER_EFFORTS.claude.filter((level) => model.efforts.includes(level)));
+    efforts.set(model.id, CLAUDE.efforts.filter((level) => model.efforts.includes(level)));
     names.set(model.id, model.name);
   }
   for (const model of listed) {
@@ -284,7 +303,7 @@ function claudeCodeCatalogModels(data: ModelsDevCache, listed: CliModel[]): Arra
     id,
     meta: known[id]
       ? { efforts: levels }
-      : { id, name: names.get(id) || prettyClaudeModel(id), tool_call: true, efforts: levels, modalities: { output: ["text"] }, source: "claude-code" },
+      : { id, name: names.get(id) || claudeModelName(id), tool_call: true, efforts: levels, modalities: { output: ["text"] }, source: "claude-code" },
   }));
 }
 
@@ -330,7 +349,7 @@ async function fetchAnthropicModelCatalog(): Promise<Array<{ id: string; meta: M
         id: model.id!,
         meta: {
           id: model.id,
-          name: model.display_name || prettyClaudeModel(model.id!),
+          name: model.display_name || claudeModelName(model.id!),
           tool_call: true,
           reasoning: isLikelyReasoningModel("claude", model.id!),
           release_date: typeof model.created_at === "string" ? model.created_at.slice(0, 10) : undefined,
@@ -343,15 +362,15 @@ async function fetchAnthropicModelCatalog(): Promise<Array<{ id: string; meta: M
 }
 
 async function readCodexLocalModels(): Promise<Array<{ id: string; meta: ModelsDevModel }>> {
-  return (await discoverCodexModelsLocal())
-    .filter((model) => model.value && isCodexRelevantModel(model.value) && !isExcludedOpenAiTextModel(model.value))
+  return (await readCodexCacheModels())
+    .filter((model) => isCodexRelevantModel(model.slug!) && !isExcludedOpenAiTextModel(model.slug!))
     .map((model) => ({
-      id: model.value!,
+      id: model.slug!,
       meta: {
-        id: model.value,
-        name: model.detail || model.label,
+        id: model.slug,
+        name: model.display_name || model.description || model.slug,
         tool_call: true,
-        reasoning: isLikelyReasoningModel("codex", model.value!),
+        reasoning: isLikelyReasoningModel("codex", model.slug!),
         modalities: { output: ["text"] },
         source: "codex-local-cache",
       },
@@ -367,7 +386,7 @@ async function readClaudeLocalModelIds(): Promise<Array<{ id: string; meta: Mode
       id,
       meta: {
         id,
-        name: prettyClaudeModel(id),
+        name: claudeModelName(id),
         tool_call: true,
         reasoning: isLikelyReasoningModel("claude", id),
         modalities: { output: ["text"] },
@@ -647,15 +666,9 @@ function collectModelFields(value: unknown, counts: Map<string, number>, depth =
   }
 }
 
-function prettyClaudeModel(model: string): string {
-  if (model === "opus" || model === "sonnet") {
-    return `${capitalize(model)} latest`;
-  }
-  return model
-    .replace(/^claude-/, "")
-    .split("-")
-    .map((part) => (/^\d+$/.test(part) ? part : capitalize(part)))
-    .join(" ");
+/** The name a Claude id reads as, the picker's way: "claude-fable-5-2" is "Fable 5.2". */
+function claudeModelName(id: string): string {
+  return withContext(parseClaudeId(id).name, id);
 }
 
 function capitalize(value: string): string {
@@ -664,11 +677,14 @@ function capitalize(value: string): string {
 
 // The picker's rows ---------------------------------------------------------
 //
-// Grouped by generation, newest first, with each generation's families
-// together (most capable first). Names and effort levels come from the CLI's
-// own list when it has the model, and are read from the id otherwise.
-
-type PickerBackend = "claude" | "codex";
+// One section per harness, listing exactly the models the harness's own CLI
+// lists for this account (the catalog adds a detail line and prices, never a
+// row). Rows read the name and then the version ("Opus 5.5", "Sol 6.1") and
+// sort by the version read from the id, highest first. Models of one version
+// go by the harness's tier order: Claude Code's own family order (Opus, Fable,
+// Sonnet, Haiku), Codex's families by price (Astra, Sol, Terra, Luna). A CLI
+// alias ("opus") closes its section, named and sorted like the model it
+// stands for now.
 
 /** A model as its CLI lists it. */
 type CliModel = {
@@ -679,123 +695,187 @@ type CliModel = {
   efforts: string[];
   /** A Claude Code alias ("opus") that always means the family's newest model. */
   alias: boolean;
+  /** The model it runs: its own id, or the one an alias stands for now. */
+  resolved: string;
 };
 
 type ParsedModelId = {
-  /** The generation's heading: "Claude 5.5", "GPT-6.1", "o3". */
-  group: string;
-  /** GPT and Claude ids, then o-series, then ids of no known shape. */
+  /** Ids of the harness's main shape, then a second shape (o-series), then ids of no known shape. */
   series: number;
   version: number[];
   family: string;
-  /** Read from the id: "Opus 5.5", "GPT-6.1 Sol". */
+  /** Read from the id: "Opus 5.5", "Sol 6.1". */
   name: string;
   /** A context window suffix: "claude-opus-5-5[1m]" is "1M". */
   context?: string;
 };
 
-const ALIAS_GROUP = "Always the newest";
-const CONTEXT_SUFFIX = /\[(\d+)([km])\]$/i;
-
-// The levels the dashboard passes (native/src/models.rs effort_options_for):
-// a model with an effort setting takes low to xhigh, and Claude also max.
-const RUDDER_EFFORTS: Record<PickerBackend, EffortId[]> = {
-  claude: ["low", "medium", "high", "xhigh", "max"],
-  codex: ["low", "medium", "high", "xhigh"],
+/**
+ * A harness: an agent CLI Rudder runs, and how the pickers find, name and
+ * sort its models. The pickers show one section per HARNESSES row, in that
+ * order, so a new harness is a new row.
+ */
+type Harness = {
+  /** The backend id `/model <id> <model>` and the dashboard take. */
+  id: BackendId;
+  label: string;
+  /** What it signs in with, for the picker's account line. */
+  account: string;
+  /** The catalog provider (models.dev, `models-dev.json`) for detail lines and prices. */
+  catalog: "anthropic" | "openai";
+  /** The CLI's own list of models: the rows of its section. */
+  listed: (catalog: ModelCatalog) => Promise<CliModel[]>;
+  /** The model it runs when given none (HarnessModels.default). */
+  defaultModel: (catalog: ModelCatalog) => Promise<string | null>;
+  /** The version, family and name an id reads as. */
+  parse: (id: string) => ParsedModelId;
+  /** Its name for a model, from the CLI's display name. */
+  name: (display: string) => string;
+  /** How its families rank within one version. */
+  tiers: Tiers;
+  /** The levels the dashboard passes it (native/src/models.rs effort_options_for). */
+  efforts: EffortId[];
 };
 
-function pickerRows(backend: PickerBackend, catalog: Record<string, ModelsDevModel>, cli: CliModel[]): ModelOption[] {
-  const listed = new Map<string, CliModel>();
+/** Each family's rank, the highest first. */
+type Tiers = (parse: Harness["parse"], cli: CliModel[], catalog: Record<string, ModelsDevModel>) => Map<string, number>;
+
+const CLAUDE: Harness = {
+  id: "claude",
+  label: "Claude",
+  account: "Claude Code",
+  catalog: "anthropic",
+  listed: async (catalog) => catalog.claudeCode.models,
+  defaultModel: async (catalog) => catalog.claudeCode.default,
+  parse: parseClaudeId,
+  // Claude Code's names already read "Opus 5.5".
+  name: (display) => display,
+  tiers: tiersByListOrder,
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+};
+
+const CODEX: Harness = {
+  id: "codex",
+  label: "Codex",
+  account: "ChatGPT",
+  catalog: "openai",
+  listed: () => readCodexCliModels(),
+  defaultModel: () => readCodexConfiguredModel(),
+  parse: parseGptId,
+  name: gptName,
+  // Codex lists its recommended model first, not its flagship.
+  tiers: tiersByPrice,
+  efforts: ["low", "medium", "high", "xhigh"],
+};
+
+const HARNESSES: Harness[] = [CLAUDE, CODEX];
+
+const CONTEXT_SUFFIX = /\[(\d+)([km])\]$/i;
+
+function pickerRows(harness: Harness, catalog: Record<string, ModelsDevModel>, cli: CliModel[]): ModelOption[] {
+  const models = new Map<string, CliModel>();
   const aliases: CliModel[] = [];
   for (const model of cli) {
     if (model.alias) {
       aliases.push(model);
-    } else if (!listed.has(model.id)) {
-      listed.set(model.id, model);
+    } else if (!models.has(model.id)) {
+      models.set(model.id, model);
     }
   }
-  const ids = new Set(Object.entries(catalog).filter(([id, model]) => isPickerModel(backend, id, model)).map(([id]) => id));
-  for (const id of listed.keys()) {
-    ids.add(id);
-  }
-  // A dated snapshot repeats its undated twin, so only the twin is listed
-  // (the dashboard's picker does the same: models.rs dated_duplicate_base).
-  for (const id of ids) {
-    const base = /^(.+)-\d{8}$/.exec(id)?.[1];
-    if (base && ids.has(base)) {
-      const twin = listed.get(id);
-      if (twin && !listed.has(base)) {
-        listed.set(base, twin);
-      }
-      ids.delete(id);
-    }
-  }
-  const prices = familyPrices(backend, catalog);
-  const rows = [...ids]
-    .map((id) => ({ id, parsed: parseModelId(backend, id) }))
-    .sort((a, b) => compareModelIds(a.parsed, b.parsed, prices) || a.id.localeCompare(b.id))
-    // Older catalog models make way; every model the CLI lists stays.
-    .filter((row, index) => listed.has(row.id) || index < MODEL_PICKER_LIMIT)
-    .map(({ id, parsed }): ModelOption => ({
-      label: modelLabel(backend, id, parsed, listed),
-      value: id,
-      detail: listed.get(id)?.description || catalogDetail(catalog[id]),
-      group: parsed.group,
-      efforts: modelEfforts(backend, id, catalog[id], listed.get(id)),
+  const tiers = harness.tiers(harness.parse, cli, catalog);
+  // The levels both the CLI lists and the dashboard passes; the dashboard refuses any other.
+  const efforts = (model: CliModel) => harness.efforts.filter((level) => model.efforts.includes(level));
+  const rows = [...models.values()]
+    .map((model) => ({ model, parsed: harness.parse(model.id) }))
+    .sort((a, b) => compareModelIds(a.parsed, b.parsed, tiers) || a.model.id.localeCompare(b.model.id))
+    .map(({ model, parsed }): ModelOption => ({
+      label: modelLabel(harness, model.id, parsed, models),
+      value: model.id,
+      detail: model.description || catalogDetail(catalog[model.id]),
+      efforts: efforts(model),
     }));
+  // "opus" reads "Opus 5.5" and sorts where Opus 5.5 does.
   const aliasRows = aliases
-    .map((alias) => ({ alias, family: alias.id.replace(CONTEXT_SUFFIX, "") }))
-    .sort((a, b) => (prices.get(b.family) ?? 0) - (prices.get(a.family) ?? 0) || a.alias.id.localeCompare(b.alias.id))
-    .map(({ alias }): ModelOption => ({
-      label: withContext(capitalize(alias.id.replace(CONTEXT_SUFFIX, "")), alias.id),
+    .map((alias) => ({ alias, parsed: harness.parse(alias.resolved) }))
+    .sort((a, b) => compareModelIds(a.parsed, b.parsed, tiers) || a.alias.id.localeCompare(b.alias.id))
+    .map(({ alias, parsed }): ModelOption => ({
+      label: modelLabel(harness, alias.resolved, parsed, models),
       value: alias.id,
-      detail: [alias.name ? `Now ${alias.name}` : "", alias.description ?? ""].filter(Boolean).join(" · "),
-      group: ALIAS_GROUP,
-      efforts: modelEfforts(backend, alias.id, catalog[alias.id], alias),
+      detail: alias.description ?? "",
+      efforts: efforts(alias),
+      alias: true,
     }));
   return [...rows, ...aliasRows];
 }
 
-function isPickerModel(backend: PickerBackend, id: string, model: ModelsDevModel): boolean {
-  if (!isUsableTextModel(id, model)) {
-    return false;
-  }
-  return backend === "claude" ? id.startsWith("claude-") && isClaudePickerModel(id) : isCodexRelevantModel(id);
+/** Families in the order the CLI first lists them: Claude Code lists Opus, Fable, Sonnet, Haiku. */
+function tiersByListOrder(parse: Harness["parse"], cli: CliModel[]): Map<string, number> {
+  const families = [...new Set(cli.map((model) => parse(model.resolved).family))];
+  return new Map(families.map((family, index) => [family, families.length - index]));
 }
 
-/** "claude-opus-5-5" is Opus of Claude 5.5, "gpt-6.1-sol" Sol of GPT-6.1, "o4-mini" Mini of o4. */
-function parseModelId(backend: PickerBackend, id: string): ParsedModelId {
+/** Each family's highest output price in the catalog: Astra before Sol before Terra before Luna. */
+function tiersByPrice(parse: Harness["parse"], _cli: CliModel[], catalog: Record<string, ModelsDevModel>): Map<string, number> {
+  const prices = new Map<string, number>();
+  for (const [id, model] of Object.entries(catalog)) {
+    const price = model.cost?.output;
+    if (typeof price === "number") {
+      const { family } = parse(id);
+      prices.set(family, Math.max(prices.get(family) ?? 0, price));
+    }
+  }
+  return prices;
+}
+
+function splitContext(id: string): { base: string; context?: string } {
   const suffix = CONTEXT_SUFFIX.exec(id);
-  const context = suffix ? `${suffix[1]}${suffix[2].toUpperCase()}` : undefined;
-  const base = suffix ? id.slice(0, suffix.index) : id;
-  if (backend === "claude") {
-    const claude = /^claude-([a-z]+)((?:-\d{1,2})+)(?:-\d{8})?$/.exec(base);
-    if (claude) {
-      const version = claude[2].slice(1).split("-").map(Number);
-      const number = version.join(".");
-      return { group: `Claude ${number}`, series: 0, version, family: claude[1], name: `${capitalize(claude[1])} ${number}`, context };
-    }
-  } else {
-    const gpt = /^gpt-(\d+(?:\.\d+)?)(?:-([a-z][a-z0-9-]*))?$/.exec(base);
-    if (gpt) {
-      const variant = gpt[2] ?? "";
-      return { group: `GPT-${gpt[1]}`, series: 0, version: gpt[1].split(".").map(Number), family: variant, name: [`GPT-${gpt[1]}`, ...words(variant)].join(" "), context };
-    }
-    const oSeries = /^o(\d+)(?:-([a-z][a-z0-9-]*))?$/.exec(base);
-    if (oSeries) {
-      const variant = oSeries[2] ?? "";
-      return { group: `o${oSeries[1]}`, series: 1, version: [Number(oSeries[1])], family: `o:${variant}`, name: [`o${oSeries[1]}`, ...words(variant)].join(" "), context };
-    }
+  return suffix ? { base: id.slice(0, suffix.index), context: `${suffix[1]}${suffix[2].toUpperCase()}` } : { base: id };
+}
+
+/** An id of no known shape reads as its words, without a provider prefix: "anthropic/my-model" is "My Model". */
+function unknownId(base: string, context?: string): ParsedModelId {
+  return { series: 2, version: [], family: base, name: words(base.slice(base.lastIndexOf("/") + 1)), context };
+}
+
+/** "claude-opus-5-5" is Opus 5.5, "claude-haiku-4-5-20251001" Haiku 4.5. */
+function parseClaudeId(id: string): ParsedModelId {
+  const { base, context } = splitContext(id);
+  const claude = /^claude-([a-z]+)((?:-\d{1,2})+)(?:-\d{8})?$/.exec(base);
+  if (!claude) {
+    return unknownId(base, context);
   }
-  return { group: "Other", series: 2, version: [], family: base, name: base, context };
+  const version = claude[2].slice(1).split("-").map(Number);
+  return { series: 0, version, family: claude[1], name: `${capitalize(claude[1])} ${version.join(".")}`, context };
 }
 
-function words(variant: string): string[] {
-  return variant.split("-").filter(Boolean).map(capitalize);
+/** "gpt-6.1-sol" is Sol 6.1, "gpt-5.3-codex-spark" Codex Spark 5.3; "gpt-5.6" has no family word. */
+function parseGptId(id: string): ParsedModelId {
+  const { base, context } = splitContext(id);
+  const gpt = /^gpt-(\d+(?:\.\d+)?)(?:-([a-z][a-z0-9-]*))?$/.exec(base);
+  if (gpt) {
+    const family = gpt[2] ?? "";
+    return { series: 0, version: gpt[1].split(".").map(Number), family, name: family ? `${words(family)} ${gpt[1]}` : `GPT-${gpt[1]}`, context };
+  }
+  const oSeries = /^o(\d+)(?:-([a-z][a-z0-9-]*))?$/.exec(base);
+  if (oSeries) {
+    const family = oSeries[2] ?? "";
+    return { series: 1, version: [Number(oSeries[1])], family: `o:${family}`, name: family ? `${words(family)} o${oSeries[1]}` : `o${oSeries[1]}`, context };
+  }
+  return unknownId(base, context);
 }
 
-/** Newest generation first; within one, the family with the highest price first. */
-function compareModelIds(a: ParsedModelId, b: ParsedModelId, prices: Map<string, number>): number {
+/** Codex's display name, the name and then the version: "GPT-6.2-Sol" and "GPT-6.2 Sol" read "Sol 6.2". */
+function gptName(display: string): string {
+  const named = /^GPT-(\d+(?:\.\d+)?)[- ](.+)$/i.exec(display);
+  return named ? `${capitalize(named[2].replace(/-/g, " "))} ${named[1]}` : display;
+}
+
+function words(family: string): string {
+  return family.split(/[-_]/).filter(Boolean).map(capitalize).join(" ");
+}
+
+/** The highest version first; within one, the family of the highest tier first. */
+function compareModelIds(a: ParsedModelId, b: ParsedModelId, tiers: Map<string, number>): number {
   if (a.series !== b.series) {
     return a.series - b.series;
   }
@@ -805,27 +885,13 @@ function compareModelIds(a: ParsedModelId, b: ParsedModelId, prices: Map<string,
       return diff;
     }
   }
-  return (prices.get(b.family) ?? 0) - (prices.get(a.family) ?? 0) || Number(!!a.context) - Number(!!b.context);
+  return (tiers.get(b.family) ?? 0) - (tiers.get(a.family) ?? 0) || Number(!!a.context) - Number(!!b.context);
 }
 
-/** Each family's highest output price in the catalog: Fable before Opus before Sonnet before Haiku. */
-function familyPrices(backend: PickerBackend, catalog: Record<string, ModelsDevModel>): Map<string, number> {
-  const prices = new Map<string, number>();
-  for (const [id, model] of Object.entries(catalog)) {
-    const price = model.cost?.output;
-    if (typeof price === "number") {
-      const { family } = parseModelId(backend, id);
-      prices.set(family, Math.max(prices.get(family) ?? 0, price));
-    }
-  }
-  return prices;
-}
-
-/** The CLI's display name for the model ("GPT-6.2-Sol" reads "GPT-6.2 Sol"), or one read from the id. */
-function modelLabel(backend: PickerBackend, id: string, parsed: ParsedModelId, listed: Map<string, CliModel>): string {
+/** The harness's name for the CLI's display name, or the name read from the id. */
+function modelLabel(harness: Harness, id: string, parsed: ParsedModelId, listed: Map<string, CliModel>): string {
   const own = listed.get(id.replace(CONTEXT_SUFFIX, ""))?.name?.trim();
-  const name = own ? (backend === "codex" ? own.replace(/^(GPT-\d+(?:\.\d+)?)-/i, "$1 ") : own) : parsed.name;
-  return withContext(name, id);
+  return withContext(own ? harness.name(own) : parsed.name, id);
 }
 
 /** "Opus 5.5" of "claude-opus-5-5[1m]" reads "Opus 5.5 · 1M". */
@@ -834,28 +900,29 @@ function withContext(name: string, id: string): string {
   return suffix ? `${name} · ${suffix[1]}${suffix[2].toUpperCase()}` : name;
 }
 
-/** The levels both the model's CLI lists and the dashboard passes; the dashboard refuses any other. */
-function modelEfforts(backend: PickerBackend, id: string, model: ModelsDevModel | undefined, listed: CliModel | undefined): EffortId[] {
-  // Claude Code's levels, kept in the catalog: the dashboard takes exactly these.
-  if (model?.efforts) {
-    return model.efforts;
+/**
+ * The name the app shows for any model an agent runs on. The home names every
+ * model it sends with this (cloud/worker/home.mjs), so the app never names
+ * one itself. A model its harness lists reads as its picker row does (an
+ * alias like the model it stands for: "opus" is "Opus 5.5"); any other id
+ * reads as the rows' rules read it ("claude-opus-4-1" is "Opus 4.1", "gpt-6.1-sol"
+ * Sol 6.1, "my-model" My Model). No id is the model the harness runs when
+ * given none (HarnessModels.default), and null when it does not say which.
+ * `harnesses` is the last discoverHarnesses() answer, empty before the first.
+ */
+export function modelName(harnesses: HarnessModels[], backend: string, id: string | null): string | null {
+  const listed = harnesses.find((harness) => harness.id === backend);
+  if (!id) {
+    return listed?.default ? modelName(harnesses, backend, listed.default) : null;
   }
-  if (!hasEffortSetting(backend, id, model)) {
-    return [];
+  const row = listed?.models.find((model) => model.value === id);
+  if (row) {
+    return row.label;
   }
-  return listed ? RUDDER_EFFORTS[backend].filter((level) => listed.efforts.includes(level)) : RUDDER_EFFORTS[backend];
+  const harness = HARNESSES.find((entry) => entry.id === backend);
+  return withContext(harness ? harness.parse(id).name : unknownId(splitContext(id).base).name, id);
 }
 
-/** native/src/models.rs model_supports_reasoning: the family rule, or the catalog's word. */
-function hasEffortSetting(backend: PickerBackend, id: string, model: ModelsDevModel | undefined): boolean {
-  if (model?.reasoning === true) {
-    return true;
-  }
-  if (backend === "claude") {
-    return /opus|sonnet|fable/.test(id) || (id.startsWith("claude-") && !id.includes("3-"));
-  }
-  return isGptTextModel(id) || id.includes("codex") || isOSeriesModel(id);
-}
 
 type ClaudeCodeModel = {
   value?: string;
@@ -868,27 +935,41 @@ type ClaudeCodeModel = {
 
 const CLAUDE_CODE_TIMEOUT_MS = 20_000;
 
+/** Claude Code's own /model list, and the model its "default" row runs. */
+type ClaudeCodeList = { models: CliModel[]; default: string | null };
+
 /**
  * Claude Code's own /model list for this account, with each alias's current
  * model, display names and the effort levels each model takes. Each alias
  * also lists the model it stands for. Empty when Claude Code is not installed.
+ * Its "default" row is not a model of its own: it names the model an agent
+ * started without one runs.
  */
-async function readClaudeCodeModels(): Promise<CliModel[]> {
+async function readClaudeCodeModels(): Promise<ClaudeCodeList> {
   const answer = await claudeCodeModelList();
   const models: CliModel[] = [];
+  let runsByDefault: string | null = null;
   for (const row of answer ?? []) {
-    // Claude Code's "default" is what Rudder's Default row starts.
-    if (!row.value || row.value === "default") {
+    if (row.value === "default") {
+      runsByDefault = row.resolvedModel?.startsWith("claude-") ? row.resolvedModel : null;
+      continue;
+    }
+    if (!row.value) {
       continue;
     }
     const efforts = row.supportsEffort ? row.supportedEffortLevels ?? [] : [];
-    const alias = !row.value.startsWith("claude-");
-    models.push({ id: row.value, name: row.displayName, description: row.description, efforts, alias });
-    if (alias && row.resolvedModel?.startsWith("claude-")) {
-      models.push({ id: row.resolvedModel, name: row.displayName, description: row.description, efforts, alias: false });
+    if (row.value.startsWith("claude-")) {
+      models.push({ id: row.value, name: row.displayName, description: row.description, efforts, alias: false, resolved: row.value });
+      continue;
     }
+    // An alias is named and placed like the model it stands for.
+    if (!row.resolvedModel?.startsWith("claude-")) {
+      throw new Error(`Claude Code listed the model alias "${row.value}" without the Claude model it stands for`);
+    }
+    models.push({ id: row.value, name: row.displayName, description: row.description, efforts, alias: true, resolved: row.resolvedModel });
+    models.push({ id: row.resolvedModel, name: row.displayName, description: row.description, efforts, alias: false, resolved: row.resolvedModel });
   }
-  return models;
+  return { models, default: runsByDefault };
 }
 
 /** Claude Code's headless `initialize` answer: its model list, or null when Claude Code is not installed. */

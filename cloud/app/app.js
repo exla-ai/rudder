@@ -13,15 +13,18 @@ import { ContextMeter } from "/app/context-meter.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
-import { NotesScreen, notesLink, notesPath } from "/app/notes.js";
+import { NOTES_ICON, NotesScreen, notesLink, notesPath } from "/app/notes.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
-import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
+import { mountCommandPalette } from "/app/command-palette.js";
+import { agentModelLabel, openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
+import { mountQuoteReply, paintQuote } from "/app/quote-reply.js";
 import { duration, paintSubagent } from "/app/subagents.js";
-import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
-import { sentAfter, settlePending } from "/app/pending.js";
+import { mountSubagentTray } from "/app/subagent-tray.js";
+import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
+import { sentAfter, settlePending, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -46,6 +49,7 @@ const store = {
   stateError: null,
   signedOut: false,
   transcripts: new Map(),   // `${ws}|${run}` -> transcript
+  earlier: new Map(),       // `${ws}|${run}` -> {conversation,pin,cursor,messages,loading}: pages loaded above it
   pending: new Map(),       // `${ws}|${run}` -> [{id,text,ts,state}]
   expanded: new Set(),      // tool message keys
   showMore: new Set(),
@@ -120,8 +124,7 @@ const agentStatus = (a) => {
   }
   return statusOf(a?.status);
 };
-const BACKEND = { claude: "Claude", codex: "Codex", opencode: "opencode" };
-const backendLabel = (a) => [BACKEND[a.backend] || a.backend, a.model].filter(Boolean).join(" · ");
+const backendLabel = (a) => agentModelLabel(a);
 
 // The "All agents" chat's hidden project (all-agents.js) is found too, never listed.
 function findProject(ws) {
@@ -740,6 +743,7 @@ function DesktopShell() {
   const planUsage = PlanUsage();
   el.querySelector(".ds-foot").prepend(planUsage.el);
   const projectsEl = el.querySelector(".ds-projects");
+  rowMenu(projectsEl, ".ds-prow", (row, at) => projectMenu(row.closest(".ds-proj").dataset.key, at, row.querySelector(".ds-pn")));
   const needsSec = el.querySelector(".ds-needs");
   const needsEl = el.querySelector(".ds-needs-list");
   // "Needs you" folds away like a project; the count stays in its header.
@@ -784,7 +788,7 @@ function DesktopShell() {
     setSideClosed(!sideClosed);
   }, { signal: life.signal });
   // Two agents side by side: drag one from the sidebar onto the right of
-  // the main area, or use its "Open on the right" button. At most two panes;
+  // the main area, or use "Open beside" in its menu. At most two panes;
   // the URL follows the focused one. Remembered per viewer until closed.
   const panes = [...main.querySelectorAll(".dsk-pane")].map((paneEl) => ({ el: paneEl, route: null, screen: null }));
   const divider = main.querySelector(".pane-div");
@@ -1230,7 +1234,7 @@ function DesktopShell() {
   const stepHint = `${alt}+[ and ${alt}+] step through agents`;
   const sideAgent = (x) => {
     // The status line: in "Needs you" the project name gives way before the status does.
-    const a = h(`<a class="ds-agent" data-link draggable="false"><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><span class="ds-apin" hidden aria-hidden="true">${icon("pin")}</span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
+    const a = h(`<a class="ds-agent" data-link draggable="false"><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><span class="ds-apin" hidden aria-hidden="true">${icon("pin")}</span></a>`);
     a.title = stepHint;
     return a;
   };
@@ -1276,9 +1280,6 @@ function DesktopShell() {
     a.dataset.ws = target.ws; a.dataset.run = ag.pending ? "" : target.run;
     // A project's own rows move (moving agents, above); "Needs you" keeps its order.
     if (showProject || ag.pending) a.removeAttribute("aria-describedby"); else a.setAttribute("aria-describedby", "ds-move-hint");
-    const openR = a.querySelector(".ds-open-r");
-    openR.hidden = !!ag.pending || !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, target));
-    openR.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openIn(1, target); };
     a._target = { p, a: ag };
     const name = a.querySelector(".ds-an");
     if (!isRenaming(name)) setText(name, ag.title || ag.task || "Untitled agent");
@@ -1553,9 +1554,9 @@ function withCompactMarkers(messages) {
 
 // Photos and files from the phone. Each one is uploaded to the project on the
 // cloud machine (<repo>/.rudder/uploads, git-excluded) and the message carries
-// the saved paths under "Attached files:", which the agent opens like any file.
+// the saved paths (pending.js withAttachments), which the agent opens like any
+// file. The transcript gives them back as a message's `attachments`.
 const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
-const ATTACH_HEADER = "Attached files:";
 // The iOS shell before 1.0.1 has no camera permission string, and picking
 // "Take Photo" there crashes the app: offer files only until it updates.
 const ATTACH_DOCS_ONLY = !!NATIVE && !NATIVE.attachments;
@@ -1623,18 +1624,6 @@ function openAttachMenu(anchor, pick) {
   document.addEventListener("keydown", onKey, true);
   if (!coarse) menu.querySelector("button:not([disabled])")?.focus();
   return close;
-}
-
-function withAttachments(text, paths) {
-  if (!paths.length) return text;
-  const list = paths.map((p) => `- ${p}`).join("\n");
-  return text ? `${text}\n\n${ATTACH_HEADER}\n${list}` : `${ATTACH_HEADER}\n${list}`;
-}
-
-function splitAttachments(text) {
-  const m = /(?:^|\n\n)Attached files:\n((?:- [^\n]+(?:\n|$))+)\s*$/.exec(text || "");
-  if (!m) return { body: text || "", files: [] };
-  return { body: text.slice(0, m.index).trim(), files: m[1].trim().split("\n").map((line) => line.slice(2).trim()).filter(Boolean) };
 }
 
 const attachmentName = (p) => String(p).split("/").pop().replace(/^\d{8}-\d{6}-(?:\d+-)?/, "");
@@ -2642,6 +2631,7 @@ function HomeScreen() {
   const needsListEl = el.querySelector(".needs");
   const projectsSec = el.querySelector(".projects-sec");
   const projectsEl = el.querySelector(".projects");
+  rowMenu(projectsEl, ".card.project", (card, at) => projectMenu(card.dataset.key, at, card));
   const projectsBody = el.querySelector(".projects-body");
   const addSlot = el.querySelector(".add-slot");
   // First run: the three steps lead, above the projects.
@@ -2764,12 +2754,7 @@ function HomeScreen() {
 
     const projects = sortProjects(s.projects || []);
     setText(projectsSec.querySelector(".count"), projects.length ? String(projects.length) : "");
-    // Moving needs a neighbour in the same group (pinned or not).
-    const groupSize = (p) => projects.filter((x) => !!pinnedAt(x) === !!pinnedAt(p)).length;
-    reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, (cEl, p) => {
-      updateProjectCard(cEl, p);
-      cEl.querySelector(".p-more").hidden = groupSize(p) < 2;
-    });
+    reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, updateProjectCard);
 
     if (!projects.length) {
       const body = "Add a project, then start agents on it from here. They run on your own cloud machine, so they keep going with your phone locked and your laptop closed.";
@@ -2927,54 +2912,52 @@ function announce(text) {
   setTimeout(() => { liveEl.textContent = text; }, 50);
 }
 
-// A project card's menu, for moving it where there is no sidebar to drag in.
-function openProjectMenu(anchor, ws) {
+// A new chat in a project: its page with the task box ready, which starts the
+// agent (ProjectScreen, POST /api/app/task).
+function newChat(ws) {
+  navigate(projectPath(ws));
+  screen?.el.querySelector(".composer textarea")?.focus();
+}
+
+// A project's menu, from its sidebar row or home screen card: a right click,
+// the menu key, a long press (rowMenu) or the card's More button. `at` places
+// it as showAgentMenu does; focus goes back to `returnFocus`.
+function projectMenu(ws, at, returnFocus) {
   const all = sortProjects(store.state?.projects || []);
   const p = all.find((x) => x.workspaceId === ws);
   if (!p) return;
-  const group = all.filter((x) => !!pinnedAt(x) === !!pinnedAt(p));
-  const at = group.indexOf(p);
-  const wrap = h(`<div><div class="scrim"></div><div class="menu" role="menu"></div></div>`);
-  const menu = wrap.querySelector(".menu");
-  menu.setAttribute("aria-label", p.name || "Project");
-  const close = () => {
-    wrap.remove();
-    anchor.setAttribute("aria-expanded", "false");
-    document.removeEventListener("keydown", onKey, true);
+  const pinned = !!pinnedAt(p);
+  // Pinned projects and the others each keep to their own group.
+  const group = all.filter((x) => !!pinnedAt(x) === pinned);
+  const place = group.indexOf(p);
+  const move = (to) => {
+    const m = moveProject(ws, to);
+    if (m) announce(moveSaid(m, to < place));
+    // The repaint moved the row, which drops focus: put it back.
+    if (returnFocus?.isConnected) returnFocus.focus();
   };
-  const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); anchor.focus(); } };
-  for (const [label, ic, to, off] of [["Move up", "up", at - 1, at === 0], ["Move down", "down", at + 1, at === group.length - 1]]) {
-    const b = h(`<button type="button" role="menuitem">${icon(ic)}<span></span></button>`);
-    b.querySelector("span").textContent = label;
-    b.disabled = off;
-    b.addEventListener("click", () => {
-      close();
-      const m = moveProject(ws, to);
-      if (m) announce(moveSaid(m, to < at));
-      anchor.focus();
-    });
-    menu.appendChild(b);
-  }
-  wrap.querySelector(".scrim").addEventListener("click", close);
-  // Under the button, or above it when the card is near the bottom.
-  const r = anchor.getBoundingClientRect();
-  const below = r.bottom + 120 < innerHeight;
-  Object.assign(menu.style, {
-    position: "fixed", right: `${innerWidth - r.right}px`,
-    top: below ? `${r.bottom + 4}px` : "auto", bottom: below ? "auto" : `${innerHeight - r.top + 4}px`,
-    transformOrigin: below ? "top right" : "bottom right",
+  showAgentMenu({
+    ...at,
+    label: p.name || p.repo || "Project",
+    returnFocus,
+    items: [
+      { label: "New chat", icon: "plus", run: () => newChat(ws) },
+      { label: "Notes", icon: "file", run: () => navigate(notesPath(ws)) },
+      { label: pinned ? "Unpin" : "Pin to the top", icon: "pin", run: () => setPinned(ws, !pinned) },
+      ...(group.length < 2 ? [] : [
+        "divider",
+        { label: "Move up", icon: "up", disabled: place === 0, run: () => move(place - 1) },
+        { label: "Move down", icon: "down", disabled: place === group.length - 1, run: () => move(place + 1) },
+      ]),
+    ],
   });
-  document.body.appendChild(wrap);
-  anchor.setAttribute("aria-expanded", "true");
-  document.addEventListener("keydown", onKey, true);
-  menu.querySelector("button:not([disabled])")?.focus();
 }
 
 function createProjectCard() {
   const el = h(`<a class="card project tap" data-link>
     <div class="p-top"><span class="p-name"></span><span class="pill p-dash"></span><span class="dot live s-working p-live"></span>
       <button type="button" class="p-pin" aria-pressed="false">${icon("pin")}</button>
-      <button type="button" class="p-more" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button></div>
+      <button type="button" class="p-more" aria-haspopup="menu">${icon("more")}</button></div>
     <div class="p-repo"></div>
     <div class="p-stats">
       <span class="stat st-w s-working"><span class="dot"></span><b></b> working</span>
@@ -2992,7 +2975,7 @@ function createProjectCard() {
   el.querySelector(".p-more").addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    openProjectMenu(e.currentTarget, el.dataset.key);
+    projectMenu(el.dataset.key, { anchor: e.currentTarget }, e.currentTarget);
   });
   return el;
 }
@@ -3027,7 +3010,7 @@ function updateProjectCard(el, p) {
   const pin = el.querySelector(".p-pin");
   pin.setAttribute("aria-pressed", String(pinned));
   pin.setAttribute("aria-label", pinned ? `Unpin ${p.name || "project"}` : `Pin ${p.name || "project"} to the top`);
-  el.querySelector(".p-more").setAttribute("aria-label", `Move ${p.name || "project"}`);
+  el.querySelector(".p-more").setAttribute("aria-label", `Actions for ${p.name || "project"}`);
   const err = el.querySelector(".p-err");
   setText(err, p.failureReason || ""); err.hidden = !p.failureReason;
   el.setAttribute("aria-label", `${p.name}, ${w} working, ${n} need you, ${d} done`);
@@ -3269,7 +3252,7 @@ function digestRunRow(p, r) {
   setText(el.querySelector(".a-title"), r.title || r.task || "Untitled agent");
   setText(el.querySelector(".a-time"), r.firstAt === r.lastAt ? clockTime(r.lastAt) : `${clockTime(r.firstAt)} to ${clockTime(r.lastAt)}`);
   setText(el.querySelector(".status-text"), st.label);
-  const model = [BACKEND[r.backend] || r.backend, r.model].filter(Boolean).join(" · ");
+  const model = agentModelLabel(r);
   const chip = el.querySelector(".c-model");
   setText(chip, model); chip.hidden = !model;
   const did = el.querySelector(".d-did");
@@ -3738,7 +3721,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
       ${canOpenOnMac() ? `<button type="button" class="icon-btn mac-copy" aria-label="Open a copy on this Mac" title="Open a copy on this Mac">${MAC_ICON}</button>` : ""}
       <button type="button" class="icon-btn lock-toggle" hidden aria-pressed="false"></button>
-      <button type="button" class="icon-btn term-toggle" aria-label="Show the agent's terminal" aria-pressed="false">${icon("terminal")}</button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
     <div class="term-panel" hidden>
@@ -3753,7 +3735,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       </div>
     </div>
     <div class="chat-wrap">
-      <div class="scroller has-composer"><div class="chat" role="log" aria-label="Conversation"><div class="truncated-note" hidden>Showing the most recent messages</div><div class="msgs"></div><div class="typing" hidden aria-label="Agent is working"><i></i><i></i><i></i></div></div></div>
+      <div class="scroller has-composer"><div class="chat" role="log" aria-label="Conversation"><div class="earlier-bar" hidden><button type="button" class="load-earlier">Load earlier messages</button><span class="earlier-start">Start of the conversation</span></div><div class="msgs"></div><div class="typing" hidden aria-label="Agent is working"><i></i><i></i><i></i></div></div></div>
       <button type="button" class="new-pill">${icon("down")}<span>New messages</span></button>
     </div></section>`);
   const bar = el.querySelector(".topbar");
@@ -3790,7 +3772,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   back.href = backTo;
   back.setAttribute("aria-label", ro ? "Back to team" : allAgents ? "Back to projects" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
-  if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
+  if (ro) for (const n of el.querySelectorAll(".mac-copy, .more")) n.hidden = true;
   else if (allAgents) {
     // Its project is hidden and holds no work: no files, canvas or Mac copy.
     el.querySelector(".mac-copy")?.remove();
@@ -3810,7 +3792,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     draftKey: `msg:${key}`,
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
     attachments: true,
-    onSubmit: (text, files) => { send(text, files); return true; },
+    onSubmit: (text, files) => { send(quoteReply?.wrap(text) ?? text, files); return true; },
   });
   // With the sidebar (DesktopShell), Alt+[ and Alt+] step between agents. The
   // hint says so when the pane has room for it (desktop.css .c-steps).
@@ -3828,7 +3810,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Context left and where the backend compacts, at the row's end (context-meter.js).
   const contextMeter = ContextMeter(chatTools);
   // Edit on any prompt: rewinds the conversation to it, in place (chat-edit.js).
-  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript() });
+  // Highlight to reply: Reply on text selected in a message quotes it above the prompt (quote-reply.js).
+  const quoteReply = ro ? null : mountQuoteReply({ chat: msgsEl, scroller, composer });
+  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript(), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -3880,6 +3864,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Pinned above the composer: the oldest prompt the agent is blocked on.
   const askSlot = h(`<div class="ask-slot"></div>`);
   composer.el.before(askSlot);
+  // Above it: every subagent and teammate the agent started (subagent-tray.js).
+  const tray = ro ? null : mountSubagentTray({ workspace: ws, run });
+  if (tray) askSlot.before(tray.el);
   let askCard = null;
   function paintAsk() {
     if (ro) return;
@@ -3942,9 +3929,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
 
   // Negotiate the exact current agent screen independently of the dashboard
   // byte channel. Historical and legacy owners retain their HTTP screen view.
+  // It opens and closes from the Cmd+K palette and the More menu.
   const termPanel = el.querySelector(".term-panel");
   const termScreen = el.querySelector(".term-screen");
-  const termToggle = el.querySelector(".term-toggle");
   let termOn = false;
   let termTimer = null;
   let termCanonical = false;
@@ -3989,13 +3976,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   function setTerminal(on) {
     termOn = on; termCanonical = false; termFallbackEpoch++;
     termPanel.hidden = !on;
-    termToggle.setAttribute("aria-pressed", String(on));
-    termToggle.classList.toggle("on", on);
     clearTimeout(termTimer);
     terminalView.stop();
     if (on && !document.hidden) terminalView.start();
   }
-  termToggle.addEventListener("click", () => setTerminal(!termOn));
   el.querySelector(".key-strip").addEventListener("click", async (e) => {
     const b = e.target.closest("[data-key]");
     if (!b) return;
@@ -4009,6 +3993,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let atBottom = true;
   let firstPaint = true;
   let lastCount = 0;
+  // A paint that keeps what is on screen in place (paintKeepingView).
+  let holdScroll = false;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
   const toBottom = (smooth) => scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   scroller.addEventListener("scroll", () => {
@@ -4093,16 +4079,17 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     menuEl = h(`<div><div class="scrim"></div><div class="menu" role="menu"></div></div>`);
     const menu = menuEl.querySelector(".menu");
     const add = (html, fn) => { const b = h(html); b.addEventListener("click", () => { closeMenu(); fn(); }); menu.appendChild(b); };
-    // The header buttons a narrow bar hides (.agent-bar in agent-stats.css) lead the menu.
+    // The terminal (on a phone, its only way in; Cmd+K has it too), then the
+    // header buttons a narrow bar hides (.agent-bar in agent-stats.css).
+    add(`<button type="button" role="menuitem">${icon("terminal")}<span>${termOn ? "Close terminal" : "Open terminal"}</span></button>`, () => setTerminal(!termOn));
     const priv = lockBtn.classList.contains("on");
     const tucked = [
-      [termToggle, "Show terminal"],
       [bar.querySelector(".fp-toggle"), "Files"],
       [bar.querySelector(".cv-toggle"), "Canvas"],
       [lockBtn, priv ? "Share with your team" : "Make private", icon(priv ? "unlock" : "lock")],
     ].filter(([b]) => b && !b.hidden && !b.getClientRects().length);
     for (const [b, label, ic] of tucked) add(`<button type="button" role="menuitem">${ic || b.innerHTML}<span>${escapeHtml(label)}</span></button>`, () => b.click());
-    if (tucked.length) menu.appendChild(h("<hr>"));
+    menu.appendChild(h("<hr>"));
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
     if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>Open in Claude</span></button>`, () => openExternal(a.remoteUrl));
     if (canOpenOnMac() && findProject(ws)?.repo) add(`<button type="button" role="menuitem">${MAC_ICON}<span>Open a copy on this Mac</span></button>`, copyHere);
@@ -4150,10 +4137,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       for (const f of item.files || []) {
         if (!f.path) { f.path = await uploadAttachment(ws, f.file); paint(); }
       }
-      item.sentText = withAttachments(item.text, (item.files || []).map((f) => f.path));
       item.state = "sending";
       paint();
-      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: item.sentText } });
+      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)) } });
       item.state = "sent";
       // It answered the agent's open question; the transcript shows the answer.
       if (res?.answered) store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
@@ -4171,10 +4157,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   async function loadTranscript() {
     if (inflight) return;
     inflight = true;
+    // With earlier pages loaded, the newest page starts where they end (its
+    // `after` cursor), so messages that scroll out of its last 300 stay shown.
+    const pin = store.earlier.get(key)?.pin ?? null;
     try {
-      const t = ro
-        ? await api(`/api/app/team/transcript?member=${encodeURIComponent(member)}&workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`)
-        : await api(`/api/app/transcript?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`);
+      const t = await api(transcriptUrl(pin ? `&after=${encodeURIComponent(pin)}` : ""));
+      // Asked for before the first earlier page pinned it: the next poll asks again.
+      if ((store.earlier.get(key)?.pin ?? null) !== pin) return;
+      // An edit started a new conversation: the pages loaded above were the old one's.
+      if (pin && t.conversation !== store.earlier.get(key).conversation) store.earlier.delete(key);
       store.transcripts.set(key, t);
       lastErr = null;
       waking = false;
@@ -4187,6 +4178,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         waking = err.status === 503;
         const prev = store.transcripts.get(key);
         const text = err.status === 404 ? "This agent is private now, or it was deleted." : err.message;
+        if (err.status === 404) store.earlier.delete(key);
         store.transcripts.set(key, { ...(prev || {}), messages: err.status === 404 ? [] : prev?.messages || [], error: text, roNotice: text });
         return;
       }
@@ -4208,6 +4200,57 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const list = store.pending.get(key);
     if (!list?.length) return;
     store.pending.set(key, settlePending(list, t.messages, Date.now()));
+  }
+
+  // The chat's transcript request. A teammate's agent is read through the team view.
+  const transcriptUrl = (page) => ro
+    ? `/api/app/team/transcript?member=${encodeURIComponent(member)}&workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300${page}`
+    : `/api/app/transcript?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300${page}`;
+
+  // "Load earlier messages": the page before the oldest one shown, put in
+  // above it. The first one pins the newest page's start (loadTranscript).
+  async function loadEarlier() {
+    const t = store.transcripts.get(key);
+    const e = store.earlier.get(key) || { conversation: t?.conversation, pin: t?.earlier, cursor: t?.earlier, messages: [], loading: false };
+    if (!e.cursor || e.loading) return;
+    e.loading = true;
+    store.earlier.set(key, e);
+    paint();
+    try {
+      const page = await api(transcriptUrl(`&before=${encodeURIComponent(e.cursor)}`));
+      if (store.earlier.get(key) !== e) return;
+      e.messages = [...page.messages, ...e.messages];
+      e.cursor = page.earlier;
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+    } finally {
+      e.loading = false;
+      paintKeepingView();
+    }
+  }
+  el.querySelector(".load-earlier").addEventListener("click", loadEarlier);
+
+  // Messages put in above stay out of the way: the first message in view
+  // keeps its place on screen.
+  function paintKeepingView() {
+    const top = scroller.getBoundingClientRect().top;
+    const anchor = [...msgsEl.children].find((n) => n.matches(".msg, .tool, .compact, .turn-time") && n.getBoundingClientRect().bottom > top);
+    const was = anchor?.getBoundingClientRect().top;
+    holdScroll = true;
+    try { paint(); } finally { holdScroll = false; }
+    if (anchor?.isConnected) scroller.scrollTop += anchor.getBoundingClientRect().top - was;
+    atBottom = isAtBottom();
+  }
+
+  function paintEarlier(t, e) {
+    const cursor = e ? e.cursor : t.earlier;
+    const bar = el.querySelector(".earlier-bar");
+    bar.hidden = !cursor && !e?.messages.length;
+    const btn = bar.querySelector(".load-earlier");
+    btn.hidden = !cursor;
+    btn.disabled = !!e?.loading;
+    setText(btn, e?.loading ? "Loading earlier messages" : "Load earlier messages");
+    bar.querySelector(".earlier-start").hidden = !!cursor;
   }
 
   function header() {
@@ -4252,15 +4295,17 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       return;
     }
-    // A message open for editing stays where it is.
-    const wasBottom = firstPaint || (atBottom && !editAction.editing());
+    // A message open for editing stays where it is, and so does what is on
+    // screen while earlier messages go in above (paintKeepingView).
+    const wasBottom = !holdScroll && (firstPaint || (atBottom && !editAction.editing()));
+    const earlier = store.earlier.get(key);
     const items = [];
     let lastDay = null;
     // A run of tool calls between two things the agent SAYS is one collapsed
     // "Worked · N steps" line: a long turn was otherwise a wall of tool rows
     // with the actual replies lost between them.
     let steps = null;
-    for (const m of withCompactMarkers(t.messages || [])) {
+    for (const m of withCompactMarkers([...(earlier?.messages || []), ...(t.messages || [])])) {
       // Short turns (a subagent reporting in) would each add "Worked for 1s".
       if (m.kind === "turn" && !(m.durationMs >= SHORT_TURN_MS)) continue;
       // A turn's time belongs to the turn above it, even past midnight.
@@ -4292,7 +4337,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       items.push({ kind: "error", id: "error", text: t.error, ...(ro ? { ic: t.roNotice?.includes("private") ? "lock" : "power", title: t.roNotice?.includes("private") ? "Not visible to you" : "Their cloud machine is asleep" } : {}) });
     }
 
-    el.querySelector(".truncated-note").hidden = !t.truncated;
+    paintEarlier(t, earlier);
     reconcile(msgsEl, items, (x) => x.id, createItem, updateItem);
     typing.hidden = status !== "working";
 
@@ -4335,9 +4380,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const p = x.p;
       node.className = `msg user ${p.state === "failed" ? "failed" : "pending"}`;
       const md = node.querySelector(".md");
-      const sig = `${p.text}|${markdownReady()}`;
-      if (md.dataset.sig !== sig) { renderMarkdown(md, p.text); md.dataset.sig = sig; }
-      md.hidden = !p.text;
+      // A reply's quote goes above the bubble (quote-reply.js).
+      const body = paintQuote(node, p.text);
+      const sig = `${body}|${markdownReady()}`;
+      if (md.dataset.sig !== sig) { renderMarkdown(md, body); md.dataset.sig = sig; }
+      md.hidden = !body;
       paintAttachments(node.querySelector(".atts"), p.files || []);
       const uploading = (p.files || []).filter((f) => !f.path).length;
       const label = p.state === "sent" ? "Delivered" : p.state === "uploading" && uploading ? `Uploading ${p.files.length - uploading + 1} of ${p.files.length}` : "Sending";
@@ -4354,10 +4401,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const md = node.querySelector(".md");
     let text = m.text || "";
     if (m.role === "user") {
-      const split = splitAttachments(text);
-      text = split.body;
+      text = paintQuote(node, text);
       md.hidden = !text;
-      paintAttachments(node.querySelector(".atts"), split.files.map((path) => ({ path })));
+      paintAttachments(node.querySelector(".atts"), (m.attachments || []).map((path) => ({ path })));
       editAction(node, m, store.transcripts.get(key));
     }
     const sig = `${text}|${markdownReady()}`;
@@ -4462,6 +4508,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   return {
     el,
     update: paint,
+    // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
+    terminal: ro ? null : { isOpen: () => termOn, set: setTerminal },
     destroy() {
       clearTimeout(timer); timer = -1;
       termOn = false; clearTimeout(termTimer); terminalView.stop();
@@ -4470,6 +4518,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       resizeObs.disconnect();
       agentStats.destroy();
       contextMeter.destroy();
+      tray?.destroy();
+      quoteReply?.destroy();
       if (screen?.el === el) document.title = "Rudder";
     },
   };
@@ -4509,6 +4559,58 @@ document.addEventListener("visibilitychange", () => {
 });
 // Re-render relative times every 30s even when data holds still.
 setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
+
+// Cmd+K (command-palette.js): the rows for the page on screen. The agent's
+// terminal, then a new chat and notes for the project on screen, the app's
+// pages, and agents and projects to jump to. Older agents, and a new chat or
+// notes for the other projects, show once something is typed.
+function paletteCommands() {
+  if (store.signedOut) return [];
+  const route = parseRoute(location.pathname);
+  const projects = sortProjects(store.state?.projects || []);
+  const here = ["project", "agent", "notes"].includes(route.name) ? projects.find((p) => p.workspaceId === route.ws) : null;
+  const name = (p) => p.name || p.repo || "Project";
+  const go = (path) => () => navigate(path);
+  // A new chat starts from its project's task box (newChat).
+  const startChat = (p) => () => newChat(p.workspaceId);
+  const rows = [];
+  const term = screen?.terminal;
+  if (term) {
+    const open = term.isOpen();
+    rows.push({ label: open ? "Close terminal" : "Open terminal", detail: findAgent(route.ws, route.run)?.title || "",
+      icon: icon("terminal"), keywords: ["shell", "console"], run: () => term.set(!open) });
+  }
+  if (route.name === "all" || route.name === "all-agent") rows.push({ label: "New chat", detail: "All agents", icon: icon("plus"), run: go(`${ALL_PATH}/new`) });
+  if (here) {
+    rows.push({ label: "New chat", detail: name(here), icon: icon("plus"), keywords: ["agent", "task"], run: startChat(here) });
+    rows.push({ label: "Notes", detail: name(here), icon: NOTES_ICON, run: go(notesPath(here.workspaceId)) });
+  }
+  rows.push(
+    { label: "All agents", detail: "One chat with every agent", icon: icon("agents"), run: go(ALL_PATH) },
+    { label: "All projects", icon: icon("code"), keywords: ["home"], run: go("/app") },
+    { label: "Files", icon: icon("folder"), run: go("/app/files") },
+    { label: "Digest", icon: icon("sun"), run: go(digestPath(null)) },
+    ...(hasTeam(store.state) ? [{ label: "Team", icon: icon("users"), run: go(teamPath()) }] : []),
+    { label: "Settings", icon: icon("settings"), run: openSettings },
+    { label: "Add project", icon: icon("plus"), run: openAddProject },
+  );
+  const agents = projects.flatMap((p) => (p.agents || []).filter((a) => !a.pending).map((a) => ({ p, a })))
+    .sort((x, y) => (y.a.updatedAt || 0) - (x.a.updatedAt || 0));
+  for (const { p, a } of agents) {
+    const st = agentStatus(a);
+    rows.push({ label: a.title || a.task || "Untitled agent", detail: `${name(p)} · ${st.label}`,
+      icon: `<span class="dot ${st.cls}${st.live ? " live" : ""}"></span>`, keywords: [name(p)],
+      searchOnly: groupOf(a) === "earlier", run: go(agentPath(p.workspaceId, a.id)) });
+  }
+  for (const p of projects) rows.push({ label: name(p), detail: p.repo && p.repo !== p.name ? p.repo : "", icon: icon("code"), run: go(projectPath(p.workspaceId)) });
+  for (const p of projects) {
+    if (p === here) continue;
+    rows.push({ label: `New chat in ${name(p)}`, icon: icon("plus"), keywords: ["agent", "task"], searchOnly: true, run: startChat(p) });
+    rows.push({ label: `Notes for ${name(p)}`, icon: NOTES_ICON, searchOnly: true, run: go(notesPath(p.workspaceId)) });
+  }
+  return rows;
+}
+mountCommandPalette(paletteCommands);
 
 // The iOS shell's 9:01 notification, tapped: open the newest digest.
 window.rudderOpenDigest = () => { if (!store.signedOut) navigate(digestPath(null)); };

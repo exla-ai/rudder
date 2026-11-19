@@ -459,7 +459,7 @@ export function formatTranscript(project, agent, transcript, { now = Date.now() 
     size -= body.shift().length + 1;
     dropped += 1;
   }
-  if (dropped || transcript.truncated) head.push("(older messages not shown)");
+  if (dropped || transcript.earlier) head.push("(older messages not shown)");
   return [...head, "", ...body].join("\n");
 }
 
@@ -470,9 +470,11 @@ function messageLine(m, limit) {
     return `[tool] ${m.tool.name}: ${clip(input, 160).replace(/\n+/g, " ")} -> ${clip(result, 160)}`;
   }
   const text = String(m.text || "").trim();
-  if (!text) return null;
+  // Files the user sent from the app (transcripts.mjs showAttachments).
+  const files = m.attachments ? ` (attached: ${m.attachments.join(", ")})` : "";
+  if (!text && !files) return null;
   const who = m.role === "user" ? "user" : m.role === "assistant" ? "agent" : m.role;
-  return `[${who}] ${clip(text, limit)}`;
+  return `[${who}] ${clip(text, limit)}${files}`;
 }
 
 function askLine(q) {

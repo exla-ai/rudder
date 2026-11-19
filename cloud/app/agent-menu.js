@@ -4,7 +4,8 @@
 // click. The dashboard saves a name the way its own rename does (native
 // rename_agent_at), so every screen shows it. A pin keeps an agent from the
 // cleanup that deletes agents nobody touched for a day. Close is the app's
-// one delete (closeAgent here, after deleteAgent in app.js asks).
+// one delete (closeAgent here, after deleteAgent in app.js asks). Project
+// rows and cards open their menu the same ways (rowMenu, projectMenu in app.js).
 import { h, icon } from "/app/render.js";
 import { app, api, openSheet, toast } from "/app/core.js";
 import { hideClosed } from "/app/closing.js";
@@ -301,3 +302,69 @@ export function showAgentMenu({ x, y, anchor, label, items, returnFocus }) {
 
 /** The context-menu key or Shift+F10: open a row's menu from the keyboard. */
 export const isMenuKey = (e) => e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+
+// How long a finger rests on a row before letting go opens its menu: the
+// sidebar's agent rows lift after the same hold (app.js HOLD_MS).
+const HOLD_MS = 350;
+
+// The click a touch screen may send as a held press lets go must not open the
+// row, or land on the menu's scrim and close it.
+function swallowClick() {
+  const stop = (e) => { e.preventDefault(); e.stopPropagation(); };
+  addEventListener("click", stop, { capture: true, once: true });
+  setTimeout(() => removeEventListener("click", stop, true), 400);
+}
+
+/**
+ * Open the menu of a row matching `selector` in `root` the ways an agent row
+ * does: a right click, the context-menu key or Shift+F10, and on a touch
+ * screen a press held for a moment and let go without moving (a swipe still
+ * scrolls). `open(row, at)` gets `{ x, y }` for a pointer or `{ anchor: row }`
+ * for the keyboard. A press on a button in the row stays that button's.
+ */
+export function rowMenu(root, selector, open) {
+  const rowAt = (node) => (node instanceof Element ? node.closest(selector) : null);
+  let press = null; // a held touch: { row, x, y, at, opened }
+  // The context-menu key fires a contextmenu event too; the key opened the menu.
+  let keyMenu = false;
+  root.addEventListener("pointerdown", (e) => {
+    keyMenu = false;
+    press = null;
+    if (!e.isPrimary || e.pointerType === "mouse" || e.button !== 0) return;
+    const row = rowAt(e.target);
+    if (row && !e.target.closest("button")) press = { row, x: e.clientX, y: e.clientY, at: e.timeStamp, opened: false };
+  });
+  root.addEventListener("pointermove", (e) => {
+    if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) press = null;
+  });
+  root.addEventListener("pointercancel", () => { press = null; });
+  root.addEventListener("pointerup", (e) => {
+    const p = press;
+    press = null;
+    if (!p || p.opened || e.timeStamp - p.at < HOLD_MS) return;
+    swallowClick();
+    open(p.row, { x: p.x, y: p.y });
+  });
+  root.addEventListener("contextmenu", (e) => {
+    const row = rowAt(e.target);
+    if (!row) return;
+    e.preventDefault();
+    if (keyMenu) { keyMenu = false; return; }
+    // Android's own long press: the menu opens now, not again on letting go.
+    if (press) {
+      if (press.opened) return;
+      press.opened = true;
+      swallowClick();
+      open(press.row, { x: press.x, y: press.y });
+      return;
+    }
+    open(row, { x: e.clientX, y: e.clientY });
+  });
+  root.addEventListener("keydown", (e) => {
+    const row = isMenuKey(e) ? rowAt(e.target) : null;
+    if (!row) return;
+    e.preventDefault();
+    keyMenu = true;
+    open(row, { anchor: row });
+  });
+}

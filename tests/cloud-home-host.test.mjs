@@ -358,6 +358,108 @@ serverTest("a busy home asks to update now: Cloud offers the newer image, then u
   assert.ok(![retry, third].some((m) => log().includes(m.params.workerToken)));
 });
 
+serverTest("Update now from the app: versions, asking before it interrupts agents, the same update, why one failed", async (t) => {
+  const OLD = "registry.fly.io/workers:5.0.5";
+  const NEW = "registry.fly.io/workers:5.0.10";
+  const { port, base, dbPath } = await bootServer(t, {
+    RUDDER_WORKER_IMAGE: NEW,
+    // Only the app's request may move this home.
+    RUDDER_HOME_IDLE_UPDATE_MS: String(60 * 60 * 1000),
+    RUDDER_HOME_IDLE_MS: String(60 * 60 * 1000),
+  });
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const db = new Database(dbPath);
+  t.after(() => db.close());
+  const token = "rdrw_app_update_fixture_token";
+  db.prepare("insert into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)")
+    .run(tokenHash("rdr_app_update_cli"), "acct-u", "u@example.com", old, old);
+  const insert = db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, host_kind, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values (@id, 'acct-u', @key, @name, 'running', @host, @hash, @kind, @url, @home, @old, @old, @old)`);
+  insert.run({ id: "home-u", key: "home", name: "home", host: "external", hash: tokenHash(token), kind: "home", url: null, home: null, old });
+  // The All agents chat's hidden project (server.ts COORDINATOR_SLUG).
+  insert.run({ id: "repo-all", key: "home:~rudder/rudder-all-agents", name: "rudder-all-agents", host: null, hash: tokenHash(token), kind: "home-repo", url: "local:rudder-all-agents", home: "home-u", old });
+  const app = (route, body) => fetch(`${base}${route}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { authorization: "Bearer rdr_app_update_cli", "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const state = async () => (await app("/api/app/state")).json();
+
+  // A home on 5.0.5: it serves the chat but does not mark it, and lacks `usage`.
+  const connect = async (workerToken) => {
+    const messages = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-u/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+    t.after(() => ws.close());
+    ws.on("message", (data) => {
+      const message = JSON.parse(data.toString());
+      messages.push(message);
+      if (message.type !== "rpc") return;
+      const reply = message.method === "usage" ? { error: "unknown method usage" } : { result: { ok: true } };
+      ws.send(JSON.stringify({ type: "rpc-result", id: message.id, ...reply }));
+    });
+    await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+    const publish = (image, { working = false, marked = false } = {}) => ws.send(JSON.stringify({
+      type: "state",
+      host: { kind: "external", image },
+      projects: [
+        { workspaceId: "repo-all", name: "rudder-all-agents", dashboard: "running", agents: [], ...(marked ? { coordinator: true } : {}) },
+        { workspaceId: "r", name: "b", agents: [{ id: "1", status: working ? "working" : "done", asks: [] }] },
+      ],
+    }));
+    return { ws, messages, publish, updates: () => messages.filter((m) => m.type === "rpc" && m.method === "update") };
+  };
+  const home = await connect(token);
+  home.publish(OLD, { working: true });
+  const before = await waitFor(async () => { const s = await state(); return s.home?.version ? s : null; });
+  assert.deepEqual([before.home.version, before.home.updateTo, before.home.updating], ["5.0.5", "5.0.10", false]);
+  assert.equal(before.coordinator.failureReason, "Your cloud machine runs Rudder 5.0.5. The All agents chat needs a newer version.");
+  assert.deepEqual([before.coordinator.dashboard, before.coordinator.needsUpdate], ["failed", true]);
+  const usage = await app("/api/app/usage");
+  assert.equal(usage.status, 400);
+  assert.deepEqual(await usage.json(), { error: "Your cloud machine runs Rudder 5.0.5, which does not have this yet.", needsUpdate: true });
+
+  // An agent is working: nothing happens until the user says to interrupt it.
+  const refused = await app("/api/app/home/update", {});
+  assert.equal(refused.status, 409);
+  assert.match((await refused.json()).error, /^1 agent is working or waiting on you, and updating restarts it$/);
+  await sleep(300);
+  assert.equal(home.updates().length, 0);
+
+  const started = await app("/api/app/home/update", { interrupt: true });
+  assert.equal(started.status, 200);
+  assert.equal((await started.json()).home.updating, true);
+  const first = await waitFor(() => home.updates()[0]);
+  assert.equal(first.params.image, NEW);
+  assert.equal((await state()).home.updating, true);
+  const again = await app("/api/app/home/update", { interrupt: true });
+  assert.equal(again.status, 409);
+  assert.match((await again.json()).error, /already on its way/);
+
+  // The host could not apply it: the app gets the reason and can try again.
+  const reason = "docker pull was refused by registry.fly.io; log this host in again (sudo docker login registry.fly.io)";
+  home.ws.send(JSON.stringify({ type: "update-failed", tokenHash: tokenHash(first.params.workerToken), reason }));
+  const failed = await waitFor(async () => { const s = await state(); return s.home.updateError ? s.home : null; });
+  assert.deepEqual([failed.updating, failed.updateError], [false, reason]);
+
+  // Idle now: no interrupt needed, and the old reason goes with the new attempt.
+  home.publish(OLD);
+  await sleep(200);
+  assert.equal((await app("/api/app/home/update", {})).status, 200);
+  const second = await waitFor(() => home.updates()[1]);
+  const during = (await state()).home;
+  assert.deepEqual([during.updating, during.updateError], [true, null]);
+
+  // The host applies it: the home connects on the new version with the new token.
+  const updated = await connect(second.params.workerToken);
+  updated.publish(NEW, { marked: true });
+  const after = await waitFor(async () => { const s = await state(); return s.home.version === "5.0.10" && s.home.stateLive ? s : null; });
+  assert.deepEqual([after.home.updateTo, after.home.updating, after.home.updateError], [null, false, null]);
+  assert.equal(after.coordinator.needsUpdate, undefined);
+  assert.equal(after.coordinator.failureReason, null);
+  assert.equal(after.coordinator.dashboard, "running");
+});
+
 serverTest("an external home on GHCR is offered a GHCR image; one on the Fly registry stays there", async (t) => {
   const FLY = "registry.fly.io/rudder-workers-exla";
   const GHCR = "ghcr.io/exla-ai/rudder-worker";

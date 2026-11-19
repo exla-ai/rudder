@@ -5,8 +5,10 @@
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
+// /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
 // /app/__mock/all/<ok|old|stuck|lost|codex> (the All agents chat and the ways it fails to start),
+// /app/__mock/update/<ok|fail> (how the next Update now of an old machine goes: home-update.js),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
@@ -20,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { digestRun } from "../worker/digest.mjs";
+import { readTranscript, showAttachments } from "../worker/transcripts.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4321);
@@ -30,6 +33,7 @@ const iso = (ms) => new Date(ms).toISOString();
 let signedOut = process.env.MOCK_SIGNED_OUT === "1";
 let homeMode = "running";
 let usageMode = "ok";
+let trayMode = "ok";
 let closeMode = "ok";
 // Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
 const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
@@ -54,9 +58,21 @@ let coordinator = null;
 // carries it (Cloud 5.0.5); codex, the chat runs on Codex, which calls the
 // tools from its code tool. Switching keeps the chats already started.
 let allMode = "ok";
+// The machine's Rudder and Update now (home-update.js, POST /api/app/home/update).
+// all/old puts it on 5.0.5 and usage/old on 4.4.2; an update that goes (update/ok)
+// keeps the old machine connected a few seconds, then restarts it and brings
+// it back on Cloud's version. One that fails (update/fail) reports why, as a
+// host that could not pull the image does.
+const CLOUD_VERSION = "5.0.10";
+let homeVersion = CLOUD_VERSION;
+let updateMode = "ok";
+let updating = false;
+let updateError = null;
+let restarting = false;
 const coordinatorHealth = () => ({
   dashboard: { old: "failed", stuck: "starting" }[allMode] ?? "running",
-  failureReason: allMode === "old" ? "Your cloud machine runs an older Rudder without All agents. Update it: press Alt+r in its dashboard." : null,
+  failureReason: allMode === "old" ? `Your cloud machine runs Rudder ${homeVersion}. The All agents chat needs a newer version.` : null,
+  needsUpdate: allMode === "old",
 });
 const T0 = now();
 
@@ -64,8 +80,14 @@ const home = () => homeMode === "none" ? null : ({
   id: "ws_home_7f3a",
   status: homeMode,
   machineState: homeMode === "running" ? "started" : homeMode === "stopped" ? "suspended" : homeMode === "queued" ? "starting" : "failed",
-  connected: homeMode === "running",
+  connected: homeMode === "running" && !restarting,
+  stateLive: homeMode === "running" && !restarting,
   failureReason: homeMode === "failed" ? "Fly machine failed health checks after boot (exit 137, out of memory)." : null,
+  hostImage: `registry.fly.io/rudder-workers:${homeVersion}`,
+  version: homeVersion,
+  updateTo: homeVersion === CLOUD_VERSION ? null : CLOUD_VERSION,
+  updating,
+  updateError,
   activeAgents: projects.reduce((n, p) => n + p.agents.filter((a) => a.status === "working").length, 0),
   lastActivityAt: iso(now() - 2 * MIN),
   tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail4c2e1.ts.net", online: homeMode === "running", https: true },
@@ -73,7 +95,14 @@ const home = () => homeMode === "none" ? null : ({
   logins,
 });
 
-const agent = (o) => ({
+// The names a home gives these models (src/models.ts modelName): agents, plan
+// nodes and digest runs carry them as `modelName`.
+const MODEL_NAMES = {
+  opus: "Opus 5.5", sonnet: "Sonnet 5.5", "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
+  "gpt-6.1-sol": "Sol 6.1", "gpt-5.5": "GPT-5.5", "anthropic/claude-sonnet": "Claude Sonnet",
+};
+const named = (o) => ({ ...o, modelName: MODEL_NAMES[o.model] ?? null });
+const agent = (o) => named({
   phase: null, model: null, mode: "execute", lastMessage: null, summary: null, nodeId: null, planId: null, remoteUrl: null, visibility: "team",
   createdAt: T0 - 90 * MIN, updatedAt: T0 - 10 * MIN, ...o,
 });
@@ -129,6 +158,7 @@ const projects = [
 ];
 // No project has been moved yet (POST /api/app/project-order).
 for (const p of projects) p.sortOrder = null;
+for (const p of projects) if (p.plan) p.plan.nodes = p.plan.nodes.map(named);
 
 
 // Morning digests: run records as the dashboard writes them, through the real
@@ -159,7 +189,7 @@ function mockDigest(day, end, live = false) {
   const records = digestRecords(end);
   const raw = projects.filter((p) => records[p.workspaceId]).map((p) => ({
     workspaceId: p.workspaceId, name: p.name, repo: p.repo,
-    runs: records[p.workspaceId].map((r) => digestRun(r, { since, until: end })).filter(Boolean),
+    runs: records[p.workspaceId].map((r) => digestRun(r, { since, until: end })).filter(Boolean).map(named),
   }));
   return digestLib.composeDigest(raw, { day, timeZone: "America/Los_Angeles", since, until: end, generatedAt: end });
 }
@@ -289,9 +319,88 @@ function subagentTranscript(a) {
 }
 const SUBAGENT_DEMO = new Set(["run_b1", "run_a7"]);
 
+// The subagent tray (worker/subagents.mjs, cloud/app/subagent-tray.js): every
+// subagent of a demo agent. Its chat's cards, plus for the Claude agent its
+// teammates (one running, one done, one stopped) and subagents from earlier
+// in the day whose cards scrolled out of the chat.
+const trayCache = new Map();
+function mockTray(a, msgs) {
+  const fromChat = msgs.filter((m) => m.subagent?.id).map((m) => m.subagent);
+  if (a.backend !== "claude") return fromChat;
+  if (!trayCache.has(a.id)) trayCache.set(a.id, mockTeammates(now() - 6 * MIN));
+  return [...fromChat, ...trayCache.get(a.id).map((s) => (typeof s === "function" ? s() : s))];
+}
+function mockTeammates(t) {
+  const mate = (o) => ({ backend: "claude", type: "teammate", kind: null, description: null, earlier: 0, ...o });
+  const settleSteps = [
+    subTool("e1", t + 20_000, "Bash", "npx vitest run src/jobs/settle.test.ts", " ✓ settles a won bet\n ✓ settles a lost bet\n × voids bets on a voided market\n × ignores a second resolution\n\n Tests  2 failed | 2 passed (4)", true),
+    subSay("e2", t + 34_000, "Two cases fail: a voided market should refund stakes, and a market resolved twice must not pay out twice."),
+    subTool("e3", t + 41_000, "Read", "src/jobs/settle.ts", "  12  export async function settleMarket(market: Market) {\n  13    for (const bet of await openBets(market.id)) await pay(bet, market.outcome);\n  14  }"),
+    subTool("e4", t + 52_000, "Edit", "src/jobs/settle.ts", "+  if (market.status === \"void\") return refundAll(market.id);\n+  if (market.settledAt) return;"),
+    subTool("e5", t + 66_000, "Bash", "npx vitest run src/jobs", " ✓ src/jobs/settle.test.ts (4 tests) 9ms\n\n Tests  4 passed (4)"),
+    subTool("e6", t + 74_000, "SendMessage", "team-lead", "Message sent to team-lead's inbox"),
+  ];
+  const docSteps = [
+    subTool("d1", t + 25_000, "Read", "docs/payouts.md", "# Payouts\n\nPayouts are sent through Stripe Connect."),
+    subTool("d2", t + 47_000, "Edit", "docs/payouts.md", "+## Settlement\n+\n+A market's bets settle the moment it resolves."),
+    subSay("d3", t + 63_000, "Documented settlement and the rounding rule in docs/payouts.md."),
+  ];
+  return [
+    () => liveSubagent(mate({ id: "7ea77a7e-0000-4000-8000-0000000000a1", name: "settle-tests", prompt: "Run the settlement tests, fix what fails, and message me when they pass.", finishes: false }), settleSteps, { start: t + 15_000, every: 7_000 }),
+    mate({ id: "7ea77a7e-0000-4000-8000-0000000000a2", name: "payout-docs", prompt: "Document how settlement and payout rounding work in docs/payouts.md.", status: "done", startedAt: t + 16_000, endedAt: t + 63_000, toolCalls: 2, result: docSteps[2].text, messages: docSteps }),
+    mate({ id: "7ea77a7e-0000-4000-8000-0000000000a3", name: "odds-feed", prompt: "Switch the odds poller to the streaming feed.", status: "stopped", startedAt: t + 18_000, endedAt: t + 29_000, toolCalls: 1, result: null,
+      messages: [subTool("o1", t + 26_000, "Bash", "curl -sN https://odds.example.test/stream | head -3", null), subSay("o2", t + 29_000, "[Request interrupted by user for tool use]", "user")] }),
+    { id: "a3c90", backend: "claude", type: "subagent", kind: "Explore", name: null, description: "Find the odds feed client", prompt: "Read-only. Where does the app poll for odds, and how often?", status: "done", startedAt: t - 3 * 60 * MIN, endedAt: t - 3 * 60 * MIN + 95_000, toolCalls: 3,
+      result: "Odds are polled every 30s by `src/jobs/poll-oracles.ts`, through `src/odds/client.ts`.", earlier: 0,
+      messages: [subTool("q1", t - 3 * 60 * MIN + 20_000, "Grep", "pollOdds  in src", "src/jobs/poll-oracles.ts:9:export async function pollOdds() {"), subSay("q2", t - 3 * 60 * MIN + 95_000, "Odds are polled every 30s by `src/jobs/poll-oracles.ts`, through `src/odds/client.ts`.")] },
+    { id: "a1b44", backend: "claude", type: "subagent", kind: "general-purpose", name: null, description: "Add the bets table migration", prompt: "Add a migration for the bets table with a status column.", status: "done", startedAt: t - 4 * 60 * MIN, endedAt: t - 4 * 60 * MIN + 260_000, toolCalls: 6,
+      result: "Added `migrations/0012_bets.sql` with `status` as an enum; it applies cleanly.", earlier: 4,
+      messages: [subTool("g1", t - 4 * 60 * MIN + 200_000, "Bash", "npm run db:migrate", "Applied 0012_bets.sql"), subSay("g2", t - 4 * 60 * MIN + 260_000, "Added `migrations/0012_bets.sql` with `status` as an enum; it applies cleanly.")] },
+  ];
+}
+// One line per subagent, as worker/subagents.mjs sends it.
+function trayLine(s) {
+  const last = s.messages.filter((m) => !(m.role === "user" && m.text.startsWith("[Request interrupted by user"))).at(-1);
+  const step = (m) => !m ? null : m.role === "tool" ? `${m.tool.name} ${m.tool.input || ""}`.trim() : m.text.replace(/\s+/g, " ").trim();
+  return {
+    id: s.id, backend: s.backend, type: s.type || "subagent", kind: s.kind, name: s.name, description: s.description,
+    status: s.status, startedAt: s.startedAt, endedAt: s.endedAt, toolCalls: s.toolCalls,
+    step: s.status !== "running" && s.result ? s.result.replace(/\s+/g, " ").trim() : step(last),
+  };
+}
+
 // MOCK_TRANSCRIPT=<file>: a real /api/app/transcript response (readTranscript
 // output) shown as the first agent's conversation.
 const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
+// MOCK_SESSION=<dir>/<uuid>.jsonl: a Claude session read by the real
+// worker/transcripts.mjs as the first agent's conversation, pages and all
+// ("Load earlier messages"). Its run record and Claude folder go in
+// <dir>/mock-session.
+const mockSession = process.env.MOCK_SESSION ? (() => {
+  const file = path.resolve(process.env.MOCK_SESSION);
+  const dir = path.join(path.dirname(file), "mock-session");
+  const sessionId = path.basename(file, ".jsonl");
+  const cwd = "/workspace/code/mock";
+  const projectDir = path.join(dir, "home", ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.rmSync(path.join(projectDir, `${sessionId}.jsonl`), { force: true });
+  fs.symlinkSync(file, path.join(projectDir, `${sessionId}.jsonl`));
+  return { dir, sessionId, cwd };
+})() : null;
+function sessionTranscript(a, url) {
+  const repo = path.join(mockSession.dir, "repo");
+  fs.mkdirSync(path.join(repo, ".rudder", "runs", a.id), { recursive: true });
+  fs.writeFileSync(path.join(repo, ".rudder", "runs", a.id, "run.json"), JSON.stringify({
+    id: a.id, backend: "claude", task: a.task, taskSummary: a.title, status: a.status,
+    session: { nativeSessionId: mockSession.sessionId }, workspace: { path: mockSession.cwd },
+  }));
+  return readTranscript(repo, a.id, {
+    limit: Number(url.searchParams.get("limit") || 300),
+    home: path.join(mockSession.dir, "home"),
+    before: url.searchParams.get("before"),
+    after: url.searchParams.get("after"),
+  });
+}
 // MOCK_SLASH_CLAUDE=<file>, MOCK_SLASH_CODEX=<file>: real /api/app/slash-commands
 // responses (worker/slash-commands.mjs forRun) for the chat's "/" menu.
 // MOCK_SLASH_DELAY_MS: how long each answer takes, as a home building the list would.
@@ -768,10 +877,23 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === "/app/__mock/signout") { signedOut = true; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/home/")) { homeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
-  if (p.startsWith("/app/__mock/usage/")) { usageMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/usage/")) {
+    usageMode = p.split("/").pop();
+    if (usageMode === "old") homeVersion = "4.4.2";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
+  if (p.startsWith("/app/__mock/subagents/")) {
+    trayMode = p.split("/").pop();
+    if (trayMode === "old") homeVersion = "5.0.9";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
+  if (p.startsWith("/app/__mock/update/")) { updateMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/all/new" }); return res.end(); }
   if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/all/")) {
     allMode = p.split("/").pop();
+    if (allMode === "old") homeVersion = "5.0.5";
     if (coordinator) Object.assign(coordinator, coordinatorHealth());
     res.writeHead(302, { Location: "/app/all/new" });
     return res.end();
@@ -894,16 +1016,44 @@ const server = http.createServer(async (req, res) => {
       if (slashDelayMs) await new Promise((resolve) => setTimeout(resolve, slashDelayMs));
       return json(res, 200, list);
     }
+    if (p === "/api/app/subagents" && req.method === "GET") {
+      const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      // server.ts homeNeedsUpdate: a home without the "subagents" method.
+      if (trayMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
+      const at = (s) => (s.status === "running" ? s.startedAt : s.endedAt ?? s.startedAt) ?? 0;
+      const all = (SUBAGENT_DEMO.has(t.a.id) ? mockTray(t.a, t.msgs) : [])
+        .sort((x, y) => (y.status === "running") - (x.status === "running") || at(y) - at(x));
+      const open = all.find((s) => s.id === url.searchParams.get("open")) ?? null;
+      return json(res, 200, {
+        runId: t.a.id,
+        subagents: all.map(trayLine),
+        open: open && { ...trayLine(open), prompt: open.prompt, result: open.result, messages: open.messages, earlier: open.earlier },
+      });
+    }
     if (p === "/api/app/transcript" && req.method === "GET") {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
       if (!t) return json(res, 404, { error: "Agent not found" });
+      if (mockSession && t.a === projects[0].agents[0]) {
+        try {
+          return json(res, 200, sessionTranscript(t.a, url));
+        } catch (error) {
+          return json(res, 500, { error: error.message });
+        }
+      }
+      // Page cursors as the worker's (transcripts.mjs readTranscript), by message index here.
       const limit = Number(url.searchParams.get("limit") || 300);
-      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
+      const at = (name) => url.searchParams.has(name) ? Number(url.searchParams.get(name).split(":")[1]) : null;
+      const end = at("before") ?? t.msgs.length;
+      const start = at("after") ?? Math.max(0, end - limit);
+      const page = { runId: t.a.id, conversation: t.a.id, earlier: start > 0 ? `${t.a.id}:${start}:` : null, messages: t.msgs.slice(start, end) };
+      if (url.searchParams.has("before")) return json(res, 200, page);
+      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
       if (homeMode !== "running") return json(res, 503, { error: "The cloud machine is asleep", asleep: true });
-      if (usageMode === "old") return json(res, 400, { error: "Your cloud machine runs Rudder 4.4.2, which does not have this yet. Update it: press Alt+r in its dashboard." });
+      if (usageMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
       const fetchedAt = iso(now() - 2 * MIN);
       const win = (label, percent, inMin) => ({ label, percent, resetsAt: iso(now() + inMin * MIN) });
       return json(res, 200, { fetchedAt, ttlSeconds: 300, accounts: [
@@ -926,12 +1076,38 @@ const server = http.createServer(async (req, res) => {
     const body = req.method === "POST" || req.method === "PATCH" ? await readBody(req) : {};
     const handled = orgRoutes(req, res, p, url, body) ?? teamRoutes(req, res, p, url, body);
     if (handled !== undefined) return;
+    if (p === "/api/app/home/update" && req.method === "POST") {
+      if (updating) return json(res, 409, { error: "an update is already on its way" });
+      if (homeVersion === CLOUD_VERSION) return json(res, 409, { error: "this machine already runs the newest Rudder" });
+      // server.ts homeBusyAgents: mid-turn, or holding a prompt.
+      const busy = [...projects, ...(coordinator ? [coordinator] : [])]
+        .reduce((n, x) => n + x.agents.filter((a) => a.status === "working" || a.status === "starting" || a.asks?.length).length, 0);
+      if (busy && body.interrupt !== true) {
+        return json(res, 409, { error: `${busy === 1 ? "1 agent is" : `${busy} agents are`} working or waiting on you, and updating restarts ${busy === 1 ? "it" : "them"}` });
+      }
+      updating = true;
+      updateError = null;
+      if (updateMode === "fail") {
+        setTimeout(() => { updating = false; updateError = "docker pull was refused by registry.fly.io; log this host in again (sudo docker login registry.fly.io)"; }, 5000);
+      } else {
+        setTimeout(() => { restarting = true; }, 3000);
+        setTimeout(() => {
+          restarting = false;
+          updating = false;
+          homeVersion = CLOUD_VERSION;
+          if (allMode === "old") allMode = "ok";
+          if (coordinator) Object.assign(coordinator, coordinatorHealth());
+        }, 9000);
+      }
+      return json(res, 200, { home: home() });
+    }
     if (p === "/api/app/send") {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "The agent's terminal is not accepting input right now." });
       setTimeout(() => {
-        t.msgs.push({ id: `u${now()}`, role: "user", ts: now(), text: body.text });
+        // Files come back as `attachments`, as the worker reads them.
+        t.msgs.push(...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
         t.a.status = "working"; t.a.updatedAt = now();
         suggestions.delete(t.a.id);
       }, 2500);
@@ -956,7 +1132,7 @@ const server = http.createServer(async (req, res) => {
       if (at < 0) return json(res, 502, { error: "That message is no longer in this chat. Reload the chat and try again" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "could not relaunch run_a1: the agent's terminal is gone" });
       await delay(t.a.status === "working" ? 1200 : 400);
-      t.msgs.splice(at, t.msgs.length - at, { id: `u${now()}`, role: "user", ts: now(), text: body.text });
+      t.msgs.splice(at, t.msgs.length - at, ...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
       t.a.status = "working"; t.a.updatedAt = now();
       setTimeout(() => {
         t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: "Starting from your edited message." });
@@ -1160,40 +1336,45 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/models") {
-      // The shape `rudder __models` returns (src/models.ts discoverModelOptions), cut from a real home.
+      // The shape `rudder __models` returns (src/models.ts discoverHarnesses), cut from a real home.
       const all = ["low", "medium", "high", "xhigh", "max"];
       const gpt = ["low", "medium", "high", "xhigh"];
-      const c = (label, value, group, detail, efforts = all) => ({ label, value, group, detail, efforts });
+      const c = (label, value, detail, efforts = all) => ({ label, value, detail, efforts });
+      const alias = (...args) => ({ ...c(...args), alias: true });
       return json(res, 200, {
-        current: { backend: "claude", model: "claude-opus-5-5", effort: "high" },
-        claude: [
-          { label: "Default", detail: "CLI default" },
-          c("Opus 5.5", "claude-opus-5-5", "Claude 5.5", "For complex work and everyday tasks"),
-          c("Sonnet 5.5", "claude-sonnet-5-5", "Claude 5.5", "Most efficient for simpler tasks"),
-          c("Haiku 5.5", "claude-haiku-5-5", "Claude 5.5", "Fastest for quick answers", []),
-          c("Fable 5.2", "claude-fable-5-2", "Claude 5.2", "For your toughest challenges"),
-          c("Fable 5.1", "claude-fable-5-1", "Claude 5.1", "Most capable for your hardest and longest-running tasks"),
-          c("Fable 5", "claude-fable-5", "Claude 5", "Most capable for your hardest and longest-running tasks"),
-          c("Opus 5", "claude-opus-5", "Claude 5", "Best for everyday, complex tasks"),
-          c("Sonnet 5", "claude-sonnet-5", "Claude 5", "Efficient for routine tasks"),
-          c("Opus 4.6", "claude-opus-4-6", "Claude 4.6", "Best for everyday, complex tasks", ["low", "medium", "high", "max"]),
-          c("Sonnet 4.6", "claude-sonnet-4-6", "Claude 4.6", "Efficient for routine tasks", ["low", "medium", "high", "max"]),
-          c("Haiku 4.5", "claude-haiku-4-5", "Claude 4.5", "Fastest for quick answers", []),
-          c("Fable", "fable", "Always the newest", "Now Fable 5.2 · For your toughest challenges"),
-          c("Opus", "opus", "Always the newest", "Now Opus 5.5 · For complex work and everyday tasks"),
-          c("Sonnet", "sonnet", "Always the newest", "Now Sonnet 5.5 · Most efficient for simpler tasks"),
-          c("Haiku", "haiku", "Always the newest", "Now Haiku 5.5 · Fastest for quick answers", []),
-        ],
-        codex: [
-          { label: "Default", detail: "CLI default" },
-          c("GPT-6.2 Astra", "gpt-6.2-astra", "GPT-6.2", "Our most capable model for complex coding and professional work.", gpt),
-          c("GPT-6.2 Sol", "gpt-6.2-sol", "GPT-6.2", "Fast, go-to model for coding and everyday work.", gpt),
-          c("GPT-6.1 Sol", "gpt-6.1-sol", "GPT-6.1", "Previous generation model for coding and everyday work.", gpt),
-          c("GPT-6.1 Terra", "gpt-6.1-terra", "GPT-6.1", "Efficient model that excels at visual understanding and computer use.", gpt),
-          c("GPT-6 Astra", "gpt-6-astra", "GPT-6", "Previous generation model for complex coding and professional work.", gpt),
-          c("GPT-6 Sol", "gpt-6-sol", "GPT-6", "Legacy model for coding and everyday work.", gpt),
-          c("GPT-6 Luna", "gpt-6-luna", "GPT-6", "Fast and affordable model for easier tasks.", gpt),
-          c("GPT-5.3 Codex", "gpt-5.3-codex", "GPT-5.3", "400K context · 2026-02-05", gpt),
+        current: { backend: "claude", model: "claude-opus-5-5", name: "Opus 5.5", effort: "high" },
+        harnesses: [
+          { id: "claude", label: "Claude", account: "Claude Code", models: [
+            c("Opus 5.5", "claude-opus-5-5", "For complex work and everyday tasks"),
+            c("Sonnet 5.5", "claude-sonnet-5-5", "Most efficient for simpler tasks"),
+            c("Haiku 5.5", "claude-haiku-5-5", "Fastest for quick answers"),
+            c("Fable 5.2", "claude-fable-5-2", "For your toughest challenges"),
+            c("Fable 5.1", "claude-fable-5-1", "Most capable for your hardest and longest-running tasks"),
+            c("Opus 5", "claude-opus-5", "Best for everyday, complex tasks"),
+            c("Fable 5", "claude-fable-5", "Most capable for your hardest and longest-running tasks"),
+            c("Sonnet 5", "claude-sonnet-5", "Efficient for routine tasks"),
+            c("Opus 4.8", "claude-opus-4-8", "Best for everyday, complex tasks"),
+            c("Opus 4.7", "claude-opus-4-7", "Best for everyday, complex tasks"),
+            c("Opus 4.6", "claude-opus-4-6", "Best for everyday, complex tasks", ["low", "medium", "high", "max"]),
+            c("Sonnet 4.6", "claude-sonnet-4-6", "Efficient for routine tasks", ["low", "medium", "high", "max"]),
+            c("Haiku 4.5", "claude-haiku-4-5-20251001", "Fastest for quick answers", []),
+            alias("Opus 5.5", "opus", "For complex work and everyday tasks"),
+            alias("Sonnet 5.5", "sonnet", "Most efficient for simpler tasks"),
+            alias("Haiku 5.5", "haiku", "Fastest for quick answers"),
+            alias("Fable 5.2", "fable", "For your toughest challenges"),
+          ] },
+          { id: "codex", label: "Codex", account: "ChatGPT", models: [
+            c("Astra 6.2", "gpt-6.2-astra", "Our most capable model for complex coding and professional work.", gpt),
+            c("Sol 6.2", "gpt-6.2-sol", "Fast, go-to model for coding and everyday work.", gpt),
+            c("Sol 6.1", "gpt-6.1-sol", "Previous generation model for coding and everyday work.", gpt),
+            c("Terra 6.1", "gpt-6.1-terra", "Efficient model that excels at visual understanding and computer use.", gpt),
+            c("Astra 6", "gpt-6-astra", "Previous generation model for complex coding and professional work.", gpt),
+            c("Sol 6", "gpt-6-sol", "Legacy model for coding and everyday work.", gpt),
+            c("Luna 6", "gpt-6-luna", "Fast and affordable model for easier tasks.", gpt),
+            c("Sol 5.6", "gpt-5.6-sol", "Legacy model for coding and everyday work.", gpt),
+            c("Terra 5.6", "gpt-5.6-terra", "Legacy balanced model for agentic coding.", gpt),
+            c("Luna 5.6", "gpt-5.6-luna", "Legacy fast model for simpler tasks.", gpt),
+          ] },
         ],
       });
     }

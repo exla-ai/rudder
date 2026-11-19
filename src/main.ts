@@ -30,7 +30,7 @@ import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
 import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
 import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
-import { discoverModelOptions, refreshModelCatalog } from "./models.js";
+import { discoverHarnesses, modelName, refreshModelCatalog } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import { toolCacheEnv } from "./tool-cache.js";
 import { ensureEngineRunning, persistentProjectEngineRequested, runEngineCommand } from "./engine.js";
@@ -303,17 +303,18 @@ export async function main(): Promise<void> {
       return;
     }
     case "__models": {
-      // The phone's /model picker, through the home supervisor: the same
-      // options as the dashboard's, and the backend + model new agents use.
-      const [claude, codex] = await Promise.all([discoverModelOptions("claude"), discoverModelOptions("codex")]);
+      // The app's model pickers, through the home supervisor: one section per
+      // harness (src/models.ts HARNESSES), and the backend + model new agents use.
+      const harnesses = await discoverHarnesses();
       const config = await loadConfig();
       // None chosen yet is an answer too: this picker is where one gets chosen.
       const backend = config.lastUsedBackend ?? config.defaultBackend;
       // The effort as the dashboard reads it (native config.rs config_effort).
       const saved = backend ? config.backends[backend] : undefined;
       const effort = (backend === "codex" ? saved?.reasoningEffort ?? saved?.effort : saved?.effort ?? saved?.reasoningEffort) ?? null;
-      const current = backend ? { backend, model: saved?.model ?? null, effort } : null;
-      process.stdout.write(`${JSON.stringify({ current, claude, codex })}\n`);
+      const model = saved?.model ?? null;
+      const current = backend ? { backend, model, name: modelName(harnesses, backend, model), effort } : null;
+      process.stdout.write(`${JSON.stringify({ current, harnesses })}\n`);
       return;
     }
     case "__refresh-models": {

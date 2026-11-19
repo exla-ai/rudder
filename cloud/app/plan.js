@@ -3,6 +3,7 @@
 // that agent; nothing here edits the plan.
 import { h, icon, setText, reconcile } from "/app/render.js";
 import { app, api, showError, toast, track } from "/app/core.js";
+import { agentModelLabel } from "/app/model-picker.js";
 
 const NODE_STATUS = {
   running: { label: "Running", cls: "s-working", live: true },
@@ -21,7 +22,6 @@ const PLAN_GROUPS = [
   { id: "merged", label: "Merged", has: ["merged"] },
 ];
 const groupFor = (status) => PLAN_GROUPS.find((g) => g.has.includes(status))?.id || "next";
-const BACKEND = { claude: "Claude", codex: "Codex", opencode: "opencode" };
 
 /**
  * The plan a project carries, normalized: { nodes, awaitingApproval, planIds }
@@ -151,7 +151,7 @@ export function PlanView({ ws, hrefFor, variant = "panel" }) {
             const deps = depsText(n);
             const d = a.querySelector(".pv-deps");
             setText(d, deps); d.hidden = !deps;
-            const model = [BACKEND[n.backend] || n.backend, n.model].filter(Boolean).join(" · ");
+            const model = agentModelLabel(n);
             const m = a.querySelector(".pv-model");
             setText(m, model); m.hidden = !model;
             a.setAttribute("aria-label", `${n.id} ${n.title || ""}, ${st.label}${deps ? `, ${deps}` : ""}${n.runId ? "" : ", not started"}`);

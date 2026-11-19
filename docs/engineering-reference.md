@@ -1798,17 +1798,29 @@ functional but less battle-tested than the local dashboard; treat it as beta.
 
 ## 10. Models and effort
 
-- `src/models.ts`: model discovery for the phone's `/model` picker (`rudder __models`).
-  `discoverModelOptions(backend, default)` merges the catalog (models.dev cache,
-  provider APIs, Claude project models, all written to `models-dev.json` for the
-  dashboard) with the CLI's own list: Claude Code's headless `initialize` answer
-  (aliases, display names, `supportedEffortLevels`) or Codex's
-  `~/.codex/models_cache.json` (`supported_reasoning_levels`). Rows carry a
-  readable `label` (the CLI's display name, else read from the id: "Opus 5.5",
-  "GPT-6.1 Sol", "Opus 5.5 · 1M"), a generation `group` (newest first, families
-  by catalog price within one) and `efforts`: the CLI's levels that the dashboard
-  also passes (`effort_options_for`). Claude Code aliases close the list under
-  "Always the newest". No model names are hard-coded.
+- `src/models.ts`: model discovery for the app's model pickers (`rudder __models`,
+  `{ current, harnesses: [{ id, label, account, models }] }`). `HARNESSES` is
+  the one list of harnesses: each row names the harness (backend id, label,
+  sign-in), its catalog provider, its CLI's own list (`listed`), how its ids
+  parse into family and version, its tier order and its effort levels. The app
+  shows one section per row in that order (`cloud/app/model-picker.js`), so a
+  new harness is a new row there plus its backend in the dashboard. A section
+  lists exactly the CLI's own models for this account: Claude Code's headless
+  `initialize` answer (aliases, display names, `supportedEffortLevels`) or
+  Codex's `~/.codex/models_cache.json` (`supported_reasoning_levels`). The
+  catalog (models.dev cache, provider APIs, Claude project models, all written
+  to `models-dev.json` for the dashboard) adds detail lines and prices, never
+  rows. Rows read the name and then the version (the CLI's display name:
+  "Opus 5.5", "Sol 6.1" for "GPT-6.1-Sol", "Opus 5.5 · 1M") and carry `efforts`:
+  the CLI's levels that the dashboard also passes (`effort_options_for`). Rows
+  sort by the version read from the id, highest first; within one version by
+  the harness's tiers: Claude Code's own family order (Opus, Fable, Sonnet,
+  Haiku), Codex's families by catalog price (Astra, Sol, Terra, Luna; Codex's
+  own order leads with its recommended model). Claude Code aliases close the
+  section under "Always the newest", each named and sorted like the model it
+  stands for ("opus" reads "Opus 5.5"). No model names or orders are
+  hard-coded. Agent rows and chips read "Codex · Sol 6.1" from the same list
+  (`agentModelLabel`).
 - Claude Code's list is also merged into the catalog: every model and alias it
   lists gets `efforts` (exactly its levels, empty for none; a dated id also sets
   its undated twin), and a model only Claude Code knows gets an entry. The

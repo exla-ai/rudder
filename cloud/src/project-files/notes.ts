@@ -89,7 +89,22 @@ export class ProjectNotesRoutes {
     } else throw new CloudProjectFileError(405, "Use GET to read notes and POST to change them");
     const homeId = this.dependencies.ownHome(accountId);
     if (!homeId) throw new CloudProjectFileError(404, "Your cloud machine is not connected");
-    if (this.dependencies.workspace(accountId, workspaceId).homeId !== homeId) throw new CloudProjectFileError(403, "Notes are only for projects on your own cloud machine");
-    return replyFrom(request, await this.dependencies.rpc(homeId, "projectNotes", { workspaceId, request }, signal));
+    const reply = await ownStatus(async () => {
+      if (this.dependencies.workspace(accountId, workspaceId).homeId !== homeId) throw new CloudProjectFileError(403, "Notes are only for projects on your own cloud machine");
+      return this.dependencies.rpc(homeId, "projectNotes", { workspaceId, request }, signal);
+    });
+    return replyFrom(request, reply);
+  }
+}
+
+/** The project check's and the home's own status reach the browser: 503 is a
+ * sleeping home, which Notes tells apart, and Notes has no file bindings for
+ * ProjectFileRoutes' 403 to renew. */
+async function ownStatus<T>(work: () => Promise<T>): Promise<T> {
+  try { return await work(); }
+  catch (error) {
+    const status = (error as { status?: unknown } | null)?.status;
+    if (!(error instanceof CloudProjectFileError) && error instanceof Error && typeof status === "number") throw new CloudProjectFileError(status, error.message);
+    throw error;
   }
 }

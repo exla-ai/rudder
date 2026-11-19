@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ async function load(entry) {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
 }
 const { projectNotes } = await load("../src/project-files/notes.ts");
+const { ProjectFileRoutes } = await load("../cloud/src/project-files/routes.ts");
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", JJ_USER: "t", JJ_EMAIL: "t@t" };
 // projectNotes runs jj itself: the same identity, and jj from PATH instead of
@@ -87,4 +89,42 @@ test("notes in a plain Git repo: the repository's own .gitignore wins, a staged 
   sh(dir, "git", ["add", "RUDDER_NOTES.md"]);
   assert.deepEqual(await keepOut(dir, true), { git: { state: "excluded" } });
   assert.equal(sh(dir, "git", ["status", "--porcelain"]), "");
+});
+
+test("the Cloud notes route carries the home's answers, and a sleeping home stays a 503 the app can tell apart", async (t) => {
+  const dir = await repo(t, { jj: false });
+  let home = (params) => projectNotes(dir, params.request);
+  const routes = new ProjectFileRoutes({
+    workspace: (_account, workspaceId) => {
+      if (workspaceId !== "wsp_app") throw Object.assign(new Error("project not found"), { status: 404 });
+      return { homeId: "home_1" };
+    },
+    ownHome: () => "home_1",
+    rpc: async (homeId, method, params) => {
+      assert.deepEqual([homeId, method, params.workspaceId], ["home_1", "projectNotes", "wsp_app"]);
+      return JSON.parse(JSON.stringify(await home(params)));
+    },
+  });
+  const server = createServer((req, res) => { void routes.handle(req, res, new URL(req.url, "http://cloud"), "account_1"); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}/api/app/project-notes`;
+  const call = async (query, body) => {
+    const res = await fetch(body ? base : `${base}?${new URLSearchParams(query)}`, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {});
+    return { status: res.status, body: await res.json() };
+  };
+
+  // What notes.js sends, end to end.
+  assert.deepEqual(await call({ workspaceId: "wsp_app" }), { status: 200, body: { text: "", revision: null, git: { state: "included" } } });
+  assert.deepEqual(await call(null, { version: 1, workspaceId: "wsp_app", operation: "write", baseRevision: null, text: "hi\n" }),
+    { status: 200, body: { outcome: "saved", revision: sha("hi\n"), git: { state: "excluded" } } });
+  assert.deepEqual(await call(null, { version: 1, workspaceId: "wsp_app", operation: "git", keepOut: false }), { status: 200, body: { git: { state: "included" } } });
+
+  // Errors keep their own status: HomeControlSessions answers a home's refusal with 400, homeRpc a sleeping home with 503.
+  assert.deepEqual(await call({ workspaceId: "wsp_other" }), { status: 404, body: { error: "project not found" } });
+  home = () => { throw Object.assign(new Error("This project is still cloning"), { status: 400 }); };
+  assert.deepEqual(await call({ workspaceId: "wsp_app" }), { status: 400, body: { error: "This project is still cloning" } });
+  home = () => { throw Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 }); };
+  assert.deepEqual(await call(null, { version: 1, workspaceId: "wsp_app", operation: "write", baseRevision: sha("hi\n"), text: "more\n" }),
+    { status: 503, body: { error: "the cloud machine is not connected yet; it may still be starting" } });
 });

@@ -162,7 +162,8 @@ export function NotesScreen(ws) {
       const result = await api("/api/app/project-notes", { method: "POST", body: {
         version: 1, workspaceId: ws, operation: "write", baseRevision: over === undefined ? revision : over, text: value,
       } });
-      if (result.outcome === "saved") {
+      // The file already holds this text: an earlier try that timed out landed.
+      if (result.outcome === "saved" || result.text === value) {
         base = value;
         revision = result.revision;
         if (result.git) git = result.git;
@@ -213,10 +214,12 @@ export function NotesScreen(ws) {
       if (!gone && e?.status !== 401) status("Not up to date", { detail: e.message });
     }
   }
+  // Text a save could not land (a sleeping machine) is tried again on the same
+  // beat, so it saves once the machine is running.
   function scheduleCheck() {
     clearTimeout(checkTimer);
     if (gone) return;
-    checkTimer = setTimeout(async () => { await check(); scheduleCheck(); }, CHECK_MS);
+    checkTimer = setTimeout(async () => { await (dirty() && !conflict ? save() : check()); scheduleCheck(); }, CHECK_MS);
   }
   const onVisible = () => {
     if (document.visibilityState === "visible") void check();

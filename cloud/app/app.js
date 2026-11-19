@@ -1934,12 +1934,16 @@ function emptyState({ ic, title, body, action }) {
 // back to the app (AgentLogin.swift), so there is nothing to copy. Without it,
 // Claude shows a code to paste here and Codex a code to type on its page.
 // OpenCode signs its OpenAI provider in with ChatGPT's device code, always.
+// Antigravity's Google page always shows a code to paste: its redirect is
+// Google's own page, never this phone.
 const AGENTS = [
   { id: "claude", label: "Claude Code", ic: "spark", account: "Claude" },
   { id: "codex", label: "Codex", ic: "code", account: "ChatGPT" },
   { id: "opencode", label: "OpenCode", ic: "terminal", account: "ChatGPT" },
+  { id: "antigravity", label: "Antigravity", ic: "globe", account: "Google" },
 ];
 const DEVICE_ONLY = new Set(["opencode"]);
+const CODE_ONLY = new Set(["antigravity"]);
 const agentName = (provider) => AGENTS.find((x) => x.id === provider)?.label || provider;
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 const planLabel = (plan) => (plan ? PLAN_LABEL[plan] || plan[0].toUpperCase() + plan.slice(1) : "");
@@ -2076,7 +2080,7 @@ function openAgentSignIn(provider) {
     }
     // In the iOS app the page normally hands its answer straight back; if
     // that did not work, the code routes still do.
-    if (NATIVE_LOGIN && !DEVICE_ONLY.has(provider)) {
+    if (NATIVE_LOGIN && !DEVICE_ONLY.has(provider) && !CODE_ONLY.has(provider)) {
       const alt = h(`<button type="button" class="btn block ls-alt"></button>`);
       setText(alt, provider === "claude" ? "Use a code instead" : "Use a device code instead");
       alt.addEventListener("click", () => void begin(provider === "claude" ? "code" : "device"));
@@ -2147,6 +2151,7 @@ function openAgentSignIn(provider) {
     }
     if (closed) return;
     if (device) return showDevice();
+    if (CODE_ONLY.has(provider)) return showCode();
     if (provider === "claude" && (mode === "code" || !NATIVE_LOGIN || !session.callback)) return showCode();
     busy(`Approve in the ${provider === "claude" ? "Claude" : "OpenAI"} window`, "It closes by itself once you're signed in.");
     const res = await authorizeNative(session.id, session.url, session.callback);
@@ -2157,8 +2162,9 @@ function openAgentSignIn(provider) {
   }
 
   function showCode() {
+    const approve = provider === "antigravity" ? "sign in with Google" : "tap <b>Authorize</b>";
     body.replaceChildren(h(`<div class="ls-steps">
-      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and tap <b>Authorize</b>.</div></div>
+      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and ${approve}.</div></div>
       <button type="button" class="btn block accent ls-open">${icon("external")}<span>Open the sign-in page</span></button>
       <div class="ls-step"><span class="ls-n">2</span><div>Copy the code it shows, then paste it here.</div></div>
       <form class="ls-code"><input class="input" name="code" placeholder="Paste the code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
@@ -2451,7 +2457,7 @@ function SetupCard() {
     <div class="card accounts setup" role="list" aria-label="Setup steps"></div></div>`);
   const list = el.querySelector(".setup");
   el.querySelector(".setup-x").addEventListener("click", () => { ls.set(SETUP_DONE_KEY, true); el.hidden = true; });
-  const SUB = { claude: "Agents run on your Claude subscription", codex: "Agents run on your ChatGPT subscription" };
+  const SUB = { claude: "Agents run on your Claude subscription", codex: "Agents run on your ChatGPT subscription", antigravity: "Agents run on your Google account" };
   const rows = new Map();
   for (const agent of AGENTS) {
     const row = h(`<div class="acct" role="listitem">

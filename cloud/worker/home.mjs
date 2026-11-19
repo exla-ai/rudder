@@ -174,7 +174,7 @@ function tailnetOffline(message) {
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
-// Claude Code, Codex and OpenCode sign-ins started from the phone (cloud/worker/logins.mjs).
+// Claude Code, Codex, OpenCode and Antigravity sign-ins started from the phone (cloud/worker/logins.mjs).
 const logins = createLoginRunner({
   spawnPty: pty.spawn,
   env: baseChildEnv,
@@ -188,6 +188,8 @@ const logins = createLoginRunner({
       void credentialsAfterLogin(provider);
     }
   },
+  // agy stays open after it signs in; its model list says when it has.
+  signedIn: async (provider) => provider === "antigravity" && (await antigravityStatus({ ...baseChildEnv })).loggedIn,
 });
 
 /** @type {Map<string, Project>} */
@@ -1768,7 +1770,13 @@ async function checkCredentials() {
 // the login works with one real request.
 async function credentialsAfterLogin(provider) {
   const env = { ...baseChildEnv };
-  const quick = provider === "claude" ? await claudeStatus(env) : provider === "opencode" ? opencodeStatus(env) : await codexStatus(env);
+  const quick = provider === "claude"
+    ? await claudeStatus(env)
+    : provider === "opencode"
+      ? opencodeStatus(env)
+      : provider === "antigravity"
+        ? await antigravityStatus(env)
+        : await codexStatus(env);
   if (quick.loggedIn) {
     credentials = {
       ...(credentials ?? {}),
@@ -1838,6 +1846,13 @@ async function checkOpencode(env) {
   return { ok: false, account, plan: null, detail };
 }
 
+// agy lists models only when signed in ("Please sign in" otherwise, still
+// exit 0). It does not say which Google account it uses.
+async function antigravityStatus(env) {
+  const models = await capture("agy", ["models"], { env, timeoutMs: 20_000 });
+  const text = `${models.stdout}\n${models.stderr}`;
+  return { loggedIn: models.code === 0 && !/sign in/i.test(text), account: null, plan: null, code: models.code, text };
+}
 // "max", "pro", ... for a subscription; "API" for a Console login.
 function claudePlan(status) {
   if (typeof status.subscriptionType === "string" && status.subscriptionType) {
@@ -1910,14 +1925,11 @@ async function checkCodex(env) {
   return { ok: false, account, plan, detail };
 }
 
-// agy lists models only when signed in ("Please sign in" otherwise, still
-// exit 0), then one real request proves the sign-in works. agy does not say
-// which Google account it uses.
+// Signed in (antigravityStatus), then one real request proves it works.
 async function checkAntigravity(env) {
-  const models = await capture("agy", ["models"], { env, timeoutMs: 20_000 });
-  const listed = `${models.stdout}\n${models.stderr}`;
-  if (models.code !== 0 || /sign in/i.test(listed)) {
-    return { ok: false, account: null, plan: null, detail: models.code !== 0 ? firstLine(listed) || `exit ${models.code}` : "not logged in" };
+  const status = await antigravityStatus(env);
+  if (!status.loggedIn) {
+    return { ok: false, account: null, plan: null, detail: status.code !== 0 ? firstLine(status.text) || `exit ${status.code}` : "not logged in" };
   }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK", "--effort", "low"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {

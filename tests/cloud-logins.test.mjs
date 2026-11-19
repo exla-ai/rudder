@@ -255,6 +255,58 @@ test("cancel ends the CLI, and an API key in the machine's env never decides the
   assert.equal(runner.snapshot().claude.status, "cancelled");
 });
 
+// agy 1.5.0 at first start: its Google authorize URL (redirect to
+// antigravity.google, whose page shows a code) and an "authorization code"
+// prompt. A good code signs it in and it carries on into its session.
+const FAKE_AGY = String.raw`#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const url = "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=x.apps.googleusercontent.com&code_challenge=c&code_challenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=openid&state=st1";
+process.stdout.write("\u001b]7501;state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==\u0007");
+console.log(" Your browser should open automatically. If not:\n " + url + "\n → \u001b]8;;" + url + "\u0007Click here to authenticate\u001b]8;;\u0007\n If you aren't automatically redirected, paste the authorization code below:\n authorization code...");
+process.stdin.on("data", (d) => {
+  if (d.toString().trim() === "4/0AbCdEf-good") {
+    fs.writeFileSync(path.join(process.env.HOME, "agy-login.json"), "{}");
+    console.log(" Signed in");
+  } else {
+    console.log(" Invalid authorization code");
+  }
+});
+setInterval(() => {}, 1000);
+`;
+
+test("Antigravity: the code from Google's page signs agy in, and its session is closed after", async (t) => {
+  const dir = tmpdir();
+  const home = path.join(dir, "home");
+  fs.mkdirSync(home);
+  const bin = path.join(dir, "agy");
+  fs.writeFileSync(bin, FAKE_AGY, { mode: 0o755 });
+  const terms = [];
+  const runner = createLoginRunner({
+    spawnPty: (file, args, options) => {
+      const term = pipePty(file, args, options);
+      terms.push(term);
+      return term;
+    },
+    env: { ...process.env, HOME: home },
+    dir: path.join(dir, "l"),
+    cwd: home,
+    commands: { antigravity: bin },
+    signedIn: async (provider) => provider === "antigravity" && fs.existsSync(path.join(home, "agy-login.json")),
+  });
+  t.after(() => {
+    runner.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const started = await runner.start("antigravity");
+  assert.equal(started.status, "waiting");
+  assert.equal(started.callback, null);
+  assert.match(started.codeUrl, /^https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?.*redirect_uri=https%3A%2F%2Fantigravity\.google/);
+  const done = await runner.finish("antigravity", started.id, { code: " 4/0AbCdEf-good\n" });
+  assert.equal(done.status, "done");
+  await waitFor(() => !terms[0].alive());
+});
+
 test("a CLI that never shows a link fails the start with what it printed", async (t) => {
   const dir = tmpdir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

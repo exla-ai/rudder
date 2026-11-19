@@ -1,9 +1,10 @@
-// Signing the cloud machine's Claude Code, Codex and OpenCode in from the
-// phone.
+// Signing the cloud machine's Claude Code, Codex, OpenCode and Antigravity in
+// from the phone.
 //
 // Every login is the CLI's own: `claude auth login`, `codex login`,
-// `codex login --device-auth`, or `opencode providers login` for its OpenAI
-// provider with ChatGPT, run in a pty. Nothing here sees a password or a
+// `codex login --device-auth`, `opencode providers login` for its OpenAI
+// provider with ChatGPT, or `agy` (which signs in before anything else), run
+// in a pty. Nothing here sees a password or a
 // token; the CLI does the exchange and stores its own login file.
 //
 // Both browser logins open a URL whose redirect is a server the CLI runs on
@@ -22,6 +23,12 @@
 //
 // OpenCode signs in with ChatGPT's device code only (OpenCode 1.19's
 // "ChatGPT Pro/Plus (headless)" method), the same page and code as Codex's.
+//
+// Antigravity has only the code: its Google sign-in redirects to
+// antigravity.google, whose page shows a code that `agy` takes at its
+// "authorization code" prompt. agy then carries on into its own session, so
+// the login is done when `signedIn("antigravity")` (agy lists its models)
+// says so, and the session is closed.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -37,8 +44,9 @@ const EXIT_WAIT_MS = 60_000;
 
 const ANSI = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]/g;
 
-export const LOGIN_PROVIDERS = ["claude", "codex", "opencode"];
-const PROVIDER_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+export const LOGIN_PROVIDERS = ["claude", "codex", "opencode", "antigravity"];
+const PROVIDER_NAMES = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity" };
+const PROVIDER_COMMANDS = { claude: "claude", codex: "codex", opencode: "opencode", antigravity: "agy" };
 const OPENCODE_LOGIN = ["providers", "login", "-p", "openai", "-m", "ChatGPT Pro/Plus (headless)"];
 
 export function stripAnsi(text) {
@@ -86,6 +94,11 @@ export function claudeCodeUrl(output) {
   return null;
 }
 
+// agy's Google authorize URL, whose page shows the code to paste.
+export function antigravityCodeUrl(output) {
+  return /https:\/\/accounts\.google\.com\/o\/oauth2\/[^\s"'<>]*redirect_uri=https%3A%2F%2Fantigravity\.google[^\s"'<>]*/.exec(stripAnsi(output))?.[0] ?? null;
+}
+
 // ChatGPT's device login. Codex: "Open this link ... https://auth.openai.com/codex/device"
 // then "Enter this one-time code (expires in 15 minutes)  ABCD-EFGHI".
 // OpenCode: "Go to: https://auth.openai.com/codex/device" then "Enter code: ABCD-EFGHI".
@@ -117,9 +130,10 @@ export function lastLines(output, count = 3) {
  *   onChange?: (provider: string, session: object) => void,
  *   fetchImpl?: typeof fetch,
  *   commands?: Partial<Record<string, string>>,
+ *   signedIn?: (provider: string) => Promise<boolean>,
  * }} options
  */
-export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onChange = () => {}, fetchImpl = fetch, commands = {} }) {
+export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onChange = () => {}, fetchImpl = fetch, commands = {}, signedIn = async () => false }) {
   const sessions = new Map(); // provider -> session
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const browserScript = path.join(dir, "browser.sh");
@@ -203,11 +217,12 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     };
     sessions.set(provider, session);
 
-    const file = commands[provider] || provider;
+    const file = commands[provider] || PROVIDER_COMMANDS[provider];
     const args = provider === "claude"
       ? ["auth", "login", "--claudeai"]
       : provider === "opencode" ? OPENCODE_LOGIN
-        : mode === "device" ? ["login", "--device-auth"] : ["login"];
+        : provider === "antigravity" ? []
+          : mode === "device" ? ["login", "--device-auth"] : ["login"];
     const childEnv = { ...env, BROWSER: browserScript, RUDDER_LOGIN_URL_FILE: urlFile, TERM: "xterm-256color" };
     // An API key in the environment would decide the login for the CLI.
     delete childEnv.ANTHROPIC_API_KEY;
@@ -275,6 +290,12 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       session.codeUrl ||= claudeCodeUrl(session.output);
       return Boolean(session.url && session.callback && session.codeUrl);
     }
+    if (session.provider === "antigravity") {
+      session.codeUrl ||= antigravityCodeUrl(session.output);
+      session.url = session.codeUrl;
+      session.callback = null;
+      return Boolean(session.codeUrl);
+    }
     if (session.mode === "device") {
       const device = chatgptDeviceCode(session.output);
       if (device) {
@@ -326,16 +347,20 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
         log(`login ${provider}: callback request: ${error.message}`);
       }
     } else if (typeof code === "string" && code.trim()) {
-      if (provider !== "claude") {
+      if (provider !== "claude" && provider !== "antigravity") {
         throw new Error(`${PROVIDER_NAMES[provider]} signs in with its device code, not a pasted one.`);
       }
+      // Google's codes carry a "/" ("4/0Ab..."), Claude's a "#".
       const cleaned = code.trim().replace(/\s+/g, "");
-      if (!/^[A-Za-z0-9._~#=-]+$/.test(cleaned) || cleaned.length > 4000) {
+      if (!/^[A-Za-z0-9._~#=\/-]+$/.test(cleaned) || cleaned.length > 4000) {
         throw new Error("That doesn't look like the code from the sign-in page.");
       }
       session.status = "finishing";
       changed(session);
       session.term.write(`${cleaned}\r`);
+      if (provider === "antigravity") {
+        await waitForSignIn(session);
+      }
     } else {
       throw new Error("callback or code is required");
     }
@@ -344,6 +369,21 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       end(session, "failed", lastLines(session.output) || "The sign-in did not finish.");
     }
     return publicView(session);
+  }
+
+  // agy keeps running after it signs in, so its exit says nothing: the login is
+  // done once agy lists models, and its session is closed then.
+  async function waitForSignIn(session) {
+    const deadline = Date.now() + EXIT_WAIT_MS;
+    while (!session.endedAt && Date.now() < deadline) {
+      await sleep(1000);
+      if (!session.endedAt && await signedIn(session.provider)) {
+        end(session, "done");
+        try { session.term.kill(); } catch { /* already gone */ }
+        return;
+      }
+    }
+    end(session, "failed", lastLines(session.output) || "Antigravity did not finish signing in.");
   }
 
   function cancel(provider, id) {

@@ -48,7 +48,7 @@ with Git.
 
 ```sh
 npm version X.Y.Z --no-git-tag-version
-jj commit package.json package-lock.json -m "X.Y.Z"
+jj commit package.json package-lock.json mac/project.yml -m "X.Y.Z"
 jj bookmark set main -r @-
 sha="$(jj log -r main --no-graph -T commit_id)"
 git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "$sha:refs/heads/release-check/X.Y.Z"
@@ -138,8 +138,10 @@ the newest `/Applications/Xcode*.app` through `DEVELOPER_DIR`. It also fetches
 pinned, checksummed xcodegen, uv (for Python 3.12, which dmgbuild needs) and
 `gh` into `$RUNNER_TEMP`.
 
-1. Bump `MARKETING_VERSION` (user-facing) and `CURRENT_PROJECT_VERSION` (+1
-   every build) in `mac/project.yml`. Commit and push `main`.
+1. The Mac app has Rudder's version: `npm version` (step 2) runs
+   `scripts/mac-version.mjs`, which sets `MARKETING_VERSION` and the derived
+   build number in `mac/project.yml`. Release the Mac app from a tagged
+   Rudder version, never with its own number. Push `main` first.
 2. The workflow may be disabled. If so, run `gh workflow enable mac.yml`.
 3. Run `gh workflow run mac.yml --ref main -f release=true`.
 

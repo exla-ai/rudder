@@ -1000,8 +1000,16 @@ pub(crate) fn claude_program() -> String {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "claude".to_string())
+        .unwrap_or_else(|| DEFAULT_CLAUDE_PROGRAM.to_string())
 }
+
+#[cfg(not(test))]
+const DEFAULT_CLAUDE_PROGRAM: &str = "claude";
+/// Tests never start the real Claude Code, which costs money and reads the
+/// user's own config: a test that does not inject a fake through
+/// RUDDER_CLAUDE_BIN gets a program that cannot exist, so its launch fails.
+#[cfg(test)]
+pub(crate) const DEFAULT_CLAUDE_PROGRAM: &str = "rudder-tests-never-start-the-real-claude";
 
 /// Prompt for the per-node review agent that runs in a finished node's OWN jj
 /// workspace before Rudder auto-merges it. It reviews the node's working-copy

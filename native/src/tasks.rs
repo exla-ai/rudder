@@ -1724,28 +1724,24 @@ Task:\n{task}"
     );
     // A title needs no settings, hooks, plugins, MCP servers or tools, and
     // loading the user's (LSP plugins, hooks) cost ~2s of a ~5s call that a new
-    // task waits on before it exists. A Claude Code too old for these flags
-    // fails at once, and the plain call below still names the workspace.
-    let run = |extra: &[&str]| {
-        Command::new(claude_program())
-            .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
-            .args(extra)
-            .env("CLAUDE_CODE_NO_FLICKER", "0")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-    };
-    let output = run(&[
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        "--tools",
-        "",
-        "--disable-slash-commands",
-    ])
-    .or_else(|| run(&[]))?;
+    // task waits on before it exists. A failed call is None: the row keeps
+    // its local summary.
+    let output = Command::new(claude_program())
+        .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
+        .args([
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--tools",
+            "",
+            "--disable-slash-commands",
+        ])
+        .env("CLAUDE_CODE_NO_FLICKER", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     task_title_from_summary_output(&stdout)
 }

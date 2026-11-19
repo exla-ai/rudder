@@ -5714,7 +5714,7 @@ fn plan_commands_use_read_only_backend_profiles() {
         AgentMode::Plan,
         None,
     );
-    assert_eq!(claude.program, "claude");
+    assert_eq!(claude.program, crate::launch::DEFAULT_CLAUDE_PROGRAM);
     assert!(claude
         .env
         .iter()
@@ -9322,7 +9322,7 @@ fn resume_commands_reuse_saved_session_ids() {
     claude.backend = Backend::Claude;
     claude.session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
     let claude_command = claude_resume_command(&claude, claude.session_id.as_deref().unwrap());
-    assert_eq!(claude_command.program, "claude");
+    assert_eq!(claude_command.program, crate::launch::DEFAULT_CLAUDE_PROGRAM);
     assert!(claude_command.args.iter().any(|arg| arg == "--resume"));
     assert!(claude_command
         .args
@@ -9465,7 +9465,7 @@ fn fork_commands_branch_the_session_without_touching_the_original() {
 
     // Claude branches by resuming WITH --fork-session (new session id minted).
     let claude = claude_fork_command("opus", Some(EffortLevel::High), "sid-claude", None);
-    assert_eq!(claude.program, "claude");
+    assert_eq!(claude.program, crate::launch::DEFAULT_CLAUDE_PROGRAM);
     assert!(claude
         .args
         .windows(2)
@@ -22536,15 +22536,14 @@ fn gam_task_text_never_becomes_a_model_picker() {
 #[cfg(not(windows))]
 #[test]
 fn focusing_a_reloaded_agent_reopens_its_conversation() {
-    // Resuming spawns the real backend CLI. Where it is not installed (the
-    // release gate), skip rather than fail -- same reason the resolver test
-    // stubs its backend.
-    if std::env::var_os("PATH")
-        .map(|path| !std::env::split_paths(&path).any(|dir| dir.join("claude").exists()))
-        .unwrap_or(true)
-    {
-        return;
-    }
+    // Resuming spawns the backend CLI. A stand-in keeps the pane alive: what
+    // matters is that a pane opens, and tests never start the real `claude`.
+    let _env = env_guard();
+    let dir = unique_test_repo("reopen-itest");
+    fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nexec cat\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
     let mut run = test_agent_run("reopen-itest", "port the settings screen");
@@ -22579,6 +22578,8 @@ fn focusing_a_reloaded_agent_reopens_its_conversation() {
         !app.reopen_conversation_at(0),
         "already has a pane, and the attempt is recorded"
     );
+    drop(app);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

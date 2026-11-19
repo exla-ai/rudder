@@ -2,12 +2,12 @@
 // running and finished, in one strip above the composer, so they stay in reach
 // without scrolling up to their cards (cloud/worker/subagents.mjs, GET
 // /api/app/subagents). Each entry says what the chat's card says, live: status,
-// title, kind and name, how long, tool calls and its latest step
-// (subagents.js subagentFacts). An entry opens that subagent's activity in the
-// tray, painted as the card's is (paintSubagentActivity). Teammates are listed
-// too, whether or not the chat has a card for them. The tray hides to one line,
-// remembered per device. A cloud machine too old to list subagents gets one
-// row with Update now in the tray's place (home-update.js).
+// title, kind and name, how long and tool calls (subagents.js subagentFacts).
+// An entry opens that subagent's activity in the tray, painted as the card's is
+// (paintSubagentActivity). Teammates are listed too, whether or not the chat
+// has a card for them. The tray hides to one line, remembered per device, that
+// says how many run. A cloud machine too old to list subagents gets one row
+// with Update now in the tray's place (home-update.js).
 
 import { h, icon, reconcile, setText } from "/app/render.js";
 import { api, ls } from "/app/core.js";
@@ -25,7 +25,6 @@ export function mountSubagentTray({ workspace, run }) {
     <button type="button" class="sat-toggle">
       <span class="sat-ic">${icon("agents")}</span>
       <span class="sat-title">Subagents</span>
-      <span class="sat-count"></span>
       <span class="sat-badge" hidden></span>
       <span class="sat-act"></span>${icon("chevron").replace("<svg", '<svg class="sat-caret"')}
     </button>
@@ -46,7 +45,6 @@ export function mountSubagentTray({ workspace, run }) {
     </div>
   </section>`);
   const toggle = el.querySelector(".sat-toggle");
-  const countEl = el.querySelector(".sat-count");
   const badgeEl = el.querySelector(".sat-badge");
   const panel = el.querySelector(".sat-panel");
   const note = el.querySelector(".sat-note");
@@ -116,10 +114,8 @@ export function mountSubagentTray({ workspace, run }) {
     el.classList.toggle("live", running > 0);
     el.classList.toggle("outdated", outdated);
     toggle.setAttribute("aria-expanded", String(shown));
-    const what = outdated ? "your cloud machine needs an update" : `${list.length}${running ? `, ${running} running` : ""}`;
-    toggle.setAttribute("aria-label", `Subagents: ${what}. ${shown ? "Hide" : "Show"}`);
-    setText(countEl, outdated || !list.length ? "" : String(list.length));
     const badge = outdated ? "Update needed" : running ? `${running} running` : "";
+    toggle.setAttribute("aria-label", `Subagents${outdated ? ": your cloud machine needs an update" : running ? `: ${running} running` : ""}. ${shown ? "Hide" : "Show"}`);
     badgeEl.hidden = !badge;
     setText(badgeEl, badge);
     setText(el.querySelector(".sat-act"), shown ? "Hide" : "Show");
@@ -157,16 +153,13 @@ export function mountSubagentTray({ workspace, run }) {
       <span class="sat-c-top"><span class="dot"></span><span class="sat-c-name"></span></span>
       <span class="sat-c-who"></span>
       <span class="sat-c-meta"><span class="sat-c-state"></span><span class="sat-c-facts"></span></span>
-      <span class="sat-c-step"></span>
     </button>`);
   }
 
   function paintCard(node, s, now) {
     const f = trayFacts(s, now);
     const facts = [f.time, f.calls].filter(Boolean).join(" · ");
-    // What a finished one came back with reads without its markdown marks.
-    const step = !s.step ? (s.status === "running" ? "Starting" : "") : s.status === "running" ? s.step : s.step.replace(/\*\*|`|^#+\s*/g, "");
-    const sig = [s.status, f.title, f.who, facts, step].join("|");
+    const sig = [s.status, f.title, f.who, facts].join("|");
     if (node.dataset.sig === sig) return;
     node.dataset.sig = sig;
     node.classList.remove("s-working", "s-done", "s-failed", "s-idle");
@@ -178,8 +171,7 @@ export function mountSubagentTray({ workspace, run }) {
     who.hidden = !f.who;
     setText(node.querySelector(".sat-c-state"), f.st.label);
     setText(node.querySelector(".sat-c-facts"), facts ? ` · ${facts}` : "");
-    setText(node.querySelector(".sat-c-step"), step);
-    node.setAttribute("aria-label", [f.title, f.who, [f.st.label, facts].filter(Boolean).join(", "), step, "Open its activity"].filter(Boolean).join(". "));
+    node.setAttribute("aria-label", [f.title, f.who, [f.st.label, facts].filter(Boolean).join(", "), "Open its activity"].filter(Boolean).join(". "));
   }
 
   async function poll() {

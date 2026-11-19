@@ -25,7 +25,6 @@
 .sa-tray.live .sat-ic { background: var(--working-soft); color: var(--working); }
 .sat-ic svg { width: 14px; height: 14px; }
 .sat-title { font-weight: 600; color: var(--ink-2); flex: none; }
-.sat-count { flex: none; font-variant-numeric: tabular-nums; }
 /* How many run, or that the machine needs an update: seen with the tray hidden too. */
 .sat-badge { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--working-soft); color: var(--working); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sa-tray.outdated .sat-badge { background: var(--needs-soft); color: var(--needs); }
@@ -66,8 +65,6 @@
 .sat-c-who { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sat-c-meta { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .sat-c-state { color: var(--c); font-weight: 600; }
-.sat-c-step { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sat-card.s-working .sat-c-step { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 
 .sat-open {
   display: flex; flex-direction: column; margin: 0 0 10px; overflow: hidden;

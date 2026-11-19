@@ -107,8 +107,6 @@ function paint(box, m, open) {
   box._msg = m;
   const { st, title, who, time, calls } = subagentFacts(s, Date.now());
   const facts = [who, time, calls].filter(Boolean);
-  const msgs = s.messages || [];
-  const last = msgs[msgs.length - 1];
   const sig = [activitySig(s), time, open].join("|");
   if (box._saSig === sig) return;
   box._saSig = sig;
@@ -124,12 +122,11 @@ function paint(box, m, open) {
   setText(row.querySelector(".sa-label"), st.label);
   // On a phone the facts wrap between items, never inside one.
   setText(row.querySelector(".sa-facts"), facts.map((f) => f.replace(/ /g, "\u00a0")).join(" · "));
-  // Closed, the card says what it is doing now, or what it came back with.
+  // Closed, a finished card says what it came back with.
   const line = row.querySelector(".sa-line");
-  const text = open ? "" : s.status === "running" ? activity(last) : oneLine(s.result || "");
+  const text = open || s.status === "running" ? "" : oneLine(s.result || "");
   setText(line, text);
   line.hidden = !text;
-  line.classList.toggle("sa-result", !open && s.status !== "running");
 
   const body = box.querySelector(":scope > .sa-body");
   body.hidden = !open;
@@ -190,13 +187,6 @@ function updateInner(node, x) {
   const md = node.classList.contains("md") ? node : node.querySelector(".md");
   const sig = `${x.text}|${markdownReady()}`;
   if (md.dataset.sig !== sig) { renderMarkdown(md, x.text || ""); md.dataset.sig = sig; }
-}
-
-// What a running subagent is doing: its newest tool call, or what it last said.
-function activity(m) {
-  if (!m) return "Starting";
-  if (m.role === "tool") return `${m.tool?.name || "Tool"} ${(m.tool?.input || "").replace(/\s+/g, " ").trim()}`.trim();
-  return oneLine(m.text || "");
 }
 
 function oneLine(text) {

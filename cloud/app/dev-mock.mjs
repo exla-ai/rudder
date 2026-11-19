@@ -3,7 +3,7 @@
 // Serves /app/* from this folder and mocks /api/app/*.
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
-// /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
+// /app/__mock/creds/<out|claude|both|expired|two> (Claude Code / Codex sign-in; two: a second Claude account),
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/compact/<live|done|off> (run_a1 compacting its context now, then the marker it leaves),
@@ -47,16 +47,38 @@ let closeMode = "ok";
 let harnessMode = "ok";
 let notesMode = "ok";
 let fileRefMode = "ok";
-// Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
-const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
+// Who the machine's Claude Code and Codex accounts sign in as (each harness a
+// list, "main" first, as home.mjs checkCredentials reports), and sign-ins in flight.
+const signedIn = (provider, id = "main", email = "viraat@example.com") =>
+  ({ id, default: id === "main", ok: true, account: email, plan: provider === "claude" ? "max" : "pro", detail: null });
+const OUT = [{ id: "main", default: true, ok: false, account: null, detail: "not logged in" }];
 const CREDS = {
-  out: () => ({ claude: { ok: false, account: null, detail: "not logged in" }, codex: { ok: false, account: null, detail: "not logged in" } }),
-  claude: () => ({ claude: signedIn("claude"), codex: { ok: false, account: null, detail: "not logged in" } }),
-  both: () => ({ claude: signedIn("claude"), codex: signedIn("codex") }),
-  expired: () => ({ claude: { ok: false, account: "viraat@example.com", plan: "max", detail: "login expired" }, codex: signedIn("codex") }),
+  out: () => ({ claude: OUT, codex: OUT }),
+  claude: () => ({ claude: [signedIn("claude")], codex: OUT }),
+  both: () => ({ claude: [signedIn("claude")], codex: [signedIn("codex")] }),
+  expired: () => ({ claude: [{ id: "main", default: true, ok: false, account: "viraat@example.com", plan: "max", detail: "login expired" }], codex: [signedIn("codex")] }),
+  two: () => ({ claude: [signedIn("claude"), { ...signedIn("claude", "mi6x2k3a", "work@example.com"), plan: "pro" }], codex: [signedIn("codex")] }),
 };
+// One account of a harness, signed in (or added) on the mock machine.
+const putAccount = (provider, row) => {
+  const list = creds[provider] ?? [];
+  creds = { ...creds, [provider]: list.some((a) => a.id === row.id) ? list.map((a) => (a.id === row.id ? row : a)) : [...list, row] };
+};
+const accountRow = (provider, id) => (creds[provider] ?? []).find((a) => a.id === id);
 let creds = CREDS.claude();
 const logins = {};
+// A sign-in that finished: main signs in as the user, an added one as work.
+const mockSignedIn = (provider, account) => {
+  const was = accountRow(provider, account);
+  return { ...signedIn(provider, account, account === "main" ? "viraat@example.com" : "work@example.com"), default: was?.default ?? account === "main" };
+};
+// What handoff.mjs handoffRefusal says about an account a chat moves to.
+const mockRefusal = (provider, account, label) => {
+  const row = accountRow(provider, account);
+  if (!creds[provider]) return null;
+  if (!row) return `That ${label} account is no longer on your cloud machine.`;
+  return row.ok ? null : `${label} isn't signed in on your cloud machine${row.account ? ` as ${row.account}` : ""}.`;
+};
 // GitHub in the vault, and the device flow the phone runs (approves itself after a few polls).
 let githubConnected = true;
 let githubFlow = null;
@@ -1164,10 +1186,13 @@ const server = http.createServer(async (req, res) => {
       if (usageMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
       const fetchedAt = iso(now() - 2 * MIN);
       const win = (label, percent, inMin) => ({ label, percent, resetsAt: iso(now() + inMin * MIN) });
+      const extra = (creds.claude ?? []).filter((a) => a.id !== "main" && a.ok);
       return json(res, 200, { fetchedAt, ttlSeconds: 300, accounts: [
-        { provider: "claude", email: "viraat@example.com", plan: "Max 20x", blocked: null, error: null, fetchedAt,
+        { provider: "claude", account: "main", default: accountRow("claude", "main")?.default ?? true, email: "viraat@example.com", plan: "Max 20x", blocked: null, error: null, fetchedAt,
           windows: [win("Session (5h)", 42, 134), win("Weekly", 61, 3 * 24 * 60 + 200), win("Weekly · Opus", 74, 3 * 24 * 60 + 200)] },
-        { provider: "codex", email: "viraat@example.com", plan: "Pro", blocked: null, error: null, fetchedAt,
+        ...extra.map((a) => ({ provider: "claude", account: a.id, default: a.default, email: a.account, plan: "Pro", blocked: null, error: null, fetchedAt,
+          windows: [win("Session (5h)", 8, 212), win("Weekly", 12, 4 * 24 * 60)] })),
+        { provider: "codex", account: "main", default: true, email: "viraat@example.com", plan: "Pro", blocked: null, error: null, fetchedAt,
           windows: [win("Session (5h)", 18, 251), win("Weekly", 33, 5 * 24 * 60 + 30)] },
       ] });
     }
@@ -1326,8 +1351,10 @@ const server = http.createServer(async (req, res) => {
       // Another model or effort of the same harness: the chat carries on.
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
+      const refusal = mockRefusal(t.a.backend, body.account, t.a.backend === "codex" ? "Codex" : "Claude Code");
+      if (refusal) return json(res, 400, { error: refusal });
       await delay(250);
-      Object.assign(t.a, { model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, updatedAt: now() });
+      Object.assign(t.a, { model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, account: body.account, updatedAt: now() });
       return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/agent-harness") {
@@ -1338,11 +1365,12 @@ const server = http.createServer(async (req, res) => {
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (harnessMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
       const label = (backend) => (backend === "codex" ? "Codex" : "Claude");
-      // A harness the machine is not signed in to is refused (handoff.mjs handoffRefusal).
-      if (creds[body.backend] && !creds[body.backend].ok) return json(res, 400, { error: `${label(body.backend)} isn't signed in on your cloud machine.` });
+      // An account the machine is not signed in to is refused (handoff.mjs handoffRefusal).
+      const refusal = mockRefusal(body.backend, body.account, label(body.backend));
+      if (refusal) return json(res, 400, { error: refusal });
       await delay(250);
       const from = [label(t.a.backend), t.a.modelName].filter(Boolean).join(" · ");
-      Object.assign(t.a, { backend: body.backend, model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, status: "working", updatedAt: now() });
+      Object.assign(t.a, { backend: body.backend, model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, account: body.account, status: "working", updatedAt: now() });
       const asks = body.instructions ? `## The user's instructions for this handoff\n${body.instructions}\n\n` : "";
       const summary = `## Goal\n${t.a.task}\n\n${asks}## Where it stopped\nIt had finished its last turn and was waiting for the user.`;
       t.msgs.splice(0, t.msgs.length, { id: `h${now()}`, role: "system", kind: "handoff", ts: now(), text: `Moved from ${from}`, handoff: { from, summary } });
@@ -1395,12 +1423,14 @@ const server = http.createServer(async (req, res) => {
       const provider = body.provider;
       const id = `login-${now().toString(36)}`;
       const device = provider === "codex" && body.device === true;
-      logins[provider] = { id, provider, mode: device ? "device" : "browser", status: "waiting", error: null, startedAt: iso(now()), endedAt: null };
+      // "new" adds an account (home.mjs createAccount); its id is a base-36 time.
+      const account = body.account === "new" ? now().toString(36) : body.account;
+      logins[provider] = { id, provider, account, mode: device ? "device" : "browser", status: "waiting", error: null, startedAt: iso(now()), endedAt: null };
       if (device) {
         setTimeout(() => {
           if (logins.codex?.id !== id || logins.codex.status !== "waiting") return;
           Object.assign(logins.codex, { status: "done", endedAt: iso(now()) });
-          creds = { ...creds, codex: signedIn("codex") };
+          putAccount("codex", mockSignedIn("codex", account));
         }, 7000);
       }
       return json(res, 200, {
@@ -1420,9 +1450,22 @@ const server = http.createServer(async (req, res) => {
       if (body.code === "bad") Object.assign(login, { status: "failed", error: "OAuth error: Invalid code", endedAt: iso(now()) });
       else {
         Object.assign(login, { status: "done", endedAt: iso(now()) });
-        creds = { ...creds, [body.provider]: signedIn(body.provider) };
+        putAccount(body.provider, mockSignedIn(body.provider, login.account));
       }
       return json(res, 200, login);
+    }
+    // An account's menu in Settings (home.mjs changeAccount).
+    if (p === "/api/app/agent-account") {
+      const { provider, account, action } = body;
+      if (!accountRow(provider, account)) return json(res, 400, { error: "That account is no longer on your cloud machine." });
+      await delay(400);
+      if (action === "default") creds = { ...creds, [provider]: creds[provider].map((a) => ({ ...a, default: a.id === account })) };
+      else if (action === "signOut") putAccount(provider, { ...accountRow(provider, account), ok: false, account: null, plan: null, detail: "not logged in" });
+      else if (action === "remove") {
+        const left = creds[provider].filter((a) => a.id !== account);
+        creds = { ...creds, [provider]: left.some((a) => a.default) ? left : left.map((a) => ({ ...a, default: a.id === "main" })) };
+      } else return json(res, 400, { error: "Unknown action" });
+      return json(res, 200, { ok: true, credentials: creds });
     }
     if (p === "/api/app/login/cancel") {
       const login = logins[body.provider];

@@ -233,8 +233,9 @@ export function setPlanUsageShown(shown) {
 }
 
 /**
- * Plan usage for the cloud machine's signed-in Claude and Codex accounts: one
- * row each in the sidebar footer (the window closest to its limit), and every
+ * Plan usage for the cloud machine's signed-in Claude and Codex accounts (a
+ * harness can hold several, src/accounts.ts): one row each in the sidebar
+ * footer (the window closest to its limit), and every
  * window with its reset time in the popover. Usage belongs to the machine's
  * sign-ins, not to a project. When it cannot load, the meter says so and the
  * popover gives the reason. Mount `el` in the footer and call
@@ -246,7 +247,7 @@ export function PlanUsage() {
   let report = null;       // the last QuotaReport from the home
   let problem = null;      // why the last fetch failed, shown in the popover
   let updater = null;      // Update now, while the machine is too old to report usage
-  let signedIn = [];       // provider ids signed in on the machine
+  let signedIn = [];       // "<provider>:<account>" signed in on the machine
   let timer = 0, inflight = false, stopped = false;
 
   const pop = popover(el, { label: "Plan usage", place: "above", render: () => renderUsagePop({
@@ -325,7 +326,7 @@ export function PlanUsage() {
     const creds = state?.home?.credentials;
     // An asleep machine sends no credentials: keep what was last shown.
     if (creds) {
-      const next = PROVIDERS.filter((p) => creds[p.id]?.ok).map((p) => p.id);
+      const next = PROVIDERS.flatMap((p) => (creds[p.id] ?? []).filter((a) => a.ok).map((a) => `${p.id}:${a.id}`));
       if (next.join() !== signedIn.join()) { signedIn = next; paint(); }
     }
   }
@@ -347,12 +348,16 @@ export function PlanUsage() {
 
 const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
-// The signed-in providers the report has an account for, in display order.
+// The signed-in accounts the report has, in display order. A harness with
+// more than one names each by its email.
 function reportedAccounts(report, signedIn) {
-  return PROVIDERS
-    .filter((p) => signedIn.includes(p.id))
-    .map((p) => ({ ...p, account: report.accounts?.find((a) => a.provider === p.id) || null }))
-    .filter(({ account }) => account);
+  return PROVIDERS.flatMap((p) => {
+    const mine = (report.accounts ?? []).filter((a) => a.provider === p.id && signedIn.includes(`${p.id}:${a.account}`));
+    return mine.map((account) => ({
+      label: mine.length > 1 && account.email ? `${p.label} · ${account.email.split("@")[0]}` : p.label,
+      account,
+    }));
+  });
 }
 
 // The window closest to its limit decides when the account is blocked.

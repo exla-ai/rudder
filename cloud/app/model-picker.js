@@ -124,19 +124,61 @@ function choiceLabel(c) {
   return c ? modelText(c.backend, c.name, c.effort) : "Choose model";
 }
 
-/** The cloud machine's last sign-in check of a harness, or null before one. */
-const credOf = (backend) => app.store?.state?.home?.credentials?.[backend] ?? null;
-/** Whether that check found the harness signed out (cloud/worker/handoff.mjs handoffRefusal). */
-const signedOut = (backend) => {
-  const cred = credOf(backend);
-  return !!cred && !cred.ok;
+// A harness's accounts on the cloud machine, as its last sign-in check found
+// them: "main" (the CLI's own) first. Claude Code and Codex can hold several
+// (src/accounts.ts), each its own sign-in; an agent runs on one of them.
+const MAIN = "main";
+/** The machine's accounts of a harness, or [] before its first check. */
+const accountsOf = (backend) => app.store?.state?.home?.credentials?.[backend] ?? [];
+const accountOf = (backend, id) => accountsOf(backend).find((a) => a.id === id) ?? null;
+/** The account new agents on a harness start on. */
+const defaultAccount = (backend) => accountsOf(backend).find((a) => a.default)?.id ?? MAIN;
+/** Whether that check found the account signed out (cloud/worker/handoff.mjs handoffRefusal). */
+const signedOut = (backend, id) => {
+  const account = accountOf(backend, id);
+  return !!account && !account.ok;
+};
+/** An account in words: its email, else which one it is. */
+const accountName = (backend, id) => {
+  const list = accountsOf(backend);
+  const account = list.find((a) => a.id === id);
+  return account?.account || (id === MAIN ? "Main account" : `Account ${list.indexOf(account) + 1}`);
 };
 
-function accountLine(harness) {
-  const cred = credOf(harness.id);
+function accountLine(harness, id) {
+  const cred = accountOf(harness.id, id);
   if (!cred) return `Runs on your own ${harness.account} subscription`;
   if (cred.ok) return [cred.account, cred.plan ? `${PLAN_LABEL[cred.plan] || cred.plan} plan` : null].filter(Boolean).join(" · ") || "Signed in";
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
+}
+
+/**
+ * Under the harness tabs: the account its agents run on. One account is a
+ * line; several are a choice, `selected` checked, the signed-out ones off.
+ */
+function paintAccounts(el, harness, { selected, onPick }) {
+  const list = accountsOf(harness.id);
+  el.hidden = false;
+  if (list.length < 2) {
+    el.classList.remove("mp-accounts");
+    el.removeAttribute("role");
+    el.removeAttribute("aria-label");
+    setText(el, accountLine(harness, selected));
+    return;
+  }
+  el.classList.add("mp-accounts");
+  el.setAttribute("role", "radiogroup");
+  el.setAttribute("aria-label", `${harness.label} account`);
+  el.replaceChildren(...list.map((a) => {
+    const b = h(`<button type="button" role="radio" class="mp-acct"><span class="mp-acct-n"></span><span class="mp-acct-p"></span></button>`);
+    setText(b.querySelector(".mp-acct-n"), accountName(harness.id, a.id));
+    setText(b.querySelector(".mp-acct-p"), a.ok ? (a.plan ? PLAN_LABEL[a.plan] || a.plan : "") : "Signed out");
+    b.setAttribute("aria-checked", String(a.id === selected));
+    b.disabled = !a.ok;
+    b.title = a.ok ? accountLine(harness, a.id) : "Not signed in on the cloud machine. Sign in again from Settings.";
+    b.addEventListener("click", () => onPick(a.id));
+    return b;
+  }));
 }
 
 /**
@@ -161,19 +203,17 @@ function paintTabs(tabsEl, harnesses, { tab, onTab }) {
 }
 
 /**
- * One harness's models, the aliases last under "Always the newest", and its
- * sign-in in `accountEl`. `selected` is checked and `current` badged
+ * One harness's models, the aliases last under "Always the newest".
+ * `selected` is checked and `current` badged
  * ({ backend, model } each), whichever tab they are on. Keeps the list's
  * scroll while the tab stays; a new tab starts at the top. `reveal` scrolls
  * the checked row into view.
  */
-function paintModels(modelsEl, accountEl, section, { selected, current, onPick, reveal }) {
+function paintModels(modelsEl, section, { selected, current, onPick, reveal }) {
   const { harness, models } = section;
   const top = modelsEl.dataset.harness === harness.id ? modelsEl.scrollTop : 0;
   modelsEl.dataset.harness = harness.id;
   modelsEl.setAttribute("aria-label", `${harness.label} models`);
-  setText(accountEl, accountLine(harness));
-  accountEl.hidden = false;
   modelsEl.replaceChildren();
   let aliases = false;
   for (const o of models) {
@@ -283,6 +323,9 @@ export function openModelPicker(ws, { onPicked } = {}) {
   const start = currentChoice(ws);
   let pick = start && { backend: start.backend, model: start.model };
   let effort = start?.effort || "auto";
+  // The account picked per harness; until a pick, the harness's default.
+  const picked = {};
+  const accountFor = (backend) => picked[backend] ?? defaultAccount(backend);
   // The harness tab shown: the picked model's until another is chosen.
   let tab = pick?.backend ?? null;
   let revealed = false;
@@ -303,13 +346,14 @@ export function openModelPicker(ws, { onPicked } = {}) {
     if (harnesses.length) {
       paintTabs(tabsEl, harnesses, { tab, onTab: showTab });
       const harness = harnessOf(data, tab);
-      paintModels(modelsEl, accountEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed });
+      paintAccounts(accountEl, harness, { selected: accountFor(harness.id), onPick: (id) => { picked[harness.id] = id; render(); } });
+      paintModels(modelsEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed });
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const row = pickedRow();
     const eff = effortFor(row, effort);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
-    useBtn.disabled = !pick;
+    useBtn.disabled = !pick || signedOut(pick.backend, accountFor(pick.backend));
     setText(useBtn, pick ? `Use ${modelText(pick.backend, row.label, dial ? eff : null)}` : "Use this model");
   }
 
@@ -320,6 +364,12 @@ export function openModelPicker(ws, { onPicked } = {}) {
     const eff = effortsOf(row).length ? effortFor(row, effort) : null;
     useBtn.disabled = true;
     try {
+      // New agents on a harness start on its default account (native reads
+      // it at launch), so picking another account here makes it the default.
+      const account = accountFor(backend);
+      if (account !== defaultAccount(backend)) {
+        await api("/api/app/agent-account", { method: "POST", body: { provider: backend, account, action: "default" } });
+      }
       // Exactly the dashboard grammar: /model <harness> <model> [effort].
       const text = `/model ${backend} ${model}${eff ? ` ${eff}` : ""}`;
       await api("/api/app/task", { method: "POST", body: { workspace: ws, text } });
@@ -327,7 +377,9 @@ export function openModelPicker(ws, { onPicked } = {}) {
       ls.set(pickKey(ws), choice);
       track("model_picked", { backend, model, effort: eff || "none" });
       dlg.close();
-      toast(`New agents start on ${choiceLabel(choice)}`);
+      const as = accountsOf(backend).length > 1 ? ` as ${accountName(backend, account)}` : "";
+      toast(`New agents start on ${choiceLabel(choice)}${as}`);
+      app.refreshState();
       onPicked?.(choice);
     } catch (err) { showError(err); useBtn.disabled = false; }
   });
@@ -402,15 +454,17 @@ export function mountChatModelControl(container, { workspace, run, agent }) {
  * (POST /api/app/agent-model). The model sheet's Switch and the effort chip
  * both land here. Throws what the request threw.
  */
-async function switchChatModel({ workspace, run, agent, backend, row, effort }) {
+async function switchChatModel({ workspace, run, agent, backend, row, effort, account }) {
   const model = row.value;
-  const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort } });
+  const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort, account } });
   track("chat_model_switched", { backend, model, effort });
   // The dashboard took it (or will within seconds): show it now, the next
   // state refresh carries the real row.
   const a = agent();
-  if (a) { a.model = model; a.modelName = row.label; a.effort = effort === "auto" ? null : effort; }
-  toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${modelText(backend, row.label, effort)}`);
+  const moved = a && (a.account ?? MAIN) !== account;
+  if (a) { a.model = model; a.modelName = row.label; a.effort = effort === "auto" ? null : effort; a.account = account; }
+  const as = moved ? ` as ${accountName(backend, account)}` : "";
+  toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${modelText(backend, row.label, effort)}${as}`);
   app.refreshState();
 }
 
@@ -463,7 +517,7 @@ function openEffortMenu(chip, { workspace, run, agent, onSwitched }) {
       if (e.id === current) return;
       chip.disabled = true;
       try {
-        await switchChatModel({ workspace, run, agent, backend: a.backend, row, effort: e.id });
+        await switchChatModel({ workspace, run, agent, backend: a.backend, row, effort: e.id, account: a.account ?? MAIN });
         onSwitched();
       } catch (err) { showError(err); }
       finally { chip.disabled = false; }
@@ -538,6 +592,11 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   // The picked row; until a pick, the row the agent runs on.
   let pick = { backend, model: start.model };
   let effort = start.effort || "auto";
+  // The account picked per harness: the chat's own for its harness, the
+  // default for the others, until a pick.
+  const own = start.account ?? MAIN;
+  const picked = { [backend]: own };
+  const accountFor = (b) => picked[b] ?? defaultAccount(b);
   // The harness tab shown: the chat's own until another is chosen.
   let tab = backend;
   let revealed = false;
@@ -557,6 +616,8 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const a = agent() || start;
     const busy = a.status === "working";
     const moving = pick.backend !== backend;
+    const account = accountFor(pick.backend);
+    const reaccount = !moving && account !== (a.account ?? MAIN);
     const row = rowOf(pick);
     const eff = effortFor(row, effort);
     const all = sections();
@@ -565,7 +626,8 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     if (section) {
       tab = section.harness.id;
       paintTabs(tabsEl, all.map((x) => x.harness), { tab, onTab: showTab });
-      paintModels(modelsEl, accountEl, section, {
+      paintAccounts(accountEl, section.harness, { selected: accountFor(tab), onPick: (id) => { picked[section.harness.id] = id; render(); } });
+      paintModels(modelsEl, section, {
         selected: pick, current: { backend, model: a.model },
         onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed,
       });
@@ -573,19 +635,20 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     revealed = true;
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     const to = harnessLabel(pick.backend);
-    // A harness the machine is not signed in to can't take the chat: its
+    // An account the machine is not signed in to can't take the chat: its
     // agent would fail at once. The home refuses it too.
-    const blocked = moving && signedOut(pick.backend);
+    const blocked = (moving || reaccount) && signedOut(pick.backend, account);
     setText(note, blocked
-      ? `${to} isn't signed in on your cloud machine. Sign in from Settings to move this chat there.`
+      ? `${to} isn't signed in on your cloud machine as ${accountName(pick.backend, account)}. Sign in again from Settings first.`
       : moving ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
       : busy ? "It is working right now. Switch when this turn ends."
+      : reaccount ? `The conversation carries on as ${accountName(pick.backend, account)}. Its next reply uses that account.`
       : "The conversation carries on. Its next reply uses the new model.");
     note.classList.toggle("mp-blocked", blocked);
-    const same = !moving && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
+    const same = !moving && !reaccount && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
     const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
     useBtn.disabled = !row || same || (busy && !moving) || blocked;
-    setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : `Switch to ${name}`);
+    setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : reaccount && pick.model === a.model ? `Switch to ${accountName(pick.backend, account)}` : `Switch to ${name}`);
   }
 
   useBtn.addEventListener("click", async () => {
@@ -595,14 +658,14 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     if (pick.backend !== backend) {
       openHandoffDialog({
         workspace, run, agent,
-        to: { backend: pick.backend, model: pick.model, name: row.label, effort: eff === "auto" ? null : eff },
+        to: { backend: pick.backend, model: pick.model, name: row.label, effort: eff === "auto" ? null : eff, account: accountFor(pick.backend) },
         onMoved: () => { dlg.close(); onSwitched(); },
       });
       return;
     }
     useBtn.disabled = true;
     try {
-      await switchChatModel({ workspace, run, agent, backend, row, effort: eff });
+      await switchChatModel({ workspace, run, agent, backend, row, effort: eff, account: accountFor(backend) });
       dlg.close();
       onSwitched();
     } catch (err) { showError(err); render(); }
@@ -689,11 +752,11 @@ function openHandoffDialog({ workspace, run, agent, to, onMoved }) {
     try {
       const res = await api("/api/app/agent-harness", {
         method: "POST",
-        body: { workspace, run, backend: to.backend, model: to.model, effort: to.effort || "auto", instructions },
+        body: { workspace, run, backend: to.backend, model: to.model, effort: to.effort || "auto", account: to.account, instructions },
       });
       // The dashboard took it: show it now, the next state refresh carries the real row.
       const row = agent();
-      if (row) Object.assign(row, { backend: to.backend, model: to.model, modelName: to.name, effort: to.effort, status: "working" });
+      if (row) Object.assign(row, { backend: to.backend, model: to.model, modelName: to.name, effort: to.effort, account: to.account, status: "working" });
       sending = false;
       dlg.close();
       toast(res?.status === "queued" ? `Moving to ${toText} when the cloud machine picks it up` : `This chat moved to ${toText}`);

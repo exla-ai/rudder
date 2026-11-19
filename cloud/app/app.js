@@ -1971,20 +1971,28 @@ function openSignInPage(url) {
   else openExternal(url);
 }
 
-// What a row says about one agent's login on the machine.
-function agentLoginState(home, provider) {
+// Claude Code and Codex can hold several accounts on the machine, each its own
+// sign-in (src/accounts.ts); OpenCode and Antigravity one. The machine checks
+// each: `home.credentials[provider]` is a list, "main" (the CLI's own) first.
+const MULTI_ACCOUNT = new Set(["claude", "codex"]);
+const MAIN = "main";
+/** A harness's accounts as last checked; before the first check, its main one, unchecked. */
+const agentAccounts = (home, provider) => home?.credentials?.[provider] ?? [{ id: MAIN, default: true }];
+
+// What a row says about one account's login on the machine.
+function accountLoginState(home, provider, account) {
   const login = home?.logins?.[provider];
-  if (login && LOGIN_BUSY.has(login.status)) {
+  if (login && LOGIN_BUSY.has(login.status) && login.account === account.id) {
     return { kind: "busy", pill: "Signing in", cls: "s-accent", sub: login.status === "finishing" ? "Finishing on the machine…" : "Waiting for you to approve" };
   }
-  const cred = home?.credentials?.[provider];
-  if (cred?.ok) {
-    const bits = [cred.account, planLabel(cred.plan)].filter(Boolean);
+  if (account.ok) {
+    const bits = [account.account, planLabel(account.plan)].filter(Boolean);
     return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in" };
   }
-  if (cred && cred.ok === false) {
-    const detail = cred.detail || "";
-    if (/expired/i.test(detail)) return { kind: "out", sub: "Login expired. Sign in again.", err: true, expired: true };
+  if (account.ok === false) {
+    const detail = account.detail || "";
+    const who = account.account ? `${account.account}: ` : "";
+    if (/expired/i.test(detail)) return { kind: "out", sub: `${who}Login expired. Sign in again.`, err: true, expired: true };
     if (/not logged in|not signed in/i.test(detail)) return { kind: "out", sub: "Not signed in" };
     return { kind: "out", sub: detail, err: true };
   }
@@ -1992,73 +2000,169 @@ function agentLoginState(home, provider) {
   return { kind: "checking", sub: "Checking…" };
 }
 
+// One harness at a glance: signing in while any of its sign-ins runs, else
+// how the account new agents start on stands.
+function agentLoginState(home, provider) {
+  const login = home?.logins?.[provider];
+  const list = agentAccounts(home, provider);
+  const busy = login && LOGIN_BUSY.has(login.status) && list.find((a) => a.id === login.account);
+  return accountLoginState(home, provider, busy || list.find((a) => a.default) || list[0]);
+}
+
 // Agents can't run at all, or a login that worked has expired: worth putting
 // above the projects. One agent never signed in is not a problem.
 function agentLoginTrouble(home) {
   if (!home?.credentials || home.status !== "running") return false;
-  const states = AGENTS.map((x) => agentLoginState(home, x.id));
+  const states = AGENTS.flatMap((x) => agentAccounts(home, x.id).map((a) => accountLoginState(home, x.id, a)));
   return !states.some((st) => st.kind === "ok" || st.kind === "busy") || states.some((st) => st.expired);
 }
 
+/**
+ * Settings > Agents: a row per account, each harness's in turn. Claude Code
+ * and Codex also get "Add another account", which runs the same sign-in into
+ * a new account. An account's menu makes it the one new agents start on,
+ * signs it in again, signs the main one out, or removes an added one.
+ */
 function AccountsCard() {
   const el = h(`<div class="card accounts" role="list" aria-label="Agent sign-in"></div>`);
-  const rows = new Map();
-  for (const agent of AGENTS) {
+  let shape = "";
+  let rows = [];
+  let adds = [];
+
+  function accountRow(agent, account) {
     const row = h(`<div class="acct" role="listitem">
       <div class="m-icon">${icon(agent.ic)}</div>
-      <div class="a-body"><div class="a-title"><span></span><span class="pill" hidden><span class="dot"></span><span class="pl"></span></span></div>
+      <div class="a-body"><div class="a-title"><span></span><span class="pill st" hidden><span class="dot"></span><span class="pl"></span></span><span class="pill a-def" hidden>Default</span></div>
       <div class="a-sub"></div></div>
       <button type="button" class="btn small accent a-btn" hidden>Sign in</button>
-      <button type="button" class="icon-btn a-more" aria-label="${escapeHtml(agent.label)} account" hidden>${icon("more")}</button>
+      <button type="button" class="icon-btn a-more" hidden>${icon("more")}</button>
     </div>`);
     setText(row.querySelector(".a-title span"), agent.label);
-    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id));
-    row.querySelector(".a-more").addEventListener("click", async () => {
-      const cred = store.state?.home?.credentials?.[agent.id];
-      const ok = await confirmDialog({
-        title: `Switch ${agent.label} account?`,
-        body: `Agents on your cloud machine use ${cred?.account || "this account"} now. They'll use the ${agent.account} account you sign in with next.`,
-        confirm: "Sign in",
-      });
-      if (ok) openAgentSignIn(agent.id);
-    });
-    el.appendChild(row);
-    rows.set(agent.id, row);
+    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id, account.id));
+    const more = row.querySelector(".a-more");
+    more.addEventListener("click", () => openAccountMenu(agent, account.id, more));
+    return { el: row, agent, id: account.id };
   }
-  function update(home) {
+
+  function addRow(agent) {
+    const row = h(`<div class="acct acct-add" role="listitem"><button type="button" class="a-add">${icon("plus")}<span></span></button></div>`);
+    setText(row.querySelector("span"), `Add another ${agent.label} account`);
+    row.querySelector("button").addEventListener("click", () => openAgentSignIn(agent.id, "new"));
+    return { el: row, agent };
+  }
+
+  function build(home) {
+    rows = [];
+    adds = [];
+    const children = [];
     for (const agent of AGENTS) {
-      const row = rows.get(agent.id);
-      const st = agentLoginState(home, agent.id);
-      const pill = row.querySelector(".pill");
+      for (const account of agentAccounts(home, agent.id)) {
+        const row = accountRow(agent, account);
+        rows.push(row);
+        children.push(row.el);
+      }
+      if (MULTI_ACCOUNT.has(agent.id)) {
+        const add = addRow(agent);
+        adds.push(add);
+        children.push(add.el);
+      }
+    }
+    el.replaceChildren(...children);
+  }
+
+  function update(home) {
+    // Rows are rebuilt only when accounts come or go, so focus stays put.
+    const next = AGENTS.map((agent) => `${agent.id}:${agentAccounts(home, agent.id).map((a) => a.id).join(",")}`).join(" ");
+    if (next !== shape) {
+      shape = next;
+      build(home);
+    }
+    for (const { el: row, agent, id } of rows) {
+      const list = agentAccounts(home, agent.id);
+      const account = list.find((a) => a.id === id);
+      const st = accountLoginState(home, agent.id, account);
+      const pill = row.querySelector(".pill.st");
       pill.hidden = !st.pill;
       if (st.pill) {
-        pill.className = `pill ${st.cls}`;
+        pill.className = `pill st ${st.cls}`;
         pill.querySelector(".dot").classList.toggle("live", st.kind === "busy");
         setText(pill.querySelector(".pl"), st.pill);
       }
+      // With more than one, the row says which one new agents start on.
+      row.querySelector(".a-def").hidden = !(list.length > 1 && account.default);
       const sub = row.querySelector(".a-sub");
       setText(sub, st.sub);
       sub.classList.toggle("err", !!st.err);
       // A sign-in left half done (the app closed mid-way) can be started
       // over from here; the machine drops the old one.
       row.querySelector(".a-btn").hidden = !(st.kind === "out" || st.kind === "busy");
-      row.querySelector(".a-more").hidden = st.kind !== "ok";
+      const more = row.querySelector(".a-more");
+      more.hidden = st.kind === "busy" || st.kind === "checking" || (st.kind === "out" && id === MAIN);
+      more.setAttribute("aria-label", `${agent.label} account ${account.account || ""}`.trim());
+    }
+    // Another account once one is signed in; until then, Sign in above.
+    for (const { el: row, agent } of adds) {
+      row.hidden = !agentAccounts(home, agent.id).some((a) => a.ok);
     }
   }
   return { el, update };
 }
 
+// An account row's "...": make it the default for new agents, sign it in
+// again, sign the main one out or remove an added one.
+function openAccountMenu(agent, id, anchor) {
+  const list = agentAccounts(store.state?.home, agent.id);
+  const account = list.find((a) => a.id === id);
+  if (!account) return;
+  const who = account.account || `this ${agent.label} account`;
+  const change = async (action, done) => {
+    try {
+      await api("/api/app/agent-account", { method: "POST", body: { provider: agent.id, account: id, action } });
+      toast(done);
+      await refreshState();
+    } catch (err) { showError(err); }
+  };
+  const items = [];
+  if (MULTI_ACCOUNT.has(agent.id) && list.length > 1 && !account.default) {
+    items.push({ label: "Make default", icon: "check", run: () => change("default", `New ${agent.label} agents start on ${who}`) });
+  }
+  items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
+  if (MULTI_ACCOUNT.has(agent.id) && account.ok && id === MAIN) {
+    items.push("divider", { label: "Sign out", icon: "power", danger: true, run: async () => {
+      const ok = await confirmDialog({
+        title: `Sign ${who} out?`,
+        body: `Agents on this account stop working until it is signed in again.`,
+        confirm: "Sign out", danger: true,
+      });
+      if (ok) void change("signOut", `${agent.label} is signed out`);
+    } });
+  }
+  if (id !== MAIN) {
+    items.push("divider", { label: "Remove", icon: "trash", danger: true, run: async () => {
+      const ok = await confirmDialog({
+        title: `Remove ${who}?`,
+        body: `It is signed out and removed from your cloud machine. Chats on it switch to another account before they continue.`,
+        confirm: "Remove", danger: true,
+      });
+      if (ok) void change("remove", `${who} is removed`);
+    } });
+  }
+  showAgentMenu({ anchor, label: `${agent.label} account`, items, returnFocus: anchor });
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// One sign-in, start to finish, in a sheet.
-function openAgentSignIn(provider) {
+// One sign-in, start to finish, in a sheet. `account` is the one to sign in:
+// "main", an added one's id, or "new" to add another (Claude Code, Codex).
+function openAgentSignIn(provider, account) {
   const name = agentName(provider);
-  const dlg = h(`<dialog class="sheet login-sheet" aria-label="Sign in to ${escapeHtml(name)}"><div class="dialog">
+  const heading = account === "new" ? `Add a ${name} account` : `Sign in to ${name}`;
+  const dlg = h(`<dialog class="sheet login-sheet" aria-label="${escapeHtml(heading)}"><div class="dialog">
     <div class="sheet-grab"></div>
     <div class="add-head"><h3></h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="ls-body" aria-live="polite"></div>
   </div></dialog>`);
-  setText(dlg.querySelector("h3"), `Sign in to ${name}`);
+  setText(dlg.querySelector("h3"), heading);
   const body = dlg.querySelector(".ls-body");
   let session = null;
   let closed = false;
@@ -2090,8 +2194,12 @@ function openAgentSignIn(provider) {
   };
   const succeeded = async () => {
     ended = true;
+    const note = account === "new"
+      ? `Pick it for a chat in the model picker, or make it the default for new agents in Settings.`
+      : `Agents on your cloud machine can use this ${AGENTS.find((x) => x.id === provider)?.account || ""} account.`;
     body.replaceChildren(h(`<div class="ls-done"><div class="ls-check">${icon("check")}</div><div class="ls-title">Signed in</div>
-      <div class="ls-note">Agents on your cloud machine now use this ${escapeHtml(AGENTS.find((x) => x.id === provider)?.account || "")} account.</div></div>`));
+      <div class="ls-note"></div></div>`));
+    setText(body.querySelector(".ls-note"), note);
     toast(`${name} is signed in`);
     await refreshState();
     setTimeout(() => { if (!closed) dlg.close(); }, 1600);
@@ -2114,7 +2222,7 @@ function openAgentSignIn(provider) {
           : !home.connected ? "Waking your cloud machine first. This can take a minute." : "",
       );
       try {
-        return await api("/api/app/login/start", { method: "POST", body: { provider, device } });
+        return await api("/api/app/login/start", { method: "POST", body: { provider, account, device } });
       } catch (err) {
         if (closed || err.status === 401) throw err;
         if (err.status !== 503 || Date.now() > deadline) throw err;
@@ -2467,7 +2575,7 @@ function SetupCard() {
       <button type="button" class="btn small accent a-btn">Sign in</button>
     </div>`);
     setText(row.querySelector(".a-title span"), `Sign in to ${agent.label}`);
-    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id));
+    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id, MAIN));
     list.appendChild(row);
     rows.set(agent.id, row);
   }
@@ -2503,7 +2611,7 @@ function openAgentChooser() {
   for (const agent of AGENTS) {
     const b = h(`<button type="button" class="btn block">${icon(agent.ic)}<span></span></button>`);
     setText(b.querySelector("span"), `${agent.label} (${agent.account} account)`);
-    b.addEventListener("click", () => { dlg.close(); openAgentSignIn(agent.id); });
+    b.addEventListener("click", () => { dlg.close(); openAgentSignIn(agent.id, MAIN); });
     actions.appendChild(b);
   }
   dlg.addEventListener("click", (e) => {

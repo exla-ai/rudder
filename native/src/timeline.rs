@@ -585,6 +585,9 @@ pub(crate) struct TimelineRequest {
     pub(crate) created_at: String,
     /// The model the run was started on (a `[1m]` suffix sets the window).
     pub(crate) model: String,
+    /// The conversation the run is on, for backends whose usage is per
+    /// conversation (Antigravity).
+    pub(crate) session_id: Option<String>,
 }
 
 impl TimelineRequest {
@@ -596,6 +599,7 @@ impl TimelineRequest {
             cwd: run.cwd.clone(),
             created_at: run.created_at.clone(),
             model: run.model.clone(),
+            session_id: run.session_id.clone(),
         }
     }
 }
@@ -722,8 +726,8 @@ pub(crate) fn compute_timeline_in(
         // Totals only: Antigravity's transcript carries usage but no per-call
         // timing Rudder can split into model and tool time.
         Backend::Antigravity => {
-            if let Some(session) = signals::read_antigravity_session(&request.run_id) {
-                let usage = crate::antigravity::token_usage(&session);
+            if let Some(session) = request.session_id.as_deref() {
+                let usage = crate::antigravity::token_usage(session);
                 summary.input += usage.input;
                 summary.output += usage.output;
             }
@@ -933,6 +937,7 @@ mod tests {
             cwd: dir.clone(),
             created_at: "0".into(),
             model: String::new(),
+            session_id: None,
         };
         let summary = compute_timeline_in(&request, None, None);
         assert_eq!(summary.start_ms, Some(800));

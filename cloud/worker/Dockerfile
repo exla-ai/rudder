@@ -141,8 +141,8 @@ RUN set -eux; \
     tailscale version
 
 # Agent CLIs are installed later, as the non-root user, into locations that
-# user can write: Claude Code through its native installer (~/.local/bin, which
-# `claude update` and its auto-updater can replace in place), the npm ones
+# user can write: Claude Code and Antigravity (agy) through their native installers (~/.local/bin, which
+# their own updaters can replace in place), the npm ones
 # under an npm prefix in the user's home. The image used to `npm install -g`
 # claude-code as root, so a worker could never actually update it: the
 # auto-updater printed "Updated to latest" into ~/.local/share/claude while
@@ -193,6 +193,8 @@ RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH} \
   && curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
+  && curl -fsSL https://antigravity.google/cli/install.sh | bash \
+  && agy --version \
   && npm install -g @openai/codex@${CODEX_VERSION} opencode-ai@${OPENCODE_VERSION} acpx@latest hunkdiff@latest pnpm@latest \
   && npm cache clean --force \
   && codex --version | grep -qx "codex-cli ${CODEX_VERSION}" \

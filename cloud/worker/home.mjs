@@ -2099,7 +2099,7 @@ async function startTailscale(env) {
 // ---------------------------------------------------------------------------
 
 // $HOME is on the machine's ephemeral root disk. Conversations (~/.claude,
-// ~/.codex) and Rudder's own state (~/.rudder) must survive a stop/start, or
+// ~/.codex, ~/.gemini) and Rudder's own state (~/.rudder) must survive a stop/start, or
 // every agent would come back with no memory and nothing to resume.
 function persistHomeDirs() {
   fs.mkdirSync(PERSIST_HOME, { recursive: true });
@@ -2110,7 +2110,7 @@ function persistHomeDirs() {
   // .cache, .npm and the pnpm store: package and browser caches (Rudder's tool
   // cache, npx, Playwright) filled the 8G root disk, after which writes there
   // failed. The volume has room, and the caches stay warm across restarts.
-  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go", ".cache", ".npm", ".local/share/pnpm/store"]) {
+  for (const name of [".claude", ".codex", ".gemini", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go", ".cache", ".npm", ".local/share/pnpm/store"]) {
     const live = path.join(HOME, name);
     const stored = path.join(PERSIST_HOME, name);
     fs.mkdirSync(stored, { recursive: true });

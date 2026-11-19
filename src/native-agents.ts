@@ -23,7 +23,9 @@ export function nativeAgentCommand(params: {
       ? codexArgs(params.run, prompt, params.contract, params.codexCommand)
       : params.run.backend === "opencode"
         ? opencodeArgs(params.run, [params.contract, "", prompt].join("\n"), "build")
-        : claudeArgs(params.run, prompt, params.contract);
+        : params.run.backend === "antigravity"
+          ? antigravityArgs(params.run, [params.contract, "", prompt].join("\n"), ["--dangerously-skip-permissions"])
+          : claudeArgs(params.run, prompt, params.contract);
   return args.map(shellQuote).join(" ");
 }
 
@@ -76,6 +78,29 @@ function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): 
   ]);
 }
 
+/**
+ * Antigravity's interactive TUI (`agy`): `-i` runs the first turn and keeps
+ * the session open, `--conversation` continues the run's own conversation.
+ * Workers skip permission prompts like Claude and Codex workers; planners run
+ * in agy's plan mode.
+ */
+function antigravityArgs(run: RunRecord, prompt: string, modeArgs: string[]): string[] {
+  const effort = normalizeEffortForBackend("antigravity", run.effort);
+  const conversation = run.session?.nativeSessionId;
+  return compact([
+    "agy",
+    ...modeArgs,
+    run.model ? "--model" : undefined,
+    run.model || undefined,
+    effort ? "--effort" : undefined,
+    effort,
+    conversation ? "--conversation" : undefined,
+    conversation,
+    "-i",
+    prompt,
+  ]);
+}
+
 function codexArgs(run: RunRecord, prompt: string, contract: string, codexCommand = "codex"): string[] {
   const model = liveCodexModel(run.model) || lastUsedCodexModelSync() || CODEX_DEFAULT_MODEL;
   return [
@@ -100,7 +125,9 @@ function planArgs(run: RunRecord, prompt: string, codexCommand?: string): string
     ? codexPlanArgs(run, prompt, codexCommand)
     : run.backend === "opencode"
       ? opencodeArgs(run, `${PLAN_MODE_CONTRACT}\n\n${prompt}`, "plan")
-      : claudePlanArgs(run, prompt);
+      : run.backend === "antigravity"
+        ? antigravityArgs(run, `${PLAN_MODE_CONTRACT}\n\n${prompt}`, ["--mode", "plan"])
+        : claudePlanArgs(run, prompt);
 }
 
 function claudePlanArgs(run: RunRecord, prompt: string): string[] {

@@ -19,7 +19,7 @@ pub(crate) fn register(app:&App, owner:&OwnerFence, journal:&mut Journal, reques
     ensure!(requested.version==1 && ["register","retire"].contains(&requested.action.as_str())
         && ["http","https"].contains(&requested.protocol.as_str())
         && uuid::Uuid::parse_str(&requested.request_id)?.to_string()==requested.request_id,"invalid preview registration");
-    let grants=app.fabric_runtime.file_grants(app,owner);
+    let grants=app.fabric_runtime.file_grants(app,owner,true);
     let scope=serde_json::to_value(&requested.scope)?;
     let grant=grants.as_array().context("current preview scopes are unavailable")?.iter()
         .find(|grant|grant["scope"]==scope).context("preview requires the exact current owned workspace")?;
@@ -40,7 +40,7 @@ pub(crate) fn register(app:&App, owner:&OwnerFence, journal:&mut Journal, reques
 }
 
 pub(crate) fn list(app:&App, owner:&OwnerFence, journal:&Journal)->Result<serde_json::Value> {
-    let grants=app.fabric_runtime.file_grants(app,owner);
+    let grants=app.fabric_runtime.file_grants(app,owner,true);
     let grants=grants.as_array().context("current preview scopes are unavailable")?;
     let mut latest=std::collections::BTreeMap::new();
     for value in journal.surface_receipts(owner,KIND,256)? {

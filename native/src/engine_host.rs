@@ -937,7 +937,7 @@ impl EngineControl {
                     }
                 }
                 if request.op == "files" {
-                    status["file_grants"] = app.fabric_runtime.file_grants(app, &owner.fence);
+                    status["file_grants"] = app.fabric_runtime.file_grants(app, &owner.fence, owner.is_fabric());
                 }
                 if request.op == "screen" {
                     // Historical mirrors remain readable only after this exact

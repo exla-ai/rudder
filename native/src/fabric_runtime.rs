@@ -209,7 +209,13 @@ impl RuntimeState {
     /// child: the file service reads it through `/proc/<pid>/root`, the same
     /// mount the agent sees. That pid stays this App's unreaped child while
     /// the terminal is live, so it cannot be reused under the grant.
-    pub(crate) fn file_grants(&self, app: &App, owner: &OwnerFence) -> serde_json::Value {
+    ///
+    /// A Fabric owner grants only attempts its runtime holds with certain
+    /// custody. A dashboard owner runs no Fabric runtime, so it has no links:
+    /// the live PTY its App owns is the attempt. Either way the agent must
+    /// still be running: a finished pane keeps its terminal for its last
+    /// screen, and its workspace may be merged away.
+    pub(crate) fn file_grants(&self, app: &App, owner: &OwnerFence, fabric: bool) -> serde_json::Value {
         let mut grants = Vec::new();
         if app.cwd.as_os_str().len() <= 4096 {
             grants.push(serde_json::json!({"scope": {
@@ -218,20 +224,26 @@ impl RuntimeState {
             }, "root": app.cwd, "access": {"kind": "host"}}));
         }
         grants.extend(app.agents.iter().filter_map(|agent| {
-            let slot = self.links.get(&agent.id)?;
             let terminal = agent.terminal.as_ref()?;
-            if slot.uncertain || slot.transport_uncertain || slot.draining || slot.closed
-                || terminal.instance_id() != slot.attempt || agent.cwd.as_os_str().len() > 4096 {
+            let pid = terminal.child_process_id()?;
+            if agent.plain_process || is_cloud_owned_agent(agent) || agent.cwd.as_os_str().len() > 4096 {
                 return None;
             }
+            if fabric {
+                let slot = self.links.get(&agent.id)?;
+                if slot.uncertain || slot.transport_uncertain || slot.draining || slot.closed
+                    || terminal.instance_id() != slot.attempt {
+                    return None;
+                }
+            }
             let access = if overlay_fork(&agent.cwd) {
-                serde_json::json!({"kind": "namespace", "pid": terminal.child_process_id()?})
+                serde_json::json!({"kind": "namespace", "pid": pid})
             } else {
                 serde_json::json!({"kind": "host"})
             };
             Some(serde_json::json!({"scope": {
                 "projectId": owner.project_id, "workspaceId": agent.id,
-                "attemptId": slot.attempt, "ownerEpoch": owner.epoch
+                "attemptId": terminal.instance_id(), "ownerEpoch": owner.epoch
             }, "root": agent.cwd, "access": access}))
         }).take(15));
         serde_json::json!(grants)

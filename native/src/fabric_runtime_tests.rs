@@ -577,3 +577,35 @@ fn only_negotiated_active_append_publishes_peer_steer() {
     link.steer_mode = Some(AgentSteerMode::ActiveAppend);
     assert!(link.observation("target", Backend::Claude, true).capabilities.contains("steer"));
 }
+
+#[test]
+fn a_dashboard_owner_grants_its_live_agents_files_without_runtime_links() {
+    let mut f = Fixture::new();
+    // A dashboard (legacy-native) owner runs no Fabric runtime, so it never
+    // has links. The Files panel listed only the checkout for its agents.
+    f.runtime.links.clear();
+    let workspaces = |grants: serde_json::Value| -> Vec<String> {
+        grants.as_array().unwrap().iter()
+            .map(|grant| grant["scope"]["workspaceId"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(workspaces(f.runtime.file_grants(&f.app, &f.owner, true)), [CHECKOUT_FILE_WORKSPACE]);
+    let grants = f.runtime.file_grants(&f.app, &f.owner, false);
+    assert_eq!(workspaces(grants.clone()), [CHECKOUT_FILE_WORKSPACE, "target"]);
+    let agent = &grants[1];
+    assert_eq!(agent["scope"]["attemptId"], f.app.agents[0].terminal.as_ref().unwrap().instance_id());
+    assert_eq!(agent["root"], serde_json::json!(f.dir));
+    assert_eq!(agent["access"], serde_json::json!({"kind": "host"}));
+    // An agent running on a cloud machine has no files here.
+    f.app.agents[0].status = AgentStatus::Migrated;
+    assert_eq!(workspaces(f.runtime.file_grants(&f.app, &f.owner, false)), [CHECKOUT_FILE_WORKSPACE]);
+    f.app.agents[0].status = AgentStatus::Running;
+    // A finished agent keeps its pane (and terminal) for its last screen, but
+    // its workspace is no longer served.
+    let terminal = f.app.agents[0].terminal.as_mut().unwrap();
+    terminal.request_termination();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while terminal.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(workspaces(f.runtime.file_grants(&f.app, &f.owner, false)), [CHECKOUT_FILE_WORKSPACE]);
+}

@@ -641,6 +641,8 @@ const PLAN_COLUMN_MQ = matchMedia("(min-width: 1024px)");
 const SPLIT_MQ = matchMedia("(min-width: 1100px)");
 let desktop = null;
 app.onScopeChange = () => desktop?.update();
+// The model pickers' "+" adds an agent account (model-picker.js).
+app.openAgentSignIn = openAgentSignIn;
 const isDesktop = () => !!desktop;
 // An iPad in portrait has the sidebar but no room for the plan beside the
 // screen, so the project screen keeps the plan as a section, as on a phone.

@@ -158,8 +158,9 @@ function accountLine(harness, id) {
  */
 function paintAccounts(el, harness, { selected, onPick }) {
   const list = accountsOf(harness.id);
+  const addable = ADDABLE.has(harness.id);
   el.hidden = false;
-  if (list.length < 2) {
+  if (list.length < 2 && !(addable && list.length)) {
     el.classList.remove("mp-accounts");
     el.removeAttribute("role");
     el.removeAttribute("aria-label");
@@ -178,7 +179,18 @@ function paintAccounts(el, harness, { selected, onPick }) {
     b.title = a.ok ? accountLine(harness, a.id) : "Not signed in on the cloud machine. Sign in again from Settings.";
     b.addEventListener("click", () => onPick(a.id));
     return b;
-  }));
+  }), ...(addable ? [addAccountChip(harness)] : []));
+}
+
+// Claude Code and Codex hold several accounts, each its own sign-in
+// (src/accounts.ts); the "+" after the chips adds one (app.js openAgentSignIn).
+const ADDABLE = new Set(["claude", "codex"]);
+function addAccountChip(harness) {
+  const b = h(`<button type="button" class="mp-acct mp-acct-add">${icon("plus")}<span>Add account</span></button>`);
+  b.setAttribute("aria-label", `Add another ${harness.label} account`);
+  b.title = `Sign in to another ${harness.label} account`;
+  b.addEventListener("click", () => app.openAgentSignIn(harness.id, "new"));
+  return b;
 }
 
 /**

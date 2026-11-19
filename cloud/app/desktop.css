@@ -106,6 +106,10 @@
 .mp-acct[aria-checked="true"] { background: var(--ink); color: var(--bg); border-color: transparent; }
 .mp-acct[aria-checked="true"] .mp-acct-p { color: inherit; opacity: .75; }
 .mp-acct:disabled { opacity: .5; }
+/* The "+" after the accounts: adds another one (model-picker.js addAccountChip). */
+.mp-acct-add { color: var(--muted); border-style: dashed; padding: 0 11px 0 8px; }
+.mp-acct-add svg { width: 15px; height: 15px; flex: none; }
+.mp-acct-add:hover { color: var(--ink); border-color: var(--ink-2); }
 .mp-model {
   display: grid; grid-template-columns: 1fr auto; grid-template-areas: "t r" "d r"; align-items: center; column-gap: 12px; row-gap: 2px;
   width: 100%; text-align: left; padding: 11px 12px 11px 14px; border-radius: 14px; border: 1.5px solid var(--line-strong);

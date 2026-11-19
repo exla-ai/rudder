@@ -1,9 +1,8 @@
-// Live numbers beside the work: an agent's output speed and context use in
-// its page header (from the transcript's `stats`, cloud/worker/transcripts.mjs),
+// Live numbers beside the work: an agent's output speed in its page header (from the transcript's `stats`, cloud/worker/transcripts.mjs),
 // and the plan usage of the cloud machine's Claude and Codex sign-ins in the
 // sidebar footer (GET /api/app/usage, src/usage.ts fetchQuota on the home).
 // Each shows a popover with the detail: on hover with a mouse, on tap.
-import { h, setText, escapeHtml } from "/app/render.js";
+import { h, setText } from "/app/render.js";
 import { api, coarse, ls, rel, toMs } from "/app/core.js";
 
 const SVG = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -34,13 +33,6 @@ function resetText(iso) {
   if (mins < 60) return `Resets in ${mins}m`;
   if (mins < 24 * 60) return `Resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
   return `Resets ${new Date(at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`;
-}
-
-// A small ring for how full the context is.
-function ring(pct) {
-  const r = 6.5, c = 2 * Math.PI * r;
-  const used = Math.max(0, Math.min(100, pct));
-  return `<svg class="as-ring" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="${r}" class="as-ring-bg"/><circle cx="8" cy="8" r="${r}" class="as-ring-fg" stroke-dasharray="${(used / 100) * c} ${c}" transform="rotate(-90 8 8)"/></svg>`;
 }
 
 /* Popover ---------------------------------------------------------------- */
@@ -122,7 +114,7 @@ function popover(anchor, { label, render, place = "below" }) {
 /* Agent stats: header line + popover ------------------------------------- */
 
 /**
- * The agent page's speed and context, at the end of the header's subtitle
+ * The agent page's output speed, at the end of the header's subtitle
  * `line` ("Working · Claude · opus"). Call `update(transcript.stats)` after
  * each paint of the line. Hidden while the transcript has no numbers (a new
  * agent, a backend without session logs, or a teammate's agent). When the
@@ -130,29 +122,27 @@ function popover(anchor, { label, render, place = "below" }) {
  * gives the reason.
  */
 export function AgentStats(line) {
+  // Context left has its own readout above the composer (context-meter.js).
   const el = h(`<button type="button" class="as-chip" hidden>
-    <span class="as-sep" aria-hidden="true">·</span><span class="as-ctx"></span><span class="as-sep as-mid" aria-hidden="true">·</span><span class="as-tps"></span>
+    <span class="as-sep" aria-hidden="true">·</span><span class="as-tps"></span>
   </button>`);
   line.appendChild(el);
-  const ctxEl = el.querySelector(".as-ctx");
   const tpsEl = el.querySelector(".as-tps");
-  const midSep = el.querySelector(".as-mid");
   let stats = null;
   let problem = null;
 
-  const pop = popover(el, { label: "Agent speed and context", render: () => renderAgentPop(stats, problem) });
+  const pop = popover(el, { label: "Agent speed", render: () => renderAgentPop(stats, problem) });
 
   // When the line has no room, whole parts give way instead of being cut
-  // mid-word: the word "left", then the agent and model (the composer's
-  // model chip names it too), then the speed. The status and the context
-  // stay. The steps are classes on the chip (agent-stats.css): the page
-  // sets the line's own classes on each paint.
-  const STEPS = ["fit-left", "fit-bk", "fit-tps"];
+  // mid-word: the agent and model (the composer's model chip names it too),
+  // then the speed. The status stays. The steps are classes on the chip
+  // (agent-stats.css): the page sets the line's own classes on each paint.
+  const STEPS = ["fit-bk", "fit-tps"];
   function fit() {
     el.classList.remove(...STEPS);
     if (el.hidden || !line.clientWidth) return;
     el.classList.add("as-measure");
-    for (const step of problem ? STEPS.slice(0, 2) : STEPS) {
+    for (const step of problem ? STEPS.slice(0, 1) : STEPS) {
       if (line.scrollWidth <= line.clientWidth) break;
       el.classList.add(step);
     }
@@ -169,53 +159,28 @@ export function AgentStats(line) {
   function paint(next) {
     problem = next?.error || null;
     stats = next && !problem ? next : null;
-    const ctx = contextView(stats?.context);
     const speed = stats?.speed;
-    el.hidden = !ctx && !speed && !problem;
+    el.hidden = !speed && !problem;
     if (el.hidden) { pop.close(); return; }
     if (problem) {
-      ctxEl.hidden = true;
-      midSep.hidden = true;
-      setText(tpsEl, "Stats unavailable");
-      tpsEl.hidden = false;
-      el.setAttribute("aria-label", "Speed and context unavailable. Show why");
+      setText(tpsEl, "Speed unavailable");
+      el.setAttribute("aria-label", "Speed unavailable. Show why");
       if (pop.open) pop.paint();
       return;
     }
-    const ctxSig = ctx ? `${ctx.pct ?? ""}|${ctx.label}|${ctx.level}` : "";
-    if (ctxEl.dataset.sig !== ctxSig) {
-      ctxEl.dataset.sig = ctxSig;
-      ctxEl.innerHTML = ctx ? `${ctx.pct === null ? "" : ring(ctx.pct)}<span>${escapeHtml(ctx.label)}${ctx.pct === null ? "" : `<span class="as-left"> left</span>`}</span>` : "";
-      ctxEl.className = `as-ctx ${ctx ? `lv-${ctx.level}` : ""}`;
-    }
-    ctxEl.hidden = !ctx;
-    setText(tpsEl, speed ? `${formatRate(speed.tokensPerSecond)} tok/s` : "");
-    tpsEl.hidden = !speed;
-    midSep.hidden = !ctx || !speed;
-    const parts = [ctx?.aria, speed ? `${formatRate(speed.tokensPerSecond)} tokens per second over the last ${speed.responses.length} responses` : null].filter(Boolean);
-    el.setAttribute("aria-label", parts.join(", "));
+    setText(tpsEl, `${formatRate(speed.tokensPerSecond)} tok/s`);
+    el.setAttribute("aria-label", `${formatRate(speed.tokensPerSecond)} tokens per second over the last ${speed.responses.length} responses`);
     if (pop.open) pop.paint();
   }
 
   return { el, update, destroy: () => { resize.disconnect(); pop.destroy(); } };
 }
 
-// What the header shows for the context: percent left of the window, or the
-// size alone when the model's window is not known.
-function contextView(c) {
-  if (!c) return null;
-  if (c.used === null) return { pct: null, label: "Compacted", level: "ok", aria: "Context compacted" };
-  if (!c.window) return { pct: null, label: `${formatTokens(c.used)} context`, level: "ok", aria: `${formatTokens(c.used)} tokens of context in use` };
-  const usedPct = Math.min(100, (c.used / c.window) * 100);
-  const left = Math.max(0, Math.round(100 - usedPct));
-  return { pct: usedPct, label: `${left}%`, level: level(usedPct), aria: `${left}% of the context window left` };
-}
-
 function renderAgentPop(stats, problem) {
   const box = h(`<div class="st-body"></div>`);
   if (problem) {
-    const sec = h(`<section class="st-sec"><div class="st-h"><span>Speed and context</span></div><p class="st-note"></p></section>`);
-    setText(sec.querySelector(".st-note"), `The cloud machine could not work them out: ${problem}`);
+    const sec = h(`<section class="st-sec"><div class="st-h"><span>Output speed</span></div><p class="st-note"></p></section>`);
+    setText(sec.querySelector(".st-note"), `The cloud machine could not work it out: ${problem}`);
     box.appendChild(sec);
     return box;
   }
@@ -242,32 +207,6 @@ function renderAgentPop(stats, problem) {
       bars.appendChild(b);
     }
     setText(sec.querySelector(".st-line"), `Last ${speed.responses.length} ${speed.responses.length === 1 ? "response" : "responses"}: ${total.toLocaleString()} tokens in ${formatSeconds(ms)}`);
-    box.appendChild(sec);
-  }
-  const c = stats.context;
-  if (c) {
-    const view = contextView(c);
-    const sec = h(`<section class="st-sec">
-      <div class="st-h"><span>Context</span><b class="mono"></b></div>
-      <div class="st-meter"><i></i></div>
-      <div class="st-line"></div>
-      <div class="st-sub"></div>
-    </section>`);
-    setText(sec.querySelector("b"), view.pct === null ? "" : `${view.label} left`);
-    const meter = sec.querySelector(".st-meter");
-    meter.hidden = view.pct === null;
-    if (view.pct !== null) {
-      meter.className = `st-meter lv-${view.level}`;
-      meter.querySelector("i").style.width = `${view.pct}%`;
-    }
-    setText(sec.querySelector(".st-line"), c.used === null
-      ? "Compacted. The new size shows after the next response."
-      : c.window ? `${formatTokens(c.used)} of ${formatTokens(c.window)} used` : `${formatTokens(c.used)} in use. This model's window is not known here.`);
-    const sub = [];
-    if (c.autoCompactWindow) sub.push(`Auto-compact window ${formatTokens(c.autoCompactWindow)}, model window ${formatTokens(c.modelWindow ?? c.autoCompactWindow)}`);
-    else if (c.window) sub.push(`Model window ${formatTokens(c.window)}`);
-    if (c.compactedAt) sub.push(`Compacted ${ago(c.compactedAt)}`);
-    setText(sec.querySelector(".st-sub"), sub.join(" · "));
     box.appendChild(sec);
   }
   if (stats.model) {

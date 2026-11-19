@@ -133,26 +133,6 @@ pub(crate) fn clear_signal(run_id: &str) {
     }
 }
 
-/// Forget which conversation the run's hooks last reported (Claude's
-/// `.claude-session`, Codex's `.json.session` and `.json.turn`), for a row
-/// moving to another backend: those ids belong to the old CLI.
-pub(crate) fn forget_session_reports(run_id: &str) -> std::io::Result<()> {
-    let Some(dir) = signals_dir() else {
-        return Ok(());
-    };
-    for name in [
-        format!("{run_id}.claude-session"),
-        format!("{run_id}.json.session"),
-        format!("{run_id}.json.turn"),
-    ] {
-        match std::fs::remove_file(dir.join(name)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 /// Remove every per-run signal artifact (the signal file plus the Claude `--settings`
 /// / Codex notify config) when a run is deleted: nothing else ever prunes them, so
 /// `<rudder_home>/signals/` would otherwise accumulate dead runs forever. Best-effort.

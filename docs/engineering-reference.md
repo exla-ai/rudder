@@ -498,7 +498,9 @@ to timeline.jsonl. Cloud and opencode agents get a two-row note instead.
   `deliver_model_request`, the app's steer kind `model` (relaunch on the same
   conversation at its prompt, refused mid-turn). `model_for` is view state and
   is dropped as soon as the draft stops being a `/model` line. `/model` typed
-  on its own still sets the model new agents start on.
+  on its own (and the app's project model picker, which sends it) sets only the
+  model new agents start on (`set_model_defaults`): existing agents, paused main
+  chats included, keep their backend, model and session.
 - **Speed and context left (`agent_stats.rs`)**: the worker border's right side
   shows the selected agent's `42 tok/s · 63% left`, the numbers the app shows
   in a chat header: output tokens per second over the last 5 finished
@@ -1821,6 +1823,8 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   `CODEX_RUDDER_COMMON_CONFIG_ARGS` (`src/codex-config.ts`); a test in
   `tests/workflow-contracts.test.mjs` fails if they drift. It adds
   `model_auto_compact_token_limit=150000` and `tool_output_token_limit=6000`,
+  `check_for_update_on_startup=false` (Codex's "Update available" screen held a
+  resumed agent at startup),
   and an effort is always sent: the chosen one, else `DEFAULT_EFFORT` (`high`).
   An unset effort used to fall through to `~/.codex/config.toml`, which ran a
   whole v4 session at `max`. The acpx backend has no Codex config passthrough;

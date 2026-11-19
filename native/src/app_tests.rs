@@ -1692,88 +1692,56 @@ fn picking_a_model_leaves_a_running_main_row_alone() {
 }
 
 #[test]
-fn picking_a_model_for_a_dead_main_row_only_records_it() {
+fn a_paused_codex_main_chat_survives_model_changes_elsewhere() {
+    // The app's project model picker sends `/model claude <model>`; it used to
+    // move every paused main chat to Claude and drop its Codex session, so it
+    // came back after a restart with no history.
     let _env = env_guard();
-    let home = unique_test_repo("model-pick-dead-main");
+    let home = unique_test_repo("model-default-keeps-paused-main");
     std::env::set_var("RUDDER_HOME", home.join(".rudder"));
     let mut app = App::new();
     app.cwd = home.clone();
+    let old = "019a0000-0000-7000-8000-000000000001";
     let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
     main.mode = AgentMode::Main;
-    main.backend = Backend::Claude;
-    main.model = "opus".to_string();
+    main.backend = Backend::Codex;
+    main.model = "gpt-5.6-terra".to_string();
+    main.effort = Some(EffortLevel::High);
     main.status = AgentStatus::Paused;
+    main.session_id = Some(old.to_string());
+    main.execution_profile = Some("codex-cli".to_string());
+    main.resume_turn = true;
+    save_native_run_record(&home, &main).unwrap();
     let turns = main.turns.len();
     app.agents.push(main);
+    app.agents.push(test_agent_run("other-1", "another chat"));
     app.selected_agent = 0;
     app.focus = FocusPane::Task;
 
+    // The default for new agents, from the app's picker and the task bar's.
+    assert!(app.handle_command("/model claude opus"));
     app.apply_suggestion(Suggestion {
-        label: "gpt-5.6-terra".to_string(),
+        label: "sonnet".to_string(),
         detail: String::new(),
-        action: SuggestionAction::SetModel {
-            backend: Backend::Codex,
-            model: "gpt-5.6-terra".to_string(),
-            effort: Some(EffortLevel::Low),
-        },
+        action: SuggestionAction::SetModel { backend: Backend::Claude, model: "sonnet".to_string(), effort: None },
     });
-
-    let row = &app.agents[0];
-    assert_eq!((row.backend, row.model.as_str()), (Backend::Codex, "gpt-5.6-terra"));
-    assert!(row.terminal.is_none(), "the session starts with the next message, not on the pick");
-    assert_eq!(row.turns.len(), turns, "no generic prompt was sent");
+    assert_eq!((app.backend, app.model.as_str()), (Backend::Claude, "sonnet"));
     assert!(app.focus == FocusPane::Task, "typing after the pick stays in the task bar");
-    let _ = fs::remove_dir_all(&home);
-}
+    // Another agent's own model.
+    assert!(matches!(app.deliver_model_request("other-1", "haiku auto"), SteerDelivery::Delivered));
+    assert_eq!(app.agents[1].model, "haiku");
 
-#[test]
-fn a_new_backend_for_a_paused_main_row_drops_the_old_cli_session() {
-    let _env = env_guard();
-    let home = unique_test_repo("model-pick-new-backend");
-    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
-    let mut app = App::new();
-    app.cwd = home.clone();
-    let old = "d1d1d1d1-0000-4000-8000-000000000001";
-    let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
-    main.mode = AgentMode::Main;
-    main.backend = Backend::Claude;
-    main.model = "opus".to_string();
-    main.status = AgentStatus::Paused;
-    main.session_id = Some(old.to_string());
-    main.execution_profile = Some("claude-sdk".to_string());
-    main.resume_turn = true;
-    save_native_run_record(&home, &main).unwrap();
-    let reported = crate::signals::claude_session_path(MAIN_AGENT_ID).unwrap();
-    fs::create_dir_all(reported.parent().unwrap()).unwrap();
-    fs::write(&reported, old).unwrap();
-    app.agents.push(main);
-    app.selected_agent = 0;
-    let pick = |app: &mut App, backend: Backend, model: &str| {
-        app.apply_suggestion(Suggestion {
-            label: model.to_string(),
-            detail: String::new(),
-            action: SuggestionAction::SetModel { backend, model: model.to_string(), effort: None },
-        });
-    };
-
-    // Another model on the same CLI keeps the conversation.
-    pick(&mut app, Backend::Claude, "sonnet");
-    assert_eq!(app.agents[0].session_id.as_deref(), Some(old));
-    assert!(reported.exists());
-
-    pick(&mut app, Backend::Codex, "gpt-5.6-terra");
     let row = &app.agents[0];
-    assert_eq!(row.backend, Backend::Codex);
-    assert_eq!(row.session_id, None, "a Claude id is never resumed with codex");
-    assert_eq!(row.execution_profile, None, "the next launch picks Codex's profile");
-    assert!(!row.resume_turn);
-    assert!(!reported.exists(), "the old hook report can't be adopted back");
+    assert_eq!((row.backend, row.model.as_str(), row.effort), (Backend::Codex, "gpt-5.6-terra", Some(EffortLevel::High)));
+    assert_eq!(row.session_id.as_deref(), Some(old), "its conversation resumes");
+    assert_eq!(row.execution_profile.as_deref(), Some("codex-cli"));
+    assert!(row.resume_turn);
+    assert!(row.terminal.is_none() && row.turns.len() == turns, "nothing was started or sent");
     let record: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(native_run_dir(&home, MAIN_AGENT_ID).join("run.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(record["session"].get("nativeSessionId"), None);
-    assert_eq!(record["session"]["previousSessionIds"], serde_json::json!([old]), "still in its history");
+    assert_eq!(record["session"]["nativeSessionId"], serde_json::json!(old));
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -5588,6 +5556,8 @@ fn codex_launches_carry_the_efficiency_policy_and_an_explicit_effort() {
     assert!(has(&unset.args, "model_reasoning_effort=\"high\""), "{:?}", unset.args);
     assert!(has(&unset.args, "model_auto_compact_token_limit=150000"));
     assert!(has(&unset.args, "tool_output_token_limit=6000"));
+    // Codex's "Update available" screen once held a resumed agent at startup.
+    assert!(has(&unset.args, "check_for_update_on_startup=false"));
     let chosen = codex_fork_command("gpt-test", Some(EffortLevel::Low), "sid-codex", None);
     assert!(has(&chosen.args, "model_reasoning_effort=\"low\""));
     assert!(!has(&chosen.args, "model_reasoning_effort=\"high\""));

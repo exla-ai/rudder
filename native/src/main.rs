@@ -4337,6 +4337,10 @@ impl App {
         }
     }
 
+    /// The backend, model and effort NEW agents start on: `/model` in the task
+    /// bar, the app's project model picker and `/fast`. Existing agents keep
+    /// theirs, running or paused, along with their sessions. One agent's model
+    /// changes through `P` or its chat's model control (`deliver_model_request`).
     fn set_model_defaults(
         &mut self,
         backend: Backend,
@@ -4354,43 +4358,9 @@ impl App {
             self.fast_mode = false;
             let _ = config::save_fast_mode(false);
         }
-        // Reflect the switch on the LEFT pane for EVERY switch path. The main
-        // agent row renders its own run.model; only the `/model` command used to
-        // update it, so `/fast` and the `P` picker left the row showing the old
-        // model. Update all main rows here (the one chokepoint every path calls).
-        let model_now = self.model.clone();
-        let cwd_now = self.cwd.clone();
-        let mut unsaved = None;
-        // Only relabel main rows with NO live PTY: a running process keeps its
-        // launch-time model, and rewriting its row advertised a model the
-        // process was not using. The next message starts it on the new choice.
-        for run in self
-            .agents
-            .iter_mut()
-            .filter(|run| run.is_main() && run.terminal.is_none())
-        {
-            if run.backend != backend {
-                // Its conversation belongs to the old CLI: resuming that id
-                // with the new one fails. The next message starts a fresh
-                // session (the old id stays in the record's history).
-                run.session_id = None;
-                run.execution_profile = None;
-                run.resume_turn = false;
-                if let Err(error) = signals::forget_session_reports(&run.id) {
-                    unsaved = Some(format!("the main agent's old session reports were not cleared: {error}"));
-                }
-            }
-            run.backend = backend;
-            run.model = model_now.clone();
-            run.effort = effort;
-            if let Err(error) = save_native_run_record(&cwd_now, run) {
-                unsaved = Some(format!("the main agent's record was not saved: {error}"));
-            }
-        }
         let warning = save_model_defaults(self.backend, &self.model, self.effort)
             .err()
             .map(|error| format!("config warning: {error}"))
-            .or(unsaved)
             .or_else(|| openrouter_key_refusal(self.backend, &self.model).map(str::to_string));
         // Switching to a DIFFERENT model retires a still-planning planner so the next
         // task re-plans and launches its agents on the new model (see
@@ -7264,10 +7234,9 @@ impl App {
                 if self.apply_agent_model_choice(&model, effort) {
                     return;
                 }
-                // Picking only records the choice (`set_model_defaults` relabels
-                // a main row with no live process): the session starts on the
-                // next message, and focus stays where it is, so typing after
-                // the pick never lands in a freshly started agent.
+                // Picking only records the default for new agents (existing
+                // ones keep theirs), and focus stays where it is, so typing
+                // after the pick never lands in a freshly started agent.
                 let warning = self.set_model_defaults(backend, model, effort);
                 self.task_input.clear();
                 self.task_cursor = 0;

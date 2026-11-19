@@ -844,12 +844,14 @@ pub(crate) fn push_codex_interactive_orchestrator_args(
 /// desktop-app notification hooks that expect the official signed launch chain.
 /// Compaction and the output cap come from the v4 session measurement (PLAN.md
 /// section 20): context ran to about 451K of a 475K window before compacting,
-/// and tokens above 150K per request were 44% of all input.
+/// and tokens above 150K per request were 44% of all input. No update check:
+/// Codex's "Update available" screen at startup stops an unattended agent.
 pub(crate) const CODEX_COMMON_CONFIG: &[&str] = &[
     "notify=[]",
     "model_reasoning_summary=\"detailed\"",
     "model_auto_compact_token_limit=150000",
     "tool_output_token_limit=6000",
+    "check_for_update_on_startup=false",
 ];
 
 fn push_codex_common_config_overrides(args: &mut Vec<String>, effort: Option<EffortLevel>) {

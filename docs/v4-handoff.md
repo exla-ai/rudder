@@ -221,6 +221,17 @@ button in the chat starts a new one; older chats are reachable only until the
 `claude -p --model haiku` run against the broker with fake projects (all five
 read/write/wait tools), `codex mcp list` for the project config, and headless
 screenshots against dev-mock.
+On main since: the chat starts with its own short framing (what it is, its
+tools, that it edits nothing) instead of the checkout owner's rules: home.mjs
+starts its dashboard with `RUDDER_ALL_AGENTS=1` and native
+`all_agents_task_prompt` builds the first prompt. A new Codex chat shows its
+first reply within a second instead of after up to a minute: the Codex
+session was recorded only on the dashboard's 60s reconcile tick, and now the
+1s rollout scan pins the thread the worker's own SessionStart hook names. The
+worker also finds a rollout written after a remembered miss in today's day
+folders. Checked for real (11-19) with a scratch dashboard and Codex luna:
+first reply to the worker's transcript 42s and 22s before, 0.8s and 0.5s
+after.
 
 "/" menu (shipped in 5.0.4): Claude's list comes from Claude itself. The
 worker opens an interactive claude off-screen in a private tmux with the
@@ -275,12 +286,13 @@ unsigned Release archive and the MacBook signed, notarized and packaged it.
 The Mac app updates itself from the next Mac release, 1.2.0 (not released
 yet): Sparkle 2.10.1, a daily check that downloads in the background and
 installs on quit, and Rudder > Check for Updates…. The feed is `appcast.xml`
-on the latest GitHub release, EdDSA-signed by `mac/scripts/publish.sh` with
-the key in `~/.rudder-sparkle-ed25519` on the Linux home;
-`mac/scripts/package.sh` signs Sparkle's helpers. Open: the
-`SPARKLE_ED_PRIVATE_KEY` repo secret for the CI route, a backup of the key,
-and a server-side web app version so the Mac app can reload after a Cloud
-deploy.
+on the latest GitHub release. `mac/scripts/publish.sh` stages a draft
+release and runs `.github/workflows/mac-publish.yml`, which EdDSA-signs the
+feed with the `SPARKLE_ED_PRIVATE_KEY` repo secret, verifies it against the
+app's `SUPublicEDKey` and publishes; `mac/scripts/package.sh` signs Sparkle's
+helpers. Open: a backup of the key (the secret is the only copy since a
+machine update deleted `~/.rudder-sparkle-ed25519` on 2026-11-19), and a
+server-side web app version so the Mac app can reload after a Cloud deploy.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

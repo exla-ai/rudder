@@ -43,8 +43,8 @@ mac/
 └── scripts/
     ├── build.sh             xcodegen, tests, unsigned Release archive, then package.sh
     ├── package.sh           sign (Sparkle's helpers too), notarize, DMG, release.env
-    ├── publish.sh           appcast.xml and the GitHub release (Rudder.dmg + appcast.xml)
-    ├── appcast.mjs          the Sparkle appcast, EdDSA-signed
+    ├── publish.sh           stages the GitHub release, runs .github/workflows/mac-publish.yml
+    ├── appcast.mjs          the Sparkle appcast: write (EdDSA-signed) and verify
     ├── make-dmg.sh          the DMG window (dmgbuild)
     └── ci.sh                the same steps on an offstage Mac for .github/workflows/mac.yml
 ```
@@ -216,21 +216,40 @@ Both live on the repo's **latest** GitHub release, `mac-v<version>-<build>`:
   `releases/download/mac-v<version>-<build>/Rudder.dmg` with its length and
   EdDSA signature, so it stays right however "latest" moves.
 
-Publish both from a machine with the Sparkle key (see "Updates"), Node 18+
-and `gh`, once `mac/build/Rudder.dmg` and `mac/build/release.env` are there
+Publish both from any machine with `gh` signed in to an account that can push
+to the repo, once `mac/build/Rudder.dmg` and `mac/build/release.env` are there
 (copied from the Mac that packaged them) and the commit they were built from is
-pushed:
+pushed. No key is needed there:
 
 ```bash
-RUDDER_SPARKLE_KEY=~/.rudder-sparkle-ed25519 mac/scripts/publish.sh mac/build <commit>
+mac/scripts/publish.sh mac/build <commit>
 ```
 
-`appcast.mjs` refuses a key that is not the one in `SUPublicEDKey` and checks
-its signature before `gh release create` uploads both files and marks the
-release latest (gh publishes only after both uploads finished). A release
-without `appcast.xml` stops every installed app's updates until the next one,
-and a version or build in the appcast that differs from the DMG's would make
-the apps update in a loop: always publish with `release.env` from the build.
+`publish.sh` uploads `Rudder.dmg` and `release.env` to a draft release
+`mac-v<version>-<build>` that targets `<commit>`, runs
+`.github/workflows/mac-publish.yml` on it (`gh workflow run`) and waits for it
+(`gh run watch`). That job is the only place the Sparkle private key is used:
+
+1. It downloads both files from the draft and checks that the tag matches
+   `release.env`.
+2. `appcast.mjs write` signs the downloaded DMG into `appcast.xml` with the
+   `SPARKLE_ED_PRIVATE_KEY` secret, and refuses a key that is not the one for
+   `SUPublicEDKey`.
+3. `appcast.mjs verify` checks `appcast.xml` against `SUPublicEDKey` in
+   `mac/App/Info.plist` at `<commit>`, the key the app ships: the signature
+   over the DMG, the version, build, minimum macOS, URL and length.
+4. It uploads `appcast.xml`, removes `release.env` and publishes the release
+   as latest, which creates its tag at `<commit>`.
+
+A release without `appcast.xml` stops every installed app's updates until the
+next one, and a version or build in the appcast that differs from the DMG's
+would make the apps update in a loop: always publish with `release.env` from
+the build. Never replace `Rudder.dmg` on a published release either: the
+appcast's length and signature are for the bytes it signed. A new DMG needs a
+new Rudder version; `publish.sh` refuses a tag that has a release or draft
+already. If the job fails, the draft stays: fix the cause and run
+`gh workflow run mac-publish.yml --ref main -f tag=mac-v<version>-<build>`,
+or `gh release delete` the draft to start over.
 
 Rudder's npm releases create no GitHub release, so the Mac release stays
 latest. If any other GitHub release is created later and marked latest, both
@@ -249,13 +268,14 @@ not sandboxed, so Sparkle's XPC services stay unused (`SUEnableInstallerLauncher
 and `SUEnableDownloaderService` are off), and no entitlement is needed.
 
 Updates are signed with an Ed25519 key in Sparkle's format. `SUPublicEDKey` is
-base64 of the raw 32-byte public key. The private key is a file holding base64
-of the 32-byte seed, what Sparkle's `generate_keys -x` exports; it is in
-`~/.rudder-sparkle-ed25519` (mode 600) on the Linux home machine and, for the
-CI route, in the `SPARKLE_ED_PRIVATE_KEY` repo secret. Keep a copy somewhere
-safe: losing it means no installed app accepts another update until users
-download a new DMG by hand. `generate_keys -f <file>` imports it into a Mac's
-keychain if Sparkle's own tools are ever wanted; they are not needed.
+base64 of the raw 32-byte public key. The private key is base64 of the 32-byte
+seed, what Sparkle's `generate_keys -x` exports. It is the
+`SPARKLE_ED_PRIVATE_KEY` repo secret, which only `mac-publish.yml` reads;
+no machine needs a key file. Keep a backup somewhere safe, never in a Rudder
+machine's home directory (a machine update recreates it): losing the key means
+no installed app accepts another update until users download a new DMG by
+hand. `generate_keys -f <file>` imports it into a Mac's keychain if Sparkle's
+own tools are ever wanted; they are not needed.
 
 The first Sparkle build (1.2.0) cannot reach users of 1.1.0 or older, who have
 no updater: they download it once from `/download/mac`.

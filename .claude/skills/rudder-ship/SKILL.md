@@ -154,9 +154,12 @@ pinned, checksummed xcodegen, uv (for Python 3.12, which dmgbuild needs) and
 3. Run `gh workflow run mac.yml --ref main -f release=true`.
 
 The job archives and signs with the Developer ID secrets, notarizes, staples and
-builds `Rudder.dmg`. `mac/scripts/publish.sh` then writes `appcast.xml` (the
-Sparkle feed, EdDSA-signed with the `SPARKLE_ED_PRIVATE_KEY` secret) and
-publishes GitHub release `mac-v<version>-<build>` as latest with both files.
+builds `Rudder.dmg`. `mac/scripts/publish.sh` then uploads `Rudder.dmg` and
+`release.env` to a draft GitHub release `mac-v<version>-<build>`, runs
+`.github/workflows/mac-publish.yml` on it and waits. That job signs
+`appcast.xml` (the Sparkle feed) with the `SPARKLE_ED_PRIVATE_KEY` secret,
+verifies it against `SUPublicEDKey` in `mac/App/Info.plist` at the build commit,
+and publishes the release as latest with both files.
 `https://rudder.exla.ai/download/mac` redirects to
 `releases/latest/download/Rudder.dmg`, and installed apps (1.2.0 and later)
 update from `releases/latest/download/appcast.xml`. Rudder's npm releases
@@ -164,10 +167,12 @@ create no GitHub release, so the Mac release stays "latest". A latest release
 without `appcast.xml` stops every installed app's updates: never publish a Mac
 release with a bare `gh release create`.
 
-The Sparkle private key is `~/.rudder-sparkle-ed25519` on the Linux home (base64
-of the Ed25519 seed, mode 600; never print it). If the `SPARKLE_ED_PRIVATE_KEY`
-secret is missing, the job stops at its first step; the user sets it with
-`gh secret set SPARKLE_ED_PRIVATE_KEY --repo exla-ai/rudder < ~/.rudder-sparkle-ed25519`.
+The Sparkle private key (base64 of the Ed25519 seed) exists only as the
+`SPARKLE_ED_PRIVATE_KEY` repo secret, which only `mac-publish.yml` reads. No
+machine needs a key file: `~/.rudder-sparkle-ed25519` was lost in a machine
+update on 2026-11-19. Never print the secret. If it is missing, `mac.yml`
+(release) stops at its first step and `mac-publish.yml` at signing; only the
+user can set it again, from their own backup.
 
 Signing needs the Developer ID Application identity. Its private key exists
 only in the user's MacBook Pro keychain. Without the `MAC_DEVELOPER_ID_P12`
@@ -185,8 +190,13 @@ first codesign there needs "Always Allow" on the keychain prompt:
   sign the app alone with a bare `codesign`: `Sparkle.framework` and its
   helpers need this team's signature first.
 - Copy `Rudder.dmg` and `release.env` back to the Linux home, push the commit
-  they were built from, and publish from there:
-  `RUDDER_SPARKLE_KEY=~/.rudder-sparkle-ed25519 mac/scripts/publish.sh <dir> <commit>`.
+  they were built from, and publish from there with
+  `mac/scripts/publish.sh <dir> <commit>`. It needs no key, only `gh` with
+  push access and `mac-publish.yml` on GitHub's `main`. It stages the draft,
+  runs `mac-publish.yml` and waits. If that job fails, the draft stays: fix
+  the cause and run
+  `gh workflow run mac-publish.yml --ref main -f tag=mac-v<version>-<build>`.
+  `publish.sh` refuses a tag that already has a release or draft.
 
 If the job sits in "Queued" with no runner, the exla-ai org is not connected to
 Offstage's GitHub App (console, CI page). Tell the user; do not move the job
@@ -197,7 +207,11 @@ to the URL in the Tools step.
 
 Verify:
 
-- `gh release view mac-v<version>-<build>` lists `Rudder.dmg` and `appcast.xml`.
+- `gh release view mac-v<version>-<build>` lists `Rudder.dmg` and `appcast.xml`
+  (no `release.env`).
+- The published feed verifies against the shipped key: download both assets
+  and run `node mac/scripts/appcast.mjs verify --appcast appcast.xml --dmg Rudder.dmg
+  --version <version> --build <build> --minimum-system 14.0 --info-plist mac/App/Info.plist`.
 - The download URL serves the new asset with `filename=Rudder.dmg`.
 - `curl -sL https://github.com/exla-ai/rudder/releases/latest/download/appcast.xml`
   shows the new version and build, and its enclosure's `length` equals the

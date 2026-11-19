@@ -1,0 +1,109 @@
+# Publishes a Mac release that mac/scripts/publish.sh staged: the draft GitHub
+# release mac-v<version>-<build> holding Rudder.dmg and release.env. The job
+# signs Rudder.dmg into appcast.xml (the Sparkle feed installed apps update
+# from) with the Sparkle EdDSA private key, verifies the feed against
+# SUPublicEDKey in mac/App/Info.plist of the commit the release targets (the
+# key the app ships), uploads it and publishes the release as latest, which
+# creates its tag at that commit.
+#
+# Secret: SPARKLE_ED_PRIVATE_KEY, base64 of the key's 32-byte seed. It is the
+# only copy of the key: losing it means no installed app accepts another
+# update. publish.sh dispatches this workflow and waits for it:
+#
+#   gh workflow run mac-publish.yml --ref main -f tag=mac-v<version>-<build>
+name: Mac publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Draft release to publish: mac-v<version>-<build>"
+        required: true
+        type: string
+
+concurrency:
+  group: mac-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch the draft release
+        run: |
+          if ! [[ "$TAG" =~ ^mac-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+            echo "::error::tag must look like mac-v5.0.8-5000008, got $TAG"
+            exit 1
+          fi
+          release="$(gh release view "$TAG" --json isDraft,targetCommitish)"
+          if [ "$(jq -r .isDraft <<<"$release")" != true ]; then
+            echo "::error::$TAG is not a draft release; mac/scripts/publish.sh stages one"
+            exit 1
+          fi
+          target="$(jq -r .targetCommitish <<<"$release")"
+          DIR="$RUNNER_TEMP/release"
+          mkdir -p "$DIR"
+          gh release download "$TAG" --dir "$DIR" --pattern Rudder.dmg --pattern release.env
+          VERSION="$(sed -n 's/^VERSION=//p' "$DIR/release.env")"
+          BUILD="$(sed -n 's/^BUILD=//p' "$DIR/release.env")"
+          MINIMUM_SYSTEM="$(sed -n 's/^MINIMUM_SYSTEM=//p' "$DIR/release.env")"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[0-9]+$ && "$MINIMUM_SYSTEM" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::release.env must set VERSION, BUILD and MINIMUM_SYSTEM as package.sh writes them"
+            exit 1
+          fi
+          # A feed whose version or build differs from the DMG's makes the apps update in a loop.
+          if [ "$TAG" != "mac-v$VERSION-$BUILD" ]; then
+            echo "::error::release.env is $VERSION ($BUILD), but the release is $TAG"
+            exit 1
+          fi
+          {
+            echo "DIR=$DIR"
+            echo "VERSION=$VERSION"
+            echo "BUILD=$BUILD"
+            echo "MINIMUM_SYSTEM=$MINIMUM_SYSTEM"
+          } >> "$GITHUB_ENV"
+          gh api -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GH_REPO/contents/mac/App/Info.plist?ref=$target" > "$DIR/Info.plist"
+          echo "Rudder $VERSION ($BUILD), $(stat -c %s "$DIR/Rudder.dmg") bytes, built from $target"
+      - name: Sign appcast.xml
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY is not set"
+            exit 1
+          fi
+          # Never printed: GitHub masks the secret in the log, and it only goes
+          # to a mode-600 file that appcast.mjs reads and the trap removes.
+          key="$RUNNER_TEMP/sparkle-ed25519"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key")
+          node mac/scripts/appcast.mjs write --dmg "$DIR/Rudder.dmg" --version "$VERSION" --build "$BUILD" \
+            --minimum-system "$MINIMUM_SYSTEM" --info-plist "$DIR/Info.plist" --key "$key" --out "$DIR/appcast.xml"
+      - name: Verify against the shipped key
+        run: |
+          node mac/scripts/appcast.mjs verify --appcast "$DIR/appcast.xml" --dmg "$DIR/Rudder.dmg" --version "$VERSION" \
+            --build "$BUILD" --minimum-system "$MINIMUM_SYSTEM" --info-plist "$DIR/Info.plist"
+      - name: Publish as latest
+        run: |
+          gh release upload "$TAG" "$DIR/appcast.xml"
+          gh release delete-asset "$TAG" release.env --yes
+          gh release edit "$TAG" --draft=false --latest
+          latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)"
+          if [ "$latest" != "$TAG" ]; then
+            echo "::error::the latest release is $latest, not $TAG"
+            exit 1
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[] | "\(.name) \(.size)")'

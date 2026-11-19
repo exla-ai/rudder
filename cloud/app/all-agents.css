@@ -43,3 +43,7 @@ body.desktop .dsk-main .all-screen .back { display: none; }
 .all-ex { display: block; width: 100%; padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 14.5px; text-align: left; cursor: pointer; }
 .all-ex:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .all-status { margin-top: 18px; font-size: 13.5px; color: var(--muted); }
+.all-status.err { color: var(--ink-2); }
+.all-retry { display: inline; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.all-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: hover) { .all-retry:hover { text-decoration: underline; } }

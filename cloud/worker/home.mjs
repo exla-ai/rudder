@@ -1300,6 +1300,8 @@ async function publishState() {
       path: project.dir,
       dashboard: project.status,
       error: project.error,
+      // Serving the All agents tools: Cloud refuses the chat on a home without them.
+      ...(project.coordinator ? { coordinator: true } : {}),
       agents: project.status === "cloning" ? [] : project.agents(),
       plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
       // The engine-proven role, PID token and attempt travel with every URL.

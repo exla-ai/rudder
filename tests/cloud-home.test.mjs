@@ -506,6 +506,15 @@ nodeTest("transcript lookups and previews are remembered between state publishes
     say("first");
     assert.equal(transcriptFile(record, home, 2_000), null, "still the remembered miss");
     assert.equal(transcriptFile(record, home, 40_000), file, "searched again after the recheck window");
+    // The session's own folder is one stat, checked every time: a session
+    // that starts writing after a miss shows at once.
+    const ownId = "5f1d2c3b-aaaa-bbbb-cccc-000000000002";
+    const own = { ...record, session: { nativeSessionId: ownId }, workspace: { path: "/work/repo" } };
+    assert.equal(transcriptFile(own, home, 1_000), null);
+    const ownFile = path.join(home, ".claude", "projects", "-work-repo", `${ownId}.jsonl`);
+    fs.mkdirSync(path.dirname(ownFile), { recursive: true });
+    fs.writeFileSync(ownFile, "{}\n");
+    assert.equal(transcriptFile(own, home, 2_000), ownFile);
     // A busy transcript is read again at most every few seconds.
     const first = lastAssistantText(record, { home, now: 40_000 });
     assert.equal(first.text, "first");
@@ -1110,4 +1119,51 @@ serverTest("a sleeping home's last state is a memory: live rows read paused, nev
     return next.live === true ? next : null;
   });
   assert.equal(project.agents[0].status, "working");
+});
+
+serverTest("the All agents project reaches the supervisor and the app, and a supervisor without its tools is told to update", async (t) => {
+  const { port, base, dbPath } = await bootServer(t);
+  const cliToken = "rdr_all_test_cli";
+  const workerToken = "rdrw_all_test_worker";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct-all", "all@example.com", now, now);
+  const insert = db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values (@id, 'acct-all', @key, @name, 'running', @machine, @hash, @kind, @url, @home, @now, @now, @now)
+  `);
+  insert.run({ id: "home-all", key: "home", name: "home", machine: "m-all", hash: tokenHash(workerToken), kind: "home", url: null, home: null, now });
+  insert.run({ id: "repo-all", key: "home:a/b", name: "b", machine: null, hash: tokenHash(workerToken), kind: "home-repo", url: "https://github.com/a/b.git", home: "home-all", now });
+  db.close();
+  const auth = { authorization: `Bearer ${cliToken}`, "content-type": "application/json" };
+  const messages = [];
+  const control = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-all/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+  t.after(() => control.close());
+  control.on("message", (data) => messages.push(JSON.parse(data.toString())));
+  await new Promise((resolve, reject) => { control.on("open", resolve); control.on("error", reject); });
+  await waitFor(() => messages.find((m) => m.type === "repos"));
+
+  const opened = await (await fetch(`${base}/api/app/coordinator`, { method: "POST", headers: auth, body: "{}" })).json();
+  const pushed = await waitFor(() => messages.findLast((m) => m.type === "repos" && m.repos.some((r) => r.coordinator)));
+  assert.deepEqual(pushed.repos.find((r) => r.coordinator), { workspaceId: opened.workspace, name: "rudder-all-agents", repo: "", remote: "local:rudder-all-agents", ref: null, coordinator: true });
+  const state = async () => (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+  const reported = async (project, expect) => {
+    control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-all", name: "b", dashboard: "running", agents: [] }, { workspaceId: opened.workspace, name: "rudder-all-agents", agents: [], ...project }] }));
+    return waitFor(async () => {
+      const next = await state();
+      return next.coordinator?.dashboard === expect ? next : null;
+    });
+  };
+
+  // An older supervisor runs it as a plain project, without the tools.
+  let next = await reported({ dashboard: "running" }, "failed");
+  assert.match(next.coordinator.failureReason, /older Rudder without All agents\. Update it: press Alt\+r/);
+  next = await reported({ dashboard: "running", coordinator: true }, "running");
+  assert.equal(next.coordinator.workspaceId, opened.workspace);
+  assert.equal(next.coordinator.failureReason, null);
+  assert.deepEqual(next.projects.map((p) => p.workspaceId), ["repo-all"], "it is never one of the projects");
 });

@@ -7,7 +7,7 @@
 // the page before the first message: what it does, the model it starts on,
 // and a composer that starts it with `/main <message>`.
 import { h, icon, setText } from "/app/render.js";
-import { api, coarse, toast, track } from "/app/core.js";
+import { api, coarse, track } from "/app/core.js";
 import { modelChip } from "/app/model-picker.js";
 
 export const ALL_PATH = "/app/all";
@@ -84,6 +84,21 @@ const EXAMPLES = [
   "Tell me when the agents working now finish.",
 ];
 
+// How long sending waits on each step before it says so with Try again: a
+// request to the cloud machine, the hidden project's dashboard starting (a
+// sleeping machine wakes first), and the new chat showing up.
+const OPEN_MS = 60_000;
+const READY_MS = 90_000;
+const CHAT_MS = 60_000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** `promise`, or an error saying `late` when `ms` pass first. */
+function within(promise, ms, late) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(late)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * /app/all: the newest chat when there is one (replaces itself with it), or
  * the start page. /app/all/new (`fresh`) always shows the start page.
@@ -144,40 +159,66 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
     examples.appendChild(b);
   }
 
-  const say = (text) => { statusEl.hidden = !text; setText(statusEl, text || ""); };
+  // One line under the intro: what sending is doing, or what went wrong with
+  // Try again (which sends the composer's text again).
+  const say = (text, failed = false) => {
+    statusEl.hidden = !text;
+    statusEl.classList.toggle("err", failed);
+    statusEl.replaceChildren(text || "");
+    if (failed) {
+      const again = h(`<button type="button" class="all-retry">Try again</button>`);
+      again.addEventListener("click", () => composer.el.querySelector("form").requestSubmit());
+      statusEl.append(" ", again);
+    }
+    // On a phone the intro runs past the composer.
+    if (text) statusEl.scrollIntoView({ block: "nearest" });
+  };
   let waitingFor = null; // ids that existed before our first message
   let gone = false;
   let autoOpened = false;
 
-  async function dashboardReady() {
-    for (let i = 0; i < 45 && !gone; i += 1) {
-      const dash = store.state?.coordinator?.dashboard;
-      if (dash === "running") return;
-      if (dash === "failed") throw new Error(store.state.coordinator.failureReason || "The All agents chat could not start on the cloud machine");
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      await refreshState();
+  // Refreshes the state, then once a second, until `done()` is true, for at
+  // most `ms`; a state request that hangs does not hold it past that. The
+  // first refresh means Try again never acts on the state that failed.
+  async function until(done, ms, late) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      await Promise.race([refreshState(), sleep(5000)]);
+      if (done()) return;
+      if (gone) throw new Error("left the page");
+      if (Date.now() >= deadline) throw new Error(late);
+      await sleep(1000);
     }
-    if (!gone) throw new Error("The cloud machine is still setting up the All agents chat. Try again in a moment.");
   }
+
+  const projectReady = () => {
+    const project = store.state?.coordinator;
+    if (project?.dashboard === "failed") throw new Error(project.failureReason || "The All agents chat could not start on the cloud machine.");
+    return project?.dashboard === "running";
+  };
 
   async function start(text) {
     if (!text) return false;
+    let sent = false;
     try {
       say("Starting the chat…");
-      const ws = await ensure();
+      const ws = await within(ensure(), OPEN_MS, "The cloud machine did not open the All agents chat.");
       paintChip(ws);
-      await dashboardReady();
+      await until(projectReady, READY_MS, "The cloud machine did not finish setting up the All agents chat.");
       waitingFor = new Set(coordinatorAgents(store.state).map((a) => a.id));
       // `/main`: one agent in the hidden project's own checkout, on its model.
-      await api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/main ${text}` } });
+      await within(api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/main ${text}` } }), OPEN_MS, "The cloud machine did not take the message.");
+      sent = true;
       track("all_agents_started", { examples: EXAMPLES.includes(text) });
-      await refreshState();
-      update();
+      // update() opens the new chat (and marks the page gone) once the state shows it.
+      await until(() => gone, CHAT_MS, "The chat did not open on the cloud machine.");
       return true;
     } catch (err) {
       waitingFor = null;
-      say("");
-      if (err.status !== 401) toast(err.message, { error: true });
+      // Left the page: the draft stays unless the message went in.
+      if (gone) return sent;
+      if (err.status === 401) say("");
+      else say(err.message, true);
       return false;
     }
   }

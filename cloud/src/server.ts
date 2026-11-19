@@ -5356,6 +5356,8 @@ type HomeProject = {
   path?: string;
   dashboard?: string;
   error?: string;
+  // The All agents chat's project, marked by a supervisor that serves its tools.
+  coordinator?: boolean;
   agents?: HomeAgent[];
   ports?: JsonRecord[];
   plan?: JsonRecord | null;
@@ -6402,7 +6404,7 @@ function pushHomeRepos(homeId: string): void {
   if (!isOpen(control)) {
     return;
   }
-  sendSocket(control, JSON.stringify({ type: "repos", repos: homeRepos(homeId).map(homeRepoDescriptor) }));
+  sendSocket(control, JSON.stringify({ type: "repos", repos: allHomeRepos(homeId).map(homeRepoDescriptor) }));
 }
 
 async function openRepoOnHome(accountId: string, body: Json): Promise<JsonRecord> {
@@ -6554,7 +6556,26 @@ async function homeRpc(homeId: string, method: string, params: JsonRecord, timeo
   if (!isOpen(control)) {
     throw Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 });
   }
-  return await homeRpcSessions.request(homeId, control, method, params, timeoutMs, signal);
+  try {
+    return await homeRpcSessions.request(homeId, control, method, params, timeoutMs, signal);
+  } catch (error) {
+    throw homeNeedsUpdate(homeId, method, params, error) ?? error;
+  }
+}
+
+// A home on an older worker than this Cloud answers a method it lacks with
+// "unknown method <name>", or, for one that names no project, with its
+// project-lookup error. Either way the user sees one plain line about updating.
+function homeNeedsUpdate(homeId: string, method: string, params: JsonRecord, error: unknown): Error | null {
+  if (!(error instanceof Error)) return null;
+  const lacksMethod = error.message === `unknown method ${method}`
+    || (params.workspaceId === undefined && error.message === "that project is not open on the home machine");
+  if (!lacksMethod) return null;
+  // The home reports its worker image (home.mjs hostInfo), tagged with its Rudder version.
+  const version = optionalString(homeStates.get(homeId)?.host?.image)?.split("@")[0]?.match(/:(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$/)?.[1];
+  const runs = version ? `Rudder ${version}` : "an older Rudder";
+  // 400, as every error a home answers with (HomeControlSessions.reply).
+  return Object.assign(new Error(`Your cloud machine runs ${runs}, which does not have this yet. Update it: press Alt+r in its dashboard.`), { status: 400 });
 }
 
 // ---------------------------------------------------------------------------
@@ -6922,8 +6943,11 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
   // Asleep or disconnected: live rows are frozen as paused, never "Working".
   const stateLive = homeStateLive(home.id);
   const lastSeen = state ? Date.parse(state.updatedAt) || null : null;
-  return homeRepos(home.id).filter((row) => isCoordinatorRow(row) === coordinator).map((row) => {
+  return allHomeRepos(home.id).filter((row) => isCoordinatorRow(row) === coordinator).map((row) => {
     const project = live.get(row.id);
+    // A supervisor older than All agents runs this project as a plain one,
+    // whose agents have no tools over the others: it never marks it (home.mjs).
+    const tooOld = coordinator && project !== undefined && project.coordinator !== true;
     // Each agent says whether teammates may see it (team.ts), and whether it
     // needs you and why (agent-status.ts).
     const visibility = visibilityStore.forProject(row.id);
@@ -6936,8 +6960,10 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       repo: repoSlugFromUrl(row.repoUrl),
       ref: row.gitRef ?? null,
       status: row.status,
-      failureReason: project?.error ?? row.failureReason ?? null,
-      dashboard: project?.dashboard ?? null,
+      failureReason: tooOld
+        ? "Your cloud machine runs an older Rudder without All agents. Update it: press Alt+r in its dashboard."
+        : project?.error ?? row.failureReason ?? null,
+      dashboard: tooOld ? "failed" : project?.dashboard ?? null,
       // false: what follows is the last state seen, at stateAt, not now.
       live: stateLive,
       stateAt: lastSeen,
@@ -6948,9 +6974,25 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,
       sortOrder: row.sortOrder ?? null,
+      agentOrder: homeRepoAgentOrder(row.id),
       lastActivityAt: row.lastActivityAt ?? null,
     };
   });
+}
+
+// The order of a project's agents in the app's sidebar, top first, as run
+// ids (POST /api/app/agent-order). Kept on the project's row like the project
+// order, so every device shows it. Null until the first move; an agent it
+// does not list sits above the listed ones.
+ensureColumn("rudder_workspaces", "agent_order", "text");
+const AGENT_ORDER_MAX = 200;
+const getHomeRepoAgentOrder = database.prepare("select agent_order from rudder_workspaces where id = ?").pluck();
+const setHomeRepoAgentOrder = database.prepare(
+  "update rudder_workspaces set agent_order = @agentOrder where id = @id and account_id = @accountId",
+);
+function homeRepoAgentOrder(workspaceId: string): string[] | null {
+  const raw = getHomeRepoAgentOrder.get(workspaceId);
+  return typeof raw === "string" ? (JSON.parse(raw) as string[]) : null;
 }
 
 function requireHomeRepo(accountId: string, workspaceId: string): { home: Workspace; repo: Workspace } {
@@ -7822,6 +7864,20 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const place = new Map(ids.map((id, i) => [id as string, i]));
     saveHomeRepoOrder(account.accountId, repos.map((repo) => ({ id: repo.id, sortOrder: place.get(repo.id) ?? null })));
     sendJson(res, 200, { workspaces: ids });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-order") {
+    // One project's agents in the sidebar, top first (homeRepoAgentOrder).
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const runs = body && typeof body === "object" && !Array.isArray(body) ? body.runs : undefined;
+    if (!Array.isArray(runs) || runs.length > AGENT_ORDER_MAX || new Set(runs).size !== runs.length
+      || runs.some((run) => typeof run !== "string" || !run || run.length > 256 || /[\x00-\x1f\x7f]/.test(run))) {
+      throw badRequest(`runs must list at most ${AGENT_ORDER_MAX} agent ids, each once`);
+    }
+    setHomeRepoAgentOrder.run({ id: repo.id, accountId: account.accountId, agentOrder: JSON.stringify(runs) });
+    schedulePersistDatabase();
+    sendJson(res, 200, { workspaceId: repo.id, runs });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {

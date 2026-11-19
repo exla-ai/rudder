@@ -295,6 +295,9 @@ function mockStats(a) {
     : { model: "claude-opus-5-5", speed, context: { used: 153_502, window: 400_000, modelWindow: 1_000_000, autoCompactWindow: 400_000, at: end, compactedAt: null } };
 }
 const toMsMock = (t) => (typeof t === "number" ? t : Date.parse(t));
+// Claude Code's suggested next prompt (worker/suggestion.mjs) for the idle
+// Claude agent; its plugin clears it when the next turn starts.
+const suggestions = new Map([["run_a3", { text: "Merge it, then add the preview links to the README", at: T0 - 17 * MIN }]]);
 function transcriptFor(ws, run) {
   const p = projects.find((x) => x.workspaceId === ws) || (coordinator?.workspaceId === ws ? coordinator : null);
   const a = p?.agents.find((x) => x.id === run);
@@ -668,6 +671,27 @@ const projectGuides = {
   ], shared: true },
 };
 
+// ---------- Project notes (notes.js) ----------
+// RUDDER_NOTES.md per project, answered as the home's notes service does: no
+// file until the first save, which keeps it out of Git. /app/__mock/notes/other-device
+// edits every project's notes as a save from another device would.
+const projectNotes = new Map(); // ws -> { text, revision, git }
+const notesOf = (ws) => projectNotes.get(ws) ?? { text: "", revision: null, git: { state: "included" } };
+function projectNotesMock(res, url, body) {
+  if (homeMode !== "running") return json(res, 503, { error: "the cloud machine is not connected yet; it may still be starting" });
+  if (!body) return json(res, 200, notesOf(url.searchParams.get("workspaceId")));
+  const current = notesOf(body.workspaceId);
+  if (body.operation === "git") {
+    projectNotes.set(body.workspaceId, { ...current, git: { state: body.keepOut ? "excluded" : "included" } });
+    return json(res, 200, { git: projectNotes.get(body.workspaceId).git });
+  }
+  if (body.baseRevision !== current.revision) return json(res, 200, { outcome: "conflict", ...current });
+  const created = current.revision === null;
+  const next = { text: body.text, revision: revisionOf(body.text), git: created ? { state: "excluded" } : current.git };
+  projectNotes.set(body.workspaceId, next);
+  return json(res, 200, { outcome: "saved", revision: next.revision, ...(created ? { git: next.git } : {}) });
+}
+
 // ---------- Vibeprint canvas (canvas-panel.js) ----------
 // A real `vibeprint serve` stands in for the home's: MOCK_VIBEPRINT_URL is its
 // page (http://127.0.0.1:PORT/) and MOCK_VIBEPRINT_TOKEN its access token. The
@@ -756,6 +780,14 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("run_a1 changed README.md\n");
   }
+  if (p === "/app/__mock/notes/other-device") {
+    for (const [ws, n] of projectNotes) {
+      const text = `${n.text}\nAdded on another device at ${new Date().toLocaleTimeString()}.\n`;
+      if (n.revision) projectNotes.set(ws, { ...n, text, revision: revisionOf(text) });
+    }
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("notes changed on another device\n");
+  }
   if (p === "/app/__mock/onboard") { onboarding.completedAt = null; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/integrations/")) { integMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/settings" }); return res.end(); }
   if (p === "/app/__mock/invite") {
@@ -810,6 +842,7 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/app/project-guide" && req.method === "GET") {
       return json(res, 200, projectGuides[url.searchParams.get("workspaceId")] ?? { files: [{ path: "README.md", kind: "file", linksTo: null, imports: [], readBy: [] }], shared: false });
     }
+    if (p === "/api/app/project-notes") return projectNotesMock(res, url, req.method === "POST" ? await readBody(req) : null);
     if (p === "/api/app/digests" && req.method === "GET") {
       return json(res, 200, { digests: digestStore.map(digestPreviewOf), timeZone: "America/Los_Angeles" });
     }
@@ -838,7 +871,7 @@ const server = http.createServer(async (req, res) => {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
       if (!t) return json(res, 404, { error: "Agent not found" });
       const limit = Number(url.searchParams.get("limit") || 300);
-      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), stats: mockStats(t.a) });
+      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
@@ -873,6 +906,7 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => {
         t.msgs.push({ id: `u${now()}`, role: "user", ts: now(), text: body.text });
         t.a.status = "working"; t.a.updatedAt = now();
+        suggestions.delete(t.a.id);
       }, 2500);
       setTimeout(() => {
         t.msgs.push({ id: `tl${now()}`, role: "tool", ts: now(), text: "", tool: { name: "Bash", input: "git status --short", output: " M cloud/app/app.js\n M cloud/app/styles.css", isError: false } });
@@ -972,6 +1006,14 @@ const server = http.createServer(async (req, res) => {
       for (const x of projects) x.sortOrder = ids.includes(x.workspaceId) ? ids.indexOf(x.workspaceId) : null;
       return json(res, 200, { workspaces: ids });
     }
+    // One project's agents in the sidebar; projects never moved have no agentOrder.
+    if (p === "/api/app/agent-order") {
+      const proj = projects.find((x) => x.workspaceId === body.workspace);
+      if (!proj) return json(res, 404, { error: "project not found" });
+      if (!Array.isArray(body.runs) || new Set(body.runs).size !== body.runs.length) return json(res, 400, { error: "runs must list agent ids, each once" });
+      proj.agentOrder = body.runs;
+      return json(res, 200, { workspaceId: proj.workspaceId, runs: body.runs });
+    }
     // Sign-ins: what logins.mjs on the machine answers. A machine that does
     // not exist yet is created first (503 until it is up, like the server).
     if (p === "/api/app/login/start") {
@@ -1061,10 +1103,41 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/models") {
+      // The shape `rudder __models` returns (src/models.ts discoverModelOptions), cut from a real home.
+      const all = ["low", "medium", "high", "xhigh", "max"];
+      const gpt = ["low", "medium", "high", "xhigh"];
+      const c = (label, value, group, detail, efforts = all) => ({ label, value, group, detail, efforts });
       return json(res, 200, {
-        current: { backend: "claude", model: "claude-opus-5-5" },
-        claude: [{ label: "Default" }, { label: "Opus 5.5", value: "claude-opus-5-5", detail: "most capable" }, { label: "Sonnet 5.5", value: "claude-sonnet-5-5", detail: "fast and strong" }, { label: "Fable 5.1", value: "claude-fable-5-1", detail: "long tasks" }, { label: "Haiku 4.5", value: "claude-haiku-4-5", detail: "quickest" }],
-        codex: [{ label: "Default" }, { label: "GPT-6.1 Sol", value: "gpt-6.1-sol", detail: "flagship" }, { label: "GPT-5.3 Codex", value: "gpt-5.3-codex", detail: "coding tuned" }],
+        current: { backend: "claude", model: "claude-opus-5-5", effort: "high" },
+        claude: [
+          { label: "Default", detail: "CLI default" },
+          c("Opus 5.5", "claude-opus-5-5", "Claude 5.5", "For complex work and everyday tasks"),
+          c("Sonnet 5.5", "claude-sonnet-5-5", "Claude 5.5", "Most efficient for simpler tasks"),
+          c("Haiku 5.5", "claude-haiku-5-5", "Claude 5.5", "Fastest for quick answers", []),
+          c("Fable 5.2", "claude-fable-5-2", "Claude 5.2", "For your toughest challenges"),
+          c("Fable 5.1", "claude-fable-5-1", "Claude 5.1", "Most capable for your hardest and longest-running tasks"),
+          c("Fable 5", "claude-fable-5", "Claude 5", "Most capable for your hardest and longest-running tasks"),
+          c("Opus 5", "claude-opus-5", "Claude 5", "Best for everyday, complex tasks"),
+          c("Sonnet 5", "claude-sonnet-5", "Claude 5", "Efficient for routine tasks"),
+          c("Opus 4.6", "claude-opus-4-6", "Claude 4.6", "Best for everyday, complex tasks", ["low", "medium", "high", "max"]),
+          c("Sonnet 4.6", "claude-sonnet-4-6", "Claude 4.6", "Efficient for routine tasks", ["low", "medium", "high", "max"]),
+          c("Haiku 4.5", "claude-haiku-4-5", "Claude 4.5", "Fastest for quick answers", []),
+          c("Fable", "fable", "Always the newest", "Now Fable 5.2 · For your toughest challenges"),
+          c("Opus", "opus", "Always the newest", "Now Opus 5.5 · For complex work and everyday tasks"),
+          c("Sonnet", "sonnet", "Always the newest", "Now Sonnet 5.5 · Most efficient for simpler tasks"),
+          c("Haiku", "haiku", "Always the newest", "Now Haiku 5.5 · Fastest for quick answers", []),
+        ],
+        codex: [
+          { label: "Default", detail: "CLI default" },
+          c("GPT-6.2 Astra", "gpt-6.2-astra", "GPT-6.2", "Our most capable model for complex coding and professional work.", gpt),
+          c("GPT-6.2 Sol", "gpt-6.2-sol", "GPT-6.2", "Fast, go-to model for coding and everyday work.", gpt),
+          c("GPT-6.1 Sol", "gpt-6.1-sol", "GPT-6.1", "Previous generation model for coding and everyday work.", gpt),
+          c("GPT-6.1 Terra", "gpt-6.1-terra", "GPT-6.1", "Efficient model that excels at visual understanding and computer use.", gpt),
+          c("GPT-6 Astra", "gpt-6-astra", "GPT-6", "Previous generation model for complex coding and professional work.", gpt),
+          c("GPT-6 Sol", "gpt-6-sol", "GPT-6", "Legacy model for coding and everyday work.", gpt),
+          c("GPT-6 Luna", "gpt-6-luna", "GPT-6", "Fast and affordable model for easier tasks.", gpt),
+          c("GPT-5.3 Codex", "gpt-5.3-codex", "GPT-5.3", "400K context · 2026-02-05", gpt),
+        ],
       });
     }
     if (p === "/api/app/repos") {

@@ -6185,18 +6185,23 @@ impl App {
     /// completed (an earlier read may predate the turn's end). A keystroke that
     /// starts nothing writes nothing there. What the rollout leaves waiting is
     /// "needs you": the Running arm of `poll_agents` adds it each tick, and a
-    /// Done row (a plan on "Implement this plan?") takes it here. A newer
-    /// thread the worker moved to becomes the row's session.
+    /// Done row (a plan on "Implement this plan?") takes it here. The thread
+    /// the worker's own hook names becomes the session of a row that has
+    /// none, and a newer thread the worker moved to becomes the row's session.
     fn poll_codex_rollouts(&mut self) {
         if let Some(rx) = &self.codex_rollout_rx {
             match rx.try_recv() {
                 Ok(results) => {
                     self.codex_rollout_rx = None;
                     let mut moved = Vec::new();
+                    let mut found = Vec::new();
                     for result in results {
                         let Some(run) = self.agents.iter_mut().find(|run| run.id == result.run_id) else {
                             continue;
                         };
+                        if let Some(session) = result.found {
+                            found.push((run.id.clone(), session));
+                        }
                         // `/new`, `/clear` or "clear context and implement"
                         // moved the conversation; the pin made at launch
                         // (`ensure_session_ids_recorded`) would keep showing
@@ -6239,6 +6244,9 @@ impl App {
                     for line in moved {
                         self.push_activity(line);
                         self.dirty = true;
+                    }
+                    for (run_id, session) in found {
+                        self.pin_codex_session(&run_id, session);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -21346,7 +21354,9 @@ What to do\n\
     /// Codex mints its own session ids, so a Codex row learns its session from
     /// the rollout that began with its launch (`codex_session_id_for_run`).
     /// That reads Codex's day directories, so it runs on a thread, one lookup
-    /// at a time; `collect_codex_session_lookup` applies the answers.
+    /// at a time; `collect_codex_session_lookup` applies the answers. A worker
+    /// with hooks names its thread sooner (`poll_codex_rollouts`); this finds
+    /// the rest, such as a run whose process died before it was recorded.
     fn ensure_session_ids_recorded(&mut self) {
         const RETRY_AFTER: Duration = Duration::from_secs(5);
         const MAX_ATTEMPTS: u32 = 24;
@@ -21425,31 +21435,38 @@ What to do\n\
             }
             Err(TryRecvError::Disconnected) => return,
         };
-        let cwd = self.cwd.clone();
         for (run_id, session_id) in found {
-            let Some(run) = self
-                .agents
-                .iter_mut()
-                .find(|run| run.id == run_id && run.session_id.is_none() && run.backend == Backend::Codex)
-            else {
-                continue;
-            };
-            // In its own workspace only Rudder's process starts sessions, so
-            // the match is the one Rudder made. In the checkout it may be the
-            // person's own.
-            if run.workspace_path.is_some() {
-                crate::gitio::note_rudder_session(&session_id);
-            }
-            run.session_id = Some(session_id.clone());
-            let backend = run.backend.as_str();
-            let _ = save_native_run_record(&cwd, run);
-            self.record_event(
-                "session-pinned",
-                "recorded the backend session for a run",
-                serde_json::json!({ "run": run_id, "backend": backend, "session": session_id }),
-            );
-            self.dirty = true;
+            self.pin_codex_session(&run_id, session_id);
         }
+    }
+
+    /// Record a Codex row's session, found by the lookup above or named by
+    /// its worker's own SessionStart hook (`poll_codex_rollouts`), while the
+    /// row still has none.
+    fn pin_codex_session(&mut self, run_id: &str, session_id: String) {
+        let cwd = self.cwd.clone();
+        let Some(run) = self
+            .agents
+            .iter_mut()
+            .find(|run| run.id == run_id && run.session_id.is_none() && run.backend == Backend::Codex)
+        else {
+            return;
+        };
+        // In its own workspace only Rudder's process starts sessions, so
+        // the match is the one Rudder made. In the checkout it may be the
+        // person's own.
+        if run.workspace_path.is_some() {
+            crate::gitio::note_rudder_session(&session_id);
+        }
+        run.session_id = Some(session_id.clone());
+        let backend = run.backend.as_str();
+        let _ = save_native_run_record(&cwd, run);
+        self.record_event(
+            "session-pinned",
+            "recorded the backend session for a run",
+            serde_json::json!({ "run": run_id, "backend": backend, "session": session_id }),
+        );
+        self.dirty = true;
     }
 
     /// One `dashboard_opened` per session, on the first poll rather than in

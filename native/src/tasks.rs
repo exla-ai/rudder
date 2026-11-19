@@ -71,6 +71,22 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
     format!("{task}\n\n{CONTEXT}")
 }
 
+/// The dashboard of the hidden project behind the app's "All agents" chat
+/// (cloud/worker/coordinator.mjs): home.mjs starts it with RUDDER_ALL_AGENTS=1.
+pub(crate) fn all_agents_dashboard() -> bool {
+    std::env::var("RUDDER_ALL_AGENTS").is_ok_and(|value| value == "1")
+}
+
+/// The first prompt of an "All agents" chat, a Main agent of that dashboard.
+/// It talks to the user's agents rather than owning a change in a checkout,
+/// so this replaces `main_task_prompt`'s rules. The project's CLAUDE.md and
+/// AGENTS.md say more (coordinator.mjs `COORDINATOR_PROMPT`).
+pub(crate) fn all_agents_task_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    const CONTEXT: &str = "Rudder: you are the All agents chat. You talk to the user's agents in every project on this machine through your all_agents tools: list and read them, send them messages or interrupt them, start new work, answer their prompts and wait for them to finish or need the user. You do not edit code or run commands in the projects yourself; ask the agent that owns the work, or start one.";
+    format!("{task}\n\n{CONTEXT}")
+}
+
 /// Split a goal-formatted prompt into its leading objective + `Done when: ...` block
 /// and the remaining body. Legacy inputs may lead with `/goal` or `Goal:`; normalize
 /// them to `Objective:` so process-launch prompts are never parsed as backend goals.

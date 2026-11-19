@@ -471,6 +471,8 @@ pub(crate) fn launch_prompt(
         AgentMode::Main => {
             if task.trim().is_empty() {
                 None
+            } else if all_agents_dashboard() {
+                Some(all_agents_task_prompt(task))
             } else {
                 Some(main_task_prompt(task))
             }

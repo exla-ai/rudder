@@ -7,7 +7,9 @@
 // (CLAUDE.md / AGENTS.md) and the `all_agents` MCP server for Claude
 // (.mcp.json) and Codex (.codex/config.toml). The server is
 // coordinator-mcp.mjs, a stdio proxy to the socket this module serves inside
-// the supervisor. Every write goes through the supervisor's own RPCs (send,
+// the supervisor. Its dashboard runs with RUDDER_ALL_AGENTS=1 (home.mjs), so a
+// chat starts with its own short framing (native all_agents_task_prompt)
+// instead of a checkout owner's. Every write goes through the supervisor's own RPCs (send,
 // keys, task, answer), so each project's dashboard stays the single writer
 // of its agents.
 

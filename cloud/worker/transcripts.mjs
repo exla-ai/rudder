@@ -140,10 +140,10 @@ function claudeSessionUrl(lines) {
 
 // Rudder launches an agent with its own framing around the request
 // ("Objective: ...", "Rudder-specific context injected by Rudder: ...", a
-// discussion's scope, a main agent's context). In the chat that turn is what
-// the user asked for, so it shows as the task itself, which is also the text
-// Edit offers to change (chat-edit.js).
-const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:|^Rudder discussion scope:|\n\nRudder: you own this request in the user's checkout\./;
+// discussion's scope, a main agent's or the All agents chat's context). In
+// the chat that turn is what the user asked for, so it shows as the task
+// itself, which is also the text Edit offers to change (chat-edit.js).
+const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:|^Rudder discussion scope:|\n\nRudder: you own this request in the user's checkout\.|\n\nRudder: you are the All agents chat\./;
 
 function showUserTask(messages, record) {
   const task = userTask(record.task);
@@ -193,9 +193,10 @@ function readRunRecord(repoDir, runId) {
 }
 
 // Where each session's transcript lives, found once. A miss means searching
-// every Claude project folder (hundreds on a long-lived home), so it is
-// remembered too and searched again at most every MISS_RECHECK_MS. The
-// session's own folder is one stat and is checked every time, so a session
+// every Claude project folder (hundreds on a long-lived home) or every Codex
+// day folder, so it is remembered too and searched again at most every
+// MISS_RECHECK_MS. Where the session would appear now is checked every time
+// (Claude: its own folder, one stat; Codex: today's folders), so a session
 // that starts writing after a miss (a new agent, a branch) shows at once.
 const MISS_RECHECK_MS = 30_000;
 const transcriptPaths = new Map(); // sessionId -> { file, checkedAt }
@@ -210,7 +211,7 @@ export function transcriptFile(record, home, now = Date.now()) {
     return known.file;
   }
   if (known && !known.file && now - known.checkedAt < MISS_RECHECK_MS) {
-    const file = claudeCwdTranscript(record, home, sessionId);
+    const file = record.backend === "codex" ? codexNewRollout(home, sessionId, now) : claudeCwdTranscript(record, home, sessionId);
     if (file) {
       transcriptPaths.set(sessionId, { file, checkedAt: now });
     }
@@ -257,6 +258,35 @@ function claudeCwdTranscript(record, home, sessionId) {
   }
   const direct = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"), `${sessionId}.jsonl`);
   return fs.existsSync(direct) ? direct : null;
+}
+
+// Codex writes a thread's rollout at its first turn, so a run can name its
+// thread before the rollout exists (a managed launch learns it when the
+// thread starts). The rollout then lands in the folder of the day it is
+// written: today. Codex names that folder in local time, so the UTC day and
+// the days either side cover every zone.
+const DAY_MS = 86_400_000;
+
+function codexNewRollout(home, threadId, now) {
+  const suffix = `-${threadId}.jsonl`;
+  for (const offset of [0, -1, 1]) {
+    const day = new Date(now + offset * DAY_MS);
+    const dir = path.join(home, ".codex", "sessions", String(day.getUTCFullYear()), String(day.getUTCMonth() + 1).padStart(2, "0"), String(day.getUTCDate()).padStart(2, "0"));
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue; // no rollout that day
+      }
+      throw error;
+    }
+    const name = names.find((entry) => entry.startsWith("rollout-") && entry.endsWith(suffix));
+    if (name) {
+      return path.join(dir, name);
+    }
+  }
+  return null;
 }
 
 function readTail(file, maxBytes) {

@@ -9282,6 +9282,17 @@ fn main_prompt_is_an_end_to_end_delivery_contract() {
     assert!(execution_prompt("fix one bug").len() < 1_000);
 }
 
+/// The All agents chat talks to agents and owns no change, so it starts with
+/// its own framing. The phone shows only what the user typed: transcripts.mjs
+/// RUDDER_FRAMING strips from "\n\nRudder: you are the All agents chat." on.
+#[test]
+fn the_all_agents_chat_starts_with_its_own_framing() {
+    let prompt = all_agents_task_prompt("What is every agent working on?");
+    assert!(prompt.starts_with("What is every agent working on?\n\nRudder: you are the All agents chat."), "{prompt}");
+    assert!(prompt.contains("all_agents tools") && prompt.contains("You do not edit code"));
+    assert!(!prompt.contains("checkout") && !prompt.contains(PARALLEL_WORK_RULE));
+}
+
 #[test]
 fn resume_commands_reuse_saved_session_ids() {
     // Builds commands via claude_program()/codex_program() (which read RUDDER_*_BIN), so
@@ -31890,7 +31901,7 @@ fn a_done_codex_row_reopens_only_for_a_rollout_turn_read_after_it_finished() {
     app.agents.push(run);
     let deliver = |app: &mut App, read_at, new_turn, waits| {
         let (tx, rx) = mpsc::channel();
-        tx.send(vec![codex_rollout::ScanResult { run_id: "codex-1".to_string(), read_at, new_turn, waits, moved: None }])
+        tx.send(vec![codex_rollout::ScanResult { run_id: "codex-1".to_string(), read_at, new_turn, waits, moved: None, found: None }])
             .unwrap();
         app.codex_rollout_rx = Some(rx);
         app.last_codex_rollout_scan = Instant::now();
@@ -31956,6 +31967,7 @@ fn a_codex_row_follows_its_worker_to_a_newer_thread_unless_it_moved_on_first() {
             new_turn: false,
             waits: Vec::new(),
             moved: Some((moved.0.to_string(), moved.1.to_string())),
+            found: None,
         };
         tx.send(vec![result]).unwrap();
         app.codex_rollout_rx = Some(rx);
@@ -31971,6 +31983,38 @@ fn a_codex_row_follows_its_worker_to_a_newer_thread_unless_it_moved_on_first() {
     app.agents[0].session_id = Some("thread-fork".to_string());
     deliver(&mut app, ("thread-b", "thread-c"));
     assert_eq!(app.agents[0].session_id.as_deref(), Some("thread-fork"));
+}
+
+/// A new Codex row takes the thread its worker's own SessionStart hook names
+/// on the next rollout scan (a second). Pinned only by the reconcile tick, it
+/// took up to a minute, and the phone's chat stayed blank that long.
+#[cfg(not(windows))]
+#[test]
+fn a_new_codex_row_takes_the_thread_its_worker_hook_names_at_once() {
+    let _env = env_guard();
+    let root = unique_test_repo("codex-hook-thread");
+    std::env::set_var("RUDDER_HOME", root.join("rudder"));
+    std::env::set_var("CODEX_HOME", root.join("codex"));
+    let thread = "01a1f1a1-c179-7e72-8511-eff64564ff01";
+    let day = root.join("codex").join("sessions").join("2026").join("11").join("19");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(day.join(format!("rollout-2026-11-19T02-27-52-{thread}.jsonl")), "{\"type\":\"session_meta\"}\n").unwrap();
+    let signal = signals::signal_path("codex-3").unwrap();
+    fs::create_dir_all(signal.parent().unwrap()).unwrap();
+    fs::write(format!("{}.session", signal.display()), thread).unwrap();
+    let results = codex_rollout::scan(&[codex_rollout::ScanRequest { run_id: "codex-3".to_string(), session_id: None }]);
+    assert_eq!(results[0].found.as_deref(), Some(thread));
+    let mut app = App::new();
+    let mut run = test_agent_run("codex-3", "Reply with one word");
+    run.backend = Backend::Codex;
+    app.agents.push(run);
+    let (tx, rx) = mpsc::channel();
+    tx.send(results).unwrap();
+    app.codex_rollout_rx = Some(rx);
+    app.last_codex_rollout_scan = Instant::now();
+    app.poll_codex_rollouts();
+    assert_eq!(app.agents[0].session_id.as_deref(), Some(thread));
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// New work never starts on an assumed backend: with none chosen the dashboard

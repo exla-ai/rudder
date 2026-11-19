@@ -287,6 +287,11 @@ pub(crate) struct ScanResult {
     /// and implement"): `(pinned, newer)`. The App adopts `newer` only while
     /// the row is still on `pinned`.
     pub(crate) moved: Option<(String, String)>,
+    /// The row has no thread yet and its worker's own SessionStart hook named
+    /// one that is on disk: the App pins it now, not on the slow reconcile
+    /// tick (`ensure_session_ids_recorded`), so the phone's chat and the
+    /// context meter find the conversation within a second.
+    pub(crate) found: Option<String>,
 }
 
 /// Reads each worker's rollout. Runs on the scan thread.
@@ -311,17 +316,17 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
             let reported = sidecar("session")
                 .filter(|id| request.session_id.as_ref() != Some(id))
                 .and_then(|id| rollout(&id).map(|path| (id, path)));
-            let (read, moved) = match (&request.session_id, pinned, reported) {
-                // Not pinned yet (`ensure_session_ids_recorded` pins it).
-                (None, _, Some((_, path))) => (Some(path), None),
+            let (read, moved, found) = match (&request.session_id, pinned, reported) {
+                // Not pinned yet: the thread its own hook named is the one.
+                (None, _, Some((id, path))) => (Some(path), None, Some(id)),
                 // A thread begun after the pinned one, in its folder, is where
                 // the conversation went. An older one is a report the row has
                 // moved past (an edit relaunch pins its fork before the new
                 // process reports it).
                 (Some(was), Some(pinned), Some((id, path))) if started_after(&pinned, &path) => {
-                    (Some(path), Some((was.clone(), id)))
+                    (Some(path), Some((was.clone(), id)), None)
                 }
-                (_, pinned, _) => (pinned, None),
+                (_, pinned, _) => (pinned, None, None),
             };
             let facts = read.map(|rollout| read_facts(&rollout)).unwrap_or_default();
             // Read after the rollout, so a turn that ended in between is seen
@@ -333,6 +338,7 @@ pub(crate) fn scan(requests: &[ScanRequest]) -> Vec<ScanResult> {
                 new_turn: facts.open_turn.is_some() && facts.open_turn != done_turn,
                 waits: facts.waits,
                 moved,
+                found,
             }
         })
         .collect()

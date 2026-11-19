@@ -526,6 +526,25 @@ nodeTest("transcript lookups and previews are remembered between state publishes
   }
 });
 
+nodeTest("a Codex rollout written after a miss shows at once", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  try {
+    const threadId = "01a1f1a1-c179-7e72-8511-eff6456435d9";
+    const record = { id: "run-c", backend: "codex", session: { nativeSessionId: threadId } };
+    // Late on the 14th in UTC: a zone ahead of UTC files it under the 15th.
+    const now = Date.parse("2026-10-14T23:30:00Z");
+    assert.equal(transcriptFile(record, home, now), null, "the thread has no rollout yet");
+    const day = path.join(home, ".codex", "sessions", "2026", "10", "15");
+    fs.mkdirSync(day, { recursive: true });
+    const file = path.join(day, `rollout-2026-10-15T08-30-01-${threadId}.jsonl`);
+    fs.writeFileSync(file, `${JSON.stringify({ type: "session_meta", payload: { id: threadId } })}\n`);
+    assert.equal(transcriptFile(record, home, now + 1_000), file, "found within the recheck window");
+    assert.equal(transcriptFile(record, home, now + 2_000), file);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
   const sessionId = "01a13ce1-6861-7893-b4a0-9fb8e889dd57";
@@ -556,7 +575,7 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
   assert.deepEqual([transcript.messages[2].tool.output, transcript.messages[2].tool.isError], ["boom", true]);
 });
 
-nodeTest("a discussion's or main agent's first message shows as what the user asked", () => {
+nodeTest("a discussion's, main agent's or All agents chat's first message shows as what the user asked", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
   const cwd = "/workspace/code/libra";
   const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
@@ -564,6 +583,7 @@ nodeTest("a discussion's or main agent's first message shows as what the user as
   const framed = {
     "33333333-2222-3333-4444-555555555551": "Rudder discussion scope:\nYou own one discussion or planning session in the current checkout.\n\nOriginal request:\nlet's discuss the webhook",
     "33333333-2222-3333-4444-555555555552": "let's discuss the webhook\n\nRudder: you own this request in the user's checkout. Preserve unrelated edits.\n- Ship only when asked.",
+    "33333333-2222-3333-4444-555555555553": "let's discuss the webhook\n\nRudder: you are the All agents chat. You talk to the user's agents in every project on this machine through your all_agents tools.",
   };
   for (const [sessionId, content] of Object.entries(framed)) {
     const lines = [

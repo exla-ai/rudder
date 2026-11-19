@@ -354,6 +354,8 @@ class Project {
       RUDDER_CLOUD_RUNTIME: "home",
       // No GitHub behind a local project: merges stay on the machine.
       ...(this.local ? { RUDDER_CLOUD_WORKER: "0" } : {}),
+      // The All agents chat starts with its own framing (native all_agents_task_prompt).
+      ...(this.coordinator ? { RUDDER_ALL_AGENTS: "1" } : {}),
     };
     this.term = pty.spawn("rudder", [], { name: "xterm-256color", cols: this.cols, rows: this.rows, cwd: this.dir, env });
     this.status = "running";
@@ -1363,7 +1365,12 @@ async function steer(project, { kind, taskId, instruction }) {
     await sleep(300);
     const receipt = readSteerReceipt(project.dir, requestId);
     if (receipt?.status === "delivered") {
+      // The state goes out before the answer, on the same socket, so Cloud's
+      // copy already shows the change (a closed agent gone, a new name) when
+      // the app refreshes on the answer. Waiting for the next publish brought
+      // a closed agent's row back for seconds.
       lastStateJson = "";
+      await publishState().catch((error) => log(`state: ${error.message}`));
       return { ok: true, status: "delivered" };
     }
     if (receipt?.status === "failed") {

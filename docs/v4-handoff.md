@@ -392,6 +392,27 @@ prompts, the app's "/" list for it, the files an edit wrote in a handoff
 from it (its CODE_ACTION step), and the files hub showing `~/.gemini`
 instructions and skills.
 
+Claude Code and Codex can hold several signed-in accounts (`src/accounts.ts`).
+An account is a config dir: "main" is the CLI's own (`~/.claude`, `~/.codex`),
+and each added one is `~/.rudder/accounts/<backend>/<id>`, which agents run on
+with `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set to it. An added dir keeps its own
+sign-in and links only what `SHARED` names to the main dir (settings, skills,
+hooks, memory files and the conversation logs), so transcripts, usage and
+resume read one place and a chat can move between accounts. Claude 2.1.328 and
+Codex 0.170.0 write through those links (checked with `auto-mode reset`,
+`plugin install/disable`, `mcp add/remove` and `features enable`). The default
+account of a backend is `backends.<backend>.account` in config.json. A run
+keeps its account in run.json, and the model and harness steers name it.
+Cloud homes sign in each account (`login/start` with `account`: main, an id or
+"new"), and `/api/app/agent-account` makes one the default, signs it out or
+removes it. The app's Settings lists a row per account with "Add another
+account", and the model pickers choose the account when a harness has more
+than one. Plan usage is per account; on macOS Claude's keychain entry for an
+added dir is `Claude Code-credentials-<sha256(dir)[:8]>`. Antigravity has one
+account (agy has no config dir setting). Open: a real sign-in into an added
+account on a Cloud home and on macOS, a Codex chat resumed on another account,
+and adding accounts from the Mac dashboard.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

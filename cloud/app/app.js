@@ -10,11 +10,13 @@ import {
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
 import { ContextMeter } from "/app/context-meter.js";
+import { GoalChip } from "/app/goal-chip.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
-import { NOTES_ICON, NotesScreen, notesLink, notesPath } from "/app/notes.js";
-import { CanonicalTerminalView } from "/app/terminal-client.js";
+import { NOTES_ICON, followNotes, notesButton, openNotes } from "/app/notes.js";
+import { followTerminal, setTerminal, terminalOpen } from "/app/terminal-panel.js";
+import { followFileLink, mountFileRefs } from "/app/file-link.js";
 import { mountCommandPalette } from "/app/command-palette.js";
 import { agentModelLabel, openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
@@ -74,6 +76,9 @@ const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1
 // Ones answered from this phone are hidden at once, before the state agrees.
 // A finished turn shorter than this shows no "Worked for" line.
 const SHORT_TURN_MS = 5000;
+// A message from another agent longer than this shows its first lines and Show more.
+const PEER_LONG_CHARS = 320;
+const PEER_LONG_LINES = 5;
 const answeredAsks = new Set();
 const pendingAsks = (a) => (Array.isArray(a?.asks) ? a.asks : []).filter((q) => q && !answeredAsks.has(q.id));
 const ASK_LABEL = { permission: "Needs approval", question: "Has a question", plan: "Plan ready" };
@@ -563,7 +568,6 @@ function parseRoute(path) {
   if (parts[1] === "p" && parts[2]) {
     const ws = decodeURIComponent(parts[2]);
     if (parts[3] === "a" && parts[4]) return { name: "agent", ws, run: decodeURIComponent(parts[4]), path };
-    if (parts[3] === "notes") return { name: "notes", ws, path };
     return { name: "project", ws, path };
   }
   return { name: "home", path: "/app" };
@@ -646,7 +650,6 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
   if (route.name === "files") return FilesHubScreen({ projects: () => store.state?.projects || [] });
-  if (route.name === "notes") return NotesScreen(route.ws);
   if (route.name === "team") return TeamScreen();
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
   if (route.name === "all") return AllAgentsScreen({ fresh: route.fresh, store, createComposer, navigate, goBack, refreshState });
@@ -692,6 +695,9 @@ function mountScreen(dir = "forward") {
   desktop?.update(route);
   followFiles(route, findAgent);
   followCanvas(route, findAgent);
+  followNotes(route, findAgent);
+  followTerminal(route, findAgent);
+  followFileLink(route);
 }
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
@@ -842,6 +848,9 @@ function DesktopShell() {
     update(r);
     followFiles(r, findAgent);
     followCanvas(r, findAgent);
+    followNotes(r, findAgent);
+    followTerminal(r, findAgent);
+    followFileLink(r);
   }
   const onPaneEvent = (e) => {
     const i = panes.findIndex((p) => p.el.contains(e.target));
@@ -1339,6 +1348,7 @@ function DesktopShell() {
         { label: "Rename", icon: "edit", run: () => renameRow(row) },
         { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pinAgent({ ws: t.ws, run: t.run, find, pinned: !pinned, repaint: updateScreen }) },
         { label: "Branch", icon: "branch", run: () => branchAgent({ ws: t.ws, run: t.run, title: (find() || a).title }) },
+        { label: "Notes", icon: "file", run: () => { navigate(agentPath(t.ws, t.run)); void openNotes({ ...t, findAgent }); } },
         { label: "Open beside", icon: "split", disabled: !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, t)), run: () => openIn(1, t) },
         ...(place < 0 ? [] : [
           "divider",
@@ -1438,7 +1448,7 @@ function DesktopShell() {
         setText(pc, n ? String(n) : live ? String(live) : "");
         pc.className = `ds-pc ${n ? "s-needs" : live ? "s-working" : ""}`;
         pc.title = n ? `${n} need you` : live ? `${live} working` : "";
-        const onProject = (route?.name === "project" || route?.name === "notes") && route.ws === ws;
+        const onProject = route?.name === "project" && route.ws === ws;
         pEl.classList.toggle("on", onProject);
         if (onProject) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
         const list = pEl.querySelector(".ds-agents");
@@ -2941,7 +2951,6 @@ function projectMenu(ws, at, returnFocus) {
     returnFocus,
     items: [
       { label: "New chat", icon: "plus", run: () => newChat(ws) },
-      { label: "Notes", icon: "file", run: () => navigate(notesPath(ws)) },
       { label: pinned ? "Unpin" : "Pin to the top", icon: "pin", run: () => setPinned(ws, !pinned) },
       ...(group.length < 2 ? [] : [
         "divider",
@@ -3309,7 +3318,6 @@ function ProjectScreen(ws) {
   bar.appendChild(headModel.el);
   bar.appendChild(refreshButton(refreshState));
   bar.appendChild(canvasButton({ ws, findAgent }));
-  bar.appendChild(notesLink(ws));
   bar.appendChild(filesButton({ ws, findAgent }));
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
@@ -3721,17 +3729,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       <button type="button" class="icon-btn lock-toggle" hidden aria-pressed="false"></button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
-    <div class="term-panel" hidden>
-      <pre class="term-screen" aria-label="Agent terminal" aria-live="off">Loading the terminal…</pre>
-      <div class="key-strip" role="toolbar" aria-label="Keys">
-        <button type="button" data-key="esc">Esc</button><button type="button" data-key="up" aria-label="Up">↑</button>
-        <button type="button" data-key="down" aria-label="Down">↓</button><button type="button" data-key="left" aria-label="Left">←</button>
-        <button type="button" data-key="right" aria-label="Right">→</button><button type="button" data-key="enter">Enter</button>
-        <button type="button" data-key="tab">Tab</button><button type="button" data-key="shift-tab" aria-label="Shift Tab">⇧Tab</button>
-        <button type="button" data-key="y">y</button><button type="button" data-key="n">n</button>
-        <button type="button" data-key="ctrl-c" class="danger">^C</button>
-      </div>
-    </div>
     <div class="chat-wrap">
       <div class="scroller has-composer"><div class="chat" role="log" aria-label="Conversation"><div class="earlier-bar" hidden><button type="button" class="load-earlier">Load earlier messages</button><span class="earlier-start">Start of the conversation</span></div><div class="msgs"></div><div class="typing" hidden aria-label="Agent is working"><i></i><i></i><i></i></div></div></div>
       <button type="button" class="new-pill">${icon("down")}<span>New messages</span></button>
@@ -3761,6 +3758,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   }
   // This pane's speed and context line (agent-stats.js), from the transcript.
   const agentStats = AgentStats(el.querySelector(".subtitle"));
+  // The standing goal `/goal` set, after the speed (goal-chip.js).
+  const goalChip = GoalChip(el.querySelector(".subtitle"));
   const scroller = el.querySelector(".scroller");
   const msgsEl = el.querySelector(".msgs");
   const typing = el.querySelector(".typing");
@@ -3774,7 +3773,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   else if (allAgents) {
     // Its project is hidden and holds no work: no files or canvas.
     bar.append(h(`<a class="icon-btn" href="${ALL_PATH}/new" data-link aria-label="New chat" title="New chat">${icon("plus")}</a>`));
-  } else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }));
+  } else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }), notesButton({ ws, run, findAgent }));
   // The right of two panes: history belongs to the left one, so it closes instead.
   if (onClose) {
     back.hidden = true;
@@ -3809,6 +3808,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Edit on any prompt: rewinds the conversation to it, in place (chat-edit.js).
   // Highlight to reply: Reply on text selected in a message quotes it above the prompt (quote-reply.js).
   const quoteReply = ro ? null : mountQuoteReply({ chat: msgsEl, scroller, composer });
+  // File paths in messages open beside the chat (file-link.js); not in a teammate's agent.
+  const chatMarkdown = { fileRefs: !ro };
+  if (!ro) mountFileRefs(msgsEl, { ws, run });
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript(), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
@@ -3922,70 +3924,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
 
   // `/`: what the agent's own CLI offers there (slash-menu.js). The message is
   // typed into the agent's terminal, so its commands work.
-  if (!ro) mountSlashMenu(composer, { workspace: ws, run, agent: agentNow, modelControl: chatModel, openTerminal: () => setTerminal(true) });
+  if (!ro) mountSlashMenu(composer, { workspace: ws, run, agent: agentNow, modelControl: chatModel, openTerminal: () => setTerm(true) });
 
-  // Negotiate the exact current agent screen independently of the dashboard
-  // byte channel. Historical and legacy owners retain their HTTP screen view.
-  // It opens and closes from the Cmd+K palette and the More menu.
-  const termPanel = el.querySelector(".term-panel");
-  const termScreen = el.querySelector(".term-screen");
-  let termOn = false;
-  let termTimer = null;
-  let termCanonical = false;
-  let termFallbackEpoch = 0;
-  const terminalView = new CanonicalTerminalView(termScreen, { workspaceId: ws, runId: run,
-    onUnavailable: () => {
-      if (!termOn) return;
-      termCanonical = false; termFallbackEpoch++;
-      for (const button of el.querySelectorAll(".key-strip button")) button.disabled = false;
-      termScreen.setAttribute("aria-label", "Saved or legacy agent terminal screen");
-      pollScreen();
-    },
-    onCapability: () => {
-      termCanonical = true; termFallbackEpoch++;
-      clearTimeout(termTimer);
-      for (const button of el.querySelectorAll(".key-strip button")) button.disabled = true;
-      termScreen.setAttribute("aria-label", "Current agent terminal, read only text view");
-    },
-  });
-  const pollScreen = async () => {
-    termTimer = null;
-    if (!termOn || termCanonical) return;
-    const fallbackEpoch = termFallbackEpoch;
-    if (!document.hidden) {
-      try {
-        const res = await api(`/api/app/screen?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}`);
-        if (!termOn || termCanonical || fallbackEpoch !== termFallbackEpoch) return;
-        if (res?.text != null) {
-          const lines = res.text.split("\n");
-          while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-          termScreen.textContent = lines.join("\n") || " ";
-        } else if (termScreen.textContent === "Loading the terminal…") {
-          termScreen.textContent = "Waiting for the agent's screen…";
-        }
-      } catch (err) {
-        if (!termOn || termCanonical || fallbackEpoch !== termFallbackEpoch) return;
-        termScreen.textContent = err.status === 401 ? "Signed out." : err.waking ? "Waking the cloud machine…" : err.message;
-      }
-    }
-    if (termOn && !termCanonical && fallbackEpoch === termFallbackEpoch) termTimer = setTimeout(pollScreen, 1000);
-  };
-  function setTerminal(on) {
-    termOn = on; termCanonical = false; termFallbackEpoch++;
-    termPanel.hidden = !on;
-    clearTimeout(termTimer);
-    terminalView.stop();
-    if (on && !document.hidden) terminalView.start();
-  }
-  el.querySelector(".key-strip").addEventListener("click", async (e) => {
-    const b = e.target.closest("[data-key]");
-    if (!b) return;
-    postNative({ type: "haptic" });
-    try {
-      await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: b.dataset.key } });
-      clearTimeout(termTimer); setTimeout(pollScreen, 250);
-    } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
-  });
+  // The agent's terminal: the right-hand panel (terminal-panel.js), opened
+  // from the Cmd+K palette, the More menu, `/` commands and Ctrl+`.
+  const termTarget = { ws, run, findAgent };
+  const setTerm = (on) => { void setTerminal(termTarget, on); };
 
   let atBottom = true;
   let firstPaint = true;
@@ -4020,6 +3964,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const k = `${key}|${node.dataset.key}`;
       if (store.expanded.has(k)) store.expanded.delete(k); else store.expanded.add(k);
       paintCompact(node, node._msg);
+      return;
+    }
+    const peerMore = e.target.closest(".peer-more");
+    if (peerMore) {
+      const node = peerMore.closest(".peer");
+      const k = `${key}|${node.dataset.key}`;
+      if (store.expanded.has(k)) store.expanded.delete(k); else store.expanded.add(k);
+      paintPeer(node, node._msg);
       return;
     }
     const stepsRow = e.target.closest(".steps-row");
@@ -4077,11 +4029,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const add = (html, fn) => { const b = h(html); b.addEventListener("click", () => { closeMenu(); fn(); }); menu.appendChild(b); };
     // The terminal (on a phone, its only way in; Cmd+K has it too), then the
     // header buttons a narrow bar hides (.agent-bar in agent-stats.css).
-    add(`<button type="button" role="menuitem">${icon("terminal")}<span>${termOn ? "Close terminal" : "Open terminal"}</span></button>`, () => setTerminal(!termOn));
+    add(`<button type="button" role="menuitem">${icon("terminal")}<span>${terminalOpen(ws, run) ? "Close terminal" : "Open terminal"}</span></button>`, () => setTerm(!terminalOpen(ws, run)));
     const priv = lockBtn.classList.contains("on");
     const tucked = [
       [bar.querySelector(".fp-toggle"), "Files"],
       [bar.querySelector(".cv-toggle"), "Canvas"],
+      [bar.querySelector(".nt-toggle"), "Notes"],
       [lockBtn, priv ? "Share with your team" : "Make private", icon(priv ? "unlock" : "lock")],
     ].filter(([b]) => b && !b.hidden && !b.getClientRects().length);
     for (const [b, label, ic] of tucked) add(`<button type="button" role="menuitem">${ic || b.innerHTML}<span>${escapeHtml(label)}</span></button>`, () => b.click());
@@ -4267,6 +4220,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     sub.querySelector(".dot").classList.toggle("live", !!st.live);
     const phase = a?.phase && a.phase.toLowerCase() !== st.label.toLowerCase() && a.phase.toLowerCase() !== a.status ? a.phase : "";
     setText(sub.querySelector(".st"), phase ? `${st.label} · ${phase}` : st.label);
+    // The goal first: the speed's fit measures the line with it.
+    goalChip.update(t?.goal);
     agentStats.update(t?.stats);
     contextMeter.update(t?.context);
     return status;
@@ -4358,7 +4313,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return box;
     }
     if (role === "user") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div></div>`);
-    if (role === "system" && (x.m.kind === "compact" || x.m.kind === "handoff")) {
+    if (role === "system" && x.m.kind === "peer") {
+      // A teammate that went idle with nothing to report is one line.
+      if (x.m.peer.idle && !x.m.text) return h(`<div class="msg peer"><div class="peer-line">${icon("agents")}<span></span></div></div>`);
+      return h(`<div class="msg peer"><div class="peer-card"><div class="peer-from">${icon("agents")}<span>From <b></b></span></div><div class="peer-title" hidden></div><div class="peer-body md"></div><button type="button" class="peer-more" hidden></button></div></div>`);
+    }
+    if (role === "system" && (x.m.kind === "compact" || x.m.kind === "handoff" || x.m.kind === "scheduled")) {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
     if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
@@ -4376,7 +4336,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       // A reply's quote goes above the bubble (quote-reply.js).
       const body = paintQuote(node, p.text);
       const sig = `${body}|${markdownReady()}`;
-      if (md.dataset.sig !== sig) { renderMarkdown(md, body); md.dataset.sig = sig; }
+      if (md.dataset.sig !== sig) { renderMarkdown(md, body, chatMarkdown); md.dataset.sig = sig; }
       md.hidden = !body;
       paintAttachments(node.querySelector(".atts"), p.files || []);
       const uploading = (p.files || []).filter((f) => !f.path).length;
@@ -4389,7 +4349,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "steps") return paintSteps(node, x);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
-    if (m.kind === "compact" || m.kind === "handoff") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "peer") { node._msg = m; return paintPeer(node, m); }
     if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
     const md = node.querySelector(".md");
     let text = m.text || "";
@@ -4400,15 +4361,17 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       editAction(node, m, store.transcripts.get(key));
     }
     const sig = `${text}|${markdownReady()}`;
-    if (md.dataset.sig !== sig) { renderMarkdown(md, text); md.dataset.sig = sig; }
+    if (md.dataset.sig !== sig) { renderMarkdown(md, text, chatMarkdown); md.dataset.sig = sig; }
   }
 
-  // A compacted context, or a chat moved here from another harness ("Moved
-  // from Claude · Opus 5.5", cloud/worker/handoff.mjs): one marker with the
-  // summary the agent continued from behind it.
+  // A compacted context, a chat moved here from another harness ("Moved
+  // from Claude · Opus 5.5", cloud/worker/handoff.mjs) or a scheduled
+  // task's turn: one marker with the summary the agent continued from, or
+  // the prompt it ran, behind it.
   function paintCompact(node, m) {
     const moved = m.kind === "handoff";
-    const c = (moved ? m.handoff : m.compact) || {};
+    const scheduled = m.kind === "scheduled";
+    const c = (moved ? m.handoff : scheduled ? { summary: m.scheduled.prompt } : m.compact) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
     const row = node.querySelector(".compact-row");
     node.classList.toggle("open", open);
@@ -4416,14 +4379,39 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.disabled = !c.summary;
     row.setAttribute("aria-expanded", String(open));
     const tokens = c.preTokens ? ` · ${c.preTokens >= 1000 ? `${Math.round(c.preTokens / 1000)}k` : c.preTokens} tokens summarized` : "";
-    const label = moved ? m.text : `Context compacted${tokens}`;
+    const label = moved || scheduled ? m.text : `Context compacted${tokens}`;
     setText(row.querySelector(".c-text"), label);
-    row.setAttribute("aria-label", `${label}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : "the summary the agent continued from"}.` : ""}`);
+    row.setAttribute("aria-label", `${label}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : scheduled ? "the prompt it ran" : "the summary the agent continued from"}.` : ""}`);
     const sum = node.querySelector(".compact-sum");
     sum.hidden = !open;
     if (!open) return;
     const sig = `${c.summary}|${markdownReady()}`;
-    if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary); sum.dataset.sig = sig; }
+    if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary, chatMarkdown); sum.dataset.sig = sig; }
+  }
+
+  // A message another agent sent this one (worker/transcripts.mjs
+  // peerMessages): a teammate, a subagent or another session. A card with who
+  // it is from, its summary and its text, long text cut to its first lines.
+  // It is not the user's, so it has no Edit.
+  function paintPeer(node, m) {
+    const p = m.peer;
+    const line = node.querySelector(".peer-line");
+    if (line) return setText(line.querySelector("span"), p.failure ? `${p.from} stopped: ${p.failure}` : `${p.from} is idle`);
+    const long = m.text.length > PEER_LONG_CHARS || m.text.split("\n").length > PEER_LONG_LINES;
+    const open = long && store.expanded.has(`${key}|${node.dataset.key}`);
+    node.classList.toggle("clamped", long && !open);
+    setText(node.querySelector(".peer-from b"), p.from);
+    const title = p.summary || (p.failure ? `Stopped: ${p.failure}` : "");
+    const head = node.querySelector(".peer-title");
+    setText(head, title);
+    head.hidden = !title;
+    const md = node.querySelector(".peer-body");
+    const sig = `${m.text}|${markdownReady()}`;
+    if (md.dataset.sig !== sig) { renderMarkdown(md, m.text, chatMarkdown); md.dataset.sig = sig; }
+    const more = node.querySelector(".peer-more");
+    more.hidden = !long;
+    setText(more, open ? "Show less" : "Show more");
+    more.setAttribute("aria-expanded", String(open));
   }
 
   // A tool card's name and one-line input. The "All agents" chat names its own tools (all-agents.js).
@@ -4495,8 +4483,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (timer !== -1) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
   };
   const onVis = () => {
-    if (!document.hidden) { clearTimeout(timer); tick(); if (termOn) terminalView.start(); }
-    else terminalView.stop();
+    if (!document.hidden) { clearTimeout(timer); tick(); }
   };
   document.addEventListener("visibilitychange", onVis);
   const unReady = () => { if (el.isConnected) paint(); };
@@ -4507,15 +4494,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     el,
     update: paint,
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
-    terminal: ro ? null : { isOpen: () => termOn, set: setTerminal },
+    terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     destroy() {
       clearTimeout(timer); timer = -1;
-      termOn = false; clearTimeout(termTimer); terminalView.stop();
       fastPolls.delete(fastPoll);
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
       agentStats.destroy();
       contextMeter.destroy();
+      goalChip.destroy();
       tray?.destroy();
       quoteReply?.destroy();
       if (screen?.el === el) document.title = "Rudder";
@@ -4559,14 +4546,14 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
 
 // Cmd+K (command-palette.js): the rows for the page on screen. The agent's
-// terminal, then a new chat and notes for the project on screen, the app's
-// pages, and agents and projects to jump to. Older agents, and a new chat or
-// notes for the other projects, show once something is typed.
+// terminal, then a new chat for the project on screen and the open chat's
+// notes, the app's pages, and agents and projects to jump to. Older agents,
+// and a new chat in the other projects, show once something is typed.
 function paletteCommands() {
   if (store.signedOut) return [];
   const route = parseRoute(location.pathname);
   const projects = sortProjects(store.state?.projects || []);
-  const here = ["project", "agent", "notes"].includes(route.name) ? projects.find((p) => p.workspaceId === route.ws) : null;
+  const here = ["project", "agent"].includes(route.name) ? projects.find((p) => p.workspaceId === route.ws) : null;
   const name = (p) => p.name || p.repo || "Project";
   const go = (path) => () => navigate(path);
   // A new chat starts from its project's task box (newChat).
@@ -4581,8 +4568,9 @@ function paletteCommands() {
   if (route.name === "all" || route.name === "all-agent") rows.push({ label: "New chat", detail: "All agents", icon: icon("plus"), run: go(`${ALL_PATH}/new`) });
   if (here) {
     rows.push({ label: "New chat", detail: name(here), icon: icon("plus"), keywords: ["agent", "task"], run: startChat(here) });
-    rows.push({ label: "Notes", detail: name(here), icon: NOTES_ICON, run: go(notesPath(here.workspaceId)) });
   }
+  const chat = route.name === "agent" ? findAgent(route.ws, route.run) : null;
+  if (chat && !chat.pending) rows.push({ label: "Notes", detail: chat.title || chat.task || "Untitled agent", icon: NOTES_ICON, run: () => openNotes({ ws: route.ws, run: route.run, findAgent }) });
   rows.push(
     { label: "All agents", detail: "One chat with every agent", icon: icon("agents"), run: go(ALL_PATH) },
     { label: "All projects", icon: icon("code"), keywords: ["home"], run: go("/app") },
@@ -4604,11 +4592,19 @@ function paletteCommands() {
   for (const p of projects) {
     if (p === here) continue;
     rows.push({ label: `New chat in ${name(p)}`, icon: icon("plus"), keywords: ["agent", "task"], searchOnly: true, run: startChat(p) });
-    rows.push({ label: `Notes for ${name(p)}`, icon: NOTES_ICON, searchOnly: true, run: go(notesPath(p.workspaceId)) });
   }
   return rows;
 }
 mountCommandPalette(paletteCommands);
+// Ctrl+` opens and closes the agent's terminal from anywhere, the terminal
+// itself included, as in VS Code. Esc stays with the terminal's programs.
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Backquote" || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+  const term = screen?.terminal;
+  if (!term || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  term.set(!term.isOpen());
+}, { capture: true });
 
 // The iOS shell's 9:01 notification, tapped: open the newest digest.
 window.rudderOpenDigest = () => { if (!store.signedOut) navigate(digestPath(null)); };
@@ -4639,12 +4635,11 @@ function restoreLastRoute() {
   const last = ls.get("rudder.lastRoute");
   if (!last || Date.now() - last.at > 24 * 3600 * 1000) return;
   const r = parseRoute(last.path || "");
-  if (r.name !== "project" && r.name !== "agent" && r.name !== "notes") return;
+  if (r.name !== "project" && r.name !== "agent") return;
   history.replaceState({ depth: 0 }, "", "/app");
   depth = 1;
   history.pushState({ depth }, "", projectPath(r.ws));
   if (r.name === "agent") { depth = 2; history.pushState({ depth }, "", agentPath(r.ws, r.run)); }
-  if (r.name === "notes") { depth = 2; history.pushState({ depth }, "", notesPath(r.ws)); }
 }
 
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);

@@ -1,0 +1,13 @@
+/* File paths in chat (file-refs.js) and the file they open beside it
+   (file-link.js, in the Files panel's look: files-panel.css). */
+
+/* A link to a file, or inline code that is a path. `.md a` colors it. */
+.md a.file-ref { cursor: pointer; }
+.md a.file-ref:hover { border-bottom-color: currentColor; }
+.md a.file-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.md a.file-ref > code { color: var(--accent); }
+.bubble a.file-ref, .bubble a.file-ref > code { color: inherit; }
+
+.fl-message { flex: 1 1 auto; min-width: 0; overflow: auto; }
+.fl-message[hidden] { display: none; }
+.fl-message .hu { padding: 0 16px 16px; }

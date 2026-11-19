@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CloudProjectFiles, CloudProjectFileError, jsonBody, SAVE_BODY_BYTES, SAVE_TOO_LARGE, type CloudFileScope } from "./relay.js";
 import { AgentSetupRoutes, AGENT_SETUP_PATHS } from "./agent-setup.js";
-import { ProjectNotesRoutes, PROJECT_NOTES_PATH } from "./notes.js";
+import { AgentNotesRoutes, AGENT_NOTES_PATH } from "./agent-notes.js";
+import { FileRefRoutes, FILE_REF_PATH } from "./file-refs.js";
 
 type Dependencies = {
   workspace(accountId: string, workspaceId: string): { homeId: string };
@@ -26,10 +27,12 @@ export class ProjectFileRoutes {
   #relay: CloudProjectFiles<string>;
   #listing = 0;
   #setup: AgentSetupRoutes;
-  #notes: ProjectNotesRoutes;
+  #notes: AgentNotesRoutes;
+  #fileRefs: FileRefRoutes;
   constructor(private readonly dependencies: Dependencies) {
     this.#setup = new AgentSetupRoutes(dependencies);
-    this.#notes = new ProjectNotesRoutes(dependencies);
+    this.#notes = new AgentNotesRoutes(dependencies);
+    this.#fileRefs = new FileRefRoutes(dependencies);
     this.#relay = new CloudProjectFiles({
       authorize: async (accountId, scope, signal) => {
         signal.throwIfAborted();
@@ -55,8 +58,9 @@ export class ProjectFileRoutes {
   }
   async handle(req: IncomingMessage, res: ServerResponse, url: URL, accountId: string): Promise<boolean> {
     const setup = AGENT_SETUP_PATHS.includes(url.pathname);
-    const notes = url.pathname === PROJECT_NOTES_PATH;
-    if (!setup && !notes && !["/api/app/project-files", "/api/app/project-file-scopes"].includes(url.pathname)) return false;
+    const notes = url.pathname === AGENT_NOTES_PATH;
+    const fileRef = url.pathname === FILE_REF_PATH;
+    if (!setup && !notes && !fileRef && !["/api/app/project-files", "/api/app/project-file-scopes"].includes(url.pathname)) return false;
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -65,13 +69,15 @@ export class ProjectFileRoutes {
     req.once("aborted", cancel); res.once("close", cancel);
     try {
       const save = req.method === "POST" && url.pathname === "/api/app/project-files";
-      if (!setup && !notes && req.method !== "GET" && !save) throw new CloudProjectFileError(405, "Use GET to read project files and POST to save one");
+      if (!setup && !notes && !fileRef && req.method !== "GET" && !save) throw new CloudProjectFileError(405, "Use GET to read project files and POST to save one");
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
       let result: unknown;
       if (setup) {
         result = await this.#setup.handle(req, url, accountId, signal);
       } else if (notes) {
         result = await this.#notes.handle(req, url, accountId, signal);
+      } else if (fileRef) {
+        result = await this.#fileRefs.handle(req, url, accountId, signal);
       } else if (save) {
         if (url.search) throw new CloudProjectFileError(400, "Send the save as JSON");
         result = await this.#relay.save(accountId, await jsonBody(req, SAVE_BODY_BYTES, SAVE_TOO_LARGE, signal), signal);
@@ -111,7 +117,8 @@ export class ProjectFileRoutes {
           || (error instanceof Error && typeof (error as { status?: unknown }).status === "number");
         if (!reported) console.error(`project files ${req.method} ${url.pathname}:`, error);
         res.statusCode = error instanceof CloudProjectFileError ? error.status : 403;
-        res.end(JSON.stringify({ error: reported ? (error as Error).message : "Project file access is unavailable" }));
+        const needsUpdate = (error as { needsUpdate?: unknown }).needsUpdate === true;
+        res.end(JSON.stringify({ error: reported ? (error as Error).message : "Project file access is unavailable", ...(needsUpdate ? { needsUpdate } : {}) }));
       }
     } finally { req.off("aborted", cancel); res.off("close", cancel); }
     return true;

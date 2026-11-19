@@ -806,19 +806,24 @@ async function handleRpc(method, params) {
   if (method === "projectFiles") {
     return (await fileService()).dispatch(project.dir, params.request);
   }
+  if (method === "fileRef") {
+    // A file a chat message names, opened read only beside the chat: in the
+    // agent's workspace, the checkout or the home user's own folders, minus
+    // the deny list (src/project-files/file-refs.ts).
+    return (await fileService()).fileRef(project.dir, params.request, {
+      home: HOME, homes: [HOME, PERSIST_HOME], roots: [HOME, VOLUME, os.tmpdir()],
+    });
+  }
   if (method === "vibeprint") {
     return await vibeprint.handle(project, params);
   }
   if (method === "projectGuide") {
     return (await agentSetupService()).projectGuide(project.dir);
   }
-  if (method === "projectNotes") {
-    // RUDDER_NOTES.md in the checkout, which only the user writes (src/project-files/notes.ts).
-    if (project.status === "cloning") {
-      throw new Error("This project is still cloning");
-    }
-    const { projectNotes } = await import(fromDist("project-files/notes.js"));
-    return await projectNotes(project.dir, params.request);
+  if (method === "agentNotes") {
+    // One agent's notes, in its run folder, which only the user writes (src/project-files/agent-notes.ts).
+    const { agentNotes } = await import(fromDist("project-files/agent-notes.js"));
+    return await agentNotes(project.dir, String(params.runId || ""), params.request);
   }
   if (method === "transcript") {
     return readTranscript(project.dir, String(params.runId || ""), {

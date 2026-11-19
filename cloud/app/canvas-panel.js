@@ -1,6 +1,6 @@
 // The Canvas panel: the project's vibeprint canvas beside the conversation.
-// On desktop it takes the shell's right column (`.dsk-files`, shared with the
-// Files panel: opening one closes the other); narrower, it is a full sheet.
+// It takes the right-hand slot it shares with Files, the terminal and Notes
+// (side-panel.js): a desktop column, or narrower a full sheet.
 //
 // The canvas runs on the home beside the agents, never inside them
 // (cloud/worker/vibeprint-host.mjs): no agent has its rule, tools or files.
@@ -13,10 +13,10 @@
 // (frames get no cookies).
 import { api, confirmDialog, toast, ls } from "/app/core.js";
 import { h, icon, copyText, escapeHtml } from "/app/render.js";
+import { openSide, closeSide, placeSide, dragColumn } from "/app/side-panel.js";
 
 const STARTING_POLL_MS = 1500;
 const RUNNING_POLL_MS = 30000;
-const WIDTH_KEY = "rudder.filesWidth"; // the right column's width, shared with Files
 const sentKey = (ws, run) => `rudder.canvasSent.${ws}.${run}`;
 const CANVAS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M6.5 10v3.5a2 2 0 0 0 2 2H14"/><path d="M17 4.5c1.6 1.2 2.6 2.9 2.5 5"/></svg>`;
 
@@ -30,6 +30,7 @@ const state = {
 };
 
 const el = h(`<section class="cv" aria-label="Canvas">
+  <div class="side-grip" aria-hidden="true"></div>
   <header class="cv-head">
     <span class="cv-title">${CANVAS_ICON}<span>Canvas</span></span>
     <span class="cv-agent" hidden></span>
@@ -61,43 +62,11 @@ linkBtn.addEventListener("click", () => {
 offBtn.addEventListener("click", () => { void turnOff(); });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.open) void refresh(); });
 
-// ---------- Placement ----------
+// ---------- The right-hand slot (side-panel.js) ----------
 
-function column() { return document.querySelector(".dsk-files"); }
-
-/** Into the right column (closing Files there first) or onto the page as a sheet. */
-async function place() {
-  const col = column();
-  if (!col) {
-    el.classList.add("cv-sheet");
-    if (el.parentElement !== document.body) document.body.appendChild(el);
-    return true;
-  }
-  el.classList.remove("cv-sheet");
-  if (el.parentElement === col) return true;
-  const files = col.querySelector(".fp");
-  if (files) {
-    files.querySelector(".fp-close")?.click();
-    await new Promise((r) => setTimeout(r, 0));
-    if (col.querySelector(".fp")) return false; // Files kept unsaved edits open.
-  }
-  col.replaceChildren(el);
-  col.hidden = false;
-  const dsk = col.closest(".dsk");
-  dsk?.classList.add("with-files");
-  const width = Number(ls.get(WIDTH_KEY));
-  if (width) dsk?.style.setProperty("--files-w", `${width}px`);
-  return true;
-}
-
-function unplace() {
-  const col = column();
-  if (col && el.parentElement === col) {
-    col.hidden = true;
-    col.closest(".dsk")?.classList.remove("with-files");
-  }
-  el.remove();
-}
+// Another panel taking the slot closes the canvas.
+const panel = { el, close: async () => { stopPanel(); return true; } };
+$(".side-grip").addEventListener("pointerdown", dragColumn);
 
 // ---------- Public surface ----------
 
@@ -111,27 +80,24 @@ export function canvasButton({ ws, run = null, findAgent }) {
 }
 
 /** The route changed, or the other pane took focus: an open canvas follows that
- * project and agent. Files taking the column closes it. */
+ * project and agent. Another panel taking the slot closes it. */
 export function followCanvas(route, findAgent) {
   if (!state.open) return;
-  // Detached: Files took the column (it is open), or the shell was rebuilt
-  // crossing its breakpoint (Files is not), and the canvas moves to the new one.
-  if (!el.isConnected && document.querySelector(".fp")) { stopPanel(); return; }
+  placeSide(); // The desktop shell is rebuilt when the window crosses its breakpoint.
   if (!route?.ws || !["project", "agent"].includes(route.name)) { closePanel(); return; }
-  void place();
   retarget({ ws: route.ws, run: route.name === "agent" ? route.run : null, findAgent });
 }
 
 async function togglePanel(target) {
-  if (state.open && el.isConnected && state.target?.ws === target.ws && state.target?.run === target.run) { closePanel(); return; }
-  if (!(await place())) return;
+  if (state.open && state.target?.ws === target.ws && state.target?.run === target.run) { closePanel(); return; }
+  if (!(await openSide(panel))) return;
   state.open = true;
   retarget(target);
 }
 
 function closePanel() {
   stopPanel();
-  unplace();
+  closeSide(panel);
 }
 
 function stopPanel() {

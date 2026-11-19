@@ -82,6 +82,13 @@ export async function createEditor({ parent, text, path, readOnly, onChange, onS
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next }, selection: { anchor: head } });
     },
     setReadOnly(locked) { view.dispatch({ effects: editable.reconfigure(editableState(locked)) }); },
+    /** Show `line` (1-based) in the middle, selected, or the cursor at `col` on it. */
+    goto(line, col = 0) {
+      const doc = view.state.doc;
+      const at = doc.line(Math.min(Math.max(1, line), doc.lines));
+      const selection = col > 0 ? { anchor: Math.min(at.from + col - 1, at.to) } : { anchor: at.from, head: at.to };
+      view.dispatch({ selection, effects: cm.EditorView.scrollIntoView(selection.anchor, { y: "center" }) });
+    },
     focus() { view.focus(); },
     destroy() { appearance.disconnect(); view.destroy(); },
   };

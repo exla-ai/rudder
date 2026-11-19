@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pidAlive } from "./agent-status.mjs";
 import { contextUsage } from "./context-usage.mjs";
+import { activeGoal } from "./chat-goal.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
 import { handoffShown } from "./handoff.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
@@ -115,6 +116,13 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     base.context = contextUsage(record, file, home);
   } catch (error) {
     base.context = { error: error instanceof Error ? error.message : String(error) };
+  }
+  // The standing goal `/goal` set (chat-goal.mjs), while the agent runs to pursue
+  // it. A failed read says so and the conversation still shows.
+  try {
+    base.goal = live ? activeGoal(record, file, home) : null;
+  } catch (error) {
+    base.goal = { error: error instanceof Error ? error.message : String(error) };
   }
   return base;
 }

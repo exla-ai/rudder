@@ -7,11 +7,11 @@ const CACHE = "rudder-app-v5";
 const SHELL = [
   "/app", "/app/theme.js", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js", "/app/harness-logos.js",
   "/app/org.js", "/app/select.js", "/app/team.js", "/app/onboarding.js", "/app/mac-local.js", "/app/prompt-suggest.js", "/app/quote-reply.js", "/app/quote-text.js",
-  "/app/agent-stats.js", "/app/context-meter.js", "/app/agent-menu.js", "/app/command-palette.js", "/app/command-rank.js", "/app/closing.js", "/app/all-agents.js", "/app/home-update.js", "/app/canvas-panel.js", "/app/chat-edit.js",
-  "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/notes.js", "/app/pending.js",
-  "/app/project-file-render.js", "/app/slash-menu.js", "/app/slash-rank.js", "/app/subagents.js", "/app/subagent-tray.js", "/app/terminal-client.js", "/app/terminal-recovery.js",
-  "/app/styles.css", "/app/desktop.css", "/app/files-panel.css", "/app/canvas-panel.css", "/app/files-hub.css",
-  "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/home-update.css", "/app/context-meter.css", "/app/notes.css", "/app/subagent-tray.css", "/app/command-palette.css", "/app/quote-reply.css",
+  "/app/agent-stats.js", "/app/context-meter.js", "/app/goal-chip.js", "/app/agent-menu.js", "/app/command-palette.js", "/app/command-rank.js", "/app/closing.js", "/app/all-agents.js", "/app/home-update.js", "/app/canvas-panel.js", "/app/chat-edit.js",
+  "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/side-panel.js", "/app/notes.js", "/app/file-link.js", "/app/file-refs.js", "/app/pending.js",
+  "/app/project-file-render.js", "/app/slash-menu.js", "/app/slash-rank.js", "/app/subagents.js", "/app/subagent-tray.js", "/app/terminal-client.js", "/app/terminal-panel.js", "/app/terminal-recovery.js",
+  "/app/styles.css", "/app/desktop.css", "/app/side-panel.css", "/app/files-panel.css", "/app/canvas-panel.css", "/app/terminal-panel.css", "/app/files-hub.css",
+  "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/home-update.css", "/app/context-meter.css", "/app/notes.css", "/app/file-link.css", "/app/subagent-tray.css", "/app/command-palette.css", "/app/quote-reply.css",
   "/app/manifest.webmanifest", "/app/icon.svg", "/app/favicon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",
 ];
 const CDN = "https://cdn.jsdelivr.net/npm/";

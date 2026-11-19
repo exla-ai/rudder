@@ -1,4 +1,4 @@
-/* Files panel (files-panel.js): desktop right column or a full-height sheet. */
+/* Files panel (files-panel.js), in the right-hand slot (side-panel.css). */
 
 :root {
   --fp-selection: rgba(47, 86, 216, 0.18);
@@ -37,29 +37,6 @@
   background: var(--bg-elev); color: var(--ink);
 }
 .fp svg { width: 17px; height: 17px; flex: none; }
-
-/* Desktop: the shell's third column. It takes the plan's place while open. */
-.dsk-files { min-width: 0; min-height: 0; border-left: 1px solid var(--line); background: var(--bg-elev); }
-.dsk-files[hidden] { display: none; }
-body.desktop { --files-w: min(46vw, 760px); }
-.dsk.with-files, .dsk.with-plan.with-files { grid-template-columns: var(--side) minmax(0, 1fr) var(--files-w); }
-.dsk.with-files .dsk-plan { display: none; }
-/* Two agents side by side keep room for both conversations. */
-.dsk:has(> .dsk-main.split) { --files-w: min(34vw, 560px); }
-.fp-grip { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; z-index: 3; cursor: col-resize; touch-action: none; }
-.fp-grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--accent); opacity: 0; transition: opacity 120ms; }
-.dsk.resizing .fp-grip::after { opacity: 0.6; }
-
-/* Narrower: a sheet over the screen, the conversation kept underneath. */
-.fp.fp-sheet {
-  position: fixed; left: 0; right: 0; top: var(--vvtop); height: var(--vvh); z-index: 40;
-  padding: var(--sat) var(--sar) var(--sab) var(--sal);
-  box-shadow: 0 0 0 1px var(--line), 0 18px 48px rgba(0, 0, 0, 0.18);
-  animation: fp-in 180ms cubic-bezier(.2, .7, .2, 1);
-}
-.fp.fp-sheet .fp-grip { display: none; }
-@keyframes fp-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .fp.fp-sheet { animation: none; } }
 
 .fp-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 14px; border-bottom: 1px solid var(--line); min-height: 52px; }
 .fp-title { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 15px; margin-right: 4px; }

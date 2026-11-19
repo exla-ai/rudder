@@ -8,6 +8,8 @@
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
 // /app/__mock/harness/<ok|old> (move a chat to another harness, or a home too old to),
+// /app/__mock/notes/<ok|old> (a chat's notes, or a home too old to keep them),
+// /app/__mock/file-ref/<ok|old> (files a chat message names, or a home too old to open them),
 // /app/__mock/all/<ok|old|stuck|lost|codex> (the All agents chat and the ways it fails to start),
 // /app/__mock/update/<ok|fail> (how the next Update now of an old machine goes: home-update.js),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
@@ -37,6 +39,8 @@ let usageMode = "ok";
 let trayMode = "ok";
 let closeMode = "ok";
 let harnessMode = "ok";
+let notesMode = "ok";
+let fileRefMode = "ok";
 // Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
 const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
 const CREDS = {
@@ -227,6 +231,7 @@ function baseTranscript(a) {
     { id: id(), role: "user", ts: t + 30 * MIN, text: "Looks good. Can you make the composer stay above the keyboard on iPhone?" },
     { id: id(), role: "assistant", ts: t + 31 * MIN, text: "Yes. The shell now sizes itself to `visualViewport.height`, so the composer rides above the keyboard instead of being covered:\n\n```css\n.shell {\n  position: fixed;\n  top: var(--vvtop);\n  height: var(--vvh);\n}\n```\n\n```swift\n// The native shell injects the token before the page runs.\nlet script = WKUserScript(\n    source: \"window.RUDDER_NATIVE = { token: \\\"\\(token)\\\", platform: \\\"ios\\\" }\",\n    injectionTime: .atDocumentStart,\n    forMainFrameOnly: true\n)\n```\n\nI also check `window.innerHeight - visualViewport.height` to drop the bottom safe-area padding while the keyboard is open. See the [visualViewport docs](https://developer.mozilla.org/en-US/docs/Web/API/VisualViewport) for the event model.\n\n- [x] Composer above keyboard\n- [x] Cmd+Enter sends\n- [ ] Haptics on send (needs the native shell)" },
     { id: id(), role: "tool", ts: t + 33 * MIN, text: "", tool: { name: "WebFetch", input: "https://rudder-home.tail4c2e1.ts.net:3000/health", output: null, isError: false } },
+    { id: id(), role: "assistant", ts: t + 34 * MIN, text: "Wrote it up. [Open the full Offstage snapshot plan](/home/rudder/.claude/plans/dreamy-launching-firefly.md), or the [Full Opus/Fable design](file:///home/rudder/.claude/plans/dreamy-launching-firefly.md#L9) section.\n\nThe viewer change is in `cloud/app/file-view.js:120`, the plan sits at `/home/rudder/.claude/plans/dreamy-launching-firefly.md`, and `src/missing.ts:5` is gone." },
   ];
   if (a.status === "waiting") msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
   else if (a.lastMessage) msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
@@ -316,6 +321,11 @@ function subagentTranscript(a) {
       subagent: { id: "a77e0", backend: "claude", kind: "general-purpose", name: "backfill", description: "Backfill settled bets", prompt: "Write a one-off script that settles bets on markets resolved before today.", status: "stopped", startedAt: t + 13_000, endedAt: t + 33_000, toolCalls: 2, result: null,
         messages: [subTool("k1", t + 20_000, "Bash", "psql $DATABASE_URL -c \"select count(*) from markets where status = 'resolved'\"", " count\n-------\n   318"), subTool("k2", t + 33_000, "Write", "scripts/backfill-settlement.ts", null)], earlier: 0 } },
     subTool("b6", t + 50_000, "Write", "src/jobs/settle.ts", "Wrote 46 lines to src/jobs/settle.ts"),
+    // What teammates send the lead (worker/transcripts.mjs peerMessages), and a scheduled task's turn.
+    { id: "b8", role: "system", kind: "peer", ts: t + 51_000, text: "Settlement rounding is in: payouts round down to whole cents. Nothing is committed.", peer: { from: "payout-review", summary: "Payout rounding fixed, not committed", idle: false, failure: null } },
+    { id: "b9", role: "system", kind: "peer", ts: t + 52_000, text: "The subagent tray now shows the word \"Subagents\" and how many are running, and the cards no longer show the last command. Nothing is committed.\n\n**Collapsed bar:** it reads \"Subagents\" followed by a \"2 running\" pill. When none are running there's no count at all.\n\n**Checks:** `node --check` on `cloud/app/subagents.js` passes, and the page had no errors.\n\nFiles changed: `cloud/app/subagent-tray.js`, `cloud/app/subagent-tray.css`.", peer: { from: "tray-polish", summary: null, idle: true, failure: null } },
+    { id: "b10", role: "system", kind: "peer", ts: t + 53_000, text: "", peer: { from: "backfill", summary: null, idle: true, failure: null } },
+    { id: "b11", role: "system", kind: "scheduled", ts: t + 54_000, text: "Scheduled check", scheduled: { prompt: "5-minute monitor (the user's goal: \"keep the settlement work moving\").\n\n1. Run ListAgents and look at each teammate.\n2. Fix anything stuck." } },
     subSay("b7", t + 55_000, a.lastMessage),
   ];
 }
@@ -427,6 +437,8 @@ const toMsMock = (t) => (typeof t === "number" ? t : Date.parse(t));
 // Claude Code's suggested next prompt (worker/suggestion.mjs) for the idle
 // Claude agent; its plugin clears it when the next turn starts.
 const suggestions = new Map([["run_a3", { text: "Merge it, then add the preview links to the README", at: T0 - 17 * MIN }]]);
+// The standing goal `/goal` set, while the agent runs (worker/chat-goal.mjs).
+const goals = new Map([["run_a1", { text: "Ship the phone app: transcripts render markdown and code, scroll stays pinned at the bottom, and tool calls collapse" }]]);
 function transcriptFor(ws, run) {
   const p = projects.find((x) => x.workspaceId === ws) || (coordinator?.workspaceId === ws ? coordinator : null);
   const a = p?.agents.find((x) => x.id === run);
@@ -448,7 +460,7 @@ function readBody(req) {
     req.on("end", () => { try { resolve(JSON.parse(d || "{}")); } catch { resolve({}); } });
   });
 }
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".webmanifest": "application/manifest+json" };
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".webmanifest": "application/manifest+json" };
 
 // Built from cloud/src like server.ts serves them (build cloud first).
 const COMPILED = { "/app/terminal-recovery.js": "../dist/private-access/terminal-recovery.js", "/app/project-file-render.js": "../dist/project-files/browser-render.js" };
@@ -800,25 +812,58 @@ const projectGuides = {
   ], shared: true },
 };
 
-// ---------- Project notes (notes.js) ----------
-// RUDDER_NOTES.md per project, answered as the home's notes service does: no
-// file until the first save, which keeps it out of Git. /app/__mock/notes/other-device
-// edits every project's notes as a save from another device would.
-const projectNotes = new Map(); // ws -> { text, revision, git }
-const notesOf = (ws) => projectNotes.get(ws) ?? { text: "", revision: null, git: { state: "included" } };
-function projectNotesMock(res, url, body) {
+// ---------- Agent notes (notes.js) ----------
+// notes.md in each agent's run folder, answered as the home's notes service
+// does: no file until the first save. /app/__mock/notes/other-device edits
+// every agent's notes as a save from another device would.
+const agentNotes = new Map(); // `${ws}|${run}` -> { text, revision }
+// A file a chat message names (file-link.js; the home side is
+// src/project-files/file-refs.ts): the agent's workspace, then the checkout
+// (both at /workspace/code/rudder, files under cloud/ from this repository),
+// then a few files in the home user's folders.
+const MOCK_CHECKOUT = "/workspace/code/rudder";
+const hostFiles = {
+  "/home/rudder/.claude/plans/dreamy-launching-firefly.md": "# Offstage snapshot plan\n\nSnapshot the agent's Mac session before each run, so a failed run restores in seconds. Background is in [the research notes](dreamy-launching-firefly-notes.md).\n\n## Steps\n\n- [x] Take an APFS snapshot when the run starts\n- [x] Keep the last three per agent\n- [ ] Restore on failure, then retry once\n- [ ] Show the restore in the agent's chat\n\n## Full Opus/Fable design\n\n| Piece | Owner | Notes |\n|---|---|---|\n| Snapshot daemon | `offstage/snapd.ts` | runs as root |\n| Restore | `offstage/restore.ts` | needs a reboot on Intel |\n| Retention | `offstage/prune.ts` | three per agent |\n\n### Snapshot\n\n```ts\nexport async function snapshot(run: string): Promise<string> {\n  const name = `rudder-${run}`;\n  await apfs.create(name);\n  return name;\n}\n```\n\n> Restores never touch `/Users/*/Library/Keychains`.\n\n## Open questions\n\n1. Does Fable need its own volume?\n2. How long does a restore take on an M1 Air?\n",
+  "/home/rudder/.claude/plans/dreamy-launching-firefly-notes.md": "# Research notes\n\nAPFS snapshots are copy on write, so taking one costs about 40 ms.\n\nBack to [the plan](dreamy-launching-firefly.md).\n",
+};
+function fileRefMock(res, url) {
   if (homeMode !== "running") return json(res, 503, { error: "the cloud machine is not connected yet; it may still be starting" });
-  if (!body) return json(res, 200, notesOf(url.searchParams.get("workspaceId")));
-  const current = notesOf(body.workspaceId);
-  if (body.operation === "git") {
-    projectNotes.set(body.workspaceId, { ...current, git: { state: body.keepOut ? "excluded" : "included" } });
-    return json(res, 200, { git: projectNotes.get(body.workspaceId).git });
+  if (fileRefMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
+  const asked = url.searchParams.get("path") || "";
+  const run = url.searchParams.get("runId") || "";
+  const known = url.searchParams.get("knownRevision") || undefined;
+  const absolute = asked.startsWith("~/") ? `/home/rudder/${asked.slice(2)}` : asked.startsWith("/") ? path.posix.normalize(asked) : null;
+  const candidates = absolute ? [absolute] : [path.posix.join(MOCK_CHECKOUT, asked)];
+  for (const file of candidates) {
+    if (/\/\.(ssh|aws|config)\/|\/\.env/.test(file)) return json(res, 400, { error: "This file can hold keys or tokens, so the viewer does not open it" });
+    let value = hostFiles[file];
+    const rel = file.startsWith(`${MOCK_CHECKOUT}/`) ? file.slice(MOCK_CHECKOUT.length + 1) : null;
+    if (value === undefined && rel !== null) {
+      value = (fileTrees[run] ?? fileTrees.checkout)[rel] ?? fileTrees.checkout[rel];
+      if (value === undefined && rel.startsWith("cloud/") && !rel.includes("..")) {
+        try { value = fs.readFileSync(path.join(DIR, "..", "..", rel), "utf8"); } catch { value = undefined; }
+      }
+    }
+    if (value === undefined || Buffer.isBuffer(value)) continue;
+    const doc = fileDoc(file, value, known);
+    return json(res, 200, { ...doc, kind: doc.kind === "markdown" ? "markdown" : "text" });
   }
+  return json(res, 400, { error: `File not found: ${asked}` });
+}
+
+function agentNotesMock(res, url, body) {
+  if (homeMode !== "running") return json(res, 503, { error: "the cloud machine is not connected yet; it may still be starting" });
+  if (notesMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
+  const ws = body ? body.workspaceId : url.searchParams.get("workspaceId");
+  const run = body ? body.runId : url.searchParams.get("runId");
+  const project = projects.find((p) => p.workspaceId === ws);
+  if (!project?.agents?.some((a) => a.id === run)) return json(res, 400, { error: "That agent is not on your cloud machine" });
+  const current = agentNotes.get(`${ws}|${run}`) ?? { text: "", revision: null };
+  if (!body) return json(res, 200, current);
   if (body.baseRevision !== current.revision) return json(res, 200, { outcome: "conflict", ...current });
-  const created = current.revision === null;
-  const next = { text: body.text, revision: revisionOf(body.text), git: created ? { state: "excluded" } : current.git };
-  projectNotes.set(body.workspaceId, next);
-  return json(res, 200, { outcome: "saved", revision: next.revision, ...(created ? { git: next.git } : {}) });
+  const next = { text: body.text, revision: revisionOf(body.text) };
+  agentNotes.set(`${ws}|${run}`, next);
+  return json(res, 200, { outcome: "saved", revision: next.revision });
 }
 
 // ---------- Vibeprint canvas (canvas-panel.js) ----------
@@ -893,6 +938,18 @@ const server = http.createServer(async (req, res) => {
   }
   if (p.startsWith("/app/__mock/update/")) { updateMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/all/new" }); return res.end(); }
   if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p === "/app/__mock/file-ref/ok" || p === "/app/__mock/file-ref/old") {
+    fileRefMode = p.split("/").pop();
+    if (fileRefMode === "old") homeVersion = "5.0.9";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
+  if (p === "/app/__mock/notes/ok" || p === "/app/__mock/notes/old") {
+    notesMode = p.split("/").pop();
+    if (notesMode === "old") homeVersion = "5.0.9";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
   if (p.startsWith("/app/__mock/harness/")) {
     harnessMode = p.split("/").pop();
     if (harnessMode === "old") homeVersion = "5.0.9";
@@ -936,9 +993,9 @@ const server = http.createServer(async (req, res) => {
     return res.end("run_a1 changed README.md\n");
   }
   if (p === "/app/__mock/notes/other-device") {
-    for (const [ws, n] of projectNotes) {
+    for (const [key, n] of agentNotes) {
       const text = `${n.text}\nAdded on another device at ${new Date().toLocaleTimeString()}.\n`;
-      if (n.revision) projectNotes.set(ws, { ...n, text, revision: revisionOf(text) });
+      if (n.revision) agentNotes.set(key, { text, revision: revisionOf(text) });
     }
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("notes changed on another device\n");
@@ -997,7 +1054,8 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/app/project-guide" && req.method === "GET") {
       return json(res, 200, projectGuides[url.searchParams.get("workspaceId")] ?? { files: [{ path: "README.md", kind: "file", linksTo: null, imports: [], readBy: [] }], shared: false });
     }
-    if (p === "/api/app/project-notes") return projectNotesMock(res, url, req.method === "POST" ? await readBody(req) : null);
+    if (p === "/api/app/file-ref" && req.method === "GET") return fileRefMock(res, url);
+    if (p === "/api/app/agent-notes") return agentNotesMock(res, url, req.method === "POST" ? await readBody(req) : null);
     if (p === "/api/app/digests" && req.method === "GET") {
       return json(res, 200, { digests: digestStore.map(digestPreviewOf), timeZone: "America/Los_Angeles" });
     }
@@ -1056,7 +1114,7 @@ const server = http.createServer(async (req, res) => {
       const start = at("after") ?? Math.max(0, end - limit);
       const page = { runId: t.a.id, conversation: t.a.id, earlier: start > 0 ? `${t.a.id}:${start}:` : null, messages: t.msgs.slice(start, end) };
       if (url.searchParams.has("before")) return json(res, 200, page);
-      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
+      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
@@ -1221,6 +1279,14 @@ const server = http.createServer(async (req, res) => {
       t.a.updatedAt = now();
       t.msgs.push({ id: `s${now()}`, role: "system", ts: now(), text: body.action === "stop" ? "Agent stopped from the app." : "Merged into main." });
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/agent-model") {
+      // Another model or effort of the same harness: the chat carries on.
+      const t = transcriptFor(body.workspace, body.run);
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      await delay(250);
+      Object.assign(t.a, { model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, updatedAt: now() });
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/agent-harness") {
       // Like a home: the old harness stops and the new one starts on a
@@ -1448,6 +1514,60 @@ const server = http.createServer(async (req, res) => {
 
   if (p === "/app" || p.startsWith("/app/")) return serveStatic(req, res, url);
   json(res, 404, { error: "Not found" });
+});
+
+// The agent terminal's canonical screen socket (cloud/src/private-access/
+// terminal-relay.ts): one read-only screen, a shell session with colored
+// `ls`, `git diff` and the 16 ANSI colors, for the terminal panel.
+const { WebSocketServer } = await import("ws");
+const termSockets = new WebSocketServer({ noServer: true });
+function mockTerminalScreen() {
+  const columns = 100, rows = 30;
+  const E = "\x1b[", sgr = (c, t) => `${E}${c}m${t}${E}0m`;
+  const prompt = (cmd) => `${sgr("36", "~/code/rudder")} ${sgr("35", "main")} ${sgr("32", "$")} ${cmd}`;
+  const lines = [
+    prompt("ls --color"),
+    `${sgr("1;34", "cloud")}  ${sgr("1;34", "docs")}  ${sgr("1;34", "engine")}  ${sgr("1;34", "mac")}  ${sgr("1;34", "native")}  ${sgr("1;34", "node_modules")}  package.json  README.md  ${sgr("1;32", "rudder.sh")}  ${sgr("1;34", "src")}  ${sgr("1;34", "tests")}`,
+    prompt("git diff --stat"),
+    ` cloud/app/terminal-panel.js | 312 ${sgr("32", "++++++++++++++++++++++++++")}`,
+    ` cloud/app/app.js            |  18 ${sgr("32", "++")}${sgr("31", "----")}`,
+    ` 2 files changed, 324 insertions(+), 6 deletions(-)`,
+    prompt("git diff cloud/app/app.js"),
+    sgr("1", "diff --git a/cloud/app/app.js b/cloud/app/app.js"),
+    sgr("1", "index 3f1c2a4..8b9e0d1 100644"),
+    sgr("1", "--- a/cloud/app/app.js"),
+    sgr("1", "+++ b/cloud/app/app.js"),
+    `${sgr("36", "@@ -14,7 +14,7 @@")} import { canvasButton, followCanvas } from "/app/canvas-panel.js";`,
+    ` import { FilesHubScreen } from "/app/files-hub.js";`,
+    sgr("31", `-import { CanonicalTerminalView } from "/app/terminal-client.js";`),
+    sgr("32", `+import { followTerminal, setTerminal, terminalOpen } from "/app/terminal-panel.js";`),
+    ` import { mountCommandPalette } from "/app/command-palette.js";`,
+    prompt("npm run check"),
+    sgr("2", "> rudder@5.0.11 check"),
+    sgr("2", "> tsc -p tsconfig.json --noEmit"),
+    `${sgr("33", "warn")} 1 file uses a deprecated API: ${sgr("4", "src/cloud.ts")}`,
+    `${sgr("1;32", "done")} No type errors ${sgr("90", "(2.4s)")}`,
+    prompt("colors"),
+    [0, 1, 2, 3, 4, 5, 6, 7].map((n) => `${E}3${n}m${String(n).padEnd(2)}${E}0m ${E}4${n}m    ${E}0m`).join(" "),
+    [0, 1, 2, 3, 4, 5, 6, 7].map((n) => `${E}9${n}m${String(n + 8).padEnd(2)}${E}0m ${E}10${n}m    ${E}0m`).join(" "),
+    prompt(""),
+  ];
+  const plain = (t) => t.replace(/\x1b\[[0-9;]*m/g, "");
+  const screen = `${E}?25h${E}m${E}H${E}J${lines.map((l, i) => `${E}${i + 1};1H${l}`).join("")}${E}${lines.length};${plain(lines.at(-1)).length + 1}H`;
+  const scrollback = ["Last login: Wed Nov 19 08:02:11 on ttys004", plain(prompt("cd ~/code/rudder")), plain(prompt("git status")), "On branch main", "nothing to commit, working tree clean"];
+  return { format: "vt100-ansi-v1", columns, rows, screen, scrollback, text: lines.map(plain).join("\n") };
+}
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url, "http://mock");
+  if (url.pathname !== "/api/app/terminal-screen") { socket.destroy(); return; }
+  termSockets.handleUpgrade(req, socket, head, (ws) => {
+    const generation = `mock-${Date.now()}`;
+    let sequence = 0;
+    const send = () => ws.send(JSON.stringify({ version: 1, type: "terminal-screen", generation, sequence: ++sequence, reset: true, gap: false, screen: mockTerminalScreen() }));
+    ws.send(JSON.stringify({ version: 1, type: "terminal-capability", capability: "canonical-screen-text-v1", access: "read-only", generation }));
+    send();
+    ws.on("message", (data) => { try { if (JSON.parse(String(data)).type === "terminal-snapshot-request") send(); } catch { /* not JSON */ } });
+  });
 });
 
 server.listen(PORT, () => console.log(`Rudder app mock on http://localhost:${PORT}/app`));

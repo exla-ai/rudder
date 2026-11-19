@@ -3,6 +3,7 @@
 //
 // A source names one place files live and how to reach them:
 //   { key, list(path), read(path, knownRevision), save(path, baseRevision, text) }
+// A source with `readOnly: true` has no save: its files show, never edit.
 // list/read resolve to the service's listing or document; save to
 // { outcome: "saved", revision } or { outcome: "conflict" }. Saves carry the
 // revision the text was read at, so a change made since (by an agent) is never
@@ -179,12 +180,18 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     onChange();
   }
 
-  async function open(source, path) {
+  /** Open `path` from `source`, at `line` (and `col`) when given. Markdown
+   * still opens rendered; the line is where its source opens. */
+  async function open(source, path, { line = 0, col = 0 } = {}) {
     close();
-    const mine = { source, path, doc: null, base: "", revision: "", mode: "view", editor: null, editable: false, readOnlyReason: "", latest: null, closed: false };
+    const mine = { source, path, doc: null, base: "", revision: "", mode: "view", line, col, editor: null, editable: false, readOnlyReason: "", latest: null, closed: false };
     file = mine;
     el.hidden = false;
-    pathEl.textContent = path;
+    // Left to right inside the right-to-left box that ellipsizes its start:
+    // an absolute path keeps its leading slash.
+    const bdi = document.createElement("bdi");
+    bdi.textContent = path;
+    pathEl.replaceChildren(bdi);
     pathEl.title = path;
     statusEl.textContent = "Opening";
     modesEl.replaceChildren();
@@ -208,8 +215,8 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     f.revision = doc.revision;
     const text = typeof doc.text === "string" ? doc.text : null;
     f.base = text ?? "";
-    f.editable = text !== null && utf8Bytes(text) <= EDIT_BYTES;
-    f.readOnlyReason = text !== null && !f.editable ? "Read only: files over 1 MiB cannot be edited here" : "";
+    f.editable = text !== null && !f.source.readOnly && utf8Bytes(text) <= EDIT_BYTES;
+    f.readOnlyReason = text !== null && !f.editable && !f.source.readOnly ? "Read only: files over 1 MiB cannot be edited here" : "";
     if (f.mode === "view" && !["markdown", "html", "image", "pdf"].includes(doc.kind) && text !== null) f.mode = "edit";
     if (f.editor) {
       if (f.editor.text() !== f.base) f.editor.setText(f.base);
@@ -224,7 +231,7 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     const kind = f.doc.kind;
     modesEl.replaceChildren();
     if (["markdown", "html"].includes(kind) && typeof f.doc.text === "string") {
-      for (const [mode, label, glyph] of [["view", "Preview", "eye"], ["edit", "Edit", "edit"]]) {
+      for (const [mode, label, glyph] of [["view", "Preview", "eye"], f.source.readOnly ? ["edit", "Source", "code"] : ["edit", "Edit", "edit"]]) {
         const b = h(`<button type="button" class="fp-mode">${icon(glyph)}<span>${label}</span></button>`);
         b.classList.toggle("on", f.mode === mode);
         b.setAttribute("aria-pressed", String(f.mode === mode));
@@ -266,6 +273,8 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
       if (f.mode !== "edit") return;
       const host = f.editor.view.dom.parentElement;
       if (host.parentElement !== contentEl) { contentEl.replaceChildren(host); f.editor.view.requestMeasure(); }
+      // The line the file was opened at, the first time its text shows.
+      if (f.line) { f.editor.goto(f.line, f.col); f.line = 0; }
       paintControls();
       return;
     }

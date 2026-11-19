@@ -1,6 +1,10 @@
 // Markdown rendering, icons and small DOM helpers.
+import { markFileRefs } from "/app/file-refs.js";
 
 const CDN = "https://cdn.jsdelivr.net/npm/";
+// DOMPurify's default allowed URIs plus file:, for chat Markdown only, where
+// markFileRefs turns every file: link into a file link without an href.
+const WITH_FILE_URIS = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|file):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
 let libs = null;
 let libsPromise = null;
 const listeners = new Set();
@@ -41,8 +45,9 @@ export function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/** Render markdown into `el`. Falls back to escaped text until libraries load. */
-export function renderMarkdown(el, text) {
+/** Render markdown into `el`. Falls back to escaped text until libraries load.
+ * `fileRefs`: chat messages, where file paths open beside the chat (file-refs.js). */
+export function renderMarkdown(el, text, { fileRefs = false } = {}) {
   const src = String(text ?? "");
   if (!libs) {
     el.innerHTML = src.split(/\n{2,}/).map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br>")}</p>`).join("");
@@ -50,9 +55,10 @@ export function renderMarkdown(el, text) {
     return;
   }
   delete el.dataset.plain;
-  const html = libs.purify.sanitize(libs.marked.parse(src), { USE_PROFILES: { html: true } });
+  const html = libs.purify.sanitize(libs.marked.parse(src), { USE_PROFILES: { html: true }, ...(fileRefs ? { ALLOWED_URI_REGEXP: WITH_FILE_URIS } : {}) });
   el.innerHTML = html;
   enhance(el);
+  if (fileRefs) markFileRefs(el);
 }
 
 function enhance(root) {

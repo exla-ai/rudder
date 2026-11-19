@@ -43,7 +43,7 @@ function resetText(iso) {
 // mouse; a click or tap keeps it open until a click outside or Escape.
 let openPop = null;
 
-function popover(anchor, { label, render, place = "below" }) {
+export function popover(anchor, { label, render, place = "below" }) {
   let el = null, pinned = false, leaveTimer = 0, enterTimer = 0;
   const close = () => {
     clearTimeout(leaveTimer); clearTimeout(enterTimer);

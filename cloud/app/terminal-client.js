@@ -1,23 +1,21 @@
 import { TerminalRecovery } from "/app/terminal-recovery.js";
 
-/** A read-only canonical text projection. It retains the complete parsed screen
- * model, while the phone uses plain text for selection and accessibility. */
+/** The agent's current terminal, read only. Each screen is a complete ANSI
+ * repaint of its PTY (vt100-ansi-v1: geometry, cursor, modes and plain-text
+ * scrollback). `draw(screen, done)` paints it (terminal-panel.js, xterm.js)
+ * and calls `done` once it is on screen, which acknowledges the frame. */
 export class CanonicalTerminalView {
-  constructor(element, { workspaceId, runId, onUnavailable = () => {}, onCapability = () => {},
+  constructor(draw, { workspaceId, runId, onUnavailable = () => {}, onCapability = () => {},
     socket = (url) => new WebSocket(url), afterPaint = (fn) => requestAnimationFrame(() => requestAnimationFrame(fn)),
     origin = location.origin } = {}) {
-    this.element = element; this.selection = {workspaceId,runId}; this.socket = socket;
+    this.selection = {workspaceId,runId}; this.socket = socket;
     this.afterPaint = afterPaint; this.origin = origin; this.onUnavailable = onUnavailable; this.onCapability = onCapability;
-    this.active = false; this.serial = 0; this.timer = null; this.ws = null; this.frame = null;
+    this.active = false; this.serial = 0; this.timer = null; this.ws = null;
     this.recovery = new TerminalRecovery({
       restore: (screen, paint) => {
-        if (!paint.isCurrent() || typeof screen.text !== "string") return;
-        this.frame = screen;
-        // No ANSI interpretation and no replay suffix. The text comes from the
-        // same authoritative emulator as geometry, cursor, modes and scrollback.
-        const top = element.scrollTop, left = element.scrollLeft;
-        element.textContent = screen.text || " "; element.scrollTop = top; element.scrollLeft = left;
-        this.afterPaint(() => { if (this.active && paint.isCurrent()) paint.painted(); });
+        if (!paint.isCurrent()) return;
+        // A whole screen from the authoritative emulator, never a replay suffix.
+        draw(screen, () => this.afterPaint(() => { if (this.active && paint.isCurrent()) paint.painted(); }));
       },
       requestSnapshot: cursor => this.send({version:1,type:"terminal-snapshot-request",cursor}),
       acknowledge: cursor => this.send({version:1,type:"terminal-painted",...cursor}),

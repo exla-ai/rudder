@@ -98,19 +98,18 @@ const canonical=(sequence=1,epoch=7)=>({version:1,type:'terminal-screen',generat
 test('negotiated current-run canonical browser paints release only current screen slots and reconnect resets',async t=>{
   let current=canonical(),allowed=true;const paints=[],sockets=[],selection={actor:'account',workspaceId:'cloud-repository',runId:'run-1'};
   const relay=new CanonicalTerminalRelay({authorize:async()=>allowed,read:async()=>current,pollMs:5});t.after(()=>relay.close());
-  const element={textContent:'',scrollTop:4,scrollLeft:2};let capabilities=0,fallback=0;
-  const view=new CanonicalTerminalView(element,{workspaceId:selection.workspaceId,runId:selection.runId,origin:'https://rudder.test',afterPaint:fn=>paints.push(fn),
+  const drawn=[];let capabilities=0,fallback=0;
+  const view=new CanonicalTerminalView((screen,done)=>{drawn.push(screen.screen);done();},{workspaceId:selection.workspaceId,runId:selection.runId,origin:'https://rudder.test',afterPaint:fn=>paints.push(fn),
     onCapability:mode=>{assert.equal(mode,'read-only');capabilities++;},onUnavailable:()=>fallback++,socket(url){
       assert.equal(new URL(url).searchParams.get('capability'),'canonical-screen-text-v1');
       const {server,client}=pair();sockets.push(server);queueMicrotask(()=>relay.attach(selection,'viewer',server).catch(()=>server.close()));return client;
     }});t.after(()=>view.stop());view.start();
-  await until(()=>paints.length===1);assert.equal(element.textContent,'full screen 1');assert.equal(capabilities,1);
+  await until(()=>paints.length===1);assert.equal(drawn.at(-1),'\x1bcfull screen 1');assert.equal(capabilities,1);
   current=canonical(2);await pause(25);assert.equal(sockets[0].frames.filter(f=>f.type==='terminal-screen').length,1,'unpainted frame holds its viewer slot');
-  paints.shift()();await until(()=>paints.length===1 && element.textContent==='full screen 2');
-  assert.equal(element.scrollTop,4);assert.equal(element.scrollLeft,2);paints.shift()();
+  paints.shift()();await until(()=>paints.length===1 && drawn.at(-1)==='\x1bcfull screen 2');paints.shift()();
   const oldGeneration=sockets[0].frames[0].generation;
   view.stop();view.start();await until(()=>capabilities===2 && paints.length===1);
-  assert.notEqual(sockets[1].frames[0].generation,oldGeneration);assert.equal(element.textContent,'full screen 2');
+  assert.notEqual(sockets[1].frames[0].generation,oldGeneration);assert.equal(drawn.at(-1),'\x1bcfull screen 2');
   paints.shift()();allowed=false;await until(()=>sockets[1].readyState===3);assert.equal(fallback,0);
   // No input or predictive write is available from this read-only capability.
   assert.equal(view.recovery.input(1,new Uint8Array([65]),'unsafe'),false);

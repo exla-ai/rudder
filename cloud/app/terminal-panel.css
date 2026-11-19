@@ -1,0 +1,89 @@
+/* Terminal panel (terminal-panel.js): an agent's live terminal in the right-hand slot. */
+
+/* Its colors, read into xterm's theme and redrawn when Appearance changes.
+   Built from the app's palette: the panel's own background and ink, the accent
+   cursor, and ANSI colors from the status hues, darkened where a light
+   background needs it. Every color but black reads at 4:1 or better. */
+:root, [data-theme="light"] {
+  --term-bg: var(--bg-elev);
+  --term-fg: var(--ink);
+  --term-cursor: var(--accent);
+  --term-selection: rgba(47, 86, 216, 0.2);
+  --term-selection-inactive: rgba(47, 86, 216, 0.1);
+  --term-scrollbar: var(--line-strong);
+  --term-scrollbar-hover: rgba(27, 26, 23, 0.24);
+  --term-black: var(--ink);
+  --term-red: var(--failed);
+  --term-green: #23784a;
+  --term-yellow: #946200;
+  --term-blue: var(--accent);
+  --term-magenta: #8a3ab9;
+  --term-cyan: #0b7a74;
+  --term-white: #6b6962;
+  --term-bright-black: var(--muted);
+  --term-bright-red: #cf4440;
+  --term-bright-green: #278250;
+  --term-bright-yellow: #a36d00;
+  --term-bright-blue: #4062e0;
+  --term-bright-magenta: #9a46c6;
+  --term-bright-cyan: #0a827b;
+  --term-bright-white: #7f7a71;
+}
+:root[data-theme="dark"], [data-theme="dark"] {
+  --term-selection: rgba(124, 156, 255, 0.28);
+  --term-selection-inactive: rgba(124, 156, 255, 0.14);
+  --term-scrollbar-hover: rgba(255, 255, 255, 0.22);
+  --term-black: #484d55;
+  --term-red: var(--failed);
+  --term-green: var(--done);
+  --term-yellow: var(--needs);
+  --term-blue: var(--accent);
+  --term-magenta: #d19bf2;
+  --term-cyan: var(--working);
+  --term-white: var(--ink-2);
+  --term-bright-black: var(--idle);
+  --term-bright-red: #ff8f8f;
+  --term-bright-green: #7fd9a4;
+  --term-bright-yellow: #f2c46a;
+  --term-bright-blue: #a0b8ff;
+  --term-bright-magenta: #e3bdfa;
+  --term-bright-cyan: #72ddd3;
+  --term-bright-white: #f6f5f1;
+}
+
+.tp {
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%;
+  background: var(--term-bg); color: var(--ink);
+}
+.tp svg { width: 17px; height: 17px; flex: none; }
+
+/* Desktop: the panel keeps its full width while the column slides open or
+   shut around it (.tp-shut, one frame at 0), pinned to the window's edge. */
+.dsk-files:not([hidden]):has(> .tp) { display: flex; justify-content: flex-end; overflow: hidden; }
+.dsk-files > .tp { flex: none; width: calc(var(--files-w) - 1px); }
+.dsk.dsk.with-files.tp-shut { grid-template-columns: var(--side) minmax(0, 1fr) 0px; }
+
+/* Narrower: the slot's full-screen sheet (side-panel.css), sliding away on close. */
+.tp.side-sheet.tp-out { animation: tp-out 160ms cubic-bezier(.4, 0, 1, 1) forwards; }
+@keyframes tp-out { to { transform: translateX(24px); opacity: 0; } }
+
+.tp-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; border-bottom: 1px solid var(--line); min-height: 52px; background: var(--bg-elev); }
+.tp-title { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 15px; flex: none; }
+.tp-title svg { color: var(--muted); }
+.tp-agent { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13.5px; }
+.tp-ro { flex: none; font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--surface-2); border-radius: 6px; padding: 2px 7px; }
+.tp-ro[hidden] { display: none; }
+.tp-close { flex: none; margin-left: auto; width: 38px; height: 38px; }
+
+/* The screen: the terminal's own background to the edges, with room around the text. */
+.tp-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; background: var(--term-bg); }
+.tp-term { width: max-content; }
+/* The text screen of saved and legacy agents fills the panel instead. */
+.tp-term.tp-fill { width: 100%; height: 100%; }
+.tp-body:has(> .tp-fill) { overflow: hidden; }
+.tp-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); font-size: 14px; background: var(--term-bg); }
+.tp-msg[hidden] { display: none; }
+.tp .xterm { cursor: text; }
+
+.tp > .key-strip { flex: none; border-top: 1px solid var(--line); background: var(--bg-elev); }
+.tp > .key-strip[hidden] { display: none; }

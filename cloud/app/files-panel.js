@@ -1,20 +1,20 @@
-// The Files panel: a project's tree and one open file beside the conversation.
-// On desktop it fills the shell's right column (`.dsk-files`); narrower, it is
-// a full-height sheet over the screen, which stays mounted underneath.
+// The Files panel: a project's tree and one open file beside the conversation,
+// in the right-hand slot it shares with Canvas, the terminal and Notes
+// (side-panel.js): a desktop column, or narrower a full-height sheet.
 //
 // Every read and save goes through the home's file service with an observed
 // workspace scope: the project checkout or a live agent's own workspace (its
 // fork mount on Linux). The browser never names a host path.
-import { api, ls } from "/app/core.js";
+import { api } from "/app/core.js";
 import { h, icon } from "/app/render.js";
 import { FileTree, FileView, iconButton, errorRow } from "/app/file-view.js";
 import { dropdown } from "/app/select.js";
+import { openSide, closeSide, placeSide, dragColumn } from "/app/side-panel.js";
 
 const CHECKOUT = "checkout";
 const TREE_POLL_MS = 6000;
 // Scope bindings expire after 60s on the control plane; renew well before.
 const SCOPE_RENEW_MS = 40000;
-const WIDTH_KEY = "rudder.filesWidth";
 
 const scopeKey = (s) => JSON.stringify([s.projectId, s.workspaceId, s.attemptId, s.ownerEpoch]);
 
@@ -57,7 +57,7 @@ const state = {
 };
 
 const el = h(`<section class="fp" aria-label="Files">
-  <div class="fp-grip" aria-hidden="true"></div>
+  <div class="side-grip" aria-hidden="true"></div>
   <header class="fp-head">
     <span class="fp-title">${icon("folder")}<span>Files</span></span>
     <select class="fp-ws" aria-label="Workspace"></select>
@@ -92,52 +92,11 @@ wsSelect.addEventListener("change", async () => {
 });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.open) schedule(); });
 
-// ---------- Placement ----------
+// ---------- The right-hand slot (side-panel.js) ----------
 
-function column() { return document.querySelector(".dsk-files"); }
-
-function place() {
-  const col = column();
-  if (col) {
-    el.classList.remove("fp-sheet");
-    if (el.parentElement !== col) col.replaceChildren(el);
-    col.hidden = false;
-    col.closest(".dsk")?.classList.add("with-files");
-    const width = Number(ls.get(WIDTH_KEY));
-    if (width) col.closest(".dsk")?.style.setProperty("--files-w", `${width}px`);
-  } else {
-    el.classList.add("fp-sheet");
-    if (el.parentElement !== document.body) document.body.appendChild(el);
-  }
-}
-
-function unplace() {
-  const col = column();
-  if (col) { col.hidden = true; col.closest(".dsk")?.classList.remove("with-files"); }
-  el.remove();
-}
-
-// Drag the panel's left edge to size the desktop column.
-$(".fp-grip").addEventListener("pointerdown", (e) => {
-  const dsk = el.closest(".dsk");
-  if (!dsk) return;
-  e.preventDefault();
-  const grip = e.currentTarget;
-  grip.setPointerCapture(e.pointerId);
-  dsk.classList.add("resizing");
-  // Every listener of this drag goes when the pointer is released or lost.
-  const drag = new AbortController();
-  grip.addEventListener("pointermove", (ev) => {
-    const width = Math.round(Math.min(Math.max(window.innerWidth - ev.clientX, 360), window.innerWidth - 420));
-    dsk.style.setProperty("--files-w", `${width}px`);
-  }, { signal: drag.signal });
-  grip.addEventListener("lostpointercapture", () => {
-    drag.abort();
-    dsk.classList.remove("resizing");
-    const width = parseInt(getComputedStyle(dsk).getPropertyValue("--files-w"), 10);
-    if (width) ls.set(WIDTH_KEY, width);
-  }, { signal: drag.signal });
-});
+// Another panel taking the slot closes Files, unless it holds unsaved edits.
+const panel = { el, close: () => closePanel() };
+$(".side-grip").addEventListener("pointerdown", dragColumn);
 
 // ---------- Public surface ----------
 
@@ -151,7 +110,7 @@ export function filesButton({ ws, run = null, findAgent }) {
  * panel follows that project and agent. Unsaved edits keep it where it is. */
 export function followFiles(route, findAgent) {
   if (!state.open) return;
-  place(); // The desktop shell is rebuilt when the window crosses its breakpoint.
+  placeSide(); // The desktop shell is rebuilt when the window crosses its breakpoint.
   if (view.dirty()) return;
   if (!route?.ws || !["project", "agent"].includes(route.name)) { void closePanel(); return; }
   const target = { ws: route.ws, run: route.name === "agent" ? route.run : null, findAgent };
@@ -163,20 +122,22 @@ const agentName = (target, id) => target?.findAgent(target.ws, id)?.title || nul
 
 async function togglePanel(target) {
   if (state.open && sameTarget(state.target, target)) { await closePanel(); return; }
+  if (!(await openSide(panel))) return;
   state.open = true;
-  place();
   if (!sameTarget(state.target, target)) {
     if (!(await view.discardOk())) return;
     await retarget(target);
   } else schedule();
 }
 
+/** Resolves false when unsaved edits keep the panel open. */
 async function closePanel() {
-  if (!(await view.discardOk())) return;
+  if (!(await view.discardOk())) return false;
   state.open = false;
   clearTimeout(state.treeTimer);
   view.close();
-  unplace();
+  closeSide(panel);
+  return true;
 }
 
 async function retarget(target) {

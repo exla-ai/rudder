@@ -75,7 +75,7 @@ function sameFile(a: { dev: number; ino: number }, b: { dev: number; ino: number
 function sameVersion(a: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }, b: typeof a): boolean {
   return sameFile(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
-function classification(relative: string): Pick<FileDocument, "mime" | "kind"> {
+export function classification(relative: string): Pick<FileDocument, "mime" | "kind"> {
   const ext = path.extname(relative).toLowerCase();
   const images: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif" };
   if (images[ext]) return { mime: images[ext], kind: "image" };
@@ -94,14 +94,14 @@ function validMedia(bytes: Buffer, mime: string): boolean {
   return false;
 }
 /** UTF-8 text without control characters, or null for binary content. */
-function textOf(content: Buffer): string | null {
+export function textOf(content: Buffer): string | null {
   if (content.includes(0)) return null;
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
     return BINARY_TEXT.test(text) ? null : text;
   } catch { return null; }
 }
-const revisionOf = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+export const revisionOf = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
 /** Where a grant's files are reachable from this process, and how to prove a
  * path still names the same mount. A namespace grant walks the agent's own

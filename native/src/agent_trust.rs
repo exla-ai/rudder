@@ -17,18 +17,39 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::pty_terminal::TerminalCommand;
+
 /// Best effort, before the agent's PTY starts: a failure here only means the
-/// agent shows its usual prompt, which the dashboard already flags.
-pub(crate) fn prepare_for_launch(program: &str, cwd: &Path) {
-    let name = Path::new(program)
+/// agent shows its usual prompt, which the dashboard already flags. Trust goes
+/// in the config the agent will read: an agent on an extra account carries
+/// that account's dir in its own env (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+pub(crate) fn prepare_for_launch(command: &TerminalCommand, cwd: &Path) {
+    let name = Path::new(&command.program)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
+    let env = |key: &str| {
+        command
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| std::ffi::OsString::from(value))
+            .or_else(|| std::env::var_os(key))
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    };
     // A RUDDER_*_BIN override is a test fake or a custom build: leave the real
     // config files alone.
     let config = match name {
-        "claude" if std::env::var_os("RUDDER_CLAUDE_BIN").is_none() => claude_config_path(),
-        "codex" if std::env::var_os("RUDDER_CODEX_BIN").is_none() => codex_config_path(),
+        "claude" if std::env::var_os("RUDDER_CLAUDE_BIN").is_none() => match env("CLAUDE_CONFIG_DIR") {
+            Some(dir) => Some(dir.join(".claude.json")),
+            None => home().map(|home| home.join(".claude.json")),
+        },
+        "codex" if std::env::var_os("RUDDER_CODEX_BIN").is_none() => match env("CODEX_HOME") {
+            Some(dir) => Some(dir.join("config.toml")),
+            None => home().map(|home| home.join(".codex").join("config.toml")),
+        },
         "agy" if std::env::var_os("RUDDER_AGY_BIN").is_none() => antigravity_settings_path(),
         _ => return,
     };
@@ -60,22 +81,8 @@ fn home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn claude_config_path() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) => Some(PathBuf::from(dir).join(".claude.json")),
-        None => home().map(|home| home.join(".claude.json")),
-    }
-}
-
 fn antigravity_settings_path() -> Option<PathBuf> {
     home().map(|home| home.join(".gemini").join("antigravity-cli").join("settings.json"))
-}
-
-fn codex_config_path() -> Option<PathBuf> {
-    match std::env::var_os("CODEX_HOME").filter(|dir| !dir.is_empty()) {
-        Some(dir) => Some(PathBuf::from(dir).join("config.toml")),
-        None => home().map(|home| home.join(".codex").join("config.toml")),
-    }
 }
 
 /// The repository root the CLIs record trust for: the nearest ancestor with a
@@ -503,6 +510,35 @@ mod tests {
         assert!(fs::read_to_string(&codex)
             .unwrap()
             .contains(&format!("[projects.\"{root}\"]")));
+    }
+
+    #[test]
+    fn trust_goes_to_the_account_config_dir_the_command_names() {
+        // An agent on an extra account reads its own .claude.json and
+        // config.toml, so that is where its folder must be trusted.
+        let temp = tempdir();
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let project = base.join("project");
+        let claude_dir = base.join("accounts/claude/work");
+        let codex_dir = base.join("accounts/codex/work");
+        for dir in [&project, &claude_dir, &codex_dir] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(claude_dir.join(".claude.json"), "{}").unwrap();
+        let claude = TerminalCommand::new("claude")
+            .with_env("CLAUDE_CONFIG_DIR", claude_dir.display().to_string());
+        prepare_for_launch(&claude, &project);
+        let codex = TerminalCommand::new("/usr/local/bin/codex")
+            .with_env("CODEX_HOME", codex_dir.display().to_string());
+        prepare_for_launch(&codex, &project);
+        let claude_config: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(claude_dir.join(".claude.json")).unwrap()).unwrap();
+        let codex_config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        for root in trust_roots(&project) {
+            let root = root.to_str().unwrap();
+            assert_eq!(claude_config["projects"][root]["hasTrustDialogAccepted"], true);
+            assert!(codex_config.contains(&format!("[projects.\"{root}\"]\ntrust_level = \"trusted\"")));
+        }
     }
 
     #[test]

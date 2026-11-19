@@ -313,6 +313,8 @@ pub(crate) fn create_main_agent(
         backend,
         model: model.to_string(),
         effort,
+        // Every caller makes a new row: it starts on the backend's default account.
+        account: new_agent_account(backend),
         status: AgentStatus::Stopped,
         cwd: repo_root.to_path_buf(),
         workspace_path: None,
@@ -655,6 +657,11 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         .get("effort")
         .and_then(|value| value.as_str())
         .and_then(EffortLevel::parse);
+    let account = record
+        .get("account")
+        .and_then(serde_json::Value::as_str)
+        .filter(|account| *account != MAIN_ACCOUNT)
+        .map(ToOwned::to_owned);
     let status = agent_status_from_record(record.get("status").and_then(|value| value.as_str()));
     let created_at = record
         .get("createdAt")
@@ -879,6 +886,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         backend,
         model,
         effort,
+        account,
         status,
         cwd,
         workspace_path,
@@ -1585,6 +1593,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         } else {
             map.remove("mergeRequested");
         }
+        match run.account.as_ref() {
+            Some(account) => map.insert("account".to_string(), serde_json::json!(account)),
+            None => map.remove("account"),
+        };
     }
     // What Rudder DID when it published this row: the branch it pushed and the PR
     // it opened. The PR's state (draft/open/merged/closed) is GitHub's to answer:

@@ -79,6 +79,49 @@ pub(crate) fn config_effort(config: &serde_json::Value, backend: Backend) -> Opt
     })
 }
 
+/// The account id of the CLI's own config dir, as the app and the steer
+/// protocol name it. In memory and in run.json it is `None`.
+pub(crate) const MAIN_ACCOUNT: &str = "main";
+
+/// `backends.<backend>.account`: the account new agents on this backend start
+/// on. Absent, or "main", is the CLI's own config dir (`None`).
+pub(crate) fn config_account(config: &serde_json::Value, backend: Backend) -> Option<String> {
+    config
+        .get("backends")?
+        .get(backend.as_str())?
+        .get("account")?
+        .as_str()
+        .filter(|account| !account.is_empty() && *account != MAIN_ACCOUNT)
+        .map(str::to_string)
+}
+
+/// The account a NEW agent row on `backend` starts on, read from config.json
+/// at launch. A row that continues a conversation keeps its own instead.
+pub(crate) fn new_agent_account(backend: Backend) -> Option<String> {
+    load_rudder_config()
+        .as_ref()
+        .and_then(|config| config_account(config, backend))
+}
+
+/// An extra account's id: 1 to 32 lowercase letters and digits, never "main".
+pub(crate) fn valid_account_id(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && id != MAIN_ACCOUNT
+}
+
+/// An extra account's config dir: `<rudder home>/accounts/<backend>/<id>`,
+/// where the Rudder home is the directory that holds config.json.
+pub(crate) fn account_dir(backend: Backend, id: &str) -> Option<PathBuf> {
+    Some(
+        rudder_config_path()?
+            .parent()?
+            .join("accounts")
+            .join(backend.as_str())
+            .join(id),
+    )
+}
+
 fn gam_side_from_json(value: &serde_json::Value) -> Option<GamSide> {
     let backend = value
         .get("backend")

@@ -999,17 +999,21 @@ pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
 /// trailing `-c notify=["<script>"]` that OVERRIDES the earlier `notify=[]` baked
 /// by the Codex capability profile (last `-c` wins). No-op for non-worker
 /// modes. When the hook files can't be written the launch fails with the
-/// reason: the worker could never report a finished turn.
+/// reason: the worker could never report a finished turn. The command is put
+/// on the run's `account` first (`apply_account`), for every mode; an account
+/// that is gone fails the launch.
 pub(crate) fn augment_worker_command(
     command: &mut TerminalCommand,
     backend: Backend,
     mode: AgentMode,
     run_id: &str,
+    account: Option<&str>,
 ) -> Result<()> {
     // Here as well as at spawn: the wrappers below (a managed profile, a gam
     // link) start the agent through `/bin/sh` or Rudder itself, which the
     // spawn-time check cannot see through.
     rudder_native::pty_terminal::require_agent_program(command)?;
+    apply_account(command, backend, account)?;
     if cfg!(target_os = "linux") && home_runtime_from_env() {
         let volume = std::env::var("RUDDER_HOME_VOLUME").unwrap_or_else(|_| "/workspace".to_string());
         with_home_scratch(command, Path::new(&volume), run_id);
@@ -1148,12 +1152,43 @@ mod home_scratch_tests {
 /// fabric run can select a managed profile without converting old resumes.
 pub(crate) fn augment_existing_worker_command(
     command: &mut TerminalCommand, backend: Backend, mode: AgentMode,
-    run_id: &str, profile: Option<&str>,
+    run_id: &str, profile: Option<&str>, account: Option<&str>,
 ) -> Result<()> {
     if profile_override(command).is_none() {
         command.env.push(("RUDDER_EXECUTION_PROFILE".into(), profile.unwrap_or("native").into()));
     }
-    augment_worker_command(command, backend, mode, run_id)
+    augment_worker_command(command, backend, mode, run_id, account)
+}
+
+/// The env var and config dir that put a `backend` agent on `account`,
+/// checked to still exist. `None` for the main account: the agent then reads
+/// whatever config dir the dashboard itself has.
+pub(crate) fn account_env(backend: Backend, account: Option<&str>) -> Result<Option<(&'static str, PathBuf)>> {
+    let Some(id) = account else {
+        return Ok(None);
+    };
+    let (key, name) = match backend {
+        Backend::Claude => ("CLAUDE_CONFIG_DIR", "Claude Code"),
+        Backend::Codex => ("CODEX_HOME", "Codex"),
+        Backend::Opencode => anyhow::bail!("opencode has only its main account; switch this chat to main"),
+        Backend::Antigravity => anyhow::bail!("Antigravity has only its main account; switch this chat to main"),
+    };
+    anyhow::ensure!(valid_account_id(id), "{id:?} is not an account id");
+    let dir = account_dir(backend, id).context("the Rudder home is unknown: HOME is not set")?;
+    anyhow::ensure!(dir.is_dir(), "the {name} account {id} is gone; switch this chat to another account");
+    Ok(Some((key, dir)))
+}
+
+/// Put an agent CLI launched for a run on that run's account: an extra
+/// account's dir as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. The main account
+/// changes no env. Every spawn of an agent CLI for a run goes through here,
+/// directly or through `augment_worker_command`.
+pub(crate) fn apply_account(command: &mut TerminalCommand, backend: Backend, account: Option<&str>) -> Result<()> {
+    if let Some((key, dir)) = account_env(backend, account)? {
+        command.env.retain(|(name, _)| name != key);
+        command.env.push((key.to_string(), dir.display().to_string()));
+    }
+    Ok(())
 }
 
 fn profile_override(command: &TerminalCommand) -> Option<&str> {

@@ -285,6 +285,8 @@ impl App {
             run.task.clone(),
             name.clone(),
             (run.backend, run.model.clone(), run.effort),
+            // The branch continues the source's conversation, on its account.
+            run.account.clone(),
             self.cwd.clone(),
         );
         if let Some(prompt) = &prompt {
@@ -397,13 +399,14 @@ impl App {
         run.last_output_at = Instant::now();
         let backend = run.backend;
         let run_id = run.id.clone();
+        let account = run.account.clone();
         let mut command = match &branched {
             Branched::Claude { session } => claude_resume_command(run, session),
             Branched::Codex { session } => codex_resume_command(run, session),
         };
         // A resumed conversation runs in a terminal here, as an edited chat's does.
         let wired =
-            signals::augment_existing_worker_command(&mut command, backend, AgentMode::Execute, &run_id, Some("native"));
+            signals::augment_existing_worker_command(&mut command, backend, AgentMode::Execute, &run_id, Some("native"), account.as_deref());
         if let Some(prompt) = &branch.prompt {
             // After `--`, text that starts with "-" is the prompt, not a flag.
             command.args.push("--".to_string());

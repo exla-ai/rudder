@@ -2700,6 +2700,11 @@ struct AgentRun {
     backend: Backend,
     model: String,
     effort: Option<EffortLevel>,
+    /// The signed-in account this chat runs on: an extra account's config dir
+    /// (`config::account_dir`), or `None` for the CLI's own ("main"). Applied
+    /// at every spawn by `signals::apply_account`. Persisted as run.json
+    /// `account` only when set.
+    account: Option<String>,
     status: AgentStatus,
     cwd: PathBuf,
     workspace_path: Option<PathBuf>,
@@ -3098,6 +3103,7 @@ fn fork_row(
     task: String,
     task_summary: String,
     (backend, model, effort): (Backend, String, Option<EffortLevel>),
+    account: Option<String>,
     cwd: PathBuf,
 ) -> AgentRun {
     let created_at = now_stamp();
@@ -3114,6 +3120,7 @@ fn fork_row(
         backend,
         model,
         effort,
+        account,
         status: AgentStatus::Running,
         cwd,
         workspace_path: None,
@@ -9460,8 +9467,10 @@ impl App {
         };
         let session_id = mint_session_id_for(backend);
         let prompt = rudder_reconcile_prompt(input, &frontier);
-        let command =
+        let account = new_agent_account(backend);
+        let mut command =
             self.reconcile_planner_command(backend, &model, effort, &prompt, session_id.as_deref());
+        let wired = signals::apply_account(&mut command, backend, account.as_deref());
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(self.cwd.clone()),
@@ -9488,6 +9497,7 @@ impl App {
             backend,
             model,
             effort,
+            account,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
             workspace_path: None,
@@ -9539,7 +9549,7 @@ impl App {
             gam: None,
         };
 
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -9647,6 +9657,7 @@ impl App {
             backend,
             model,
             effort,
+            account: new_agent_account(backend),
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
             workspace_path: None,
@@ -9907,7 +9918,7 @@ impl App {
                 workspace
             }
         };
-        let (backend, model, effort, goal_prompt, session_id) = {
+        let (backend, model, effort, account, goal_prompt, session_id) = {
             let run = &mut self.agents[index];
             run.cwd = workspace.path.clone();
             run.workspace_path = workspace
@@ -9921,6 +9932,7 @@ impl App {
                 run.backend,
                 run.model.clone(),
                 run.effort,
+                run.account.clone(),
                 run.task.clone(),
                 run.session_id.clone(),
             )
@@ -9940,8 +9952,14 @@ impl App {
         // Official completion signal: wire the backend's own Stop hook (Claude) /
         // notify (Codex) so it deterministically reports turn-end. Keyed by the run id the poll loop
         // reads. See signals.rs.
-        let command = signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
-            .map(|()| command);
+        let command = signals::augment_worker_command(
+            &mut command,
+            backend,
+            AgentMode::Execute,
+            &workspace.id,
+            account.as_deref(),
+        )
+        .map(|()| command);
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(workspace.path.clone()),
@@ -10097,11 +10115,15 @@ Until the first packet arrives, reply only: \"standing by\"."
             AgentMode::Execute,
             session_id.as_deref(),
         );
+        // Both halves are new rows, each on its backend's default account.
+        let account = new_agent_account(backend);
+        let adversarial_account = new_agent_account(adversarial_backend);
         let generator_wired = signals::augment_worker_command(
             &mut generator_command,
             backend,
             AgentMode::Execute,
             &generator_id,
+            account.as_deref(),
         );
         let mut adversarial_command = agent_command(
             adversarial_backend,
@@ -10116,6 +10138,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             adversarial_backend,
             AgentMode::GamAdversarial,
             &adversarial_id,
+            adversarial_account.as_deref(),
         );
         // Transports (gam_link.rs): a Claude channel or a Codex app-server per
         // half, so packets, revisions and steers are pushed into the live
@@ -10146,6 +10169,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             backend,
             model,
             effort,
+            account,
             status: AgentStatus::Running,
             cwd: workspace.path.clone(),
             workspace_path: workspace
@@ -10244,6 +10268,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             backend: adversarial_backend,
             model: adversarial_model.clone(),
             effort: adversarial_effort,
+            account: adversarial_account,
             status: if spawned_generator {
                 AgentStatus::Running
             } else {
@@ -11418,7 +11443,8 @@ Address the objection directly. If you disagree, say why inside \
             other => other,
         };
         let session_id = mint_session_id_for(backend);
-        let command = if is_swarm {
+        let account = new_agent_account(backend);
+        let mut command = if is_swarm {
             swarm_orchestrator_command(
                 backend,
                 &model,
@@ -11438,6 +11464,7 @@ Address the objection directly. If you disagree, say why inside \
                 interactive_planner,
             )
         };
+        let wired = signals::apply_account(&mut command, backend, account.as_deref());
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(self.cwd.clone()),
@@ -11466,6 +11493,7 @@ Address the objection directly. If you disagree, say why inside \
             backend,
             model,
             effort,
+            account,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
             workspace_path: None,
@@ -11534,7 +11562,7 @@ Address the objection directly. If you disagree, say why inside \
             }
         }
 
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -11847,7 +11875,7 @@ Address the objection directly. If you disagree, say why inside \
     fn relaunch_orchestrator_with(
         &mut self,
         index: usize,
-        command: TerminalCommand,
+        mut command: TerminalCommand,
         feedback: &str,
     ) -> bool {
         let cwd = self.cwd.clone();
@@ -11859,7 +11887,9 @@ Address the objection directly. If you disagree, say why inside \
             cwd: Some(run.cwd.clone()),
             ..TerminalPaneOptions::default()
         };
-        let launched = match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        let launched = match signals::apply_account(&mut command, run.backend, run.account.as_deref())
+            .and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options))
+        {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -12198,7 +12228,7 @@ Address the objection directly. If you disagree, say why inside \
         // loop WAITS for the official signal — a resumed process launched without
         // --settings / notify could never write it and would sit "running" forever.
         // (Same trap the conflict-resolver respawn fixed in e027f32.)
-        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref(), run.account.as_deref());
         // A resumed OLD session may still call `rudder done`; point it at the
         // sidecar the conductor reads. New launches no longer set this.
         let report_id = run.node_id.as_deref().unwrap_or(&run.id);
@@ -12490,13 +12520,14 @@ Address the objection directly. If you disagree, say why inside \
                 session_id.as_deref(),
             )
         };
-        let wired = if self.agents[main_index].execution_profile.is_some() {
+        let main_run = &self.agents[main_index];
+        let wired = if main_run.execution_profile.is_some() {
             signals::augment_existing_worker_command(
                 &mut command, backend, AgentMode::Main,
-                &self.agents[main_index].id, self.agents[main_index].execution_profile.as_deref(),
+                &main_run.id, main_run.execution_profile.as_deref(), main_run.account.as_deref(),
             )
         } else {
-            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &self.agents[main_index].id)
+            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &main_run.id, main_run.account.as_deref())
         };
         let done_file = worker_done_file(&self.cwd, &self.agents[main_index].id);
         if !bootstrap.is_empty() {
@@ -12613,7 +12644,7 @@ Address the objection directly. If you disagree, say why inside \
         // Re-wire completion hooks like every other (re)spawn path; without this
         // the run would sit "running" forever waiting for a signal the resumed
         // process was never configured to send.
-        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref(), run.account.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
@@ -12784,7 +12815,7 @@ Address the objection directly. If you disagree, say why inside \
         };
         let mut run = create_oneoff_agent(&self.cwd, backend, &model, effort, task);
         run.task_summary = truncate_chars(&format!("handoff: {title}"), 56);
-        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref(), run.account.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
@@ -12988,7 +13019,7 @@ Address the objection directly. If you disagree, say why inside \
             session_id.as_deref(),
             orchestrator_interactive,
         );
-        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
+        let wired = signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref(), run.account.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(run.cwd.clone()),
@@ -14662,6 +14693,8 @@ Address the objection directly. If you disagree, say why inside \
             backend: self.backend,
             model: self.model.clone(),
             effort: self.effort,
+            // A shell or a Rudder CLI process: no agent, so no account.
+            account: None,
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
             workspace_path: None,
@@ -16004,7 +16037,7 @@ Address the objection directly. If you disagree, say why inside \
             // minting a brand-new conductor that has lost all prior context.
             return;
         };
-        let command = rudder_orchestrator_resume_command(
+        let mut command = rudder_orchestrator_resume_command(
             run.backend,
             &run.model,
             run.effort,
@@ -16012,12 +16045,13 @@ Address the objection directly. If you disagree, say why inside \
             "The plan has been rebased and is now live; the workers are implementing it. \
              Continue conducting: answer questions and steer the fleet via RUDDER_* markers.",
         );
+        let wired = signals::apply_account(&mut command, run.backend, run.account.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(run.cwd.clone()),
             ..TerminalPaneOptions::default()
         };
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
+        match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
@@ -16644,24 +16678,22 @@ Address the objection directly. If you disagree, say why inside \
         SteerDelivery::Delivered
     }
 
-    /// One agent's model and effort, from the model control in its chat. The
+    /// One agent's model, effort and account, from the model control in its
+    /// chat: `<model> <effort|auto> <account>` (`parse_model_spec`). The
     /// backend stays: a conversation cannot move between providers. A live
     /// session sitting at its prompt is relaunched on the same conversation
-    /// with the new flags (`claude --resume`, `codex resume`), so its next turn
-    /// runs on them. A row with no process takes them when it next resumes.
-    /// Mid-turn it is refused: relaunching would throw that turn away.
+    /// with the new flags (`claude --resume`, `codex resume`) under the new
+    /// account's config dir, so its next turn runs on them. A row with no
+    /// process takes them when it next resumes. Mid-turn it is refused:
+    /// relaunching would throw that turn away.
     fn deliver_model_request(&mut self, task_id: &str, spec: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
-        let mut parts = spec.split_whitespace();
-        let (Some(model), Some(effort_arg), None) = (parts.next(), parts.next(), parts.next()) else {
-            return SteerDelivery::Failed("expected <model> <effort|auto>".to_string());
+        let (model, effort, account) = match crate::agent_model::parse_model_spec(spec) {
+            Ok(parsed) => parsed,
+            Err(refusal) => return SteerDelivery::Failed(refusal),
         };
-        let effort = parse_effort_arg(effort_arg);
-        if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
-            return SteerDelivery::Failed(format!("unknown effort: {effort_arg}"));
-        }
         let run = &mut self.agents[index];
         let backend = run.backend;
         if let Some(refusal) = crate::agent_model::model_switch_refusal(run) {
@@ -16675,10 +16707,18 @@ Address the objection directly. If you disagree, say why inside \
             ));
         }
         if !effort_options_for(backend, model).contains(&effort) {
-            return SteerDelivery::Failed(format!("{model} has no {effort_arg} effort"));
+            return SteerDelivery::Failed(format!(
+                "{model} has no {} effort",
+                effort.map(EffortLevel::as_str).unwrap_or("auto")
+            ));
         }
         if let Some(refusal) = openrouter_key_refusal(backend, model) {
             return SteerDelivery::Failed(refusal.to_string());
+        }
+        // Checked before anything changes, for a row with no process too: it
+        // would only fail on its next resume.
+        if let Err(error) = signals::account_env(backend, account.as_deref()) {
+            return SteerDelivery::Failed(error.to_string());
         }
         let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
         if live && run.status == AgentStatus::Running && !run.needs_user_input {
@@ -16690,8 +16730,12 @@ Address the objection directly. If you disagree, say why inside \
         if live && session.is_none() {
             return SteerDelivery::Failed("this chat has no saved session to continue".to_string());
         }
-        let previous = (std::mem::replace(&mut run.model, model.to_string()), run.effort);
-        run.effort = effort;
+        let account_changed = run.account != account;
+        let previous = (
+            std::mem::replace(&mut run.model, model.to_string()),
+            std::mem::replace(&mut run.effort, effort),
+            std::mem::replace(&mut run.account, account),
+        );
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
         if let Some(session) = session.filter(|_| live) {
             let mut command = match backend {
@@ -16701,7 +16745,7 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Antigravity => antigravity_resume_command(run, &session),
             };
             let wired = if run.is_main() && run.execution_profile.is_none() {
-                signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
+                signals::augment_worker_command(&mut command, backend, run.mode, &run.id, run.account.as_deref())
             } else {
                 signals::augment_existing_worker_command(
                     &mut command,
@@ -16709,11 +16753,13 @@ Address the objection directly. If you disagree, say why inside \
                     run.mode,
                     &run.id,
                     run.execution_profile.as_deref(),
+                    run.account.as_deref(),
                 )
             };
-            // Refused before the old process is touched: it keeps its model.
+            // Refused before the old process is touched: it keeps its model,
+            // effort and account.
             if let Err(error) = wired {
-                (run.model, run.effort) = previous;
+                (run.model, run.effort, run.account) = previous;
                 return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
             }
             let options = TerminalPaneOptions {
@@ -16745,7 +16791,13 @@ Address the objection directly. If you disagree, say why inside \
         if let Err(error) = save_native_run_record(&self.cwd, run) {
             return SteerDelivery::Failed(format!("{label} switched, but its record was not saved: {error}"));
         }
-        let note = format!("{label} now on {}", agent_model_label(backend, &run.model, run.effort));
+        let mut note = format!("{label} now on {}", agent_model_label(backend, &run.model, run.effort));
+        if account_changed {
+            note.push_str(&format!(
+                ", account {}",
+                run.account.as_deref().unwrap_or(MAIN_ACCOUNT)
+            ));
+        }
         self.push_activity(note);
         self.mirror_graph();
         self.dirty = true;
@@ -18416,7 +18468,7 @@ Address the objection directly. If you disagree, say why inside \
             AgentMode::ReviewAll,
             session_id.as_deref(),
         );
-        let wired = signals::augment_worker_command(&mut command, backend, AgentMode::ReviewAll, &reviewer_id);
+        let wired = signals::augment_worker_command(&mut command, backend, AgentMode::ReviewAll, &reviewer_id, run.account.as_deref());
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(cwd),
@@ -19758,6 +19810,9 @@ Address the objection directly. If you disagree, say why inside \
             task,
             truncate_chars(&label, 56),
             (backend, model, effort),
+            // A conversation from outside the dashboard is no row's: the fork
+            // is a new row, on the backend's default account.
+            new_agent_account(backend),
             self.cwd.clone(),
         );
 
@@ -19814,7 +19869,7 @@ Address the objection directly. If you disagree, say why inside \
         let seed = seed
             .map(|text| worker_orientation(&workspace.path, &text))
             .filter(|text| !text.trim().is_empty());
-        let (backend, model, effort) = {
+        let (backend, model, effort, account) = {
             let run = &mut self.agents[index];
             run.cwd = workspace.path.clone();
             run.workspace_path = workspace
@@ -19831,7 +19886,7 @@ Address the objection directly. If you disagree, say why inside \
                     source: "user".to_string(),
                 }];
             }
-            (run.backend, run.model.clone(), run.effort)
+            (run.backend, run.model.clone(), run.effort, run.account.clone())
         };
         if let Err(error) = self.write_rudder_context_timed(None) {
             self.notice = Some(format!("context warning: {error}"));
@@ -19839,8 +19894,14 @@ Address the objection directly. If you disagree, say why inside \
         let command = fork_command(backend, &model, effort, &session_id, seed.as_deref())
             .map_err(anyhow::Error::msg)
             .and_then(|mut command| {
-                signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
-                    .map(|()| command)
+                signals::augment_worker_command(
+                    &mut command,
+                    backend,
+                    AgentMode::Execute,
+                    &workspace.id,
+                    account.as_deref(),
+                )
+                .map(|()| command)
             });
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
@@ -20419,8 +20480,10 @@ Address the objection directly. If you disagree, say why inside \
             run.effort = effort;
             if provider_changed {
                 // Backend session ids are provider-specific. Keep the workspace and
-                // start a context-carrying session on the requested provider.
+                // start a context-carrying session on the requested provider, on
+                // that provider's default account.
                 run.session_id = None;
+                run.account = new_agent_account(backend);
             } else if backend == Backend::Codex
                 && run
                     .session_id
@@ -20501,8 +20564,14 @@ Address the objection directly. If you disagree, say why inside \
             // RE-WIRE completion hooks for the re-goaled session: its hook config file
             // already exists, so the poll loop waits for the official signal — a
             // relaunch without the hooks wired would never flip back to review.
-            let wired =
-                signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
+            let wired = signals::augment_existing_worker_command(
+                &mut command,
+                backend,
+                run.mode,
+                &run.id,
+                run.execution_profile.as_deref(),
+                run.account.as_deref(),
+            );
             (wired.map(|()| command), deliver_after, new_session, size, cwd, label)
         };
 
@@ -20836,6 +20905,7 @@ Address the objection directly. If you disagree, say why inside \
         let backend = self.agents[index].backend;
         let model = self.agents[index].model.clone();
         let effort = self.agents[index].effort;
+        let account = self.agents[index].account.clone();
         let terminal_size = self.agents[index].terminal_size.unwrap_or_default();
         let (resolver_cwd, conflicted_files) =
             conflict_context.unwrap_or((self.cwd.clone(), Vec::new()));
@@ -20860,6 +20930,7 @@ Address the objection directly. If you disagree, say why inside \
             backend,
             AgentMode::Execute,
             &resolver_run_id,
+            account.as_deref(),
         );
         let options = TerminalPaneOptions {
             size: terminal_size,

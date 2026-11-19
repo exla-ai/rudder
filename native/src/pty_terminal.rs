@@ -1176,7 +1176,7 @@ impl TerminalPane {
         // worker also skips the main checkout's copy of the project memory.
         #[cfg(unix)]
         if let (Some(command), Some(cwd)) = (&command, &options.cwd) {
-            crate::agent_trust::prepare_for_launch(&command.program, cwd);
+            crate::agent_trust::prepare_for_launch(command, cwd);
             crate::claude_memory::exclude_outer_memory(&command.args, cwd);
         }
         // After trust: trust keys on the agent program, and the fork's

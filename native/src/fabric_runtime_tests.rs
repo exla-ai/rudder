@@ -108,6 +108,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         backend: Backend::Claude,
         model: "sonnet".to_string(),
         effort: None,
+        account: None,
         status: AgentStatus::Running,
         cwd: std::env::temp_dir(),
         workspace_path: None,

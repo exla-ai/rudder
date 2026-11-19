@@ -1971,7 +1971,7 @@ fn a_paused_codex_main_chat_survives_model_changes_elsewhere() {
     assert_eq!((app.backend, app.model.as_str()), (Backend::Claude, "sonnet"));
     assert!(app.focus == FocusPane::Task, "typing after the pick stays in the task bar");
     // Another agent's own model.
-    assert!(matches!(app.deliver_model_request("other-1", "haiku auto"), SteerDelivery::Delivered));
+    assert!(matches!(app.deliver_model_request("other-1", "haiku auto main"), SteerDelivery::Delivered));
     assert_eq!(app.agents[1].model, "haiku");
 
     let row = &app.agents[0];
@@ -8475,6 +8475,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         backend: Backend::Claude,
         model: "sonnet".to_string(),
         effort: None,
+        account: None,
         status: AgentStatus::Running,
         cwd: std::env::temp_dir(),
         workspace_path: None,
@@ -10743,6 +10744,7 @@ fn delete_agent_requires_second_d() {
         backend: Backend::Claude,
         model: "sonnet".to_string(),
         effort: None,
+        account: None,
         status: AgentStatus::Done,
         cwd: app.cwd.clone(),
         workspace_path: None,
@@ -22568,7 +22570,7 @@ fn gam_reviewer_launch_wiring_puts_a_config_where_the_sweep_looks() {
             command.args.push("-c".to_string());
             command.args.push("notify=[]".to_string());
         }
-        signals::augment_worker_command(&mut command, backend, AgentMode::GamAdversarial, &run_id).unwrap();
+        signals::augment_worker_command(&mut command, backend, AgentMode::GamAdversarial, &run_id, None).unwrap();
 
         assert!(
             signals::worker_has_config(&run_id, backend),
@@ -22600,6 +22602,7 @@ fn a_live_gam_reviewer_survives_the_lifecycle_sweep() {
         Backend::Claude,
         AgentMode::GamAdversarial,
         run_id,
+        None,
     ).unwrap();
 
     let mut app = App::new();
@@ -24835,7 +24838,7 @@ fn codex_workers_get_lifecycle_hooks_ahead_of_the_resume_subcommand() {
         ["--no-alt-screen", "-c", "notify=[]", "resume", "sess-1"],
     )
     .with_env("PATH", fake_agent_path());
-    signals::augment_worker_command(&mut command, Backend::Codex, AgentMode::Execute, run_id).unwrap();
+    signals::augment_worker_command(&mut command, Backend::Codex, AgentMode::Execute, run_id, None).unwrap();
     let args = command.args.clone();
     signals::cleanup_run_signals(run_id);
 
@@ -31323,6 +31326,77 @@ fn swarm_experiment_flag_round_trips_through_run_json() {
 }
 
 #[test]
+fn a_runs_account_round_trips_through_run_json() {
+    let repo = unique_test_repo("account-runjson");
+    let mut run = test_agent_run("run-a1", "task");
+    run.cwd = repo.clone();
+    run.account = Some("work".to_string());
+    save_native_run_record(&repo, &run).unwrap();
+    let path = repo.join(".rudder/runs/run-a1/run.json");
+    let read = || serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(read()["account"], serde_json::json!("work"));
+    assert_eq!(agent_from_run_record(&repo, read()).unwrap().account.as_deref(), Some("work"));
+    // Back on main the key goes, though a save keeps the keys it does not write.
+    run.account = None;
+    save_native_run_record(&repo, &run).unwrap();
+    assert!(read().get("account").is_none());
+    assert_eq!(agent_from_run_record(&repo, read()).unwrap().account, None);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+/// An agent on an extra account launches with that account's dir as its
+/// config dir. A removed account refuses the launch instead of quietly
+/// running on the main one.
+#[cfg(not(windows))]
+#[test]
+fn launches_on_an_extra_account_carry_its_config_dir() {
+    let mut env = env_guard();
+    let root = unique_test_repo("accounts");
+    env.set_home(&root, &root.join("home"));
+    let rudder_home = root.join("home").join(".rudder");
+    std::env::set_var("RUDDER_HOME", &rudder_home);
+    let launch = |backend: Backend, account: Option<&str>| {
+        let mut command =
+            TerminalCommand::with_args(backend.as_str(), ["--no-alt-screen"]).with_env("PATH", fake_agent_path());
+        signals::augment_worker_command(&mut command, backend, AgentMode::Execute, "run-acct", account)
+            .map(|()| command)
+    };
+    assert_eq!(
+        launch(Backend::Claude, Some("work")).unwrap_err().to_string(),
+        "the Claude Code account work is gone; switch this chat to another account"
+    );
+    assert_eq!(
+        launch(Backend::Codex, Some("work")).unwrap_err().to_string(),
+        "the Codex account work is gone; switch this chat to another account"
+    );
+    for (backend, key) in [(Backend::Claude, "CLAUDE_CONFIG_DIR"), (Backend::Codex, "CODEX_HOME")] {
+        let dir = rudder_home.join("accounts").join(backend.as_str()).join("work");
+        fs::create_dir_all(&dir).unwrap();
+        let command = launch(backend, Some("work")).unwrap();
+        let set: Vec<_> = command.env.iter().filter(|(name, _)| name == key).collect();
+        assert_eq!(set, [&(key.to_string(), dir.display().to_string())], "{backend:?}");
+        let main = launch(backend, None).unwrap();
+        assert!(main.env.iter().all(|(name, _)| name != key), "main changes no env");
+    }
+    assert!(launch(Backend::Opencode, Some("work")).is_err(), "opencode has only main");
+    signals::cleanup_run_signals("run-acct");
+}
+
+#[test]
+fn model_steers_name_the_account() {
+    use crate::agent_model::parse_model_spec;
+    assert_eq!(parse_model_spec("opus high main"), Ok(("opus", Some(EffortLevel::High), None)));
+    assert_eq!(parse_model_spec(" gpt-5.5  auto work2 "), Ok(("gpt-5.5", None, Some("work2".to_string()))));
+    let shape = Err("expected <model> <effort|auto> <account>".to_string());
+    assert_eq!(parse_model_spec("opus high"), shape);
+    assert_eq!(parse_model_spec("opus high main extra"), shape);
+    assert_eq!(parse_model_spec("opus loud main"), Err("unknown effort: loud".to_string()));
+    for bad in ["Work", "../x", "a-b", "123456789012345678901234567890123"] {
+        assert_eq!(parse_model_spec(&format!("opus high {bad}")), Err(format!("unknown account: {bad}")));
+    }
+}
+
+#[test]
 fn swarm_checkpoint_carries_working_copy_edits_into_new_workspaces() {
     // raindrop kept a whole research phase in the main checkout's working copy;
     // a workspace added the way Rudder adds one (no -r) is based on that
@@ -32317,15 +32391,28 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     app.agents.push(run);
 
     // No process: the next resume launches with the new flags.
-    assert!(matches!(app.deliver_model_request("chat-run", "sonnet low"), SteerDelivery::Delivered));
+    assert!(matches!(app.deliver_model_request("chat-run", "sonnet low main"), SteerDelivery::Delivered));
     assert_eq!((app.agents[0].model.as_str(), app.agents[0].effort), ("sonnet", Some(EffortLevel::Low)));
-    assert!(matches!(app.deliver_model_request("chat-run", "haiku auto"), SteerDelivery::Delivered));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku auto main"), SteerDelivery::Delivered));
     assert_eq!(app.agents[0].effort, None);
+
+    // Another account: refused while its dir is missing, taken once it exists,
+    // and back to main.
+    assert!(matches!(
+        app.deliver_model_request("chat-run", "haiku auto work"),
+        SteerDelivery::Failed(reason) if reason == "the Claude Code account work is gone; switch this chat to another account"
+    ));
+    assert_eq!(app.agents[0].account, None, "a refusal leaves the chat as it was");
+    fs::create_dir_all(home.join(".rudder/accounts/claude/work")).unwrap();
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku auto work"), SteerDelivery::Delivered));
+    assert_eq!(app.agents[0].account.as_deref(), Some("work"));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku auto main"), SteerDelivery::Delivered));
+    assert_eq!(app.agents[0].account, None);
 
     // A conversation cannot change providers, and a model without an effort
     // dial takes only auto.
-    assert!(matches!(app.deliver_model_request("chat-run", "gpt-6.1-sol high"), SteerDelivery::Failed(reason) if reason.contains("codex model")));
-    assert!(matches!(app.deliver_model_request("chat-run", "haiku high"), SteerDelivery::Failed(reason) if reason.contains("no high effort")));
+    assert!(matches!(app.deliver_model_request("chat-run", "gpt-6.1-sol high main"), SteerDelivery::Failed(reason) if reason.contains("codex model")));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku high main"), SteerDelivery::Failed(reason) if reason.contains("no high effort")));
 
     // Mid-turn: relaunching would throw the turn away.
     app.agents[0].status = AgentStatus::Running;
@@ -32333,7 +32420,7 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
         Some(TerminalCommand::with_args("/bin/sh", ["-c", "cat"])),
         TerminalPaneOptions::default(),
     ).unwrap());
-    assert!(matches!(app.deliver_model_request("chat-run", "opus high"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
+    assert!(matches!(app.deliver_model_request("chat-run", "opus high main"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
     assert_eq!(app.agents[0].model, "haiku");
     app.agents[0].terminal = None;
 }
@@ -32382,12 +32469,14 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
         SteerDelivery::Failed(reason) => reason,
         SteerDelivery::Delivered => panic!("{spec} moved the chat"),
     };
-    assert!(refused(&mut app, &format!("claude sonnet auto\n{handoff}")).contains("already runs on claude"));
-    assert!(refused(&mut app, &format!("codex opus auto\n{handoff}")).contains("claude model"));
-    assert!(refused(&mut app, "codex gpt-6.1-sol auto").contains("expected"));
+    assert!(refused(&mut app, &format!("claude sonnet auto main\n{handoff}")).contains("already runs on claude"));
+    assert!(refused(&mut app, &format!("codex opus auto main\n{handoff}")).contains("claude model"));
+    assert!(refused(&mut app, "codex gpt-6.1-sol auto main").contains("expected"));
+    assert!(refused(&mut app, &format!("codex gpt-6.1-sol auto\n{handoff}")).contains("expected"));
+    assert!(refused(&mut app, &format!("codex gpt-6.1-sol auto work\n{handoff}")).contains("the Codex account work is gone"));
     assert_eq!(app.agents[0].backend, Backend::Claude, "a refusal leaves the chat as it was");
 
-    assert!(matches!(app.deliver_harness_request("chat-run", &format!("codex gpt-6.1-sol auto\n{handoff}")), SteerDelivery::Delivered));
+    assert!(matches!(app.deliver_harness_request("chat-run", &format!("codex gpt-6.1-sol auto main\n{handoff}")), SteerDelivery::Delivered));
     let run = &app.agents[0];
     assert_eq!((run.backend, run.model.as_str(), run.effort), (Backend::Codex, "gpt-6.1-sol", None));
     assert_eq!(run.session_id, None, "Codex names its new thread once it starts");
@@ -32412,7 +32501,7 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
     fs::create_dir_all(stale.parent().unwrap()).unwrap();
     fs::write(&stale, "0d3c9a52-1b9e-4c55-9f43-2d0a8e6c1b10").unwrap();
     let model = crate::models::ANTIGRAVITY_FAST_MODEL;
-    assert!(matches!(app.deliver_harness_request("chat-run", &format!("antigravity {model} auto\n{handoff}")), SteerDelivery::Delivered));
+    assert!(matches!(app.deliver_harness_request("chat-run", &format!("antigravity {model} auto main\n{handoff}")), SteerDelivery::Delivered));
     let run = &app.agents[0];
     assert_eq!((run.backend, run.model.as_str(), run.session_id.as_deref()), (Backend::Antigravity, model, None));
     assert!(!stale.exists(), "the earlier stint's conversation is not adopted");
@@ -32450,7 +32539,7 @@ fn a_claude_chat_with_an_effort_moved_to_antigravity_drops_it() {
 
     // The app sends auto (agy's rows take no effort); an app that still sends
     // the chat's effort moves it all the same, without it.
-    let spec = format!("antigravity gemini-3.8-flash-high high\n{handoff}");
+    let spec = format!("antigravity gemini-3.8-flash-high high main\n{handoff}");
     assert!(matches!(app.deliver_harness_request("chat-run", &spec), SteerDelivery::Delivered));
     let run = &app.agents[0];
     assert_eq!((run.backend, run.model.as_str(), run.effort), (Backend::Antigravity, "gemini-3.8-flash-high", None));

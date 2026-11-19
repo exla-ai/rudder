@@ -82,7 +82,15 @@ impl App {
         self.task_input.clear();
         self.task_cursor = 0;
         self.picker_index = 0;
-        let spec = format!("{model} {}", effort.map(EffortLevel::as_str).unwrap_or("auto"));
+        // The agent stays on its own account. A deleted agent has none, and
+        // fails below as not found.
+        let account = self
+            .agents
+            .iter()
+            .find(|run| run.id == id)
+            .and_then(|run| run.account.as_deref())
+            .unwrap_or(MAIN_ACCOUNT);
+        let spec = format!("{model} {} {account}", effort.map(EffortLevel::as_str).unwrap_or("auto"));
         match self.deliver_model_request(&id, &spec) {
             SteerDelivery::Delivered => {
                 if let Some(index) = self.agent_index_for_token(&id) {
@@ -134,6 +142,36 @@ impl App {
     }
 }
 
+/// A model steer's instruction: `<model> <effort|auto> <account>`, where the
+/// account is "main" (the CLI's own config dir, `None`) or an extra account's
+/// id.
+pub(crate) fn parse_model_spec(spec: &str) -> Result<(&str, Option<EffortLevel>, Option<String>), String> {
+    let mut parts = spec.split_whitespace();
+    let (Some(model), Some(effort_arg), Some(account_arg), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err("expected <model> <effort|auto> <account>".to_string());
+    };
+    let effort = parse_effort_arg(effort_arg);
+    if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
+        return Err(format!("unknown effort: {effort_arg}"));
+    }
+    Ok((model, effort, parse_account_arg(account_arg)?))
+}
+
+/// "main" is the CLI's own config dir (`None`); anything else must be an
+/// extra account's id. Whether that account still exists is
+/// `signals::account_env`'s to say.
+pub(crate) fn parse_account_arg(arg: &str) -> Result<Option<String>, String> {
+    if arg == MAIN_ACCOUNT {
+        Ok(None)
+    } else if valid_account_id(arg) {
+        Ok(Some(arg.to_string()))
+    } else {
+        Err(format!("unknown account: {arg}"))
+    }
+}
+
 /// Why this row keeps the model it was started with, the same rows
 /// `deliver_model_request` refuses.
 pub(crate) fn model_switch_refusal(run: &AgentRun) -> Option<&'static str> {
@@ -160,20 +198,25 @@ fn harness_switch_refusal(run: &AgentRun, backend: Backend) -> Option<String> {
 
 impl App {
     /// Steer kind "harness": move one chat to another harness, from the app's
-    /// model control. The instruction is `<harness> <model> <effort|auto>`,
-    /// then the handoff on the lines after it, which the home builds from the
-    /// old conversation (cloud/worker/handoff.mjs). The row keeps its id,
-    /// workspace and files. Its old process ends, and the new harness starts a
-    /// new conversation whose first prompt is the handoff, framed the way the
-    /// row's mode frames a task. A row mid-turn moves too: the handoff says
-    /// what it was doing, and the new harness carries on with it.
+    /// model control. The instruction is `<harness> <model> <effort|auto>
+    /// <account>`, then the handoff on the lines after it, which the home
+    /// builds from the old conversation (cloud/worker/handoff.mjs). The row
+    /// keeps its id, workspace and files. Its old process ends, and the new
+    /// harness starts a new conversation on that account, whose first prompt
+    /// is the handoff, framed the way the row's mode frames a task. A row
+    /// mid-turn moves too: the handoff says what it was doing, and the new
+    /// harness carries on with it.
     pub(crate) fn deliver_harness_request(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
-        let expected = || SteerDelivery::Failed("expected <harness> <model> <effort|auto>, then the handoff".to_string());
+        let expected = || {
+            SteerDelivery::Failed("expected <harness> <model> <effort|auto> <account>, then the handoff".to_string())
+        };
         let Some((head, handoff)) = instruction.split_once('\n') else {
             return expected();
         };
         let mut parts = head.split_whitespace();
-        let (Some(harness), Some(model), Some(effort_arg), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        let (Some(harness), Some(model), Some(effort_arg), Some(account_arg), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             return expected();
         };
         let Some(backend) = Backend::parse(harness) else {
@@ -186,6 +229,10 @@ impl App {
         // An Antigravity model takes no effort of its own (its slug names
         // one), so a chat moved there drops the one it ran at.
         let effort = if backend == Backend::Antigravity { None } else { effort };
+        let account = match parse_account_arg(account_arg) {
+            Ok(account) => account,
+            Err(refusal) => return SteerDelivery::Failed(refusal),
+        };
         let handoff = sanitize_steer_instruction(handoff);
         if handoff.is_empty() {
             return SteerDelivery::Failed("the handoff is empty".to_string());
@@ -206,16 +253,21 @@ impl App {
         if let Some(refusal) = openrouter_key_refusal(backend, model) {
             return SteerDelivery::Failed(refusal.to_string());
         }
+        // The new harness starts on `account`; refused up front when it
+        // cannot, while the old process still runs.
+        if let Err(error) = signals::account_env(backend, account.as_deref()) {
+            return SteerDelivery::Failed(error.to_string());
+        }
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
         let from = agent_model_label(run.backend, &run.model, run.effort);
         let session = mint_session_id_for(backend);
         let mut command = agent_command(backend, model, effort, &handoff, run.mode, session.as_deref());
         let wired = if run.is_main() && run.execution_profile.is_none() {
-            signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
+            signals::augment_worker_command(&mut command, backend, run.mode, &run.id, account.as_deref())
         } else {
             // A profile belongs to the harness that ran it (claude-sdk,
             // codex-app-server): the new harness starts on the native one.
-            signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, None)
+            signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, None, account.as_deref())
         };
         // Refused before the old process is touched: it keeps running.
         if let Err(error) = wired {
@@ -245,6 +297,7 @@ impl App {
         run.backend = backend;
         run.model = model.to_string();
         run.effort = effort;
+        run.account = account;
         run.execution_profile = terminal.execution_profile().map(str::to_string);
         run.terminal = Some(terminal);
         run.session_id = session.clone();

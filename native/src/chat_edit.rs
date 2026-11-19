@@ -1039,7 +1039,7 @@ impl App {
         };
         let turn_prompt = first_turn.unwrap_or_else(|| outcome.text.clone());
         let wired = if run.is_main() && run.execution_profile.is_none() {
-            signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
+            signals::augment_worker_command(&mut command, backend, run.mode, &run.id, run.account.as_deref())
         } else {
             signals::augment_existing_worker_command(
                 &mut command,
@@ -1047,6 +1047,7 @@ impl App {
                 run.mode,
                 &run.id,
                 run.execution_profile.as_deref(),
+                run.account.as_deref(),
             )
         };
         // Refused before the old process is touched: it keeps running.

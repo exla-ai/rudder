@@ -255,18 +255,24 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
 }
 
 /// True when `lower` is Codex's bottom status bar, which ends with the cwd after a
-/// trailing " · " separator. We require that final segment to be a single path-like
-/// token (starts with `~/` or `/`, no embedded spaces) so it matches the real bar
-/// and not arbitrary prose that merely contains " · " and a slash somewhere.
+/// " · " separator, or (Codex 0.169) with the cwd and then the thread's title. We
+/// require that cwd segment to be a single path-like token (starts with `~/` or
+/// `/`, no embedded spaces) so it matches the real bar and not arbitrary prose
+/// that merely contains " · " and a slash somewhere.
 fn looks_like_codex_status_bar(lower: &str) -> bool {
     if lower.contains("interrupt") {
         return false;
     }
-    let Some((_, tail)) = lower.rsplit_once(" \u{00b7} ") else {
-        return false;
+    let path = |segment: &str| {
+        let segment = segment.trim();
+        (segment.starts_with("~/") || segment.starts_with('/')) && !segment.contains(' ')
     };
-    let tail = tail.trim();
-    (tail.starts_with("~/") || tail.starts_with('/')) && !tail.contains(' ')
+    let after_model: Vec<&str> = lower.split(" \u{00b7} ").skip(1).collect();
+    match after_model.as_slice() {
+        [] => false,
+        [.., cwd, _title] if path(cwd) => true,
+        [.., last] => path(last),
+    }
 }
 
 /// The most recent non-empty lines with the BACKEND'S OWN CHROME removed, newest

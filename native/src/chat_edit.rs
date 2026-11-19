@@ -5,9 +5,11 @@
 //! stay as they are (Rudder keeps no per-turn workspace snapshot to restore),
 //! and the old conversation stays on disk untouched:
 //!
-//! - Claude: the session file up to (not including) the edited prompt is
-//!   copied to a new session file T, and Claude relaunches with
-//!   `--resume T --fork-session --session-id N -- <text>`.
+//! - Claude: the conversation before the edited prompt (the session file up
+//!   to it, without branches gone back from) is copied to a new session file
+//!   T, and Claude relaunches with `--resume T -- <text>`. Claude carries on
+//!   in T under T's id, so the chat shows the kept history the moment it
+//!   relaunches.
 //! - Codex: a one-shot `codex app-server` forks the thread through the turn
 //!   before the edited prompt's turn (`thread/fork`), and Codex relaunches
 //!   with `resume N -- <text>`. The fork's rollout refers back to the old one
@@ -46,8 +48,8 @@ pub(crate) struct ChatEditOutcome {
 }
 
 pub(crate) enum Rewound {
-    /// Relaunch with `--resume <fork_from> --fork-session --session-id <session>`.
-    Claude { fork_from: String, session: String },
+    /// Relaunch with `--resume <session>`: the cut copy.
+    Claude { session: String },
     /// Relaunch with `resume <session>`: the forked thread.
     Codex { session: String },
 }
@@ -55,7 +57,7 @@ pub(crate) enum Rewound {
 impl Rewound {
     fn session(&self) -> &str {
         match self {
-            Rewound::Claude { session, .. } | Rewound::Codex { session } => session,
+            Rewound::Claude { session } | Rewound::Codex { session } => session,
         }
     }
 }
@@ -123,23 +125,28 @@ fn claude_mid_turn(parent: &serde_json::Value) -> bool {
         .is_some_and(|blocks| blocks.iter().any(|block| str_field(block, "type") == Some(inside)))
 }
 
-/// The bytes of a Claude session file that come before the turn-starting
-/// prompt `entry`, any one but the first. The latest turn-starting prompt
+/// The lines of a Claude session file that come before the turn-starting
+/// prompt `entry`, any one but the first, without the branches gone back
+/// from: the conversation that prompt was sent in, as the chat shows it
+/// (activeClaudeLines in cloud/worker/session-lineage.mjs). Off the prompt's
+/// own history, a branch that starts with a prompt is one the person went
+/// back from (Claude's rewind in the pane) and is left out; any other branch
+/// (a parallel tool call's result) stays. The latest turn-starting prompt
 /// must still be `latest`. A file-history-snapshot written for the edited
-/// prompt just before it goes too. The kept history must end exactly at the
-/// prompt's parent (a linear chain): anything else means the file branches
-/// there, and resuming the copy would not be the conversation the chat showed.
-pub(crate) fn claude_rewind_prefix(source: &[u8], entry: &str, latest: &str) -> Result<Vec<u8>, String> {
-    let mut starts = Vec::new();
+/// prompt just before it goes too. The copy must end exactly at the prompt's
+/// parent, so resuming it continues that conversation; anything else is
+/// refused.
+pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Result<Vec<u8>, String> {
+    let mut lines = Vec::new();
     let mut values = Vec::new();
-    let mut offset = 0;
     for piece in source.split_inclusive(|byte| *byte == b'\n') {
-        starts.push(offset);
-        offset += piece.len();
+        lines.push(piece);
         let line = piece.strip_suffix(b"\n").unwrap_or(piece);
         values.push(serde_json::from_slice::<serde_json::Value>(line).ok());
     }
     let uuid_at = |index: usize| values[index].as_ref().and_then(|value| str_field(value, "uuid"));
+    let sidechain = |index: usize| values[index].as_ref().is_some_and(|value| flag(value, "isSidechain"));
+    let parent_at = |index: usize| values[index].as_ref().and_then(|value| str_field(value, "parentUuid"));
     let mut by_uuid = HashMap::new();
     for index in 0..values.len() {
         if let Some(uuid) = uuid_at(index) {
@@ -183,15 +190,71 @@ pub(crate) fn claude_rewind_prefix(source: &[u8], entry: &str, latest: &str) -> 
     if snapshot_for_prompt {
         cut -= 1;
     }
-    let parent = values[edited].as_ref().and_then(|value| str_field(value, "parentUuid"));
-    let last_kept = (0..cut).rev().find_map(uuid_at);
-    if parent.is_none() || last_kept != parent {
-        return Err(
-            "This chat's history branches just before that message, so it can't be rewound there"
-                .to_string(),
-        );
+    let branched = || "This chat's history branches just before that message, so it can't be rewound there".to_string();
+    // No history before it: the first prompt of a conversation the person
+    // went all the way back from.
+    let parent_uuid = parent_at(edited).ok_or_else(|| FIRST_MESSAGE_REFUSAL.to_string())?;
+    let parent = by_uuid.get(parent_uuid).copied().filter(|&parent| parent < cut).ok_or_else(branched)?;
+    // The prompt's history: from its parent back to the start. A compact
+    // boundary starts a new chain, so the history goes on from the entry
+    // written just before it.
+    let mut on_path = HashSet::new();
+    let mut next = Some(parent);
+    while let Some(index) = next {
+        if !on_path.insert(index) {
+            break;
+        }
+        next = match parent_at(index) {
+            Some(parent) => by_uuid.get(parent).copied(),
+            None if values[index].as_ref().is_some_and(|value| {
+                str_field(value, "type") == Some("system") && str_field(value, "subtype") == Some("compact_boundary")
+            }) =>
+            {
+                (0..index).rev().find(|&earlier| uuid_at(earlier).is_some() && !sidechain(earlier))
+            }
+            None => None,
+        };
     }
-    Ok(source[..starts[cut]].to_vec())
+    // Whether an entry off that history is on a branch that starts with a
+    // prompt. Walked once per branch.
+    let mut verdicts: HashMap<usize, bool> = HashMap::new();
+    let mut gone_back_from = |start: usize| {
+        let mut walked = Vec::new();
+        let mut index = start;
+        let verdict = loop {
+            if let Some(&known) = verdicts.get(&index) {
+                break known;
+            }
+            walked.push(index);
+            match parent_at(index).and_then(|parent| by_uuid.get(parent).copied()) {
+                Some(parent) if on_path.contains(&parent) => {
+                    break values[index].as_ref().is_some_and(claude_typed_prompt);
+                }
+                Some(parent) if !walked.contains(&parent) => index = parent,
+                // The start of the file, or a loop.
+                _ => break false,
+            }
+        };
+        for seen in walked {
+            verdicts.insert(seen, verdict);
+        }
+        verdict
+    };
+    let mut copy = Vec::with_capacity(source.len());
+    let mut last_kept = None;
+    for index in 0..cut {
+        if uuid_at(index).is_some() && !sidechain(index) {
+            if !on_path.contains(&index) && gone_back_from(index) {
+                continue;
+            }
+            last_kept = Some(index);
+        }
+        copy.extend_from_slice(lines[index]);
+    }
+    if last_kept != Some(parent) {
+        return Err(branched());
+    }
+    Ok(copy)
 }
 
 fn claude_session_file(cwd: &Path, session: &str) -> Result<PathBuf, String> {
@@ -226,10 +289,10 @@ fn rewind_claude(cwd: &Path, session: &str, entry: &str, latest: &str) -> Result
     let source = claude_session_file(cwd, session)?;
     let bytes = std::fs::read(&source)
         .map_err(|error| format!("could not read {}: {error}", source.display()))?;
-    let prefix = claude_rewind_prefix(&bytes, entry, latest)?;
-    let fork_from = crate::gitio::new_rudder_session_id();
-    write_private_new(&source.with_file_name(format!("{fork_from}.jsonl")), &prefix)?;
-    Ok(Rewound::Claude { fork_from, session: crate::gitio::new_rudder_session_id() })
+    let copy = claude_rewind_copy(&bytes, entry, latest)?;
+    let session = crate::gitio::new_rudder_session_id();
+    write_private_new(&source.with_file_name(format!("{session}.jsonl")), &copy)?;
+    Ok(Rewound::Claude { session })
 }
 
 // ---------------------------------------------------------------------------
@@ -773,11 +836,7 @@ impl App {
         let backend = run.backend;
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
         let mut command = match &rewound {
-            Rewound::Claude { fork_from, session } => {
-                let mut command = claude_resume_command(run, fork_from);
-                command.args.extend(["--fork-session".to_string(), "--session-id".to_string(), session.clone()]);
-                command
-            }
+            Rewound::Claude { session } => claude_resume_command(run, session),
             Rewound::Codex { session } => codex_resume_command(run, session),
         };
         let wired = if run.is_main() && run.execution_profile.is_none() {
@@ -847,13 +906,6 @@ impl App {
         ));
         self.mirror_graph();
         self.dirty = true;
-        // The cut copy it resumed from belongs to this agent too: deleting
-        // the agent deletes it with the rest of its conversation.
-        if let Rewound::Claude { fork_from, .. } = &rewound {
-            if let Err(error) = record_retired_session(&self.cwd, &outcome.run_id, fork_from) {
-                unrecorded.push(format!("its old conversation file was not noted: {error}"));
-            }
-        }
         if backend == Backend::Claude {
             // Claude's hooks last reported the old session id, and the row
             // follows what they report (adopt_reported_claude_sessions).
@@ -917,31 +969,44 @@ mod tests {
         let file = [first.clone(), tool_turn.clone(), snapshot.clone(), edited.clone()].concat();
 
         // The cut drops the edited prompt, its file-history-snapshot and all after.
-        let kept = claude_rewind_prefix(&file, "u2", "u2").unwrap();
+        let kept = claude_rewind_copy(&file, "u2", "u2").unwrap();
         assert_eq!(kept, [first.clone(), tool_turn.clone()].concat());
 
         // Without a snapshot for it, the cut is at the prompt itself.
         let plain = [first.clone(), tool_turn.clone(), session(&[prompt("u2", Some("s2"), "second ask")])].concat();
-        assert_eq!(claude_rewind_prefix(&plain, "u2", "u2").unwrap(), [first.clone(), tool_turn.clone()].concat());
+        assert_eq!(claude_rewind_copy(&plain, "u2", "u2").unwrap(), [first.clone(), tool_turn.clone()].concat());
 
         // An earlier prompt: the turns after it go too.
         let longer = [file.clone(), later.clone()].concat();
-        assert_eq!(claude_rewind_prefix(&longer, "u2", "u3").unwrap(), [first.clone(), tool_turn.clone()].concat());
-        assert_eq!(claude_rewind_prefix(&longer, "u3", "u3").unwrap(), file);
+        assert_eq!(claude_rewind_copy(&longer, "u2", "u3").unwrap(), [first.clone(), tool_turn.clone()].concat());
+        assert_eq!(claude_rewind_copy(&longer, "u3", "u3").unwrap(), file);
 
         // A newer prompt than the chat showed: nothing is cut.
-        assert!(matches!(claude_rewind_prefix(&longer, "u2", "u2"), Err(reason) if reason == STALE_REFUSAL));
+        assert!(matches!(claude_rewind_copy(&longer, "u2", "u2"), Err(reason) if reason == STALE_REFUSAL));
 
         // A message sent mid-turn, or one not in the file, can't be edited.
-        assert!(matches!(claude_rewind_prefix(&longer, "q1", "u3"), Err(reason) if reason == SENT_MID_TURN_REFUSAL));
-        assert!(matches!(claude_rewind_prefix(&longer, "gone", "u3"), Err(reason) if reason == GONE_REFUSAL));
+        assert!(matches!(claude_rewind_copy(&longer, "q1", "u3"), Err(reason) if reason == SENT_MID_TURN_REFUSAL));
+        assert!(matches!(claude_rewind_copy(&longer, "gone", "u3"), Err(reason) if reason == GONE_REFUSAL));
 
         // The first message has no earlier turn to go back to.
-        assert!(matches!(claude_rewind_prefix(&longer, "u1", "u3"), Err(reason) if reason == FIRST_MESSAGE_REFUSAL));
+        assert!(matches!(claude_rewind_copy(&longer, "u1", "u3"), Err(reason) if reason == FIRST_MESSAGE_REFUSAL));
+
+        // Claude's own rewind in the pane: the prompt sent in u2's place hangs
+        // off u2's parent, after the turn gone back from. That turn stays out
+        // of the copy (its snapshot line is not part of any conversation).
+        let again = session(&[
+            serde_json::json!({ "type": "file-history-snapshot", "messageId": "u2b" }),
+            prompt("u2b", Some("s2"), "second ask, again"),
+            reply("a6", "u2b"),
+        ]);
+        let rewound = [file.clone(), again.clone(), session(&[prompt("u3b", Some("a6"), "third ask")])].concat();
+        let before_u2 = [first.clone(), tool_turn.clone(), snapshot.clone()].concat();
+        assert_eq!(claude_rewind_copy(&rewound, "u2b", "u3b").unwrap(), before_u2);
+        assert_eq!(claude_rewind_copy(&rewound, "u3b", "u3b").unwrap(), [before_u2, again].concat());
 
         // A prompt whose parent is not the last entry kept is on a branch.
         let branched = [first, tool_turn, session(&[prompt("u2", Some("a1"), "second ask")])].concat();
-        assert!(matches!(claude_rewind_prefix(&branched, "u2", "u2"), Err(reason) if reason.contains("branches")));
+        assert!(matches!(claude_rewind_copy(&branched, "u2", "u2"), Err(reason) if reason.contains("branches")));
     }
 
     #[test]

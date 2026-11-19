@@ -192,7 +192,9 @@ function readRunRecord(repoDir, runId) {
 
 // Where each session's transcript lives, found once. A miss means searching
 // every Claude project folder (hundreds on a long-lived home), so it is
-// remembered too and searched again at most every MISS_RECHECK_MS.
+// remembered too and searched again at most every MISS_RECHECK_MS. The
+// session's own folder is one stat and is checked every time, so a session
+// that starts writing after a miss (a new agent, a branch) shows at once.
 const MISS_RECHECK_MS = 30_000;
 const transcriptPaths = new Map(); // sessionId -> { file, checkedAt }
 
@@ -206,7 +208,11 @@ export function transcriptFile(record, home, now = Date.now()) {
     return known.file;
   }
   if (known && !known.file && now - known.checkedAt < MISS_RECHECK_MS) {
-    return null;
+    const file = claudeCwdTranscript(record, home, sessionId);
+    if (file) {
+      transcriptPaths.set(sessionId, { file, checkedAt: now });
+    }
+    return file;
   }
   const file = findTranscript(record, home, sessionId);
   transcriptPaths.set(sessionId, { file, checkedAt: now });
@@ -217,16 +223,11 @@ function findTranscript(record, home, sessionId) {
   if (record.backend === "codex") {
     return codexRolloutFile(home, sessionId);
   }
-  // Claude files a session under its cwd with every other character as "-",
-  // except that a long cwd is cut and hashed: those are found by name.
-  const projects = path.join(home, ".claude", "projects");
-  const cwd = record.workspace?.path;
-  if (typeof cwd === "string" && cwd) {
-    const direct = path.join(projects, cwd.replace(/[^A-Za-z0-9-]/g, "-"), `${sessionId}.jsonl`);
-    if (fs.existsSync(direct)) {
-      return direct;
-    }
+  const direct = claudeCwdTranscript(record, home, sessionId);
+  if (direct) {
+    return direct;
   }
+  const projects = path.join(home, ".claude", "projects");
   let dirs;
   try {
     dirs = fs.readdirSync(projects);
@@ -243,6 +244,17 @@ function findTranscript(record, home, sessionId) {
     }
   }
   return null;
+}
+
+// Claude files a session under its cwd with every other character as "-",
+// except that a long cwd is cut and hashed: those are found by name.
+function claudeCwdTranscript(record, home, sessionId) {
+  const cwd = record.workspace?.path;
+  if (record.backend === "codex" || typeof cwd !== "string" || !cwd) {
+    return null;
+  }
+  const direct = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"), `${sessionId}.jsonl`);
+  return fs.existsSync(direct) ? direct : null;
 }
 
 function readTail(file, maxBytes) {

@@ -10,8 +10,10 @@
 // bytes of its rollout came before the fork) instead of copying it. The new
 // file alone holds only what came after the fork.
 //
-// Editing a sent message (native/src/chat_edit.rs) creates both: a Claude
-// fork of a cut copy, a Codex fork through the turn before the edited prompt's.
+// Editing a sent message (native/src/chat_edit.rs) makes a new conversation
+// of each kind: a Claude cut copy of the history before the edited prompt
+// (without branches gone back from), and a Codex fork through the turn before
+// the edited prompt's.
 
 import fs from "node:fs";
 import path from "node:path";

@@ -25011,6 +25011,26 @@ fn the_idle_composer_detector_needs_the_composer_and_no_spinner() {
         Backend::Codex,
         &lines(&["• pong", "", "› Ask Codex to do anything", "", "  GPT-5.6 medium · ~/repo"])
     ));
+    // Codex 0.169 puts the thread's title after the cwd. Its startup tip
+    // about /permissions sat above an idle composer, and a message from the
+    // phone was refused as "waiting on a permission prompt".
+    let resumed = lines(&[
+        "  Tip: Use /permissions to control when Codex asks for confirmation.",
+        "• Thread forked from Reply with ONE (01a1f110-a8bd-75e1-835d-46895721c813)",
+        "› Reply with only the word ONE. Do not run any commands.",
+        "  Rudder: you own this request in the user's checkout. Preserve unrelated edits.",
+        "  • Run one targeted check. No CI babysitting unless delivery requires it.",
+        "• ONE",
+        "  Worked for 3s • 23:49",
+        "› Now reply with only the word FOUR.",
+        "• FOUR",
+        "  Worked for 2s • 23:50",
+        "› Ask Codex to do anything",
+        "  GPT-5.6-Luna low · /workspace/scratch/repo · Reply with ONE",
+        "  ← for agents · ? for shortcuts                                 ⚠ 2 warnings · f2 to view",
+    ]);
+    assert!(terminal_at_idle_prompt(Backend::Codex, &resumed));
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &resumed), None);
 }
 
 /// A live worker whose turn ends on an API error reports it, the tab shows a

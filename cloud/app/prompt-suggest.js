@@ -7,7 +7,7 @@
 // cloud/worker/suggestion.mjs). Only Claude Code makes one, and not after
 // every turn; with none, the composer is unchanged.
 
-import { coarse, fitTextarea } from "/app/core.js";
+import { coarse } from "/app/core.js";
 
 let seq = 0;
 
@@ -41,12 +41,7 @@ export function mountPromptSuggestion(composer, { chipSlot }) {
 
   // A placeholder never grows the box, so a suggestion longer than one line
   // would be cut off: measure the box as if it held the text, then empty it.
-  const fit = (text) => {
-    const value = ta.value;
-    if (text !== null) ta.value = text;
-    fitTextarea(ta);
-    ta.value = value;
-  };
+  const fit = (text) => composer.fit(text);
 
   const paint = () => {
     const text = showing() ? current.text : null;

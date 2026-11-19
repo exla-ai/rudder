@@ -33,11 +33,17 @@ export const coarse = matchMedia("(pointer: coarse)").matches;
 // composer grows and its scroll clamps. WebKit has no scroll anchoring to undo
 // that, so the transcript jumped off the bottom on every keystroke. The box's
 // parent holds its height while the box collapses, so nothing outside moves.
-export function fitTextarea(ta) {
+// `resized(grew)` runs before the parent lets go, with how many pixels taller
+// the box got (negative: shorter). The page is then laid out with the taller
+// of the two boxes, so a chat above can follow it before it ever shrinks.
+export function fitTextarea(ta, resized) {
   const box = ta.parentElement;
+  const was = ta.offsetHeight;
   box.style.minHeight = `${box.offsetHeight}px`;
   ta.style.height = "auto";
   ta.style.height = `${ta.scrollHeight}px`;
+  const grew = resized ? ta.offsetHeight - was : 0;
+  if (grew) resized(grew);
   box.style.minHeight = "";
 }
 export const toMs = (t) => (t == null ? null : typeof t === "number" ? t : Date.parse(t) || null);

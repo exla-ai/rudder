@@ -1667,7 +1667,9 @@ async function uploadAttachment(ws, file) {
   return res.path;
 }
 
-function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = false }) {
+// `onResize(grew)`: the text box got `grew` pixels taller (negative: shorter),
+// called while the page is still laid out with the taller box (fitTextarea).
+function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = false, onResize }) {
   const el = h(`<div class="composer"><div class="att-tray" hidden></div><form autocomplete="off">
       ${attachments ? `<button type="button" class="attach" aria-label="Attach photos or files" aria-haspopup="menu" aria-expanded="false" title="Attach">${icon("clip")}</button><input type="file" class="file-in" multiple hidden>` : ""}
       <textarea rows="1" enterkeyhint="${coarse ? "enter" : "send"}" aria-label="${escapeHtml(placeholder)}" placeholder="${escapeHtml(placeholder)}"></textarea>
@@ -1680,8 +1682,15 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   const tray = el.querySelector(".att-tray");
   let files = []; // [{ file, name, url }]
   ta.value = store.drafts[draftKey] || "";
+  // Sizes the box to its text, or to `text` shown in its place (prompt-suggest.js).
+  const fit = (text = null) => {
+    const value = ta.value;
+    if (text !== null) ta.value = text;
+    fitTextarea(ta, onResize);
+    if (text !== null) ta.value = value;
+  };
   const grow = () => {
-    fitTextarea(ta);
+    fit();
     btn.disabled = !ta.value.trim() && !files.length;
   };
   const paintTray = () => {
@@ -1807,7 +1816,7 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   });
   form.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
   requestAnimationFrame(grow);
-  return { el, textarea: ta };
+  return { el, textarea: ta, fit };
 }
 
 function agentRow({ showProject = false } = {}) {
@@ -3902,6 +3911,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
     attachments: true,
     onSubmit: (text, files) => { send(quoteReply?.wrap(text) ?? text, files); return true; },
+    onResize: (grew) => followComposer(grew),
   });
   // With the sidebar (DesktopShell), Alt+[ and Alt+] step between agents. The
   // hint says so when the pane has room for it (desktop.css .c-steps).
@@ -4064,9 +4074,34 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let holdScroll = false;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
   const toBottom = (smooth) => scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  // A new line in the composer raises the bottom of the chat. At the bottom,
+  // the conversation rises with it. Scrolling it up by the line did that, but
+  // WebKit (the Mac app, iPhone) paints a scroll a frame apart from the layout
+  // change it answers (webkit.org/b/261692), so every wrap, Shift+Enter or
+  // deleted line bounced the chat. The chat's top margin takes the line
+  // instead, in the same layout as the composer, and the scroll stays put.
+  // Scrolled up, nothing moves. `lift` is the margin taken, hiding that much
+  // of the conversation's start; a shorter composer gives it back. One that
+  // grew while you were scrolled up has none to give back, and the scroll
+  // takes the line as before.
+  const chatEl = el.querySelector(".chat");
+  let lift = 0;
+  const setLift = (px) => {
+    lift = px;
+    chatEl.style.marginTop = px ? `${-px}px` : "";
+  };
+  // Runs while the page is laid out with the taller composer (fitTextarea):
+  // the chat can only follow by as much as it overflows.
+  function followComposer(grew) {
+    if (!atBottom) return;
+    const room = scroller.scrollHeight - scroller.clientHeight;
+    setLift(Math.max(0, lift + Math.sign(grew) * Math.min(Math.abs(grew), room)));
+  }
   scroller.addEventListener("scroll", () => {
     atBottom = isAtBottom();
     if (atBottom) pill.classList.remove("show");
+    // Scrolled to the very top: show the start the lift hid.
+    if (lift > 0 && scroller.scrollTop <= 0) setLift(0);
   }, { passive: true });
   pill.addEventListener("click", () => { toBottom(true); pill.classList.remove("show"); });
   // Keep the bottom pinned when the keyboard resizes the viewport.

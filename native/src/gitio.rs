@@ -1348,32 +1348,6 @@ fn session_record(existing: &serde_json::Value, current: Option<&str>) -> serde_
     }
 }
 
-/// Add a copy Rudder made of a conversation that the run used without ever
-/// being on it (the cut copy an edited message or a branch resumes from) to
-/// its record, so deleting the agent deletes that file too.
-pub(crate) fn record_retired_session(repo_root: &Path, run_id: &str, session: &str) -> Result<()> {
-    note_rudder_session(session);
-    let path = native_run_dir(repo_root, run_id).join("run.json");
-    let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
-    let mut previous = string_list(&record, "previousSessionIds");
-    let mut made = rudder_session_ids(&record);
-    if previous.iter().any(|id| id == session) && made.iter().any(|id| id == session) {
-        return Ok(());
-    }
-    if !previous.iter().any(|id| id == session) {
-        previous.push(session.to_string());
-    }
-    if !made.iter().any(|id| id == session) {
-        made.push(session.to_string());
-    }
-    if !record.get("session").is_some_and(serde_json::Value::is_object) {
-        record["session"] = serde_json::json!({});
-    }
-    record["session"]["previousSessionIds"] = serde_json::json!(previous);
-    record["session"]["rudderSessionIds"] = serde_json::json!(made);
-    write_run_record(&path, &record)
-}
-
 pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result<()> {
     let run_dir = native_run_dir(repo_root, &run.id);
     fs::create_dir_all(&run_dir)?;

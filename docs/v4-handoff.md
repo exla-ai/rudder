@@ -149,6 +149,21 @@ snapshots first, so the agent's jj change stays in `jj log`; a workspace with
 no jj name is kept. Checked with native filter `untouched_agents` and
 a headless run against dev-mock.
 
+Moving agents in the app's sidebar (not released yet): drag an agent row up
+or down within its project (touch: press and hold first, so a swipe still
+scrolls; hold and let go opens the row menu), Alt+Up / Alt+Down on a focused
+row, or Move up / Move down in the row menu. The row lifts, the others slide
+around a gap, the sidebar scrolls near its edges, and Esc or letting go outside
+its project puts it back. The order is saved per project on the Cloud row
+(`rudder_workspaces.agent_order`, `POST /api/app/agent-order`, `agentOrder` in
+`/api/app/state`), so every device shows it; the phone's project screen keeps
+it within each status group. Agents not in the saved order (all of them until
+the first move, new ones after) sit on top, newest first, as before. Pins and
+"Needs you" do not change it. Agent rows no longer use HTML drag and drop:
+dropping a row on the main area to open it there (beside the agent on screen)
+is part of the same pointer drag. Checked headless against dev-mock (mouse,
+touch, keyboard, menu, cross-project refusal, reload, second context).
+
 Every run is jj (shipped in 5.0.4). The git-worktree path is gone: the
 `vcs ?? "git"` routing and the git merge, sync and rebase helpers in `git.ts`,
 the `worktree` record key, `workspace.branch`, the `mergeStrategy` setting, the
@@ -164,13 +179,18 @@ instruction `branch` or `branch\n<prompt>`, answered when the branch starts).
 Files: `jj duplicate @` in the source's workspace snapshots it and makes a
 sibling copy of its working-copy commit, so the source's later edits never
 reach the branch; the branch's workspace starts on the copy. Claude: the whole
-session file goes into the branch's project folder under a new id, resumed
-with `--fork-session --session-id`, and recorded as the branch's. Codex:
-`thread/fork` of the whole thread on a one-shot app-server, cwd the branch's
-workspace, goal continuation deferred. Without a prompt the branch is Done,
-idle at its prompt. The cleanup keeps the source's conversation while a branch
-of it is being set up. Checked with native filter `branch` (fake CLIs; no real
-session was forked).
+session file goes into the branch's project folder under a new id, which is
+the branch's session and is resumed directly (`--resume <copy>`, as an edited
+chat is), so its chat shows the history before its first message. It used to
+resume with `--fork-session --session-id`, whose session Claude writes only on
+the first message: a branch started without one showed an empty chat in the
+app. Codex: `thread/fork` of the whole thread on a one-shot app-server, cwd
+the branch's workspace, goal continuation deferred. Without a prompt the
+branch is Done, idle at its prompt. The cleanup keeps the source's
+conversation while a branch of it is being set up. Checked with native filter
+`branch` and for real (11-19): a scratch dashboard with a Claude haiku and a
+Codex luna agent, branched through the steer inbox with and without a prompt.
+A 4.4.2 home answers "unknown method agentBranch"; Cloud now says to update it.
 
 All agents (shipped in 5.0.4): a button at the top of the app's sidebar
 (phone: the home top bar) opens one chat that talks to every agent in every

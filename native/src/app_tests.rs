@@ -9650,30 +9650,28 @@ fn branch_starts_a_new_agent_from_a_copy_of_its_files_and_conversation() {
     assert_eq!(jj(&repo, &["--ignore-working-copy", "file", "show", "-r", &base, "app.txt"]), "half done");
 
     // Claude resumes a copy of the whole conversation in the branch's own
-    // project folder, as a new session the branch's record owns.
+    // project folder: the branch's session, on disk before any message. With
+    // `--fork-session` the session was only written on the first message, so
+    // a branch started without one showed an empty chat in the app.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !claude_args.is_file() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     let args: Vec<String> = fs::read_to_string(&claude_args).unwrap().lines().map(str::to_string).collect();
-    let fork_from = args
-        .windows(2)
-        .find(|pair| pair[0] == "--resume")
-        .map(|pair| pair[1].clone())
-        .expect("--resume");
-    assert!(args.windows(3).any(|w| w[0] == "--fork-session" && w[1] == "--session-id" && w[2] == session));
+    assert!(args.windows(2).any(|pair| pair[0] == "--resume" && pair[1] == session), "{args:?}");
+    assert!(!args.iter().any(|arg| arg == "--fork-session" || arg == "--session-id"), "{args:?}");
     assert!(!args.iter().any(|arg| arg == "--"), "no prompt was given: {args:?}");
     let copy = home
         .join(".claude")
         .join("projects")
         .join(encode_claude_project_dir(&branch_ws))
-        .join(format!("{fork_from}.jsonl"));
+        .join(format!("{session}.jsonl"));
     assert_eq!(fs::read_to_string(&copy).unwrap(), conversation);
     let record: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(native_run_dir(&repo, &app.agents[1].id).join("run.json")).unwrap())
             .unwrap();
-    let recorded = recorded_session_ids(&record);
-    assert!(recorded.contains(&fork_from) && recorded.contains(&session), "{recorded:?}");
+    assert_eq!(record["session"]["nativeSessionId"].as_str(), Some(session.as_str()));
+    assert_eq!(rudder_session_ids(&record), [session.clone()], "deleting the branch deletes its copy");
 
     // The source is untouched.
     let source = &app.agents[0];
@@ -19478,9 +19476,9 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     let fresh_session = "c1a1a1a1-0000-4000-8000-000000000004";
     let resumed = "c1a1a1a1-0000-4000-8000-000000000005";
     let (c1, c2, c3) = ("0193a000-0000-7000-8000-0000000000c1", "0193a000-0000-7000-8000-0000000000c2", "0193a000-0000-7000-8000-0000000000c3");
-    // The sessions Rudder made: a launch's and an edit's (and the edit's cut
-    // copy, below), the Codex threads its launch and fork started.
-    for session in [s1, s2, c1, c2] {
+    // The sessions Rudder made: a launch's, another and an edit's cut copy,
+    // the Codex threads its launch and fork started.
+    for session in [s1, s2, cut, c1, c2] {
         note_rudder_session(session);
     }
 
@@ -19510,17 +19508,16 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     failed.workspace_name = Some("rudder-node-failed".to_string());
     let mut app = App::new();
     app.cwd = repo.clone();
-    // A main chat that moved sessions three times: to an edit's session (via
-    // its cut copy), then to the person's own conversation with `/resume`.
+    // A main chat that moved sessions three times: to another session, to an
+    // edit's cut copy, then to the person's own conversation with `/resume`.
     let mut chat = test_agent_run("old-chat", "old chat");
     chat.mode = AgentMode::Main;
     chat.status = AgentStatus::Paused;
     chat.cwd = repo.clone();
-    chat.session_id = Some(s1.to_string());
-    save_native_run_record(&repo, &chat).unwrap();
-    chat.session_id = Some(s2.to_string());
-    save_native_run_record(&repo, &chat).unwrap();
-    record_retired_session(&repo, &chat.id, cut).unwrap();
+    for session in [s1, s2, cut] {
+        chat.session_id = Some(session.to_string());
+        save_native_run_record(&repo, &chat).unwrap();
+    }
     chat.session_id = Some(resumed.to_string());
     save_native_run_record(&repo, &chat).unwrap();
     for session in [s1, s2, cut, resumed] {

@@ -11,10 +11,11 @@
 //!   copy or anything built on it. The branch's workspace starts on the copy
 //!   (`__launch-node --base`).
 //! - Claude: every complete line of the session file is copied into the new
-//!   workspace's project folder under a new id, and Claude starts with
-//!   `--resume <copy> --fork-session --session-id <new>`, as an edited chat
-//!   does (chat_edit.rs). The copy belongs to the branch: deleting the branch
-//!   deletes it, and the source's own file is never touched.
+//!   workspace's project folder under a new id, and Claude resumes the copy
+//!   (`--resume <copy>`), as an edited chat does (chat_edit.rs). The copy is
+//!   the branch's own session from the start, so its chat shows the history
+//!   before its first message. Deleting the branch deletes it, and the
+//!   source's own file is never touched.
 //! - Codex: a one-shot `codex app-server` forks the whole thread
 //!   (`thread/fork`) with the new workspace as its cwd, and Codex starts with
 //!   `resume <new>`. The fork reads through the source's rollout
@@ -56,8 +57,8 @@ pub(crate) struct PendingBranch {
 /// A forked conversation, ready to start.
 #[derive(Debug)]
 pub(crate) enum Branched {
-    /// Start with `--resume <fork_from> --fork-session --session-id <session>`.
-    Claude { fork_from: String, session: String },
+    /// Start with `--resume <session>`: the copy.
+    Claude { session: String },
     /// Start with `resume <session>`: the forked thread.
     Codex { session: String },
 }
@@ -65,7 +66,7 @@ pub(crate) enum Branched {
 impl Branched {
     fn session(&self) -> &str {
         match self {
-            Branched::Claude { session, .. } | Branched::Codex { session } => session,
+            Branched::Claude { session } | Branched::Codex { session } => session,
         }
     }
 }
@@ -156,9 +157,9 @@ pub(crate) fn fork_claude(
     }
     let folder = projects.join(encode_claude_project_dir(target_cwd));
     fs::create_dir_all(&folder).map_err(|error| format!("could not create {}: {error}", folder.display()))?;
-    let fork_from = crate::gitio::new_rudder_session_id();
-    write_private_new(&folder.join(format!("{fork_from}.jsonl")), &bytes[..complete])?;
-    Ok(Branched::Claude { fork_from, session: crate::gitio::new_rudder_session_id() })
+    let session = crate::gitio::new_rudder_session_id();
+    write_private_new(&folder.join(format!("{session}.jsonl")), &bytes[..complete])?;
+    Ok(Branched::Claude { session })
 }
 
 /// Fork the source's whole conversation for the branch working in `target_cwd`.
@@ -390,11 +391,7 @@ impl App {
         let backend = run.backend;
         let run_id = run.id.clone();
         let mut command = match &branched {
-            Branched::Claude { fork_from, session } => {
-                let mut command = claude_resume_command(run, fork_from);
-                command.args.extend(["--fork-session".to_string(), "--session-id".to_string(), session.clone()]);
-                command
-            }
+            Branched::Claude { session } => claude_resume_command(run, session),
             Branched::Codex { session } => codex_resume_command(run, session),
         };
         // A resumed conversation runs in a terminal here, as an edited chat's does.
@@ -435,11 +432,6 @@ impl App {
         }
         save_native_run_record(&self.cwd, run)
             .map_err(|error| format!("its record could not be saved: {error}"))?;
-        // The copy it resumed from belongs to it: deleting it deletes that too.
-        if let Branched::Claude { fork_from, .. } = &branched {
-            record_retired_session(&self.cwd, &run_id, fork_from)
-                .map_err(|error| format!("the copy of its conversation was not recorded: {error}"))?;
-        }
         if let Err(error) = spawned {
             self.release_focus_after_failed_start(index);
             return Err(format!("could not start {}: {error}", backend.as_str()));
@@ -486,17 +478,15 @@ mod tests {
         let written = b"{\"type\":\"user\",\"uuid\":\"u1\"}\n{\"type\":\"assistant\",\"uuid\":\"a1\"}\n{\"type\":\"assis";
         fs::write(&source_file, written).unwrap();
 
-        let Branched::Claude { fork_from, session: forked } =
-            fork_claude(&projects, &source_cwd, session, &target_cwd).unwrap()
+        let Branched::Claude { session: forked } = fork_claude(&projects, &source_cwd, session, &target_cwd).unwrap()
         else {
             panic!("a Claude source forks as Claude");
         };
-        assert!(valid_session_id(&fork_from) && valid_session_id(&forked));
-        assert_ne!(fork_from, session);
-        assert_ne!(forked, fork_from);
-        // The copy sits where Claude looks for it from the branch's workspace,
-        // without the line Claude was still writing.
-        let copy = projects.join(encode_claude_project_dir(&target_cwd)).join(format!("{fork_from}.jsonl"));
+        assert!(valid_session_id(&forked));
+        assert_ne!(forked, session);
+        // The copy is the branch's session, where Claude looks for it from
+        // the branch's workspace, without the line Claude was still writing.
+        let copy = projects.join(encode_claude_project_dir(&target_cwd)).join(format!("{forked}.jsonl"));
         assert_eq!(
             fs::read(&copy).unwrap(),
             b"{\"type\":\"user\",\"uuid\":\"u1\"}\n{\"type\":\"assistant\",\"uuid\":\"a1\"}\n"

@@ -5,29 +5,24 @@
 // title, kind and name, how long and tool calls (subagents.js subagentFacts).
 // An entry opens that subagent's activity in the tray, painted as the card's is
 // (paintSubagentActivity). Teammates are listed too, whether or not the chat
-// has a card for them. The tray hides to one line, remembered per device, that
-// says how many run. A cloud machine too old to list subagents gets one row
-// with Update now in the tray's place (home-update.js).
+// has a card for them. The tray stays closed behind one button left of the
+// message bar (app.js puts `button` there), which says how many run and
+// opens it. A cloud machine too old to list subagents gets one row with
+// Update now in the tray's place (home-update.js).
 
 import { h, icon, reconcile, setText } from "/app/render.js";
-import { api, ls } from "/app/core.js";
+import { api } from "/app/core.js";
 import { UpdateNow } from "/app/home-update.js";
 import { paintSubagentActivity, subagentFacts } from "/app/subagents.js";
 
-const SHOWN_KEY = "rudder.subagentTray.shown";
 // Something runs or one is open: its steps show as they happen. Otherwise the
 // tray only waits for a new subagent.
 const POLL_LIVE_MS = 3000;
 const POLL_IDLE_MS = 12000;
 
 export function mountSubagentTray({ workspace, run }) {
+  const button = h(`<button type="button" class="sat-btn" hidden aria-expanded="false">${icon("agents")}<span class="sat-badge" hidden></span></button>`);
   const el = h(`<section class="sa-tray" hidden aria-label="Subagents">
-    <button type="button" class="sat-toggle">
-      <span class="sat-ic">${icon("agents")}</span>
-      <span class="sat-title">Subagents</span>
-      <span class="sat-badge" hidden></span>
-      <span class="sat-act"></span>${icon("chevron").replace("<svg", '<svg class="sat-caret"')}
-    </button>
     <div class="sat-panel">
       <div class="sat-note" hidden></div>
       <div class="sat-update" hidden><p class="sat-update-text">Update your cloud machine to see subagents here.</p></div>
@@ -44,9 +39,7 @@ export function mountSubagentTray({ workspace, run }) {
       </div>
     </div>
   </section>`);
-  const toggle = el.querySelector(".sat-toggle");
-  const badgeEl = el.querySelector(".sat-badge");
-  const panel = el.querySelector(".sat-panel");
+  const badgeEl = button.querySelector(".sat-badge");
   const note = el.querySelector(".sat-note");
   const updateRow = el.querySelector(".sat-update");
   const strip = el.querySelector(".sat-strip");
@@ -54,7 +47,7 @@ export function mountSubagentTray({ workspace, run }) {
   const openBody = el.querySelector(".sat-open-body");
   const loading = el.querySelector(".sat-loading");
 
-  let shown = ls.get(SHOWN_KEY, true) !== false;
+  let shown = false;
   let list = [];
   let error = null;
   let outdated = false; // the cloud machine's Rudder has no subagent list yet
@@ -67,9 +60,8 @@ export function mountSubagentTray({ workspace, run }) {
   let again = false;
   let destroyed = false;
 
-  toggle.addEventListener("click", () => {
+  button.addEventListener("click", () => {
     shown = !shown;
-    ls.set(SHOWN_KEY, shown);
     paint();
   });
   strip.addEventListener("click", (e) => {
@@ -85,7 +77,12 @@ export function mountSubagentTray({ workspace, run }) {
   });
   el.querySelector(".sat-back").addEventListener("click", closeOpen);
   el.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && open && !e.defaultPrevented) { e.preventDefault(); closeOpen(); }
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    e.preventDefault();
+    if (open) return closeOpen();
+    shown = false;
+    paint();
+    button.focus();
   });
   // A mouse wheel scrolls the strip sideways.
   strip.addEventListener("wheel", (e) => {
@@ -108,22 +105,21 @@ export function mountSubagentTray({ workspace, run }) {
 
   function paint() {
     const running = list.filter((s) => s.status === "running").length;
-    el.hidden = !list.length && !error && !outdated;
-    if (el.hidden) return;
-    el.classList.toggle("collapsed", !shown);
-    el.classList.toggle("live", running > 0);
-    el.classList.toggle("outdated", outdated);
-    toggle.setAttribute("aria-expanded", String(shown));
-    const badge = outdated ? "Update needed" : running ? `${running} running` : "";
-    toggle.setAttribute("aria-label", `Subagents${outdated ? ": your cloud machine needs an update" : running ? `: ${running} running` : ""}. ${shown ? "Hide" : "Show"}`);
-    badgeEl.hidden = !badge;
-    setText(badgeEl, badge);
-    setText(el.querySelector(".sat-act"), shown ? "Hide" : "Show");
-    panel.hidden = !shown;
+    button.hidden = !list.length && !outdated;
+    if (button.hidden) shown = false;
+    el.hidden = !shown;
+    button.classList.toggle("live", running > 0);
+    button.classList.toggle("outdated", outdated);
+    button.setAttribute("aria-expanded", String(shown));
+    const label = `Subagents${outdated ? ": your cloud machine needs an update" : running ? `: ${running} running` : ""}`;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    badgeEl.hidden = !running && !outdated;
+    setText(badgeEl, outdated ? "" : String(running));
+    if (!shown) return;
     note.hidden = !error;
     setText(note, error || "");
     updateRow.hidden = !outdated;
-    if (!shown) return;
     const now = Date.now();
     strip.hidden = outdated || !!open;
     openEl.hidden = outdated || !open;
@@ -233,6 +229,7 @@ export function mountSubagentTray({ workspace, run }) {
 
   return {
     el,
+    button,
     destroy() {
       destroyed = true;
       clearTimeout(timer);

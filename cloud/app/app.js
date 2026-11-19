@@ -3863,9 +3863,17 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Pinned above the composer: the oldest prompt the agent is blocked on.
   const askSlot = h(`<div class="ask-slot"></div>`);
   composer.el.before(askSlot);
-  // Above it: every subagent and teammate the agent started (subagent-tray.js).
+  // Above it: every subagent and teammate the agent started (subagent-tray.js),
+  // opened by its button left of the message bar.
   const tray = ro ? null : mountSubagentTray({ workspace: ws, run });
-  if (tray) { askSlot.before(tray.el); mountFileRefs(tray.el, { ws, run }); }
+  if (tray) {
+    askSlot.before(tray.el);
+    mountFileRefs(tray.el, { ws, run });
+    const form = composer.el.querySelector("form");
+    const row = h(`<div class="c-row"></div>`);
+    form.before(row);
+    row.append(tray.button, form);
+  }
   let askCard = null;
   function paintAsk() {
     if (ro) return;

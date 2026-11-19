@@ -1,7 +1,33 @@
 /* Subagent tray (subagent-tray.js): every subagent and teammate of the agent,
-   above the composer. One line when hidden; a strip of cards, or the open
-   subagent's activity, when shown; one Update now row on a machine too old
-   for it. */
+   above the composer, opened by one button left of the message bar. A strip
+   of cards, or the open subagent's activity; one Update now row on a machine
+   too old for it. */
+
+/* The button and the message bar share a row (app.js .c-row). */
+.c-row { display: flex; align-items: flex-end; gap: 8px; }
+.c-row > form { flex: 1; min-width: 0; }
+.sat-btn {
+  position: relative; flex: none; width: 46px; height: 46px; padding: 0;
+  display: grid; place-items: center; border-radius: 50%;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink-2);
+  cursor: pointer; transition: transform 120ms, background 120ms, border-color 120ms;
+}
+.sat-btn[hidden] { display: none; }
+.sat-btn svg { width: 20px; height: 20px; }
+.sat-btn:hover { border-color: color-mix(in srgb, var(--ink) 30%, var(--line-strong)); }
+.sat-btn:active { transform: scale(0.94); }
+.sat-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sat-btn.live { color: var(--working); border-color: color-mix(in srgb, var(--working) 45%, var(--line-strong)); }
+.sat-btn[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
+/* How many run, or a dot when the machine needs an update. */
+.sat-badge {
+  position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; padding: 0 5px;
+  display: grid; place-items: center; border-radius: 999px; border: 2px solid var(--bg);
+  background: var(--working); color: #fff; font-size: 11px; font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.sat-badge[hidden] { display: none; }
+.sat-btn.outdated .sat-badge { min-width: 12px; height: 12px; padding: 0; background: var(--needs); }
 .sa-tray {
   flex: none; position: relative; z-index: 4;
   padding: 0 calc(var(--sar) + 10px) 0 calc(var(--sal) + 10px);
@@ -15,23 +41,7 @@
 /* The composer's own top border would double the tray's. */
 .sa-tray:not([hidden]) ~ .composer { border-top-color: transparent; }
 
-.sat-toggle {
-  width: 100%; display: flex; align-items: center; gap: 8px;
-  min-height: 36px; padding: 6px 2px; border: 0; background: none;
-  color: var(--muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
-}
-.sat-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
-.sat-ic { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; background: var(--surface-2); color: var(--ink-2); flex: none; }
-.sa-tray.live .sat-ic { background: var(--working-soft); color: var(--working); }
-.sat-ic svg { width: 14px; height: 14px; }
-.sat-title { font-weight: 600; color: var(--ink-2); flex: none; }
-/* How many run, or that the machine needs an update: seen with the tray hidden too. */
-.sat-badge { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--working-soft); color: var(--working); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.sa-tray.outdated .sat-badge { background: var(--needs-soft); color: var(--needs); }
-.sat-act { flex: none; margin-left: auto; font-size: 12.5px; color: var(--faint); }
-.sat-caret { width: 14px; height: 14px; color: var(--faint); flex: none; transform: rotate(90deg); transition: transform 160ms; }
-.sa-tray.collapsed .sat-caret { transform: rotate(-90deg); }
-
+.sat-panel { padding-top: 10px; }
 .sat-note { margin: 0 2px 8px; font-size: 12.5px; color: var(--muted); }
 
 /* A machine too old to list subagents: one row, its Update now (home-update.js) beside it. */

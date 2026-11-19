@@ -1809,6 +1809,14 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   by catalog price within one) and `efforts`: the CLI's levels that the dashboard
   also passes (`effort_options_for`). Claude Code aliases close the list under
   "Always the newest". No model names are hard-coded.
+- Claude Code's list is also merged into the catalog: every model and alias it
+  lists gets `efforts` (exactly its levels, empty for none; a dated id also sets
+  its undated twin), and a model only Claude Code knows gets an entry. The
+  dashboard (`effort_options_for`, `cached_model_efforts`) and the picker
+  (`modelEfforts`) both take those levels when present, so Haiku 5.5 offers
+  low to max and Haiku 4.5 none. The family rule applies only to models Claude
+  Code does not list. Listed models stay in the dashboard's list past its 24
+  newest rows.
 - `native/src/models.rs` mirrors the same discovery for the dashboard picker. Codex
   rows read `~/.codex/models_cache.json` before models.dev so new account-specific
   families (for example GPT-5.6 Sol/Terra/Luna) appear immediately in Codex's own order.

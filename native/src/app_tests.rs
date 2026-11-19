@@ -8424,6 +8424,54 @@ fn model_picker_leads_with_aliases_then_explicit_ids() {
 }
 
 #[test]
+fn claude_code_effort_lists_in_the_catalog_decide_models_and_efforts() {
+    let _guard = env_guard();
+    let home = unique_test_repo("model-efforts");
+    let prior = std::env::var_os("RUDDER_HOME");
+    std::env::set_var("RUDDER_HOME", &home);
+    fs::create_dir_all(&home).unwrap();
+    let all = ["low", "medium", "high", "xhigh", "max"];
+    // What src/models.ts writes from Claude Code's list: Haiku 5.5 takes every
+    // level though models.dev calls it non-reasoning, Haiku 4.5 none, and a
+    // model only Claude Code knows (no release date) is listed.
+    fs::write(
+        home.join("models-dev.json"),
+        serde_json::json!({
+            "anthropic": { "models": {
+                "claude-haiku-5-5": { "reasoning": false, "tool_call": true, "efforts": all },
+                "claude-haiku-4-5": { "reasoning": true, "tool_call": true, "efforts": [] },
+                "claude-opus-4-6": { "tool_call": true, "efforts": ["low", "medium", "high", "max"] },
+                "claude-brandnew-6": { "name": "Brandnew 6", "tool_call": true, "efforts": ["low", "high"] },
+                "haiku": { "efforts": all },
+            }},
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let parsed = |args: &[&str]| parse_model_args(args);
+    let haiku55 = parsed(&["claude", "claude-haiku-5-5", "max"]);
+    let haiku45 = parsed(&["claude", "claude-haiku-4-5", "low"]);
+    let haiku45_auto = parsed(&["claude", "claude-haiku-4-5"]);
+    let alias = parsed(&["claude", "haiku", "high"]);
+    let opus46 = parsed(&["claude", "claude-opus-4-6", "xhigh"]);
+    let brandnew = parsed(&["claude-brandnew-6", "high"]);
+
+    match prior {
+        Some(value) => std::env::set_var("RUDDER_HOME", value),
+        None => std::env::remove_var("RUDDER_HOME"),
+    }
+    let _ = fs::remove_dir_all(&home);
+
+    assert_eq!(haiku55, Ok((Backend::Claude, "claude-haiku-5-5".into(), Some(EffortLevel::Max))));
+    assert_eq!(haiku45, Err("claude-haiku-4-5 cannot run at low effort".into()));
+    assert_eq!(haiku45_auto, Ok((Backend::Claude, "claude-haiku-4-5".into(), None)));
+    assert_eq!(alias, Ok((Backend::Claude, "haiku".into(), Some(EffortLevel::High))));
+    assert_eq!(opus46, Err("claude-opus-4-6 cannot run at xhigh effort".into()));
+    assert_eq!(brandnew, Ok((Backend::Claude, "claude-brandnew-6".into(), Some(EffortLevel::High))));
+}
+
+#[test]
 fn model_picker_accepts_future_codex_models_without_a_release() {
     let meta = serde_json::json!({
         "tool_call": true,

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { discoverModelOptions } from "../dist/models.js";
+import { discoverModelOptions, refreshModelCatalog } from "../dist/models.js";
 
 async function withTempRudderHome(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-models-"));
@@ -26,6 +26,18 @@ async function withTempRudderHome(t) {
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   return root;
+}
+
+/** A `claude` that answers the headless initialize request with `models`. */
+async function claudeCodeStub(root, models) {
+  const stub = path.join(root, "claude");
+  await fsp.writeFile(stub, `#!/usr/bin/env node
+process.stdin.once("data", (line) => {
+  const { request_id } = JSON.parse(String(line));
+  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id, response: { models: ${JSON.stringify(models)} } } }) + "\\n");
+});
+`, { mode: 0o755 });
+  return stub;
 }
 
 function jsonResponse(body) {
@@ -132,13 +144,7 @@ test("the picker groups models by generation, names them and offers only efforts
     { value: "claude-opus-4-6", resolvedModel: "claude-opus-4-6", displayName: "Opus 4.6", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "max"] },
     { value: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5" },
   ];
-  const stub = path.join(root, "claude");
-  await fsp.writeFile(stub, `#!/usr/bin/env node
-process.stdin.once("data", (line) => {
-  const { request_id } = JSON.parse(String(line));
-  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id, response: { models: ${JSON.stringify(claudeModels)} } } }) + "\\n");
-});
-`, { mode: 0o755 });
+  const stub = await claudeCodeStub(root, claudeModels);
   process.env.CODEX_HOME = path.join(root, "codex");
   await fsp.mkdir(process.env.CODEX_HOME);
   const levels = (...efforts) => efforts.map((effort) => ({ effort }));
@@ -189,7 +195,8 @@ process.stdin.once("data", (line) => {
   assert.deepEqual(efforts(claude, "claude-opus-5-5"), all);
   assert.deepEqual(efforts(claude, "claude-opus-4-6"), ["low", "medium", "high", "max"], "Claude Code's own levels");
   assert.deepEqual(efforts(claude, "claude-haiku-4-5"), [], "Claude Code lists no effort for it");
-  assert.deepEqual(efforts(claude, "haiku"), [], "the dashboard passes no effort to Haiku");
+  assert.deepEqual(efforts(claude, "claude-haiku-5-5"), all, "Claude Code's levels, though the catalog calls it non-reasoning");
+  assert.deepEqual(efforts(claude, "haiku"), all);
   assert.match(claude.find((row) => row.value === "opus").detail, /^Now Opus 5\.5 · For complex work$/);
 
   const codex = (await discoverModelOptions("codex")).slice(1);
@@ -229,4 +236,41 @@ test("an expired stored login is not sent, and a refused key fails discovery wit
 
   process.env.ANTHROPIC_API_KEY = "refused-key";
   await assert.rejects(discoverModelOptions("claude"), /api\.anthropic\.com\/v1\/models.* returned 401: .*invalid x-api-key/);
+});
+
+test("a model only Claude Code lists lands in the catalog the dashboard reads, with exactly its efforts", async (t) => {
+  const root = await withTempRudderHome(t);
+  const all = ["low", "medium", "high", "xhigh", "max"];
+  const stub = await claudeCodeStub(root, [
+    { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", supportsEffort: true, supportedEffortLevels: all },
+    { value: "claude-brandnew-6", resolvedModel: "claude-brandnew-6", displayName: "Brandnew 6", supportsEffort: true, supportedEffortLevels: ["low", "high", "ultra"] },
+    { value: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5" },
+  ]);
+  const oldBin = process.env.RUDDER_CLAUDE_BIN, oldFetch = globalThis.fetch, oldOpenAI = process.env.OPENAI_API_KEY, oldAnthropic = process.env.ANTHROPIC_API_KEY;
+  process.env.RUDDER_CLAUDE_BIN = stub;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  t.after(() => {
+    globalThis.fetch = oldFetch;
+    for (const [key, value] of [["RUDDER_CLAUDE_BIN", oldBin], ["OPENAI_API_KEY", oldOpenAI], ["ANTHROPIC_API_KEY", oldAnthropic]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  globalThis.fetch = async () => jsonResponse({
+    anthropic: { id: "anthropic", models: {
+      "claude-haiku-5-5": { tool_call: true, reasoning: false, cost: { output: 5 } },
+      "claude-haiku-4-5": { tool_call: true, reasoning: true },
+    } },
+  });
+
+  await refreshModelCatalog();
+  const models = JSON.parse(await fsp.readFile(path.join(root, "models-dev.json"), "utf8")).anthropic.models;
+  assert.deepEqual(models["claude-brandnew-6"], {
+    id: "claude-brandnew-6", name: "Brandnew 6", tool_call: true, efforts: ["low", "high"], modalities: { output: ["text"] }, source: "claude-code",
+  });
+  assert.deepEqual(models["claude-haiku-5-5"].efforts, all);
+  assert.equal(models["claude-haiku-5-5"].cost.output, 5, "the catalog's own fields stay");
+  assert.deepEqual(models.haiku.efforts, all, "an alias carries its levels too");
+  assert.deepEqual(models["claude-haiku-4-5-20251001"].efforts, []);
+  assert.deepEqual(models["claude-haiku-4-5"].efforts, [], "the undated twin the pickers list takes the dated id's levels");
 });

@@ -273,6 +273,11 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
 }
 
 pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<EffortLevel>> {
+    // Claude Code's own list, kept in the catalog, names exactly the levels a
+    // model takes; the picker (src/models.ts modelEfforts) reads the same list.
+    if let Some(levels) = cached_model_efforts(backend, model) {
+        return std::iter::once(None).chain(levels.into_iter().map(Some)).collect();
+    }
     if !model_supports_reasoning(backend, model) {
         return vec![None];
     }
@@ -313,9 +318,7 @@ pub(crate) fn model_supports_reasoning(backend: Backend, model: &str) -> bool {
             model.contains("opus")
                 || model.contains("sonnet")
                 || model.contains("fable")
-                || (model.starts_with("claude-")
-                    && !model.contains("haiku")
-                    && !model.contains("3-"))
+                || (model.starts_with("claude-") && !model.contains("3-"))
         }
         Backend::Codex => {
             is_gpt_text_model(model) || model.contains("codex") || is_o_series_model(model)
@@ -342,6 +345,67 @@ pub(crate) fn is_reasoning_alias(backend: Backend, model: &str) -> bool {
         }
         Backend::Opencode => false,
     }
+}
+
+/// The effort levels Claude Code lists for a Claude model or alias, as the
+/// catalog keeps them (`anthropic.models.<id>.efforts`, written by
+/// src/models.ts from Claude Code's own model list). None when Claude Code
+/// does not list it.
+pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<EffortLevel>> {
+    if backend != Backend::Claude {
+        return None;
+    }
+    cached_claude_code_efforts().get(model).cloned()
+}
+
+/// Every catalog entry's Claude Code effort list, parsed once per version of
+/// the cache file (it is megabytes, and the palette asks on every frame).
+fn cached_claude_code_efforts() -> HashMap<String, Vec<EffortLevel>> {
+    type Memo = Option<(PathBuf, Option<SystemTime>, u64, HashMap<String, Vec<EffortLevel>>)>;
+    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
+    let Some(cache_path) = models_dev_cache_path() else {
+        return HashMap::new();
+    };
+    let Ok(meta) = fs::metadata(&cache_path) else {
+        return HashMap::new();
+    };
+    let stamp = (meta.modified().ok(), meta.len());
+    // Tests rewrite caches faster than mtime resolution; they parse every time.
+    let use_memo = !cfg!(test);
+    if let Some(memo) = MEMO.lock().ok().filter(|_| use_memo) {
+        if let Some((path, modified, len, efforts)) = memo.as_ref() {
+            if *path == cache_path && (*modified, *len) == stamp {
+                return efforts.clone();
+            }
+        }
+    }
+    let Ok(raw) = fs::read_to_string(&cache_path) else {
+        return HashMap::new();
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return HashMap::new();
+    };
+    let efforts = collect_claude_code_efforts(&data);
+    if let Some(mut memo) = MEMO.lock().ok().filter(|_| use_memo) {
+        *memo = Some((cache_path, stamp.0, stamp.1, efforts.clone()));
+    }
+    efforts
+}
+
+pub(crate) fn collect_claude_code_efforts(data: &serde_json::Value) -> HashMap<String, Vec<EffortLevel>> {
+    data.pointer("/anthropic/models")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, model)| {
+            let levels = model.get("efforts")?.as_array()?;
+            let levels = levels
+                .iter()
+                .filter_map(|level| level.as_str().and_then(EffortLevel::parse))
+                .collect();
+            Some((id.clone(), levels))
+        })
+        .collect()
 }
 
 pub(crate) fn cached_model_reasoning(backend: Backend, model_id: &str) -> Option<bool> {
@@ -1527,7 +1591,9 @@ pub(crate) fn collect_provider_models(
             } else {
                 detail
             };
-            (id.clone(), detail, release.to_string())
+            // Claude Code lists it (src/models.ts wrote its effort levels).
+            let listed = model.get("efforts").is_some();
+            (id.clone(), detail, release.to_string(), listed)
         })
         .collect::<Vec<_>>();
 
@@ -1541,8 +1607,11 @@ pub(crate) fn collect_provider_models(
             .then_with(|| score_model(backend, &b.0).cmp(&score_model(backend, &a.0)))
             .then_with(|| b.0.cmp(&a.0))
     });
-    for (id, detail, _) in entries.into_iter().take(24) {
-        rows.push((backend, id, detail));
+    // Older catalog models make way; every model Claude Code lists stays.
+    for (index, (id, detail, _, listed)) in entries.into_iter().enumerate() {
+        if listed || index < 24 {
+            rows.push((backend, id, detail));
+        }
     }
 }
 

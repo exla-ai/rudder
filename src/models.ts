@@ -47,6 +47,10 @@ type ModelsDevModel = {
   id?: string;
   name?: string;
   reasoning?: boolean;
+  /** The effort levels Claude Code lists for the model (empty: no effort
+   * setting). The dashboard (native/src/models.rs effort_options_for) and the
+   * picker accept exactly these. */
+  efforts?: EffortId[];
   tool_call?: boolean;
   release_date?: string;
   last_updated?: string;
@@ -93,7 +97,10 @@ type AnthropicModelsResponse = {
   }>;
 };
 
-let modelCatalogInFlight: Promise<ModelsDevCache> | undefined;
+/** The merged catalog, and Claude Code's own list that went into it. */
+type ModelCatalog = { data: ModelsDevCache; claudeCode: CliModel[] };
+
+let modelCatalogInFlight: Promise<ModelCatalog> | undefined;
 
 export async function discoverModelOptions(
   backend: BackendId,
@@ -101,14 +108,15 @@ export async function discoverModelOptions(
 ): Promise<ModelOption[]> {
   const defaultDetail = configuredDefault || "CLI default";
   const picker = backend === "claude" ? "claude" : "codex";
-  // The catalog (models.dev, the provider APIs, local history) and the CLI's
-  // own list: Claude Code's /model list or Codex's model cache. The CLI's
-  // list names a model, its effort levels and its display name as soon as
-  // the CLI learns it.
-  const [data, cli] = await Promise.all([
+  // The catalog (models.dev, the provider APIs, local history, Claude Code's
+  // list) and the CLI's own list: Claude Code's /model list or Codex's model
+  // cache. The CLI's list names a model, its effort levels and its display
+  // name as soon as the CLI learns it.
+  const [{ data, claudeCode }, codex] = await Promise.all([
     readModelsDev(),
-    picker === "claude" ? readClaudeCodeModels() : readCodexCliModels(),
+    picker === "claude" ? [] : readCodexCliModels(),
   ]);
+  const cli = picker === "claude" ? claudeCode : codex;
   const catalog = (picker === "claude" ? data.anthropic : data.openai)?.models ?? {};
   return [{ label: "Default", value: undefined, detail: defaultDetail }, ...pickerRows(picker, catalog, cli)];
 }
@@ -155,7 +163,7 @@ async function readCodexCliModels(): Promise<CliModel[]> {
   }));
 }
 
-async function readModelsDev(): Promise<ModelsDevCache> {
+async function readModelsDev(): Promise<ModelCatalog> {
   if (modelCatalogInFlight) {
     return modelCatalogInFlight;
   }
@@ -165,17 +173,17 @@ async function readModelsDev(): Promise<ModelsDevCache> {
   return modelCatalogInFlight;
 }
 
-async function readMergedModelCatalog(): Promise<ModelsDevCache> {
+async function readMergedModelCatalog(): Promise<ModelCatalog> {
   const cached = await readModelsDevCache();
   const current = cached !== null && Date.now() - cached.mtimeMs < MODELS_DEV_CACHE_MAX_AGE_MS;
   const base = current ? cached.data : await fetchJsonWithTimeout<ModelsDevCache>(MODELS_DEV_URL, {});
 
   const merged = cloneModelCatalog(base);
-  const added = await mergeLiveAndLocalModels(merged);
-  if (!current || added) {
+  const { changed, claudeCode } = await mergeLiveAndLocalModels(merged);
+  if (!current || changed) {
     await writeModelsDevCache(merged);
   }
-  return merged;
+  return { data: merged, claudeCode };
 }
 
 /** The cached catalog, or null when there is none yet. A cache that does not
@@ -224,13 +232,14 @@ function isCodexRelevantModel(id: string): boolean {
   return id.includes("codex") || isGptTextModel(id) || isOSeriesModel(id);
 }
 
-async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<boolean> {
+async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<{ changed: boolean; claudeCode: CliModel[] }> {
   let changed = false;
-  const [openai, anthropic, codexLocal, claudeLocal] = await Promise.all([
+  const [openai, anthropic, codexLocal, claudeLocal, claudeCode] = await Promise.all([
     fetchOpenAIModelCatalog(),
     fetchAnthropicModelCatalog(),
     readCodexLocalModels(),
     readClaudeLocalModelIds(),
+    readClaudeCodeModels(),
   ]);
 
   for (const model of openai) {
@@ -245,7 +254,38 @@ async function mergeLiveAndLocalModels(data: ModelsDevCache): Promise<boolean> {
   for (const model of claudeLocal) {
     changed = mergeProviderModel(data, "anthropic", model.id, model.meta) || changed;
   }
-  return changed;
+  for (const model of claudeCodeCatalogModels(data, claudeCode)) {
+    changed = mergeProviderModel(data, "anthropic", model.id, model.meta) || changed;
+  }
+  return { changed, claudeCode };
+}
+
+/**
+ * Every model and alias Claude Code lists, with exactly its effort levels, so
+ * the dashboard accepts it and offers the same levels as the picker. A model
+ * the catalog already has keeps its other fields. A dated id also gives its
+ * levels to the undated twin the pickers list in its place.
+ */
+function claudeCodeCatalogModels(data: ModelsDevCache, listed: CliModel[]): Array<{ id: string; meta: ModelsDevModel }> {
+  const known = data.anthropic?.models ?? {};
+  const efforts = new Map<string, EffortId[]>();
+  const names = new Map<string, string | undefined>();
+  for (const model of listed) {
+    efforts.set(model.id, RUDDER_EFFORTS.claude.filter((level) => model.efforts.includes(level)));
+    names.set(model.id, model.name);
+  }
+  for (const model of listed) {
+    const base = /^(.+)-\d{8}$/.exec(model.id)?.[1];
+    if (base && known[base] && !efforts.has(base)) {
+      efforts.set(base, efforts.get(model.id)!);
+    }
+  }
+  return [...efforts].map(([id, levels]) => ({
+    id,
+    meta: known[id]
+      ? { efforts: levels }
+      : { id, name: names.get(id) || prettyClaudeModel(id), tool_call: true, efforts: levels, modalities: { output: ["text"] }, source: "claude-code" },
+  }));
 }
 
 async function fetchOpenAIModelCatalog(): Promise<Array<{ id: string; meta: ModelsDevModel }>> {
@@ -481,7 +521,7 @@ function isOSeriesModel(id: string): boolean {
 
 function isLikelyReasoningModel(backend: "claude" | "codex", id: string): boolean {
   if (backend === "claude") {
-    if (!id.startsWith("claude-") || id.includes("haiku") || id.includes("3-")) {
+    if (!id.startsWith("claude-") || id.includes("3-")) {
       return id.includes("opus") || id.includes("sonnet") || id.includes("fable");
     }
     return true;
@@ -711,7 +751,7 @@ function pickerRows(backend: PickerBackend, catalog: Record<string, ModelsDevMod
       value: alias.id,
       detail: [alias.name ? `Now ${alias.name}` : "", alias.description ?? ""].filter(Boolean).join(" · "),
       group: ALIAS_GROUP,
-      efforts: modelEfforts(backend, alias.id, undefined, alias),
+      efforts: modelEfforts(backend, alias.id, catalog[alias.id], alias),
     }));
   return [...rows, ...aliasRows];
 }
@@ -796,6 +836,10 @@ function withContext(name: string, id: string): string {
 
 /** The levels both the model's CLI lists and the dashboard passes; the dashboard refuses any other. */
 function modelEfforts(backend: PickerBackend, id: string, model: ModelsDevModel | undefined, listed: CliModel | undefined): EffortId[] {
+  // Claude Code's levels, kept in the catalog: the dashboard takes exactly these.
+  if (model?.efforts) {
+    return model.efforts;
+  }
   if (!hasEffortSetting(backend, id, model)) {
     return [];
   }
@@ -808,7 +852,7 @@ function hasEffortSetting(backend: PickerBackend, id: string, model: ModelsDevMo
     return true;
   }
   if (backend === "claude") {
-    return /opus|sonnet|fable/.test(id) || (id.startsWith("claude-") && !id.includes("haiku") && !id.includes("3-"));
+    return /opus|sonnet|fable/.test(id) || (id.startsWith("claude-") && !id.includes("3-"));
   }
   return isGptTextModel(id) || id.includes("codex") || isOSeriesModel(id);
 }

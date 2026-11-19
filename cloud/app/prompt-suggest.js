@@ -14,8 +14,13 @@ let seq = 0;
 export function mountPromptSuggestion(composer, { chipSlot }) {
   const ta = composer.textarea;
   const placeholder = ta.placeholder;
-  const hint = composer.el.querySelector(".c-hint");
-  const hintText = hint ? hint.textContent : "";
+  // A span of its own at the hint's start: the hint keeps its other parts
+  // (the Alt+[ steps span that desktop.css wraps away in a narrow pane).
+  const tabHint = document.createElement("span");
+  tabHint.className = "ps-tab";
+  tabHint.textContent = "Tab to use the suggestion · ";
+  tabHint.hidden = true;
+  if (!coarse) composer.el.querySelector(".c-hint").prepend(tabHint);
   const describe = document.createElement("span");
   describe.className = "ps-sr";
   describe.id = `ps-sr-${seq++}`;
@@ -53,7 +58,7 @@ export function mountPromptSuggestion(composer, { chipSlot }) {
     ta.placeholder = text ?? placeholder;
     fit(text);
     chip.hidden = text === null;
-    if (hint) hint.textContent = text !== null && !coarse ? `Tab to use the suggestion · ${hintText}` : hintText;
+    tabHint.hidden = text === null;
     describe.textContent = text !== null ? `Suggested next prompt: ${text}. ${coarse ? "Use suggestion fills it in." : "Press Tab to fill it in."}` : "";
     if (text !== null) ta.setAttribute("aria-describedby", describe.id);
     else ta.removeAttribute("aria-describedby");

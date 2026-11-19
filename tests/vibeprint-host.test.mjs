@@ -34,10 +34,16 @@ const server = http.createServer((req, res) => {
   const since = new URL(req.url, "http://x").searchParams.get("since") || "";
   res.end(JSON.stringify({ text: "brief since " + since, at: new Date().toISOString(), components: 2 }));
 });
-server.listen(0, "127.0.0.1", () => setTimeout(() => fs.writeFileSync(path.join(state, "runtime", "daemon.json"), JSON.stringify({
-  pid: process.pid, port: server.address().port, token: "${TOKEN}",
-  urls: ["https://abc123def456.live.vibeprint.viraat.dev/?t=${TOKEN}", "http://localhost:1/"],
-})), 150));
+// vibeprint writes daemon.json to a temp file and renames it, so a reader
+// never sees half of it; written in place, the host read it mid-write (5.0.16).
+const daemonJson = path.join(state, "runtime", "daemon.json");
+server.listen(0, "127.0.0.1", () => setTimeout(() => {
+  fs.writeFileSync(daemonJson + ".tmp", JSON.stringify({
+    pid: process.pid, port: server.address().port, token: "${TOKEN}",
+    urls: ["https://abc123def456.live.vibeprint.viraat.dev/?t=${TOKEN}", "http://localhost:1/"],
+  }));
+  fs.renameSync(daemonJson + ".tmp", daemonJson);
+}, 150));
 process.on("SIGTERM", () => { fs.rmSync(path.join(state, "runtime", "daemon.json"), { force: true }); process.exit(0); });
 `);
 

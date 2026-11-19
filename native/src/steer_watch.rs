@@ -19,6 +19,8 @@ use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -104,6 +106,10 @@ fn arm<W>(
                 }
                 Ok(watch) => return Ok(Some((level, watch))),
                 Err(error) if error.kind() == io::ErrorKind::NotFound && is_gone(path) => {}
+                // A sender created it after the add looked: look again.
+                Err(error) if error.kind() == io::ErrorKind::NotFound && fs::metadata(path).is_ok() => {
+                    continue 'nearest;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -246,9 +252,9 @@ impl Watch {
     }
 
     fn register(queue: &OwnedFd, path: &Path) -> io::Result<OwnedFd> {
-        let path = c_path(path)?;
-        // SAFETY: `path` is a valid NUL-terminated string for the call.
-        let dir = unsafe { libc::open(path.as_ptr(), libc::O_EVTONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        let c_path = c_path(path)?;
+        // SAFETY: `c_path` is a valid NUL-terminated string for the call.
+        let dir = unsafe { libc::open(c_path.as_ptr(), libc::O_EVTONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
         if dir < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -272,6 +278,20 @@ impl Watch {
         };
         if result < 0 {
             return Err(io::Error::last_os_error());
+        }
+        // A directory deleted or renamed between the open and the add never
+        // reports it, so the watch would sit on a dead one. Only the directory
+        // still at `path` counts; otherwise NotFound, and `arm` looks again.
+        // `fs::metadata` follows a symlink the way `open` did.
+        let live = fs::metadata(path)?;
+        // SAFETY: an all-zero stat is a valid output buffer.
+        let mut held: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `dir` is open and `held` is writable.
+        if unsafe { libc::fstat(dir.as_raw_fd(), &mut held) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if (live.dev(), live.ino()) != (held.st_dev as u64, held.st_ino) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "replaced while being watched"));
         }
         Ok(dir)
     }

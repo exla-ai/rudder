@@ -879,6 +879,8 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .create-btn[disabled] { background: var(--surface-3); color: var(--faint); }
 .create-btn.busy[disabled] { background: var(--accent); color: var(--accent-ink); opacity: 0.75; }
 .create-note { font-size: 12.5px; color: var(--faint); text-align: center; margin: 10px 8px 4px; line-height: 1.4; }
+/* The chat model sheet: a move to a harness the cloud machine is not signed in to. */
+.create-note.mp-blocked { color: var(--needs); }
 
 /* Agent terminal panel + key strip + slash suggestions */
 .term-panel { border-bottom: 1px solid var(--line, rgba(127,127,127,.18)); background: var(--surface-2, rgba(127,127,127,.06)); }

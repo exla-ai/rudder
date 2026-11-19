@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handoffPrompt, handoffShown } from "../cloud/worker/handoff.mjs";
+import { handoffPrompt, handoffRefusal, handoffShown } from "../cloud/worker/handoff.mjs";
 
 const cwd = "/work/repo";
 const say = (role, text) => ({ role, text });
@@ -55,4 +55,14 @@ test("a chat that moves again hands on what the last move handed over", () => {
   const marker = { role: "system", kind: "handoff", handoff: handoffShown(first) };
   const text = handoffPrompt({ goal: "Ship it", messages: [marker, say("assistant", "Summary: ready")], lines: [], codex: true, cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
   assert.match(text, /\(Earlier, Codex took this chat over from Claude · Opus 5\.5, which handed it this:\)\n### Goal\nShip it\n[\s\S]*User: go\n\nCodex: Summary: ready/);
+});
+
+test("a chat can't move to a harness the machine's sign-in check found signed out", () => {
+  const credentials = {
+    claude: { ok: true, account: "a@example.com", plan: "max", detail: null },
+    codex: { ok: false, account: "a@example.com", plan: "pro", detail: "login expired" },
+  };
+  assert.equal(handoffRefusal(credentials, "codex", "Codex"), "Codex isn't signed in on your cloud machine.");
+  assert.equal(handoffRefusal(credentials, "claude", "Claude"), null);
+  assert.equal(handoffRefusal(null, "codex", "Codex"), null, "before the first check nothing is known");
 });

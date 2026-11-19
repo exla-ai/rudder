@@ -24,7 +24,7 @@ import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
-import { handoffPrompt } from "./handoff.mjs";
+import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
 import { phoneStatus, statusFields } from "./agent-status.mjs";
@@ -861,6 +861,12 @@ async function handleRpc(method, params) {
     // Move one chat to another harness (native deliver_harness_request): the
     // new harness starts on a handoff built here from the old conversation
     // (handoff.mjs). The instruction is `<harness> <model> <effort>`, then it.
+    // A harness this machine is not signed in to is refused here as well as
+    // in the app, so an old app or a stale screen can't start a broken agent.
+    const refusal = handoffRefusal(credentials, params.backend, harnessLabel(params.backend));
+    if (refusal) {
+      throw new Error(refusal);
+    }
     const runId = String(params.runId || "");
     return await steer(project, { kind: "harness", taskId: runId, instruction: harnessHandoff(project, runId, params) });
   }
@@ -1277,10 +1283,13 @@ setInterval(() => keepModelsFresh().catch((error) => log(`models: ${error.messag
 function nameModel(backend, model) {
   return modelName(models?.value?.harnesses ?? [], backend, model ?? null);
 }
+// A harness in words: "Claude"; one the list lacks reads as its id.
+function harnessLabel(backend) {
+  return (models?.value?.harnesses ?? []).find((harness) => harness.id === backend)?.label ?? backend;
+}
 // A harness and model in words: "Claude · Opus 5.5".
 function modelWords(backend, model) {
-  const label = (models?.value?.harnesses ?? []).find((harness) => harness.id === backend)?.label ?? backend;
-  return [label, nameModel(backend, model)].filter(Boolean).join(" · ");
+  return [harnessLabel(backend), nameModel(backend, model)].filter(Boolean).join(" · ");
 }
 
 // How many of the old conversation's newest messages a handoff reads; it

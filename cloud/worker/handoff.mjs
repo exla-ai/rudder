@@ -95,6 +95,18 @@ export function handoffShown(text) {
   return { from: match[1], summary: body.slice(Math.max(0, start), end < 0 ? body.length : end).trim() };
 }
 
+/**
+ * Why a chat can't move to `backend` (named `label`) now, or null. A harness
+ * the machine's last sign-in check found signed out would start an agent
+ * that fails at once. `credentials` is that check (home.mjs
+ * checkCredentials): before its first answer nothing is known, and the move
+ * goes ahead. The app's model sheet refuses the same way (model-picker.js).
+ */
+export function handoffRefusal(credentials, backend, label) {
+  const cred = credentials?.[backend];
+  return cred && !cred.ok ? `${label} isn't signed in on your cloud machine.` : null;
+}
+
 function stopped(messages, working, cwd) {
   if (!working) {
     return "It had finished its last turn and was waiting for the user.";

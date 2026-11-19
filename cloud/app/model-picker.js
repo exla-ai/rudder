@@ -124,8 +124,16 @@ function choiceLabel(c) {
   return c ? modelText(c.backend, c.name, c.effort) : "Choose model";
 }
 
+/** The cloud machine's last sign-in check of a harness, or null before one. */
+const credOf = (backend) => app.store?.state?.home?.credentials?.[backend] ?? null;
+/** Whether that check found the harness signed out (cloud/worker/handoff.mjs handoffRefusal). */
+const signedOut = (backend) => {
+  const cred = credOf(backend);
+  return !!cred && !cred.ok;
+};
+
 function accountLine(harness) {
-  const cred = app.store?.state?.home?.credentials?.[harness.id];
+  const cred = credOf(harness.id);
   if (!cred) return `Runs on your own ${harness.account} subscription`;
   if (cred.ok) return [cred.account, cred.plan ? `${PLAN_LABEL[cred.plan] || cred.plan} plan` : null].filter(Boolean).join(" · ") || "Signed in";
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
@@ -389,13 +397,18 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     revealed = true;
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     const to = harnessLabel(pick.backend);
-    setText(note, moving
-      ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
+    // A harness the machine is not signed in to can't take the chat: its
+    // agent would fail at once. The home refuses it too.
+    const blocked = moving && signedOut(pick.backend);
+    setText(note, blocked
+      ? `${to} isn't signed in on your cloud machine. Sign in from Settings to move this chat there.`
+      : moving ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
       : busy ? "It is working right now. Switch when this turn ends."
       : "The conversation carries on. Its next reply uses the new model.");
+    note.classList.toggle("mp-blocked", blocked);
     const same = !moving && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
     const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
-    useBtn.disabled = !row || same || (busy && !moving);
+    useBtn.disabled = !row || same || (busy && !moving) || blocked;
     setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : `Switch to ${name}`);
   }
 

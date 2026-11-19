@@ -1229,8 +1229,10 @@ const server = http.createServer(async (req, res) => {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (harnessMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
-      await delay(250);
       const label = (backend) => (backend === "codex" ? "Codex" : "Claude");
+      // A harness the machine is not signed in to is refused (handoff.mjs handoffRefusal).
+      if (creds[body.backend] && !creds[body.backend].ok) return json(res, 400, { error: `${label(body.backend)} isn't signed in on your cloud machine.` });
+      await delay(250);
       const from = [label(t.a.backend), t.a.modelName].filter(Boolean).join(" · ");
       Object.assign(t.a, { backend: body.backend, model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, status: "working", updatedAt: now() });
       const asks = body.instructions ? `## The user's instructions for this handoff\n${body.instructions}\n\n` : "";

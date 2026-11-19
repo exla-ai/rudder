@@ -1402,6 +1402,7 @@ fn opencode_workers_auto_approve_but_opencode_planners_do_not() {
     // a planner must not silently edit the tree it is only supposed to read.
     let worker = opencode_command(
         "anthropic/claude-sonnet-4-5",
+        None,
         Some("do the thing"),
         AgentMode::Execute,
     );
@@ -1416,7 +1417,7 @@ fn opencode_workers_auto_approve_but_opencode_planners_do_not() {
         .windows(2)
         .any(|w| w[0] == "--prompt" && w[1] == "do the thing"));
 
-    let planner = opencode_command("", Some("decompose this"), AgentMode::RudderPlan);
+    let planner = opencode_command("", None, Some("decompose this"), AgentMode::RudderPlan);
     assert!(
         !planner.args.iter().any(|arg| arg == "--auto"),
         "planners stop for approval instead of editing: {:?}",
@@ -1430,7 +1431,12 @@ fn opencode_workers_auto_approve_but_opencode_planners_do_not() {
 
 #[test]
 fn opencode_forks_the_conversation_and_leaves_the_original_alone() {
-    let fork = opencode_fork_command("", "ses_05585081affeaTLQtSQn6hdypX", Some("keep going"));
+    let fork = opencode_fork_command(
+        "opencode/big-pickle",
+        Some(EffortLevel::High),
+        "ses_05585081affeaTLQtSQn6hdypX",
+        Some("keep going"),
+    );
     assert_eq!(fork.program, "opencode");
     assert!(fork
         .args
@@ -1440,19 +1446,40 @@ fn opencode_forks_the_conversation_and_leaves_the_original_alone() {
         fork.args.iter().any(|arg| arg == "--fork"),
         "--fork is what keeps the ORIGINAL session untouched"
     );
-    assert!(fork
-        .args
-        .windows(2)
-        .any(|w| w[0] == "--prompt" && w[1] == "keep going"));
+    // OpenCode's TUI ignores --prompt with --session (1.19); Rudder's plugin
+    // sends the message into the fork, on the run's model and effort.
+    assert!(!fork.args.iter().any(|arg| arg == "--prompt"), "{:?}", fork.args);
+    let env = |key: &str| fork.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    assert_eq!(env("RUDDER_OPENCODE_PROMPT"), Some("keep going"));
+    assert_eq!(env("RUDDER_OPENCODE_SESSION"), None, "a fork's message goes to the session it creates");
+    assert_eq!(env("RUDDER_OPENCODE_MODEL"), Some("opencode/big-pickle"));
+    assert_eq!(env("RUDDER_OPENCODE_VARIANT"), Some("high"));
+    let config: serde_json::Value =
+        serde_json::from_str(env("OPENCODE_CONFIG_CONTENT").expect("variant config")).expect("json");
+    assert_eq!(config["agent"]["build"]["variant"], "high", "the TUI's own turns run at the effort too");
+    assert_eq!(config["agent"]["build"]["model"], "opencode/big-pickle");
+    // (Other tests move RUDDER_HOME meanwhile, so only the file is compared.)
+    assert!(
+        config["plugin"][0].as_str().is_some_and(|plugin| plugin.ends_with("/signals/opencode-plugin.mjs")),
+        "the plugin that sends it is loaded by the same config: {config}"
+    );
+
+    // A planner's next turn goes into its own session the same way.
+    let refine = rudder_plan_refine_command(Backend::Opencode, "opencode/big-pickle", None, "tighten it", "ses_plan");
+    let env = |key: &str| refine.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    assert!(!refine.args.iter().any(|arg| arg == "--prompt"), "{:?}", refine.args);
+    assert_eq!(env("RUDDER_OPENCODE_PROMPT"), Some("tighten it"));
+    assert_eq!(env("RUDDER_OPENCODE_SESSION"), Some("ses_plan"));
+    let config: serde_json::Value = serde_json::from_str(env("OPENCODE_CONFIG_CONTENT").expect("plugin config")).expect("json");
+    assert!(config.get("agent").is_none(), "no effort, no variant: {config}");
 }
 
 #[test]
 fn opencode_workers_get_a_real_completion_signal_not_a_guess() {
     // Rudder kills interactive workers whose lifecycle hooks were never installed
     // rather than guessing completion from terminal chrome. opencode has no hook
-    // flag, so Rudder generates a plugin that reports session.idle.
-    let signal = std::path::Path::new("/tmp/rudder-signals/run-1.json");
-    let plugin = signals::opencode_plugin_js(signal);
+    // flag, so Rudder loads a plugin that reports session.idle.
+    let plugin = signals::OPENCODE_PLUGIN_JS;
     assert!(plugin.contains("session.idle"), "{plugin}");
     assert!(plugin.contains("\"done\""), "idle maps to done: {plugin}");
     assert!(
@@ -1469,21 +1496,32 @@ fn opencode_workers_get_a_real_completion_signal_not_a_guess() {
     );
 
     let config =
-        signals::opencode_config_json(std::path::Path::new("/tmp/rudder-signals/run-1.js"));
+        signals::opencode_config_json(std::path::Path::new("/tmp/rudder-signals/opencode-plugin.mjs"));
     let parsed: serde_json::Value = serde_json::from_str(&config).expect("valid config json");
     assert_eq!(
         parsed["plugin"][0].as_str(),
-        Some("/tmp/rudder-signals/run-1.js"),
-        "the config loads the generated plugin by absolute path"
+        Some("/tmp/rudder-signals/opencode-plugin.mjs"),
+        "the config loads the plugin by absolute path"
     );
+    let env = signals::opencode_plugin_env(std::path::Path::new("/tmp/rudder-signals"), "run-1");
+    assert!(env.contains(&(
+        "RUDDER_OPENCODE_SIGNAL".to_string(),
+        "/tmp/rudder-signals/run-1.json".to_string()
+    )));
+    assert!(env.contains(&(
+        "RUDDER_OPENCODE_SESSION_FILE".to_string(),
+        "/tmp/rudder-signals/run-1.opencode-session".to_string()
+    )));
 }
 
 #[test]
-fn opencode_offers_no_effort_dial_because_it_has_no_flag_for_one() {
+fn an_opencode_model_opencode_does_not_list_offers_no_effort() {
+    // An OpenCode model's efforts are its variants, read from
+    // `opencode models --verbose`; one it does not list has none to name.
     assert_eq!(
         effort_options_for(Backend::Opencode, "anthropic/claude-sonnet-4-5"),
         vec![None],
-        "offering an effort Rudder cannot pass would be a dead control"
+        "offering an effort OpenCode has no variant for would be a dead control"
     );
     assert_eq!(provider_backend("opencode"), Some(Backend::Opencode));
     assert_eq!(Backend::parse("opencode"), Some(Backend::Opencode));
@@ -1503,17 +1541,21 @@ fn a_provider_qualified_model_selects_opencode() {
 }
 
 #[test]
-fn opencode_model_list_keeps_provider_qualified_ids() {
-    let raw = "opencode/big-pickle\nanthropic/claude-sonnet-4-5\n\nSome header line\n";
-    let rows = parse_opencode_model_list(raw);
+fn opencode_model_list_keeps_provider_qualified_ids_and_their_variants() {
+    // `opencode models --verbose`, as 1.19.5 prints it.
+    let raw = "Some header line\nopencode/big-pickle\n{\n  \"id\": \"big-pickle\",\n  \"variants\": {}\n}\nopenrouter/anthropic/claude-sonnet-4.5\n{\n  \"id\": \"anthropic/claude-sonnet-4.5\",\n  \"variants\": {\n    \"max\": {\n      \"reasoningEffort\": \"max\"\n    },\n    \"high\": {},\n    \"ultra\": {}\n  }\n}\n";
+    let models = parse_opencode_models(raw);
     assert_eq!(
-        rows.iter()
-            .map(|(_, id, _)| id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["opencode/big-pickle", "anthropic/claude-sonnet-4-5"],
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["opencode/big-pickle", "openrouter/anthropic/claude-sonnet-4.5"],
         "prose lines are not models"
     );
-    assert_eq!(rows[0].2, "opencode", "the provider is the detail line");
+    assert!(models[0].efforts.is_empty(), "a model with no variants runs at none");
+    assert_eq!(
+        models[1].efforts,
+        vec![EffortLevel::High, EffortLevel::Max],
+        "the variants Rudder can name, lowest first"
+    );
 }
 
 #[test]
@@ -23957,9 +23999,9 @@ fn claude_wires_the_permission_matcher_and_the_answered_hook() {
 
 #[test]
 fn the_opencode_plugin_ignores_subagents_and_hears_the_reply() {
-    let plugin = signals::opencode_plugin_js(std::path::Path::new("/tmp/sig/run-1.json"));
+    let plugin = signals::OPENCODE_PLUGIN_JS;
     assert!(
-        plugin.contains("permission.replied"),
+        plugin.contains("permission.replied") && plugin.contains("question.replied"),
         "only the ASK was wired, so the waiting state latched on and never lifted: {plugin}"
     );
     assert!(
@@ -23980,6 +24022,10 @@ fn the_opencode_plugin_ignores_subagents_and_hears_the_reply() {
     assert!(
         plugin.contains("child = false"),
         "an unresolvable session still reports"
+    );
+    assert!(
+        plugin.contains("question.asked") && plugin.contains("report(\"input\")"),
+        "a question waits on the user like Claude's"
     );
 }
 
@@ -24030,19 +24076,15 @@ fn opencode_prose_about_keyboard_shortcuts_is_not_an_idle_footer() {
 }
 
 #[test]
-fn the_generated_opencode_plugin_is_valid_javascript() {
-    // The plugin is a STRING in Rust that opencode imports as an ES module. A
-    // stray brace here is not a compile error on our side — it is every opencode
-    // worker silently failing to load its only completion hook, which the
-    // dashboard then sees as a worker that never finishes. Parse it for real.
+fn the_opencode_plugin_is_valid_javascript() {
+    // OpenCode imports the plugin as an ES module. A stray brace is not a
+    // compile error on our side: it is every opencode worker silently failing
+    // to load its only completion hook, which the dashboard then sees as a
+    // worker that never finishes. Parse it for real.
     let dir = std::env::temp_dir().join(format!("rudder-plugin-check-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("plugin.mjs");
-    std::fs::write(
-        &file,
-        signals::opencode_plugin_js(std::path::Path::new("/tmp/sig/run-1.json")),
-    )
-    .expect("write plugin");
+    std::fs::write(&file, signals::OPENCODE_PLUGIN_JS).expect("write plugin");
 
     let Ok(output) = std::process::Command::new("node")
         .arg("--check")
@@ -28751,7 +28793,7 @@ fn claude_hooks_report_the_live_session_and_the_row_follows_it() {
     run.terminal = None;
     run.session_id = Some("a29953b9-bed6-4a56-a0c4-55be8e07188b".to_string());
     app.agents.push(run);
-    app.adopt_reported_claude_sessions();
+    app.adopt_reported_sessions();
     let adopted = app.agents[0].session_id.clone();
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(adopted.as_deref(), Some("3709e163-3eb4-489f-a5a9-15353f4aa59b"));

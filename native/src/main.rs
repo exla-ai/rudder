@@ -117,6 +117,7 @@ mod publish;
 use crate::publish::*;
 mod handoff;
 use crate::handoff::*;
+mod opencode;
 mod plan_stream;
 mod telemetry;
 
@@ -3513,6 +3514,14 @@ impl App {
         let (final_gate_tx, final_gate_rx) = mpsc::channel();
         let branch = current_branch_at(&cwd);
         let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60));
+        // Tests would write the developer's own ~/.rudder.
+        let opencode_plugin_notice = if cfg!(test) {
+            None
+        } else {
+            signals::install_opencode_plugin()
+                .err()
+                .map(|error| format!("OpenCode agents cannot report to Rudder: {error:#}"))
+        };
         let perf = PerfLogger::new();
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
@@ -3604,7 +3613,7 @@ impl App {
             backend: selection.backend,
             model: selection.model,
             effort: selection.effort,
-            notice: None,
+            notice: opencode_plugin_notice,
             notice_seen: None,
             show_keys: false,
             reveal_started: None,
@@ -6661,7 +6670,7 @@ impl App {
             .diff_panel
             .tokens_refreshed_at
             .is_none_or(|at| at.elapsed() >= DIFF_PANEL_TOKEN_REFRESH);
-        if tokens_due && !cfg!(test) && !is_cloud_agent(run) && run.backend != Backend::Opencode {
+        if tokens_due && !cfg!(test) && !is_cloud_agent(run) {
             let before = (run.tokens_in, run.tokens_out);
             if self.diff_panel.open { refresh_run_token_usage(run); }
             self.diff_panel.tokens_refreshed_at = Some(Instant::now());
@@ -9361,7 +9370,7 @@ impl App {
             // opencode has no read-only headless mode; the reconcile planner runs in
             // its TUI (no --auto, so an unexpected edit stops for approval) and its
             // plan block is read out of the pane like every other opencode planner.
-            Backend::Opencode => opencode_command(model, Some(prompt), AgentMode::RudderPlan),
+            Backend::Opencode => opencode_command(model, effort, Some(prompt), AgentMode::RudderPlan),
         }
     }
 
@@ -11972,7 +11981,7 @@ Address the objection directly. If you disagree, say why inside \
         }
         // Reopen the conversation each agent was last in, not the one it
         // started with.
-        self.adopt_reported_claude_sessions();
+        self.adopt_reported_sessions();
         let mut candidates: Vec<(u128, String)> = self
             .agents
             .iter()
@@ -11995,8 +12004,7 @@ Address the objection directly. If you disagree, say why inside \
                     && !run.merge_resolver
                     && run.gam.is_none()
                     && !is_cloud_owned_agent(run)
-                    // Opencode has no resume here that runs no turn.
-                    && matches!(run.backend, Backend::Claude | Backend::Codex)
+                    && matches!(run.backend, Backend::Claude | Backend::Codex | Backend::Opencode)
                     && run
                         .session_id
                         .as_deref()
@@ -12728,7 +12736,7 @@ Address the objection directly. If you disagree, say why inside \
         let mut command = match backend {
             Backend::Claude => claude_fork_command(&model, effort, session_id, instruction),
             Backend::Codex => codex_fork_command(&model, effort, session_id, instruction),
-            Backend::Opencode => opencode_fork_command(&model, session_id, instruction),
+            Backend::Opencode => opencode_fork_command(&model, effort, session_id, instruction),
         };
         let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
@@ -13391,10 +13399,10 @@ Address the objection directly. If you disagree, say why inside \
                         });
                     }
                     Backend::Opencode => {
-                        // No fast tier and no effort dial: say so instead of silently
-                        // doing nothing (or pretending a flag was applied).
+                        // No fast tier to pick: say so instead of silently doing
+                        // nothing (or pretending a flag was applied).
                         self.notice = Some(
-                            "opencode has no fast mode or effort dial — pick a faster model with /model opencode <provider/model>"
+                            "opencode has no fast mode: pick a faster model with /model opencode <provider/model>, or a lower effort"
                                 .to_string(),
                         );
                     }
@@ -15500,9 +15508,9 @@ Address the objection directly. If you disagree, say why inside \
                     .as_deref()
                     .and_then(|sid| claude_transcript_final_text(&self.cwd, sid)),
                 Backend::Codex => latest_codex_rudder_plan_output(run),
-                // opencode keeps its transcript in a database Rudder does not read;
-                // the pane text IS the plan source for this backend.
-                Backend::Opencode => None,
+                Backend::Opencode => session_id
+                    .as_deref()
+                    .and_then(crate::opencode::final_assistant_text),
             };
             if let Some(text) = fallback_text {
                 if extract_rudder_plan_tasks(&text)
@@ -19762,7 +19770,7 @@ Address the objection directly. If you disagree, say why inside \
         let mut command = match backend {
             Backend::Claude => claude_fork_command(&model, effort, &session_id, seed.as_deref()),
             Backend::Codex => codex_fork_command(&model, effort, &session_id, seed.as_deref()),
-            Backend::Opencode => opencode_fork_command(&model, &session_id, seed.as_deref()),
+            Backend::Opencode => opencode_fork_command(&model, effort, &session_id, seed.as_deref()),
         };
         let command = signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
             .map(|()| command);
@@ -20394,12 +20402,13 @@ Address the objection directly. If you disagree, say why inside \
             let session = run.session_id.clone().filter(|s| !s.trim().is_empty());
             let (mut command, deliver_after, new_session) = if let Some(sid) = session.as_deref() {
                 // Resume the SAME session; the new goal arrives as the next turn.
-                let command = match backend {
-                    Backend::Claude => claude_resume_command(run, sid),
-                    Backend::Codex => codex_resume_command(run, sid),
-                    Backend::Opencode => opencode_resume_command(run, sid),
-                };
-                (command, Some(new_goal.to_string()), session.clone())
+                // OpenCode's TUI takes no typed-ahead turn into a session it
+                // opens; its plugin sends it.
+                match backend {
+                    Backend::Claude => (claude_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
+                    Backend::Codex => (codex_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
+                    Backend::Opencode => (opencode_continue_command(run, sid, new_goal), None, session.clone()),
+                }
             } else {
                 // No session to resume: fresh spawn carrying a handoff. Files persist
                 // in the jj workspace; only conversation memory is lost.
@@ -21229,7 +21238,7 @@ What to do\n\
         }
         self.last_reconcile = Some(Instant::now());
         self.ensure_session_ids_recorded();
-        self.adopt_reported_claude_sessions();
+        self.adopt_reported_sessions();
         self.verify_merged_rows();
         self.flag_missing_workspaces();
     }
@@ -21349,19 +21358,22 @@ What to do\n\
     /// Recording it while the run is alive closes that window, and running the same
     /// lookup for rows that RELOAD without an id rescues the ones already lost —
     /// the rollout is still on disk, Rudder just never wrote down which one it was.
-    /// Follow a Claude conversation the user switched to inside the pane
-    /// (`/resume`, `/clear`). Its hooks report the live session id; the run
-    /// record keeps the one Rudder launched with otherwise, so the phone's
+    /// Follow the conversation a Claude or OpenCode agent is on. Their hooks
+    /// report the live session id: Claude's after `/resume` or `/clear` in the
+    /// pane, OpenCode's always, since OpenCode mints its own session ids. The
+    /// run record keeps the one Rudder launched with otherwise, so the phone's
     /// chat view showed an empty transcript and a reopen resumed the wrong
     /// conversation.
-    fn adopt_reported_claude_sessions(&mut self) {
+    fn adopt_reported_sessions(&mut self) {
         let cwd = self.cwd.clone();
         let mut adopted = Vec::new();
         for run in self.agents.iter_mut() {
-            if run.backend != Backend::Claude {
-                continue;
-            }
-            let Some(reported) = signals::read_claude_session(&run.id) else {
+            let (reported, kind) = match run.backend {
+                Backend::Claude => (signals::read_claude_session(&run.id), "Claude session"),
+                Backend::Opencode => (signals::read_opencode_session(&run.id), "OpenCode session"),
+                Backend::Codex => continue,
+            };
+            let Some(reported) = reported else {
                 continue;
             };
             if !valid_session_id(&reported) || run.session_id.as_deref() == Some(reported.as_str()) {
@@ -21369,11 +21381,11 @@ What to do\n\
             }
             let previous = run.session_id.replace(reported.clone());
             let _ = save_native_run_record(&cwd, run);
-            adopted.push((run.id.clone(), previous, reported));
+            adopted.push((run.id.clone(), kind, previous, reported));
         }
-        for (run_id, previous, reported) in adopted {
+        for (run_id, kind, previous, reported) in adopted {
             self.push_activity(format!(
-                "{run_id}: now on Claude session {reported} (was {})",
+                "{run_id}: now on {kind} {reported} (was {})",
                 previous.unwrap_or_else(|| "none".to_string())
             ));
         }
@@ -21802,18 +21814,17 @@ What to do\n\
                         run.last_worker_input_at,
                         run.completed_at,
                     );
-                    // A Claude or Codex worker has its UserPromptSubmit hook wired
-                    // (Codex's with the trust bypass, signals.rs), and THAT is what a
-                    // new turn is. "Typed something and the pane repainted" is not: a
+                    // A Claude, Codex or OpenCode worker has a turn-start hook wired
+                    // (Codex's with the trust bypass, OpenCode's session.status busy;
+                    // signals.rs), and THAT is what a new turn is. "Typed something and the pane repainted" is not: a
                     // draft being typed, `/model`, `/help`, Esc, F2, any local command
                     // repaints without starting a turn (measured: `/model` fires no
                     // hook at all), and no Stop ever ends a turn that never began, so
                     // the row spun "working" until someone noticed. A Codex turn no
                     // prompt starts (a goal continuing, an approved plan) reopens the
                     // row from its rollout instead (`poll_codex_rollouts`).
-                    // Orchestrators, plain panes and opencode keep the typed-input
-                    // reading.
-                    let hooks_say_new_turn = matches!(run.backend, Backend::Claude | Backend::Codex)
+                    // Orchestrators and plain panes keep the typed-input reading.
+                    let hooks_say_new_turn = matches!(run.backend, Backend::Claude | Backend::Codex | Backend::Opencode)
                         && !is_orchestrator
                         && !run.plain_process;
                     let user_started_new_turn = if hooks_say_new_turn {

@@ -368,9 +368,15 @@ pub(crate) fn collect_run_token_usage_in(
                 output += usage.output_tokens;
             }
         }
-        // opencode keeps its usage in its own store (`opencode stats`), which Rudder
-        // does not read yet: an opencode row reports zero rather than a wrong number.
-        Backend::Opencode => {}
+        // OpenCode keeps each message's usage in its database, under the
+        // session its plugin reports (opencode.rs).
+        Backend::Opencode => {
+            if let Some(session) = run.session_id.as_deref() {
+                let (session_input, session_output) = crate::opencode::token_usage(session);
+                input += session_input;
+                output += session_output;
+            }
+        }
         Backend::Codex => {
             for usage in collect_codex_usage_in(codex_sessions_root, &run.cwd, &since).values() {
                 input += usage.input_tokens;

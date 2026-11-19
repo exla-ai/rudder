@@ -368,11 +368,7 @@ pub(crate) fn rudder_plan_refine_command(
         Backend::Opencode => {
             let mut args = vec!["--session".to_string(), session_id.to_string()];
             push_opencode_model(&mut args, model);
-            if !feedback_prompt.trim().is_empty() {
-                args.push("--prompt".to_string());
-                args.push(feedback_prompt.to_string());
-            }
-            TerminalCommand::with_args(opencode_program(), args)
+            opencode_tui(args, model, effort, Some(OpencodeFirstMessage { session: Some(session_id), text: feedback_prompt }))
         }
     }
 }
@@ -689,7 +685,7 @@ fn build_agent_command(
             }
             TerminalCommand::with_args(codex_program(), args)
         }
-        Backend::Opencode => opencode_command(model, prompt.as_deref(), mode),
+        Backend::Opencode => opencode_command(model, effort, prompt.as_deref(), mode),
     }
 }
 
@@ -703,6 +699,7 @@ fn build_agent_command(
 /// WITHOUT `--auto` so an unexpected edit stops for approval rather than landing.
 pub(crate) fn opencode_command(
     model: &str,
+    effort: Option<EffortLevel>,
     prompt: Option<&str>,
     mode: AgentMode,
 ) -> TerminalCommand {
@@ -718,7 +715,7 @@ pub(crate) fn opencode_command(
         args.push("--prompt".to_string());
         args.push(prompt.to_string());
     }
-    TerminalCommand::with_args(opencode_program(), args)
+    opencode_tui(args, model, effort, None)
 }
 
 /// opencode names models `provider/model`. An empty model means "whatever opencode
@@ -727,25 +724,103 @@ fn push_opencode_model(args: &mut Vec<String>, model: &str) {
     let model = model.trim();
     if !model.is_empty() {
         args.push("-m".to_string());
-        args.push(live_codex_model(model).to_string());
+        args.push(model.to_string());
     }
 }
 
-/// Continue an opencode conversation in place (same session, no fork).
-pub(crate) fn opencode_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
+/// A first message for an OpenCode TUI that opens an existing session, which
+/// ignores `--prompt` (OpenCode 1.19): into `session`, or without one into
+/// the session the launch creates (a `--fork`).
+pub(crate) struct OpencodeFirstMessage<'a> {
+    pub(crate) session: Option<&'a str>,
+    pub(crate) text: &'a str,
+}
+
+/// An OpenCode TUI on `model` at `effort`.
+///
+/// OpenCode runs a model at an effort through the model's variant of that name
+/// (`opencode models --verbose` lists each model's; models.rs
+/// cached_model_efforts). Its TUI has no flag for one: an agent's configured
+/// `variant` applies when the agent runs its configured model, so the launch
+/// names both through OPENCODE_CONFIG_CONTENT, which OpenCode merges over the
+/// user's config. Rudder's agents run its build agent. src/opencode.ts builds
+/// the same config for CLI-started panes.
+///
+/// A first message goes through Rudder's plugin (opencode_plugin.mjs), loaded
+/// by the same config from where the dashboard installs it at start. A worker's
+/// own OPENCODE_CONFIG loads the plugin too (signals.rs); it runs once.
+fn opencode_tui(
+    args: Vec<String>,
+    model: &str,
+    effort: Option<EffortLevel>,
+    first: Option<OpencodeFirstMessage>,
+) -> TerminalCommand {
+    let model = model.trim();
+    let mut command = TerminalCommand::with_args(opencode_program(), args);
+    let mut config = serde_json::Map::new();
+    if let (Some(effort), false) = (effort, model.is_empty()) {
+        config.insert(
+            "agent".to_string(),
+            serde_json::json!({ "build": { "model": model, "variant": effort.as_str() } }),
+        );
+    }
+    let first = first.filter(|first| !first.text.trim().is_empty());
+    if let (Some(first), Some(plugin)) = (first, signals::opencode_plugin_path()) {
+        config.insert("plugin".to_string(), serde_json::json!([plugin.display().to_string()]));
+        command = command
+            .with_env("RUDDER_OPENCODE_PROMPT", first.text.trim())
+            .with_env("RUDDER_OPENCODE_AGENT", "build");
+        if let Some(session) = first.session {
+            command = command.with_env("RUDDER_OPENCODE_SESSION", session);
+        }
+        if !model.is_empty() {
+            command = command.with_env("RUDDER_OPENCODE_MODEL", model);
+        }
+        if let Some(effort) = effort {
+            command = command.with_env("RUDDER_OPENCODE_VARIANT", effort.as_str());
+        }
+    }
+    if !config.is_empty() {
+        command = command.with_env("OPENCODE_CONFIG_CONTENT", serde_json::Value::Object(config).to_string());
+    }
+    command
+}
+
+fn opencode_resume_args(model: &str, session_id: &str) -> Vec<String> {
     let mut args = vec![
         "--auto".to_string(),
         "--session".to_string(),
         session_id.to_string(),
     ];
-    push_opencode_model(&mut args, &run.model);
-    TerminalCommand::with_args(opencode_program(), args)
+    push_opencode_model(&mut args, model);
+    args
+}
+
+/// Continue an opencode conversation in place (same session, no fork).
+pub(crate) fn opencode_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
+    opencode_tui(opencode_resume_args(&run.model, session_id), &run.model, run.effort, None)
+}
+
+/// Continue an opencode conversation in place with a new message as its next turn.
+pub(crate) fn opencode_continue_command(
+    run: &AgentRun,
+    session_id: &str,
+    message: &str,
+) -> TerminalCommand {
+    opencode_tui(
+        opencode_resume_args(&run.model, session_id),
+        &run.model,
+        run.effort,
+        Some(OpencodeFirstMessage { session: Some(session_id), text: message }),
+    )
 }
 
 /// BRANCH an opencode chat: `--session <id> --fork` copies the conversation into a
 /// new session and leaves the original untouched, like the other two backends.
+/// The first message goes to the fork through Rudder's plugin.
 pub(crate) fn opencode_fork_command(
     model: &str,
+    effort: Option<EffortLevel>,
     session_id: &str,
     prompt: Option<&str>,
 ) -> TerminalCommand {
@@ -756,11 +831,8 @@ pub(crate) fn opencode_fork_command(
         "--fork".to_string(),
     ];
     push_opencode_model(&mut args, model);
-    if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("--prompt".to_string());
-        args.push(prompt.to_string());
-    }
-    TerminalCommand::with_args(opencode_program(), args)
+    let first = prompt.map(|text| OpencodeFirstMessage { session: None, text });
+    opencode_tui(args, model, effort, first)
 }
 
 /// Resume an INTERACTIVE orchestrator session as the LIVE CONDUCTOR.
@@ -825,11 +897,7 @@ pub(crate) fn rudder_orchestrator_resume_command(
         Backend::Opencode => {
             let mut args = vec!["--session".to_string(), session_id.to_string()];
             push_opencode_model(&mut args, model);
-            if !continuation.trim().is_empty() {
-                args.push("--prompt".to_string());
-                args.push(continuation.to_string());
-            }
-            TerminalCommand::with_args(opencode_program(), args)
+            opencode_tui(args, model, effort, Some(OpencodeFirstMessage { session: Some(session_id), text: continuation }))
         }
     }
 }

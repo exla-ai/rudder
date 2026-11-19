@@ -267,7 +267,7 @@ impl App {
         // The row follows the session its worker's hooks last reported. That
         // report may name a session from an earlier stint on this harness, so
         // the new one is recorded now (Claude), or the old report goes (Codex
-        // names its new thread once it starts).
+        // and OpenCode name their new session once it starts).
         let reported = match session.as_deref().filter(|_| backend == Backend::Claude) {
             Some(session) => signals::claude_session_path(&run.id)
                 .ok_or_else(|| "HOME is not set".to_string())
@@ -277,12 +277,16 @@ impl App {
                         .and_then(|()| std::fs::rename(&temp, &file))
                         .map_err(|error| error.to_string())
                 }),
-            None => signals::signal_path(&run.id)
-                .ok_or_else(|| "HOME is not set".to_string())
-                .and_then(|signal| match std::fs::remove_file(format!("{}.session", signal.display())) {
-                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
-                    _ => Ok(()),
-                }),
+            None => match backend {
+                Backend::Opencode => signals::opencode_session_path(&run.id),
+                _ => signals::signal_path(&run.id)
+                    .map(|signal| std::path::PathBuf::from(format!("{}.session", signal.display()))),
+            }
+            .ok_or_else(|| "HOME is not set".to_string())
+            .and_then(|stale| match std::fs::remove_file(stale) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+                _ => Ok(()),
+            }),
         };
         if let Err(error) = reported {
             unrecorded.push(format!("its new session was not recorded: {error}"));

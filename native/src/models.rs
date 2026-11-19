@@ -305,7 +305,7 @@ pub(crate) fn effort_detail(backend: Backend, effort: Option<EffortLevel>) -> &'
         (_, Some(EffortLevel::XHigh)) => "extended reasoning",
         (Backend::Claude, Some(EffortLevel::Max)) => "maximum reasoning",
         (Backend::Codex, Some(EffortLevel::Max)) => "not used",
-        (Backend::Opencode, Some(EffortLevel::Max)) => "not used",
+        (Backend::Opencode, Some(EffortLevel::Max)) => "maximum reasoning",
     }
 }
 
@@ -323,8 +323,8 @@ pub(crate) fn model_supports_reasoning(backend: Backend, model: &str) -> bool {
         Backend::Codex => {
             is_gpt_text_model(model) || model.contains("codex") || is_o_series_model(model)
         }
-        // opencode exposes no reasoning-effort flag, whatever the underlying model
-        // supports, so Rudder offers no effort choice rather than a dead one.
+        // An OpenCode model's efforts are exactly its variants
+        // (cached_model_efforts); one OpenCode does not list has none.
         Backend::Opencode => false,
     };
     // OR the heuristic with the cache rather than letting the cache override it: a
@@ -347,15 +347,20 @@ pub(crate) fn is_reasoning_alias(backend: Backend, model: &str) -> bool {
     }
 }
 
-/// The effort levels Claude Code lists for a Claude model or alias, as the
-/// catalog keeps them (`anthropic.models.<id>.efforts`, written by
-/// src/models.ts from Claude Code's own model list). None when Claude Code
-/// does not list it.
+/// The effort levels a model's CLI lists for it: Claude Code's for a Claude
+/// model or alias, as the catalog keeps them (`anthropic.models.<id>.efforts`,
+/// written by src/models.ts from Claude Code's own model list), and an OpenCode
+/// model's variants of those names (`opencode models --verbose`). None when
+/// the CLI does not list the model.
 pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<EffortLevel>> {
-    if backend != Backend::Claude {
-        return None;
+    match backend {
+        Backend::Claude => cached_claude_code_efforts().get(model).cloned(),
+        Backend::Opencode => cached_opencode_models()
+            .into_iter()
+            .find(|entry| entry.id == model)
+            .map(|entry| entry.efforts),
+        Backend::Codex => None,
     }
-    cached_claude_code_efforts().get(model).cloned()
 }
 
 /// Every catalog entry's Claude Code effort list, parsed once per version of
@@ -1356,7 +1361,6 @@ pub(crate) fn model_suggestions_for(backend_filter: Backend, query: &str) -> Vec
         }
     }
     if backend_filter == Backend::Opencode {
-        maybe_refresh_opencode_models_cache();
         for (backend, model, detail) in cached_opencode_rows() {
             push_model_suggestion(&mut suggestions, &mut seen, backend, &model, &detail);
         }
@@ -1716,14 +1720,15 @@ pub(crate) fn score_model(backend: Backend, id: &str) -> i32 {
     }
 }
 
-/// Where `opencode models` output is cached for the picker. Running the binary on
-/// the render path is not an option, so the list is refreshed in the background.
+/// Where `opencode models --verbose` output is cached for the picker. Running
+/// the binary on the render path is not an option, so the list is refreshed in
+/// the background.
 pub(crate) fn opencode_models_cache_path() -> Option<PathBuf> {
     std::env::var_os("RUDDER_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rudder")))
-        .map(|home| home.join("opencode-models.txt"))
+        .map(|home| home.join("opencode-models-verbose.txt"))
 }
 
 /// One detached `opencode models` refresh per session when the cache is missing or
@@ -1752,7 +1757,7 @@ fn maybe_refresh_opencode_models_cache() {
     }
     // Write to a temp and rename so a half-written list is never read.
     let script = format!(
-        "{program} models > '{path}'.tmp 2>/dev/null && mv -f '{path}'.tmp '{path}'",
+        "{program} models --verbose > '{path}'.tmp 2>/dev/null && mv -f '{path}'.tmp '{path}'",
         program = opencode_program(),
         path = path.display()
     );
@@ -1770,35 +1775,77 @@ fn maybe_refresh_opencode_models_cache() {
     }
 }
 
-/// The models `opencode models` reported: `provider/model` per line. That command
-/// knows which providers the user is actually authenticated for, which no static
-/// table could.
+/// The models `opencode models` reported. That command knows which providers
+/// the user is actually authenticated for, which no static table could.
 pub(crate) fn cached_opencode_rows() -> Vec<(Backend, String, String)> {
+    cached_opencode_models()
+        .into_iter()
+        .map(|entry| {
+            let provider = entry.id.split('/').next().unwrap_or_default().to_string();
+            (Backend::Opencode, entry.id, provider)
+        })
+        .collect()
+}
+
+/// One model `opencode models --verbose` lists and the efforts it runs at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpencodeModel {
+    pub(crate) id: String,
+    pub(crate) efforts: Vec<EffortLevel>,
+}
+
+fn cached_opencode_models() -> Vec<OpencodeModel> {
+    maybe_refresh_opencode_models_cache();
     let Some(path) = opencode_models_cache_path() else {
         return Vec::new();
     };
     let Ok(raw) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    parse_opencode_model_list(&raw)
+    parse_opencode_models(&raw)
 }
 
-pub(crate) fn parse_opencode_model_list(raw: &str) -> Vec<(Backend, String, String)> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && line.contains('/')
-                && !line.contains(char::is_whitespace)
-                && line
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || "/-_.:[]".contains(ch))
-        })
-        .map(|line| {
-            let provider = line.split('/').next().unwrap_or_default().to_string();
-            (Backend::Opencode, line.to_string(), provider)
-        })
-        .collect()
+/// `opencode models --verbose`: each model's `provider/model` id on a line of
+/// its own, then its JSON, closed by a `}` line. A model's `variants` are the
+/// reasoning levels it runs at, by name; those Rudder names are its efforts.
+/// src/models.ts parseOpencodeModels reads the same output for the app.
+pub(crate) fn parse_opencode_models(raw: &str) -> Vec<OpencodeModel> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut models = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let id = lines[index].trim();
+        let is_id = id.contains('/')
+            && !id.contains(char::is_whitespace)
+            && !id.contains(|ch: char| "{}\"".contains(ch));
+        if !is_id || lines.get(index + 1) != Some(&"{") {
+            index += 1;
+            continue;
+        }
+        let Some(close) = lines[index + 1..].iter().position(|line| *line == "}") else {
+            break;
+        };
+        let end = index + 1 + close;
+        let body = lines[index + 1..=end].join("\n");
+        let named: Vec<EffortLevel> = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("variants").and_then(|v| v.as_object()).cloned())
+            .map(|variants| variants.keys().filter_map(|name| EffortLevel::parse(name)).collect())
+            .unwrap_or_default();
+        let efforts = [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::XHigh,
+            EffortLevel::Max,
+        ]
+        .into_iter()
+        .filter(|level| named.contains(level))
+        .collect();
+        models.push(OpencodeModel { id: id.to_string(), efforts });
+        index = end + 1;
+    }
+    models
 }
 
 pub(crate) fn is_excluded_openai_text_model(id: &str) -> bool {

@@ -1094,7 +1094,7 @@ impl App {
         self.dirty = true;
         if backend == Backend::Claude {
             // Claude's hooks last reported the old session id, and the row
-            // follows what they report (adopt_reported_claude_sessions).
+            // follows what they report (adopt_reported_sessions).
             let written = signals::claude_session_path(&outcome.run_id)
                 .ok_or_else(|| "HOME is not set".to_string())
                 .and_then(|file| {

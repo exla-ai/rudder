@@ -223,6 +223,7 @@ COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
+COPY cloud/worker/context-usage.mjs ./context-usage.mjs
 COPY cloud/worker/suggestion.mjs ./suggestion.mjs
 COPY cloud/worker/slash-commands.mjs ./slash-commands.mjs
 COPY cloud/worker/vibeprint-host.mjs ./vibeprint-host.mjs

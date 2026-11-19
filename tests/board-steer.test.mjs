@@ -196,6 +196,9 @@ test("standalone board redirects a running worker and returns it through review"
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
     };
+    // A plan that withholds "integrate" keeps finished work in Review, where
+    // the board's review steps run; any other node lands on main at once.
+    graph.planningOwnership = { "review-plan": { nodes: { "running-node": { scope: { permissions: ["read", "edit"] } } } } };
     return graph;
   });
 

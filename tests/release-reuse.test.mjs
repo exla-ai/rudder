@@ -310,7 +310,8 @@ test('workflow preserves platform/test gates and publishes only from two explici
   assert.ok(yaml.includes('EXPECTED_NATIVE_ARCHIVES_SHA256: ${{ steps.native_archives.outputs.proof_sha256 }}'));
   assert.ok(!yaml.includes('pattern: rudder-native-*')); // No warning-only original native extraction.
   assert.equal((yaml.match(/npm publish --provenance --access public/g)||[]).length,1);
-  assert.ok(yaml.includes('npm deprecate @viraatdas/rudder "Retired. Rudder is @exla/rudder:'));
+  // npm trusts this workflow (OIDC); no token is stored or passed.
+  assert.ok(yaml.includes('id-token: write') && !/NPM_TOKEN|NODE_AUTH_TOKEN/.test(yaml));
   assert.ok(!yaml.includes('npm pkg set name=@viraatdas/rudder'));
   assert.ok(!yaml.includes('workflow_dispatch:') && !yaml.includes('workflow_run:'));
 });

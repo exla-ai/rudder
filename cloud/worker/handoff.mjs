@@ -177,11 +177,13 @@ function toolLine(tool, cwd) {
 // The files the session's edit calls wrote, newest first: Claude's Edit,
 // Write, MultiEdit and NotebookEdit, Codex's patches, and OpenCode's edit,
 // write and multiedit calls and patches. Only lines that can hold one are
-// parsed.
+// parsed. An Antigravity transcript step names its tool and a summary, not
+// the files an edit wrote, so a chat leaving Antigravity lists none.
 const MAY_CHANGE = {
   claude: (line) => line.includes('"tool_use"'),
   codex: (line) => line.includes(" File: "),
   opencode: (line) => line.includes('"tool"'),
+  antigravity: () => false,
 };
 
 function changedFiles(lines, backend, cwd) {

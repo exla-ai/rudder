@@ -2,8 +2,10 @@
 //
 // Claude Code keeps one JSONL per session at
 //   ~/.claude/projects/<cwd with every non-alphanumeric char as "->/<id>.jsonl
-// and Codex keeps rollouts at ~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl.
-// Both are normalized to { id, role, ts, text, tool } messages; a user message
+// Codex keeps rollouts at ~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl,
+// and Antigravity (agy) keeps one per conversation at
+//   ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl.
+// All are normalized to { id, role, ts, text, tool } messages; a user message
 // with files sent from the app also has `attachments`.
 
 import fs from "node:fs";
@@ -82,30 +84,31 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     base.messages = showAttachments(recordedTurns(record).map(showHandoff));
     return base;
   }
-  const codex = record.backend === "codex";
+  const backend = record.backend || "claude";
   const page = readPage(sessionSegments(record, file, home), {
-    codex,
+    backend,
     end: end?.offset ?? null,
     start,
     leaf: end?.leaf ?? "",
     limit,
-    stats: end ? null : codex ? codexStats : claudeStats,
+    stats: end ? null : STATS[backend],
   });
   base.messages = showAttachments(showUserTask(page.messages, record));
   base.earlier = page.start > 0 ? `${conversation}:${page.start}:${page.leaf}` : null;
   // Subagents the page started, each on its spawn call.
   const shown = new Set(base.messages);
   const live = subagentsLive(record);
-  if (codex) {
+  if (backend === "codex") {
     attachCodexSubagents(page.reader, { home, live, shown, depth: 0 });
-  } else {
+  } else if (backend === "claude") {
     attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
   }
   if (end) {
     return base;
   }
-  // The prompts the app may offer to edit (chat-edit.js).
-  base.edits = editablePrompts(page.lines, codex ? "codex" : "claude");
+  // The prompts the app may offer to edit (chat-edit.js). agy cannot branch a
+  // conversation from an earlier turn, so an Antigravity chat offers none.
+  base.edits = backend === "antigravity" ? [] : editablePrompts(page.lines, backend);
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // A compaction under way. Its session gets nothing until it ends, so this
@@ -164,7 +167,7 @@ function sessionSegments(record, file, home) {
 // to byte `end` (the end of the session when null). Without `start`, it reads
 // back TAIL_BYTES, and twice as far each time that holds no message, until
 // one does or it reaches the session's start.
-function readPage(segments, { codex, end, start, leaf, limit, stats }) {
+function readPage(segments, { backend, end, start, leaf, limit, stats }) {
   const total = segments.reduce((sum, segment) => sum + segment.end, 0);
   const stop = end ?? total;
   if (stop > total || (start ?? 0) > stop) {
@@ -173,10 +176,10 @@ function readPage(segments, { codex, end, start, leaf, limit, stats }) {
   for (let bytes = TAIL_BYTES; ; bytes *= 2) {
     const from = start ?? Math.max(0, stop - bytes);
     const window = readSessionLines(segments, from, stop);
-    const branch = codex ? null : activeClaudeLines(window.lines, leaf, from === 0);
+    const branch = backend === "claude" ? activeClaudeLines(window.lines, leaf, from === 0) : null;
     const lines = branch ? window.lines.filter((_, index) => branch.keep[index]) : window.lines;
     const offsets = branch ? window.offsets.filter((_, index) => branch.keep[index]) : window.offsets;
-    const page = parsePage(lines, offsets, { codex, stats: stats?.() ?? null });
+    const page = parsePage(lines, offsets, { backend, stats: stats?.() ?? null });
     if (start === null && from > 0 && !page.reader.messages.length) {
       continue;
     }
@@ -198,8 +201,8 @@ function readPage(segments, { codex, end, start, leaf, limit, stats }) {
 // line (`born`, by offset) and each tool result's span (`results`: the
 // offset of its call's line, -1 when that came before these lines, and its
 // own).
-function parsePage(lines, offsets, { codex, stats }) {
-  const reader = codex ? codexReader({ stats }) : claudeReader({ stats });
+function parsePage(lines, offsets, { backend, stats }) {
+  const reader = READERS[backend]({ stats });
   const born = [];
   const bornAt = new Map(); // message -> offset of its line
   const results = [];
@@ -295,17 +298,17 @@ export function lastAssistantText(record, { home, cache, now = Date.now() }) {
   if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) {
     return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
   }
-  const codex = record.backend === "codex";
+  const backend = record.backend || "claude";
   const segments = sessionSegments(record, file, home);
   const total = segments.reduce((sum, segment) => sum + segment.end, 0);
   const window = readSessionLines(segments, Math.max(0, total - PREVIEW_TAIL_BYTES), total);
-  const branch = codex ? null : activeClaudeLines(window.lines);
+  const branch = backend === "claude" ? activeClaudeLines(window.lines) : null;
   const lines = branch ? window.lines.filter((_, index) => branch.keep[index]) : window.lines;
   const offsets = branch ? window.offsets.filter((_, index) => branch.keep[index]) : window.offsets;
-  const { messages } = parsePage(lines, offsets, { codex, stats: null }).reader;
+  const { messages } = parsePage(lines, offsets, { backend, stats: null }).reader;
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
-  const remoteUrl = codex ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
+  const remoteUrl = backend === "claude" ? claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null : null;
   const entry = { file, mtimeMs: stat.mtimeMs, size: stat.size, readAt: now, text: preview, remoteUrl };
   return { text: preview, remoteUrl, cacheEntry: entry };
 }
@@ -388,12 +391,11 @@ export function recentConversation(repoDir, runId, { home, limit }) {
       ? { record, backend, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) }
       : { record, backend, lines: [], messages: showUserTask(recordedTurns(record), record) };
   }
-  const codex = backend === "codex";
   const file = transcriptFile(record, home);
   if (!file) {
     return { record, backend, lines: [], messages: showUserTask(recordedTurns(record), record) };
   }
-  const page = readPage(sessionSegments(record, file, home), { codex, end: null, start: null, leaf: "", limit, stats: null });
+  const page = readPage(sessionSegments(record, file, home), { backend, end: null, start: null, leaf: "", limit, stats: null });
   return { record, backend, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) };
 }
 
@@ -465,6 +467,11 @@ export function transcriptFile(record, home, now = Date.now()) {
   const sessionId = record?.session?.nativeSessionId;
   if (!sessionId || !/^[A-Za-z0-9-]+$/.test(sessionId)) {
     return null;
+  }
+  if (record.backend === "antigravity") {
+    // agy files a conversation under its id alone: one stat, nothing to search.
+    const file = path.join(home, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl");
+    return fs.existsSync(file) ? file : null;
   }
   const known = transcriptPaths.get(sessionId);
   if (known?.file && fs.existsSync(known.file)) {
@@ -547,6 +554,74 @@ function codexNewRollout(home, threadId, now) {
     }
   }
   return null;
+}
+
+// Each harness's session reader and its stats.
+const READERS = { claude: claudeReader, codex: codexReader, antigravity: antigravityReader };
+const STATS = { claude: claudeStats, codex: codexStats, antigravity: antigravityStats };
+
+// ---------------------------------------------------------------------------
+// Antigravity (agy) transcript.jsonl: one step per line,
+//   {"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE",
+//    "model":"…","input_tokens":…,"cache_read_tokens":…,"output_tokens":…,"content":"…"}
+// USER_INPUT steps are prompts, PLANNER_RESPONSE steps the model's replies, and
+// every other MODEL step a tool call (RUN_COMMAND, …).
+// ---------------------------------------------------------------------------
+
+function antigravityReader({ stats = null } = {}) {
+  const reader = {
+    messages: [],
+    // As claudeReader's; a tool step carries its own result.
+    onResult: null,
+    addLine(line) {
+      if (!line.trim()) {
+        return;
+      }
+      let step;
+      try {
+        step = JSON.parse(line);
+      } catch {
+        return; // the line agy is still writing
+      }
+      stats?.add(step);
+      const id = `s${step.step_index}`;
+      const ts = toMillis(step.created_at);
+      const content = typeof step.content === "string" ? step.content.trim() : "";
+      if (step.type === "USER_INPUT") {
+        if (content) {
+          reader.messages.push({ id, role: "user", ts, text: content });
+        }
+      } else if (step.type === "PLANNER_RESPONSE") {
+        if (content) {
+          reader.messages.push({ id, role: "assistant", ts, text: content });
+        }
+      } else if (step.source === "MODEL" && typeof step.type === "string") {
+        reader.messages.push({
+          id,
+          role: "tool",
+          ts,
+          tool: { name: step.type.toLowerCase(), input: oneLine(content), output: null, isError: step.status === "ERROR" },
+        });
+      }
+    },
+  };
+  return reader;
+}
+
+// The model agy answered with last. agy names no context window and its steps
+// carry no timing, so there is no speed or context to show.
+export function antigravityStats() {
+  let model = null;
+  return {
+    add(step) {
+      if (step.type === "PLANNER_RESPONSE" && typeof step.model === "string" && step.model) {
+        model = step.model;
+      }
+    },
+    result() {
+      return { model, speed: null, context: null };
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

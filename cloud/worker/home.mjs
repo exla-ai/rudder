@@ -1744,15 +1744,15 @@ async function checkCredentials() {
   credentialsAgain = false;
   try {
     const env = { ...baseChildEnv };
-    const [github, claude, codex, opencode, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkOpencode(env), checkAws(env)]);
-    credentials = { github, claude, codex, opencode, aws, checkedAt: new Date().toISOString() };
+    const [github, claude, codex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkOpencode(env), checkAntigravity(env), checkAws(env)]);
+    credentials = { github, claude, codex, opencode, antigravity, aws, checkedAt: new Date().toISOString() };
     // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
     // look again shortly instead of reporting a broken login for 30 minutes.
-    if ([github, claude, codex, opencode, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
+    if ([github, claude, codex, opencode, antigravity, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
     lastStateJson = "";
-    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"} opencode=${opencode.ok ? opencode.account : "no"}`);
+    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"} opencode=${opencode.ok ? opencode.account : "no"} antigravity=${antigravity.ok ? "yes" : "no"}`);
   } catch (error) {
     log(`credential check: ${error.message}`);
   } finally {
@@ -1908,6 +1908,24 @@ async function checkCodex(env) {
   const text = `${probe.stdout}\n${probe.stderr}`;
   const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
   return { ok: false, account, plan, detail };
+}
+
+// agy lists models only when signed in ("Please sign in" otherwise, still
+// exit 0), then one real request proves the sign-in works. agy does not say
+// which Google account it uses.
+async function checkAntigravity(env) {
+  const models = await capture("agy", ["models"], { env, timeoutMs: 20_000 });
+  const listed = `${models.stdout}\n${models.stderr}`;
+  if (models.code !== 0 || /sign in/i.test(listed)) {
+    return { ok: false, account: null, plan: null, detail: models.code !== 0 ? firstLine(listed) || `exit ${models.code}` : "not logged in" };
+  }
+  const probe = await capture("agy", ["-p", "Reply with exactly: OK", "--effort", "low"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
+    return { ok: true, account: null, plan: null, detail: null };
+  }
+  const text = `${probe.stdout}\n${probe.stderr}`;
+  const detail = /sign in|unauthenticated|401|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account: null, plan: null, detail };
 }
 
 // The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API

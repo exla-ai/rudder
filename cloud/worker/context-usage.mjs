@@ -57,6 +57,10 @@ const MEMO_MAX = 200;
  * reports a usage.
  */
 export function contextUsage(record, file, home) {
+  if (record.backend === "antigravity") {
+    // agy names no context window and compacts on its own terms.
+    return null;
+  }
   return record.backend === "codex" ? codexUsage(record, file, home) : claudeUsage(record, file, home);
 }
 

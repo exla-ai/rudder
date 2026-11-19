@@ -121,6 +121,8 @@ export type RunMode =
 
 export type BackendConfig = {
   profileId?: string;
+  /** The account new agents start on (src/accounts.ts); absent is "main". */
+  account?: string;
   model?: string;
   effort?: EffortLevel;
   reasoningEffort?: EffortLevel;

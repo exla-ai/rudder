@@ -106,6 +106,28 @@
 .mp-effort-wrap .field-label { margin-top: 0; }
 .mp-use { margin-top: 16px; flex: none; }
 
+/* Moving a chat to another harness (model-picker.js openHandoffDialog): a
+   popup over the model sheet. [logo] Opus 5.5 > [logo] Sol 6.1 on top. */
+dialog.handoff-dialog { max-width: min(440px, calc(100vw - 32px)); }
+.handoff-dialog .dialog { display: flex; flex-direction: column; }
+.ho-route { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; min-width: 0; font: 500 13.5px/1 var(--font); color: var(--ink-2); }
+.ho-end { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px 0 8px; min-width: 0; border-radius: 999px; border: 1px solid var(--line-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ho-end .harness-logo { width: 16px; height: 16px; flex: none; color: var(--ink); }
+.ho-end:last-child { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); color: var(--ink); }
+.ho-arrow { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.handoff-dialog h3 { line-height: 1.3; overflow-wrap: anywhere; }
+.handoff-dialog .ho-sub { margin: 0 0 4px; line-height: 1.45; }
+.handoff-dialog .field-label { margin-top: 14px; }
+.handoff-dialog textarea { min-height: 84px; max-height: 40vh; }
+.handoff-dialog .ho-hint { margin: 8px 2px 16px; font-size: 12.5px; line-height: 1.4; color: var(--faint); }
+.handoff-dialog .ho-err { margin: -6px 2px 12px; padding: 0; }
+.ho-update { margin: -4px 0 16px; }
+.ho-update .ho-why { margin: 0; font-size: 13.5px; line-height: 1.45; color: var(--ink-2); }
+.ho-update .hu { align-items: flex-start; margin-top: 8px; }
+.ho-go { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.ho-keys { font: 500 11.5px/1 var(--font); padding: 3px 6px; border-radius: 6px; background: color-mix(in srgb, var(--accent-ink) 18%, transparent); color: inherit; opacity: 0.85; }
+.ho-keys[hidden] { display: none; }
+
 /* ---------- Plan (orchestrator) ---------- */
 .plan-slot { margin-top: 14px; }
 .plan-slot:empty, .plan-view[hidden] { display: none; }

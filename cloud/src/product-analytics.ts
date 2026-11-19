@@ -42,6 +42,7 @@ export const PRODUCT_EVENTS = [
   "prompt_answered",
   "agent_action",
   "agent_branched",
+  "chat_harness_switched",
   "plan_approved",
   "agent_pulled",
   "voice_session_started",
@@ -57,7 +58,7 @@ const EVENT_SET = new Set<string>(PRODUCT_EVENTS);
 // only double-count it (or fake it), so /api/app/event refuses these.
 export const SERVER_ONLY_EVENTS: ReadonlySet<string> = new Set([
   "app_active", "app_error", "message_sent", "message_edited", "prompt_answered", "agent_action", "agent_branched",
-  "plan_approved", "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
+  "chat_harness_switched", "plan_approved", "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
 ]);
 // Same project as the CLI (src/analytics.ts): a write-only project token.
 const POSTHOG_HOST = "https://us.i.posthog.com";

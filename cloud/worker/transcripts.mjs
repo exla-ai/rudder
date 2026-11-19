@@ -11,6 +11,7 @@ import path from "node:path";
 import { pidAlive } from "./agent-status.mjs";
 import { contextUsage } from "./context-usage.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
+import { handoffShown } from "./handoff.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
@@ -72,12 +73,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   if (!file) {
     // No session on disk yet (just launched, or a backend without transcripts):
     // show the prompts Rudder itself recorded.
-    base.messages = showAttachments((record.turns || []).map((turn, index) => ({
-      id: `turn-${index}`,
-      role: "user",
-      ts: toMillis(turn.ts),
-      text: String(turn.prompt || ""),
-    })));
+    base.messages = showAttachments(recordedTurns(record).map(showHandoff));
     return base;
   }
   const codex = record.backend === "codex";
@@ -322,11 +318,54 @@ const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [
 function showUserTask(messages, record) {
   const task = userTask(record.task);
   return messages.map((message) => {
-    if (message.role !== "user" || !RUDDER_FRAMING.test(message.text)) {
+    if (message.role !== "user") {
       return message;
+    }
+    const moved = showHandoff(message);
+    if (moved !== message || !RUDDER_FRAMING.test(message.text)) {
+      return moved;
     }
     return task ? { ...message, text: task } : message;
   });
+}
+
+// A chat moved here from another harness opens with the handoff its new
+// harness was given (handoff.mjs). The chat shows it as one marker, "Moved
+// from Claude · Opus 5.5", with what was handed over behind it.
+function showHandoff(message) {
+  const moved = message.role === "user" ? handoffShown(message.text) : null;
+  return moved
+    ? { id: message.id, role: "system", kind: "handoff", ts: message.ts, text: `Moved from ${moved.from}`, handoff: moved }
+    : message;
+}
+
+// The prompts Rudder recorded for an agent, as chat messages.
+function recordedTurns(record) {
+  return (record.turns || []).map((turn, index) => ({
+    id: `turn-${index}`,
+    role: "user",
+    ts: toMillis(turn.ts),
+    text: String(turn.prompt || ""),
+  }));
+}
+
+/**
+ * An agent's newest `limit` messages as the chat shows them and the session
+ * lines they came from, for a handoff to another harness (handoff.mjs). It
+ * reads no stats, subagents or edits, so the switch does not wait on them.
+ */
+export function recentConversation(repoDir, runId, { home, limit }) {
+  const record = readRunRecord(repoDir, runId);
+  if (!record) {
+    throw new Error("agent not found");
+  }
+  const codex = record.backend === "codex";
+  const file = transcriptFile(record, home);
+  if (!file) {
+    return { record, codex, lines: [], messages: showUserTask(recordedTurns(record), record) };
+  }
+  const page = readPage(sessionSegments(record, file, home), { codex, end: null, start: null, leaf: "", limit, stats: null });
+  return { record, codex, lines: page.lines, messages: showAttachments(showUserTask(page.messages, record)) };
 }
 
 // Photos and files sent from the app reach the agent as saved paths listed

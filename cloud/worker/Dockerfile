@@ -224,6 +224,7 @@ COPY cloud/worker/home.mjs ./home.mjs
 COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
+COPY cloud/worker/handoff.mjs ./handoff.mjs
 COPY cloud/worker/subagents.mjs ./subagents.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
 COPY cloud/worker/context-usage.mjs ./context-usage.mjs

@@ -4,6 +4,9 @@
 //! with its current model marked; a pick relaunches the agent's conversation
 //! on the new flags when it is at its prompt. `/model` typed into the task
 //! pane on its own still sets the model new agents start on.
+//!
+//! A model of another harness, picked in the app's chat, moves the chat there
+//! instead (steer kind "harness", `deliver_harness_request`).
 
 use super::*;
 
@@ -136,4 +139,162 @@ impl App {
 pub(crate) fn model_switch_refusal(run: &AgentRun) -> Option<&'static str> {
     (run.is_orchestrator() || run.gam.is_some() || run.plain_process || is_cloud_owned_agent(run))
         .then_some("this agent keeps the model it was started with")
+}
+
+/// Why this row cannot move to `backend`, or `None` when it may.
+fn harness_switch_refusal(run: &AgentRun, backend: Backend) -> Option<String> {
+    if let Some(refusal) = model_switch_refusal(run) {
+        return Some(refusal.to_string());
+    }
+    if run.backend == backend {
+        return Some(format!("this chat already runs on {}; pick one of its models instead", backend.as_str()));
+    }
+    if run.status == AgentStatus::Merged {
+        return Some("its work is already merged; start a new agent instead".to_string());
+    }
+    if !run.cwd.is_dir() {
+        return Some(format!("its workspace is gone: {}", run.cwd.display()));
+    }
+    None
+}
+
+impl App {
+    /// Steer kind "harness": move one chat to another harness, from the app's
+    /// model control. The instruction is `<harness> <model> <effort|auto>`,
+    /// then the handoff on the lines after it, which the home builds from the
+    /// old conversation (cloud/worker/handoff.mjs). The row keeps its id,
+    /// workspace and files. Its old process ends, and the new harness starts a
+    /// new conversation whose first prompt is the handoff, framed the way the
+    /// row's mode frames a task. A row mid-turn moves too: the handoff says
+    /// what it was doing, and the new harness carries on with it.
+    pub(crate) fn deliver_harness_request(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
+        let expected = || SteerDelivery::Failed("expected <harness> <model> <effort|auto>, then the handoff".to_string());
+        let Some((head, handoff)) = instruction.split_once('\n') else {
+            return expected();
+        };
+        let mut parts = head.split_whitespace();
+        let (Some(harness), Some(model), Some(effort_arg), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+            return expected();
+        };
+        let Some(backend) = Backend::parse(harness) else {
+            return SteerDelivery::Failed(format!("unknown harness: {harness}"));
+        };
+        let effort = parse_effort_arg(effort_arg);
+        if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
+            return SteerDelivery::Failed(format!("unknown effort: {effort_arg}"));
+        }
+        let handoff = sanitize_steer_instruction(handoff);
+        if handoff.is_empty() {
+            return SteerDelivery::Failed("the handoff is empty".to_string());
+        }
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        let run = &mut self.agents[index];
+        if let Some(refusal) = harness_switch_refusal(run, backend) {
+            return SteerDelivery::Failed(refusal);
+        }
+        if let Some(other) = known_model_backend(model).filter(|other| *other != backend) {
+            return SteerDelivery::Failed(format!("{model} is a {} model, not a {} one", other.as_str(), backend.as_str()));
+        }
+        if !effort_options_for(backend, model).contains(&effort) {
+            return SteerDelivery::Failed(format!("{model} has no {effort_arg} effort"));
+        }
+        if let Some(refusal) = openrouter_key_refusal(backend, model) {
+            return SteerDelivery::Failed(refusal.to_string());
+        }
+        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
+        let from = agent_model_label(run.backend, &run.model, run.effort);
+        let session = mint_session_id_for(backend);
+        let mut command = agent_command(backend, model, effort, &handoff, run.mode, session.as_deref());
+        let wired = if run.is_main() && run.execution_profile.is_none() {
+            signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
+        } else {
+            // A profile belongs to the harness that ran it (claude-sdk,
+            // codex-app-server): the new harness starts on the native one.
+            signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, None)
+        };
+        // Refused before the old process is touched: it keeps running.
+        if let Err(error) = wired {
+            return SteerDelivery::Failed(format!("could not start {label} on {}: {error}", backend.as_str()));
+        }
+        let options = TerminalPaneOptions {
+            size: run.terminal_size.unwrap_or_default(),
+            cwd: Some(run.cwd.clone()),
+            ..TerminalPaneOptions::default()
+        };
+        // Dropping the pane ends the old process before the new one starts.
+        run.terminal = None;
+        let mut terminal = match TerminalPane::spawn_shell_or_command(Some(command), options) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let run = &mut self.agents[index];
+                run.status = AgentStatus::Failed;
+                run.last_error = Some(error.to_string());
+                let _ = save_native_run_record(&self.cwd, run);
+                return SteerDelivery::Failed(format!("could not start {label} on {}: {error}", backend.as_str()));
+            }
+        };
+        let _ = terminal.drain_output();
+        Self::attach_output_waker(&self.pty_output_waker, &terminal);
+        let now = now_stamp();
+        let run = &mut self.agents[index];
+        run.backend = backend;
+        run.model = model.to_string();
+        run.effort = effort;
+        run.execution_profile = terminal.execution_profile().map(str::to_string);
+        run.terminal = Some(terminal);
+        run.session_id = session.clone();
+        run.status = AgentStatus::Running;
+        run.completed_at = None;
+        run.last_output_at = Instant::now();
+        run.needs_permission = false;
+        run.needs_user_input = false;
+        run.wait_signal = None;
+        run.last_error = None;
+        run.worker_exit_note = None;
+        // A new conversation: until the new harness writes it, the chat shows
+        // the prompts recorded here, and the old harness's are not in it.
+        run.turns.clear();
+        run.turns.push(AgentTurn { ts: now.clone(), prompt: handoff.clone(), source: "user".to_string() });
+        run.current_prompt = handoff;
+        run.last_user_input_at = now;
+        run.last_worker_input_at = Some(Instant::now());
+        let mut unrecorded = Vec::new();
+        if let Err(error) = save_native_run_record(&self.cwd, run) {
+            unrecorded.push(format!("its record was not saved: {error}"));
+        }
+        // The row follows the session its worker's hooks last reported. That
+        // report may name a session from an earlier stint on this harness, so
+        // the new one is recorded now (Claude), or the old report goes (Codex
+        // names its new thread once it starts).
+        let reported = match session.as_deref().filter(|_| backend == Backend::Claude) {
+            Some(session) => signals::claude_session_path(&run.id)
+                .ok_or_else(|| "HOME is not set".to_string())
+                .and_then(|file| {
+                    let temp = file.with_extension(format!("claude-session.{}.tmp", std::process::id()));
+                    std::fs::write(&temp, session)
+                        .and_then(|()| std::fs::rename(&temp, &file))
+                        .map_err(|error| error.to_string())
+                }),
+            None => signals::signal_path(&run.id)
+                .ok_or_else(|| "HOME is not set".to_string())
+                .and_then(|signal| match std::fs::remove_file(format!("{}.session", signal.display())) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+                    _ => Ok(()),
+                }),
+        };
+        if let Err(error) = reported {
+            unrecorded.push(format!("its new session was not recorded: {error}"));
+        }
+        let to = agent_model_label(backend, model, effort);
+        self.push_activity(format!("{label}: moved from {from} to {to}"));
+        self.mirror_graph();
+        self.dirty = true;
+        if unrecorded.is_empty() {
+            SteerDelivery::Delivered
+        } else {
+            SteerDelivery::Failed(format!("it moved to {to}, but {}", unrecorded.join("; ")))
+        }
+    }
 }

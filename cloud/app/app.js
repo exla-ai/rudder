@@ -4365,7 +4365,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return box;
     }
     if (role === "user") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div></div>`);
-    if (role === "system" && x.m.kind === "compact") {
+    if (role === "system" && (x.m.kind === "compact" || x.m.kind === "handoff")) {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
     if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
@@ -4396,7 +4396,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "steps") return paintSteps(node, x);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
-    if (m.kind === "compact") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "compact" || m.kind === "handoff") { node._msg = m; return paintCompact(node, m); }
     if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
     const md = node.querySelector(".md");
     let text = m.text || "";
@@ -4410,8 +4410,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (md.dataset.sig !== sig) { renderMarkdown(md, text); md.dataset.sig = sig; }
   }
 
+  // A compacted context, or a chat moved here from another harness ("Moved
+  // from Claude · Opus 5.5", cloud/worker/handoff.mjs): one marker with the
+  // summary the agent continued from behind it.
   function paintCompact(node, m) {
-    const c = m.compact || {};
+    const moved = m.kind === "handoff";
+    const c = (moved ? m.handoff : m.compact) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
     const row = node.querySelector(".compact-row");
     node.classList.toggle("open", open);
@@ -4419,8 +4423,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.disabled = !c.summary;
     row.setAttribute("aria-expanded", String(open));
     const tokens = c.preTokens ? ` · ${c.preTokens >= 1000 ? `${Math.round(c.preTokens / 1000)}k` : c.preTokens} tokens summarized` : "";
-    setText(row.querySelector(".c-text"), `Context compacted${tokens}`);
-    row.setAttribute("aria-label", `Context compacted${tokens}.${c.summary ? ` ${open ? "Hide" : "Show"} the summary the agent continued from.` : ""}`);
+    const label = moved ? m.text : `Context compacted${tokens}`;
+    setText(row.querySelector(".c-text"), label);
+    row.setAttribute("aria-label", `${label}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : "the summary the agent continued from"}.` : ""}`);
     const sum = node.querySelector(".compact-sum");
     sum.hidden = !open;
     if (!open) return;

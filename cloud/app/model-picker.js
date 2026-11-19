@@ -5,6 +5,7 @@
 import { h, icon, setText } from "/app/render.js";
 import { app, api, ls, showError, toast, track } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
+import { UpdateNow } from "/app/home-update.js";
 
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 // Effort names. Which ones a model takes comes with the list: each row's
@@ -307,11 +308,11 @@ const chatLabel = (a) => modelText(a.backend, a.modelName, a.effort);
 /**
  * The harness, model and effort one agent's chat runs on, next to its
  * composer, and a sheet to switch the model and effort for that chat only.
- * The dashboard reopens the same conversation on the new ones (POST
- * /api/app/agent-model, native deliver_model_request), so the agent's next
- * turn uses them. It stays on its harness, and it does not switch in the
- * middle of a turn. `agent()` returns the agent's current row. Call refresh()
- * when it changes.
+ * A model of its own harness: the dashboard reopens the same conversation on
+ * it (POST /api/app/agent-model, native deliver_model_request), so the
+ * agent's next turn uses it, and not in the middle of a turn. A model of
+ * another harness moves the chat there (openHandoffDialog). `agent()`
+ * returns the agent's current row. Call refresh() when it changes.
  */
 export function mountChatModelControl(container, { workspace, run, agent }) {
   const el = h(CHIP);
@@ -355,45 +356,62 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   const useBtn = dlg.querySelector(".mp-use");
   const note = dlg.querySelector(".create-note");
   let data = modelsCache;
-  let model = null; // the picked row's value; until a pick, the row the agent runs on
+  // The picked row; until a pick, the row the agent runs on.
+  let pick = { backend, model: start.model };
   let effort = start.effort || "auto";
   let revealed = false;
 
-  // Its harness's list, led by the model the agent runs on when the list
-  // does not have it (an id it was started with by hand, or one its CLI
-  // no longer lists), under the name the cloud machine gave it.
-  const options = () => {
-    const opts = rowsOf(data, backend);
-    return !start.model || opts.some((o) => o.value === start.model) ? opts : [{ value: start.model, label: start.modelName, detail: "", efforts: [] }, ...opts];
+  // Its own harness first, led by the model the agent runs on when the list
+  // does not have it (an id it was started with by hand, or one its CLI no
+  // longer lists), under the name the cloud machine gave it. Then every
+  // other harness: picking one of those moves the chat.
+  const sections = () => {
+    const own = rowsOf(data, backend);
+    const listed = !start.model || own.some((o) => o.value === start.model);
+    const harness = harnessOf(data, backend);
+    return [
+      ...(harness ? [{ harness, models: listed ? own : [{ value: start.model, label: start.modelName, detail: "", efforts: [] }, ...own] }] : []),
+      ...harnessesOf(data).filter((x) => x.id !== backend).map((x) => ({ harness: x, models: x.models })),
+    ];
   };
-  const rowOf = (opts, m) => (opts.some((o) => o.value === m) ? m : null);
+  const rowOf = (p) => sections().find((x) => x.harness.id === p.backend)?.models.find((o) => o.value === p.model) || null;
   function render() {
+    if (!data) return;
     const a = agent() || start;
     const busy = a.status === "working";
-    setText(note, busy
-      ? "It is working right now. Switch when this turn ends."
-      : "The conversation carries on. Its next reply uses the new model.");
-    const harness = harnessOf(data, backend);
-    if (!harness) return;
-    const opts = options();
-    const current = rowOf(opts, a.model);
-    model ??= rowOf(opts, start.model);
-    paintModels(modelsEl, [{ harness, models: opts }], {
-      selected: { backend, model }, current: { backend, model: current },
-      onPick: (_, v) => { model = v; render(); }, reveal: !revealed,
+    const moving = pick.backend !== backend;
+    const row = rowOf(pick);
+    const eff = effortFor(row, effort);
+    paintModels(modelsEl, sections(), {
+      selected: pick, current: { backend, model: a.model },
+      onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed,
     });
     revealed = true;
-    const row = opts.find((o) => o.value === model);
-    const eff = effortFor(row, effort);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
-    const same = model === current && (!dial || eff === (a.effort || "auto"));
-    useBtn.disabled = busy || same;
-    setText(useBtn, same ? "Current model" : `Switch to ${[row.label, effortWord(eff)].filter(Boolean).join(" · ")}`);
+    const to = harnessLabel(pick.backend);
+    setText(note, moving
+      ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
+      : busy ? "It is working right now. Switch when this turn ends."
+      : "The conversation carries on. Its next reply uses the new model.");
+    const same = !moving && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
+    const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
+    useBtn.disabled = !row || same || (busy && !moving);
+    setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : `Switch to ${name}`);
   }
 
   useBtn.addEventListener("click", async () => {
-    const row = options().find((o) => o.value === model);
+    const row = rowOf(pick);
+    if (!row) return;
     const eff = effortFor(row, effort);
+    if (pick.backend !== backend) {
+      openHandoffDialog({
+        workspace, run, agent,
+        to: { backend: pick.backend, model: pick.model, name: row.label, effort: eff === "auto" ? null : eff },
+        onMoved: () => { dlg.close(); onSwitched(); },
+      });
+      return;
+    }
+    const model = pick.model;
     useBtn.disabled = true;
     try {
       const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: eff } });
@@ -418,4 +436,110 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   render();
   loadModels().then((res) => { data = res; errEl.hidden = true; render(); })
     .catch((err) => showListError(errEl, modelsEl, err, !!data));
+}
+
+/* Moving a chat to another harness ------------------------------------- */
+
+/** How the popup's Switch is pressed from the keyboard; nothing on a touch screen. */
+const SUBMIT_KEYS = matchMedia("(pointer: coarse)").matches ? "" : /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent) ? "⌘ Enter" : "Ctrl Enter";
+
+/**
+ * The popup that moves a chat to another harness: where it goes, optional
+ * instructions for the summary the new harness starts from, then Switch or
+ * Cancel. The cloud machine builds the summary from the conversation and the
+ * dashboard starts the new harness in the same agent and workspace (POST
+ * /api/app/agent-harness; cloud/worker/handoff.mjs, native agent_model.rs).
+ * It opens over the model sheet, so Cancel and Esc go back to it. Enter is a
+ * new line; Cmd or Ctrl+Enter switches. `onMoved()` runs once it moved.
+ */
+function openHandoffDialog({ workspace, run, agent, to, onMoved }) {
+  const a = agent();
+  const toText = modelText(to.backend, to.name, to.effort);
+  const fromHarness = harnessLabel(a.backend);
+  const toHarness = harnessLabel(to.backend);
+  const dlg = h(`<dialog class="handoff-dialog" aria-labelledby="ho-t"><form class="dialog">
+    <div class="ho-route" aria-hidden="true"><span class="ho-end"></span>${icon("chevron").replace("<svg", '<svg class="ho-arrow"')}<span class="ho-end"></span></div>
+    <h3 id="ho-t"></h3>
+    <p class="ho-sub"></p>
+    <label class="field-label" for="ho-ask">Summary instructions <span class="opt">optional</span></label>
+    <textarea id="ho-ask" class="ask-other-text" rows="3" placeholder="Focus on the open bug and the files touched"></textarea>
+    <p class="ho-hint">Empty gives the default summary: the goal, decisions, where it stopped, files touched and next steps.</p>
+    <p class="repo-note err ho-err" role="alert" hidden></p>
+    <div class="ho-update" hidden></div>
+    <div class="d-actions"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn accent ho-go"><span class="ho-go-t">Switch</span><kbd class="ho-keys"></kbd></button></div>
+  </form></dialog>`);
+  const [fromEl, toEl] = dlg.querySelectorAll(".ho-end");
+  const end = (el, backend, name) => {
+    const logo = harnessLogo(backend);
+    el.innerHTML = logo;
+    el.append(logo ? name : modelText(backend, name));
+  };
+  end(fromEl, a.backend, [a.modelName || fromHarness, effortWord(a.effort)].filter(Boolean).join(" · "));
+  end(toEl, to.backend, [to.name, effortWord(to.effort)].filter(Boolean).join(" · "));
+  setText(dlg.querySelector("h3"), `Move this chat to ${toText}`);
+  setText(dlg.querySelector(".ho-sub"), a.status === "working"
+    ? `${fromHarness} stops this turn, and ${toHarness} carries on from a summary of the chat, in the same files.`
+    : `${fromHarness} stops, and ${toHarness} picks up from a summary of the chat, in the same files.`);
+  const form = dlg.querySelector("form");
+  const ask = dlg.querySelector("textarea");
+  const err = dlg.querySelector(".ho-err");
+  const go = dlg.querySelector(".ho-go");
+  const goText = dlg.querySelector(".ho-go-t");
+  const keys = dlg.querySelector(".ho-keys");
+  setText(keys, SUBMIT_KEYS);
+  keys.hidden = !SUBMIT_KEYS;
+  let updater = null;
+  let sending = false;
+  ask.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); form.requestSubmit(); }
+  });
+  form.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  dlg.addEventListener("click", (e) => { if (e.target === dlg && !sending) dlg.close(); });
+  // Esc cancels, except while it switches: the answer is on its way.
+  dlg.addEventListener("cancel", (e) => { if (sending) e.preventDefault(); });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (sending) return;
+    sending = true;
+    go.disabled = true;
+    setText(goText, "Switching…");
+    err.hidden = true;
+    const instructions = ask.value.trim();
+    try {
+      const res = await api("/api/app/agent-harness", {
+        method: "POST",
+        body: { workspace, run, backend: to.backend, model: to.model, effort: to.effort || "auto", instructions },
+      });
+      // The dashboard took it: show it now, the next state refresh carries the real row.
+      const row = agent();
+      if (row) Object.assign(row, { backend: to.backend, model: to.model, modelName: to.name, effort: to.effort, status: "working" });
+      sending = false;
+      dlg.close();
+      toast(res?.status === "queued" ? `Moving to ${toText} when the cloud machine picks it up` : `This chat moved to ${toText}`);
+      onMoved();
+      app.refreshState();
+    } catch (error) {
+      sending = false;
+      go.disabled = false;
+      setText(goText, "Switch");
+      if (error.needsUpdate) {
+        // A cloud machine older than this: its Update now, here.
+        if (!updater) {
+          const box = dlg.querySelector(".ho-update");
+          const why = h(`<p class="ho-why"></p>`);
+          setText(why, error.message);
+          updater = UpdateNow({ onDone: () => { updater.destroy(); updater = null; box.replaceChildren(); box.hidden = true; } });
+          box.append(why, updater.el);
+          box.hidden = false;
+        }
+        return;
+      }
+      err.textContent = error.status === 401 ? "Signed out." : error.message;
+      err.hidden = false;
+    }
+  });
+  dlg.addEventListener("close", () => { updater?.destroy(); dlg.remove(); });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  ask.focus();
 }

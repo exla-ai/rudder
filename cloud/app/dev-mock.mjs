@@ -7,6 +7,7 @@
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
+// /app/__mock/harness/<ok|old> (move a chat to another harness, or a home too old to),
 // /app/__mock/all/<ok|old|stuck|lost|codex> (the All agents chat and the ways it fails to start),
 // /app/__mock/update/<ok|fail> (how the next Update now of an old machine goes: home-update.js),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
@@ -35,6 +36,7 @@ let homeMode = "running";
 let usageMode = "ok";
 let trayMode = "ok";
 let closeMode = "ok";
+let harnessMode = "ok";
 // Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
 const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
 const CREDS = {
@@ -891,6 +893,12 @@ const server = http.createServer(async (req, res) => {
   }
   if (p.startsWith("/app/__mock/update/")) { updateMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/all/new" }); return res.end(); }
   if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/harness/")) {
+    harnessMode = p.split("/").pop();
+    if (harnessMode === "old") homeVersion = "5.0.9";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
   if (p.startsWith("/app/__mock/all/")) {
     allMode = p.split("/").pop();
     if (allMode === "old") homeVersion = "5.0.5";
@@ -1213,6 +1221,26 @@ const server = http.createServer(async (req, res) => {
       t.a.updatedAt = now();
       t.msgs.push({ id: `s${now()}`, role: "system", ts: now(), text: body.action === "stop" ? "Agent stopped from the app." : "Merged into main." });
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/agent-harness") {
+      // Like a home: the old harness stops and the new one starts on a
+      // handoff (cloud/worker/handoff.mjs), which the chat shows as one
+      // marker, then its first reply.
+      const t = transcriptFor(body.workspace, body.run);
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      if (harnessMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
+      await delay(250);
+      const label = (backend) => (backend === "codex" ? "Codex" : "Claude");
+      const from = [label(t.a.backend), t.a.modelName].filter(Boolean).join(" · ");
+      Object.assign(t.a, { backend: body.backend, model: body.model, modelName: MODEL_NAMES[body.model] ?? body.model, effort: body.effort === "auto" ? null : body.effort, status: "working", updatedAt: now() });
+      const asks = body.instructions ? `## The user's instructions for this handoff\n${body.instructions}\n\n` : "";
+      const summary = `## Goal\n${t.a.task}\n\n${asks}## Where it stopped\nIt had finished its last turn and was waiting for the user.`;
+      t.msgs.splice(0, t.msgs.length, { id: `h${now()}`, role: "system", kind: "handoff", ts: now(), text: `Moved from ${from}`, handoff: { from, summary } });
+      setTimeout(() => {
+        t.msgs.push({ id: `r${now()}`, role: "assistant", ts: now(), text: `Picked up from ${from}. ${t.a.task}: done and waiting for review. Tell me what to look at next.` });
+        t.a.status = "review";
+      }, 1800);
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/agent-rename") {
       // Like the dashboard: a name with "fail" in it is refused, and the

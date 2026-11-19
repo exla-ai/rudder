@@ -23,10 +23,11 @@ import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
-import { readTranscript, lastAssistantText, userTask, transcriptFile } from "./transcripts.mjs";
+import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
+import { handoffPrompt } from "./handoff.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
-import { statusFields } from "./agent-status.mjs";
+import { phoneStatus, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
@@ -856,6 +857,13 @@ async function handleRpc(method, params) {
     // One chat's model and effort (native deliver_model_request).
     return await steer(project, { kind: "model", taskId: String(params.runId || ""), instruction: `${params.model} ${params.effort}` });
   }
+  if (method === "agentHarness") {
+    // Move one chat to another harness (native deliver_harness_request): the
+    // new harness starts on a handoff built here from the old conversation
+    // (handoff.mjs). The instruction is `<harness> <model> <effort>`, then it.
+    const runId = String(params.runId || "");
+    return await steer(project, { kind: "harness", taskId: runId, instruction: harnessHandoff(project, runId, params) });
+  }
   if (method === "agentRename") {
     // Name an agent (native deliver_rename_request): the instruction is the name.
     return await steer(project, { kind: "rename", taskId: String(params.runId || ""), instruction: String(params.title || "") });
@@ -1268,6 +1276,33 @@ setInterval(() => keepModelsFresh().catch((error) => log(`models: ${error.messag
 // HarnessModels.default), and null when the harness does not say.
 function nameModel(backend, model) {
   return modelName(models?.value?.harnesses ?? [], backend, model ?? null);
+}
+// A harness and model in words: "Claude · Opus 5.5".
+function modelWords(backend, model) {
+  const label = (models?.value?.harnesses ?? []).find((harness) => harness.id === backend)?.label ?? backend;
+  return [label, nameModel(backend, model)].filter(Boolean).join(" · ");
+}
+
+// How many of the old conversation's newest messages a handoff reads; it
+// keeps as many of them as fit its budget (handoff.mjs).
+const HANDOFF_MESSAGES = 120;
+
+// `<harness> <model> <effort>`, then the handoff the new harness starts on.
+function harnessHandoff(project, runId, { backend, model, effort, instructions }) {
+  const { record, codex, lines, messages } = recentConversation(project.dir, runId, { home: HOME, limit: HANDOFF_MESSAGES });
+  const from = record.backend ?? "claude";
+  const handoff = handoffPrompt({
+    goal: userTask(record.task),
+    messages,
+    lines,
+    codex,
+    cwd: record.workspace?.path || project.dir,
+    from: modelWords(from, record.model ?? null),
+    to: modelWords(backend, model),
+    instructions,
+    working: phoneStatus(record) === "working",
+  });
+  return `${backend} ${model} ${effort}\n${handoff}`;
 }
 function withModelName(row) {
   return { ...row, modelName: nameModel(row.backend, row.model) };

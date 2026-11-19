@@ -7818,6 +7818,34 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort }));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/agent-harness") {
+    // A model of another harness picked in a chat: the dashboard moves the
+    // chat there (native deliver_harness_request), and the new harness starts
+    // on a handoff the home builds from the old conversation (handoff.mjs),
+    // shaped by `instructions` when given.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const backend = (stringField(body, "backend") ?? "").trim();
+    const model = (stringField(body, "model") ?? "").trim();
+    const effort = (stringField(body, "effort") ?? "").trim();
+    const instructions = (stringField(body, "instructions") ?? "").trim();
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(backend)) {
+      throw badRequest("backend is required");
+    }
+    if (!/^[A-Za-z0-9._:/[\]-]{1,120}$/.test(model)) {
+      throw badRequest("model is required");
+    }
+    if (!["auto", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
+      throw badRequest("effort must be auto, low, medium, high, xhigh or max");
+    }
+    if (instructions.length > 4000) {
+      throw badRequest("summary instructions are at most 4000 characters");
+    }
+    const moved = await homeRpc(home.id, "agentHarness", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", backend, model, effort, instructions });
+    captureProductEvent(account.accountId, "chat_harness_switched", { platform: requestPlatform(req), backend });
+    sendJson(res, 200, moved);
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/agent-rename") {
     // Name an agent. The dashboard saves it the way its own rename does
     // (native rename_agent_at), so every screen shows the new name.

@@ -16236,6 +16236,9 @@ Address the objection directly. If you disagree, say why inside \
                 "pin" => self.deliver_pin_request(&task_id, &instruction),
                 // The chat's model control: `<model> <effort|auto>` for one agent.
                 "model" => self.deliver_model_request(&task_id, &instruction),
+                // A model of another harness: `<harness> <model> <effort|auto>`,
+                // then the handoff the new harness starts on.
+                "harness" => self.deliver_harness_request(&task_id, &instruction),
                 // Edit a sent prompt: `<entry> <latest>\n<text>`. Accepted
                 // edits answer when their rewind finishes (drain_chat_edits).
                 "edit" => match self.deliver_edit_request(&task_id, &instruction, &request_id) {

@@ -31623,6 +31623,71 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     app.agents[0].terminal = None;
 }
 
+/// A model of another harness picked in a chat moves the chat there: the
+/// same row and workspace, on a new conversation of the new harness whose
+/// first prompt is the handoff (cloud/worker/handoff.mjs), framed as the
+/// row's mode frames a task. A row mid-turn moves too.
+#[cfg(not(windows))]
+#[test]
+fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("chat-harness-switch");
+    let home = dir.join("home");
+    env.set_home(&dir, &home);
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    fs::create_dir_all(home.join(".rudder")).unwrap();
+    fs::write(
+        home.join(".rudder/models-dev.json"),
+        serde_json::json!({ "anthropic": { "models": { "opus": { "efforts": ["low", "high"] } } } }).to_string(),
+    )
+    .unwrap();
+    let args_file = dir.join("codex-args.txt");
+    let fake = dir.join("fake-codex.sh");
+    write_args_recording_bin(&fake, &args_file);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("chat-run", "fix the flaky test");
+    run.cwd = dir.clone();
+    run.backend = Backend::Claude;
+    run.model = "opus".to_string();
+    run.effort = Some(EffortLevel::High);
+    run.session_id = Some("claude-session".to_string());
+    run.status = AgentStatus::Running;
+    run.terminal = Some(TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "cat"])),
+        TerminalPaneOptions::default(),
+    ).unwrap());
+    app.agents.push(run);
+    let handoff = "Rudder handoff: this chat moved to you from Claude · Opus 5.5.\n## Goal\nfix the flaky test";
+
+    // Its own harness switches models through the model control, a model
+    // must belong to the harness named, and the handoff is required.
+    let refused = |app: &mut App, spec: &str| match app.deliver_harness_request("chat-run", spec) {
+        SteerDelivery::Failed(reason) => reason,
+        SteerDelivery::Delivered => panic!("{spec} moved the chat"),
+    };
+    assert!(refused(&mut app, &format!("claude sonnet auto\n{handoff}")).contains("already runs on claude"));
+    assert!(refused(&mut app, &format!("codex opus auto\n{handoff}")).contains("claude model"));
+    assert!(refused(&mut app, "codex gpt-6.1-sol auto").contains("expected"));
+    assert_eq!(app.agents[0].backend, Backend::Claude, "a refusal leaves the chat as it was");
+
+    assert!(matches!(app.deliver_harness_request("chat-run", &format!("codex gpt-6.1-sol auto\n{handoff}")), SteerDelivery::Delivered));
+    let run = &app.agents[0];
+    assert_eq!((run.backend, run.model.as_str(), run.effort), (Backend::Codex, "gpt-6.1-sol", None));
+    assert_eq!(run.session_id, None, "Codex names its new thread once it starts");
+    assert_eq!(run.status, AgentStatus::Running);
+    assert_eq!(run.turns.len(), 1, "the old conversation's prompts are not in the new one");
+    assert_eq!(run.turns[0].prompt, handoff);
+    let args = recorded_args(&args_file);
+    let model_at = args.iter().position(|arg| arg == "-m").expect("a model flag");
+    assert_eq!(args[model_at + 1], "gpt-6.1-sol");
+    assert!(args.iter().any(|arg| arg == "Rudder handoff: this chat moved to you from Claude · Opus 5.5."), "{args:?}");
+    assert!(args.iter().any(|arg| arg.starts_with("Rudder: you work in your own jj workspace")), "framed as a worker's task: {args:?}");
+    assert!(!args.iter().any(|arg| arg == "resume"), "a new conversation, not a resumed one: {args:?}");
+    app.agents[0].terminal = None;
+}
+
 /// A Claude chat on disk in `home` for an agent in `cwd`: "first ask" (u1),
 /// then "second ask" (u2), whose turn was interrupted. Returns the file.
 #[cfg(not(windows))]

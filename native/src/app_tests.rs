@@ -30012,6 +30012,184 @@ fn an_agent_talking_about_a_permission_is_not_on_a_permission_prompt() {
     assert!(terminal_composer_blocked(Backend::Claude, &prompt).is_some());
 }
 
+/// The cloud lead's pane (Claude 2.1.328, bypass on) when three phone messages
+/// were refused as "waiting on a permission prompt": idle at its composer after
+/// a monitor report. The rows above the composer are its transcript as Claude
+/// renders it; the block under the composer is the pane's own mirror, with the
+/// agents that were running then (two more had joined when it was taken). Claude
+/// now draws status rows and a list of teammates and background agents under
+/// its footer, so the footer was no longer in the last three rows, and the
+/// keyword reader joined "Waiting for agy authorization code" (a teammate's
+/// row) with "no change" (the report) into a permission request.
+fn claude_2_1_328_idle_lead_with_agents() -> Vec<String> {
+    [
+        "✻ Running scheduled task (Nov 19 8:11am)",
+        "",
+        "● Bash(date -u +%T; f=$(grep -l '\"agentName\":\"find-bar\"'",
+        "      ~/.claude/projects/-workspace-code-exla-ai-rudder/*.jsonl 2>/dev/null | head -1); echo",
+        "      \"find-bar last $(date -…)",
+        "  ⎿  08:11:18",
+        "     find-bar last 08:11:13",
+        "     ae435ba1d5ecf23cb last 08:11:01",
+        "     … +5 lines (ctrl+o to expand)",
+        "",
+        "● Monitor, 08:11: no change. find-bar, Antigravity and OpenCode are all active, and the app (v220)",
+        "  checks out live. Nothing is broken. Antigravity still needs your 4/ code from the Google sign-in",
+        "  link above.",
+        "",
+        "──────────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-2879 a` ─",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor · /tasks to see subagents",
+        "                                                                                ◎ /goal active (1h)",
+        "                                                                                        /rc active",
+        "",
+        "  ● main",
+        "  ◯ find-bar             Apple-style floating find bar                                     23m 36s",
+        "  ◯ opencode-backend     Reviewing OpenCode changes in transcripts.mjs   20m 49s · ↓ 235.8k tokens",
+        "  ◯ antigravity-backend  Waiting for agy authorization code              20m 40s · ↓ 333.6k tokens",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+#[test]
+fn agent_rows_under_claudes_footer_do_not_read_as_a_permission_prompt() {
+    let idle = claude_2_1_328_idle_lead_with_agents();
+    assert!(!terminal_needs_permission_from_lines(Backend::Claude, &idle));
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &idle), None);
+
+    // The same with text typed into the composer, and in manual mode, whose
+    // footer (captured, 2.1.328) has no "(shift+tab" once it lists anything.
+    let mut typed = idle.clone();
+    typed[15] = "❯ and it shoudl open on the side like side by sid".to_string();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &typed), None);
+    let mut manual = idle.clone();
+    manual[17] = "  ⏸ manual mode on · 1 monitor · ↓ to manage".to_string();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &manual), None);
+
+    // A real 2.1.328 permission dialog with teammates (captured): the composer
+    // and the agent list are gone, one labelled rule is left under the dialog.
+    let dialog: Vec<String> = [
+        "❯ Run the shell command: touch made-by-test.txt",
+        "",
+        "● Bash(touch made-by-test.txt)",
+        "  ⎿  Waiting…",
+        "",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        " Bash command",
+        " Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below",
+        " Create empty file made-by-test.txt in current directory",
+        "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+        " touch made-by-test.txt",
+        "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. Yes, and always allow access to /workspace/rudder-scratch/perm-block/proj from this project",
+        "   3. Yes, and switch to auto mode · auto mode handles these prompts for you",
+        "   4. No",
+        "",
+        " Esc to cancel · Tab to amend",
+        "───────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-2591491 a` ─",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_needs_permission_from_lines(Backend::Claude, &dialog));
+    assert!(terminal_composer_blocked(Backend::Claude, &dialog).is_some());
+
+    // /config with teammates (captured): the menu still blocks.
+    let config: Vec<String> = [
+        "  ❯ Auto-compact                                on",
+        "    Idle compaction                             on",
+        "    Precompute compaction                       on",
+        "    ↓ 27 more",
+        "",
+        "  ↓ to navigate · ↑ to switch tabs · Esc to go back",
+        "───────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-2591491 a` ─",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_composer_blocked(Backend::Claude, &config).is_some());
+}
+
+/// Codex 0.170 idle at its composer (captured fresh at 100 columns), under a
+/// header that says "permissions" and a tip about permission settings.
+#[test]
+fn an_idle_codex_composer_is_never_refused() {
+    let lines: Vec<String> = [
+        "",
+        "  >_ OpenAI Codex (v0.170.0)",
+        "     /workspace/rudder-scratch/perm-block/proj",
+        "  permissions: YOLO mode",
+        "",
+        "  Tip: Use /statusline to configure which items appear in the status line.",
+        "",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "  GPT-6.1-Sol medium fast · /workspace/rudder-scratch/perm-block/proj",
+        "  ← for agents · ? for shortcuts                                          ⚠ 6 warnings · f2 to view",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(!terminal_needs_permission_from_lines(Backend::Codex, &lines));
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &lines), None);
+
+    // Text typed over several rows, and the bar an older Codex drew in a
+    // narrow pane (captured 11-05): no hint row, the warning badge on the
+    // status bar's row, so the cwd is not the bar's last segment.
+    let mut typed = lines.clone();
+    typed[8] = "› please allow me to approve this".to_string();
+    typed[9] = "  do you want to proceed with the permission request? yes".to_string();
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &typed), None);
+    let mut narrow = typed.clone();
+    narrow[10] = "  GPT-6.1-Sol medium Fast · /workspace/code/vibepri…  ⚠ 7 warnings · f2 to view".to_string();
+    narrow[11] = String::new();
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &narrow), None);
+
+    // Codex's trust dialog (captured) has no composer and still blocks.
+    let trust: Vec<String> = [
+        "  Folder access",
+        "  /workspace/rudder-scratch/perm-block/proj",
+        "",
+        "  Trust this folder? Codex can read, edit, and run files here, subject to your permission",
+        "  settings. Folder settings can run code automatically, even without a model request. Continue",
+        "  only if you trust these files. Your trust decision will be saved.",
+        "",
+        "› 1. Trust and continue",
+        "  2. Back to Agent Command Center",
+        "",
+        "  enter continue · esc back",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_composer_blocked(Backend::Codex, &trust).is_some());
+}
+
+/// The send check reads the live screen. A dashboard pane scrolled back shows
+/// old rows (an old prompt, a message about permissions), and reading those
+/// refused a message to an agent idle at its composer.
+#[cfg(not(windows))]
+#[test]
+fn the_live_screen_ignores_a_scrolled_back_view() {
+    let mut pane = numbered_lines_pane(8);
+    let live = pane.live_screen_lines();
+    assert!(live.iter().any(|line| line == "line040"), "{live:?}");
+    pane.scrollback_by(10);
+    assert_ne!(pane.visible_lines_snapshot(), live, "the view did scroll back");
+    assert_eq!(pane.live_screen_lines(), live);
+    assert_ne!(pane.visible_lines_snapshot(), live, "and it stays where the user put it");
+}
+
 /// Claude 2.1.318 mid-turn, as the libra "bild" agent showed it while its row
 /// said "needs permission" for the whole turn: the spinner no longer carries
 /// "esc to interrupt", and the tip under it ("pre-approve ... edit") matched

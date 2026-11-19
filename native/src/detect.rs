@@ -215,7 +215,28 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
         return true;
     }
     match backend {
-        Backend::Claude => lower.contains("(shift+tab"),
+        // The mode footer leads with the mode's glyph, and drops its
+        // "(shift+tab to cycle)" once it lists anything else (2.1.328:
+        // `⏸ manual mode on · 1 monitor · ↓ to manage`).
+        Backend::Claude => {
+            let head = lower.trim_start();
+            lower.contains("(shift+tab")
+                || head.starts_with("? for shortcuts")
+                || head
+                    .strip_prefix("\u{23f5}\u{23f5} ")
+                    .or_else(|| head.strip_prefix("\u{23f8} "))
+                    .is_some_and(|mode| {
+                        [
+                            "manual mode on",
+                            "plan mode on",
+                            "accept edits on",
+                            "auto mode on",
+                            "don't ask on",
+                        ]
+                        .iter()
+                        .any(|label| mode.starts_with(label))
+                    })
+        }
         // opencode's idle footer: the status/help hints it draws under the
         // composer. Every one of these used to be a bare substring test against
         // the whole line, so an agent WRITING about "ctrl+c" or "the tab bar" —
@@ -237,6 +258,8 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
             //   "/ for commands"           - slash-help hint
             //   "ctrl+j newline"           - input-area hint
             //   "← for agents · ? for shortcuts"  - 0.170 hint row under the bar
+            //   "⚠ 7 warnings · f2 to view"  - warning badge, on the hint row or
+            //                                  (older, narrow) the status bar
             //   "<model> <effort> ... · <cwd>"  - bottom status bar
             if lower.contains("worked for ")
                 || lower.contains("/ps to view")
@@ -244,6 +267,7 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
                 || lower.contains("/ for commands")
                 || lower.contains("ctrl+j newline")
                 || lower.contains("? for shortcuts")
+                || lower.contains("f2 to view")
             {
                 return true;
             }
@@ -416,11 +440,11 @@ pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[St
     // A permission prompt REPLACES the composer, so a pane parked at its
     // composer is not on one, whatever its recent output says. The footer
     // ("bypass permissions on", Codex's status bar) is drawn under the composer
-    // only; a menu's "❯ 1. Yes" looks like a composer line, so the footer is the
-    // test. Claude explaining that "Apple has to grant the CarPlay permission,
-    // which you request", and a Codex diff about "permission to send as the
-    // requested address" above its composer, each read as a prompt: the row
-    // said so and the phone's reply was refused.
+    // only; a menu's "❯ 1. Yes" looks like a composer line, so the composer and
+    // the footer under it are the test. Claude explaining that "Apple has to
+    // grant the CarPlay permission, which you request", and a Codex diff about
+    // "permission to send as the requested address" above its composer, each
+    // read as a prompt: the row said so and the phone's reply was refused.
     if idle_footer_showing(backend, lines) {
         return false;
     }
@@ -710,16 +734,80 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
             || lower == "interrupted")
 }
 
-/// True when the bottom rows show the footer a backend draws under its composer
-/// only, so nothing (no permission prompt, no question) has replaced it.
+/// True when the pane shows the backend's composer with the footer it draws
+/// under the composer only, so nothing (no permission prompt, no question) has
+/// replaced it.
+///
+/// Claude and Codex are found by their composer, not by the screen's last
+/// rows. Claude 2.1.328 draws more under its footer: right-aligned status rows
+/// (`◎ /goal active (1h)`, `/rc active`), a blank row, then one row per
+/// teammate or background agent (`● main`, `◯ antigravity-backend  Waiting for
+/// agy authorization code`, `↓ 4 more`). With a few agents the footer left the
+/// last three rows, and the keyword reader took an agent's row plus the lead's
+/// "no change" for a permission request: the phone's messages to an idle lead
+/// were refused.
 fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
-    lines
-        .iter()
-        .rev()
-        .map(|line| normalize_terminal_line(line))
-        .filter(|line| !line.is_empty())
-        .take(3)
-        .any(|line| looks_like_idle_chrome(backend, &line))
+    let rows: Vec<String> = lines.iter().map(|line| normalize_terminal_line(line)).collect();
+    match backend {
+        Backend::Claude => claude_composer_showing(&rows),
+        Backend::Codex => codex_composer_showing(&rows),
+        Backend::Opencode => rows
+            .iter()
+            .rev()
+            .filter(|row| !row.is_empty())
+            .take(3)
+            .any(|row| looks_like_idle_chrome(backend, row)),
+    }
+}
+
+/// Claude Code's composer box on screen: its last two rules enclose the `❯`
+/// input row (with the rows its text wraps onto), and the mode footer is among
+/// the rows under the box. A permission dialog or a menu takes the box's place
+/// and keeps at most its top rule under it (2.1.328, labelled `View teammates`
+/// when there are teammates), and a menu's `❯ 1. Yes` is an option, never an
+/// input row.
+fn claude_composer_showing(rows: &[String]) -> bool {
+    let Some(bottom) = rows.iter().rposition(|row| is_claude_rule(row)) else {
+        return false;
+    };
+    let Some(top) = rows[..bottom].iter().rposition(|row| is_claude_rule(row)) else {
+        return false;
+    };
+    let is_input = rows[top + 1..bottom].iter().any(|row| {
+        row.strip_prefix('\u{276f}')
+            .is_some_and(|text| !is_numbered_option(text))
+    });
+    is_input
+        && rows[bottom + 1..]
+            .iter()
+            .any(|row| looks_like_idle_chrome(Backend::Claude, row))
+}
+
+/// A rule Claude Code draws across the pane above and below its composer,
+/// with or without a label set into it (`──── View teammates: … ─`).
+fn is_claude_rule(row: &str) -> bool {
+    row.starts_with("\u{2500}\u{2500}") && row.ends_with('\u{2500}')
+}
+
+/// Codex's composer at rest: its last `›` row is the input (an approval, the
+/// trust dialog and every picker put the cursor on a numbered option instead),
+/// and the pane's last row is its status bar or hint row, which Codex draws
+/// under the composer only.
+fn codex_composer_showing(rows: &[String]) -> bool {
+    let input = rows.iter().rev().find_map(|row| row.strip_prefix('\u{203a}'));
+    input.is_some_and(|text| !is_numbered_option(text))
+        && rows
+            .iter()
+            .rev()
+            .find(|row| !row.is_empty())
+            .is_some_and(|row| looks_like_idle_chrome(Backend::Codex, row))
+}
+
+/// `1. Yes`, `2) No`: a menu option after its cursor glyph.
+fn is_numbered_option(text: &str) -> bool {
+    let text = text.trim_start();
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && matches!(text[digits..].chars().next(), Some('.' | ')'))
 }
 
 /// Why text typed into this pane would NOT reach the agent as a message, if it

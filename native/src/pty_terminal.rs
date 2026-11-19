@@ -1396,10 +1396,17 @@ impl TerminalPane {
             .any(|line| line.contains(needle))
     }
 
-    /// The child's live screen rows right now (see `live_screen_contains`).
+    /// The child's live screen rows right now (see `live_screen_contains`),
+    /// wherever the user has scrolled the view: vt100 reads rows through its
+    /// scrollback offset, so a pane scrolled back answered with old rows (an
+    /// old prompt, or a message about one).
     pub fn live_screen_lines(&mut self) -> Vec<String> {
         self.drain_output();
-        self.current_visible_lines_snapshot()
+        let view = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(0);
+        let lines = self.current_visible_lines_snapshot();
+        self.parser.screen_mut().set_scrollback(view);
+        lines
     }
 
     pub fn visible_lines_snapshot(&self) -> Vec<String> {

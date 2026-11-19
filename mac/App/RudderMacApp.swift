@@ -164,8 +164,8 @@ struct RootView: View {
     }
 }
 
-/// The web app under a titlebar strip of its own background, with the loading
-/// and retry screens crossfaded over it.
+/// The web app under a titlebar strip of its own background, the find bar
+/// floating over it, and the loading and retry screens crossfaded over both.
 struct SignedInView: View {
     @Bindable var model: AppModel
     let token: String
@@ -176,13 +176,13 @@ struct SignedInView: View {
                 // The traffic lights sit here, over the app's own color, and the
                 // strip drags the window; the page starts below it.
                 Theme.canvas.frame(height: Theme.titlebarHeight)
-                if model.find.isVisible {
-                    FindBar(find: model.find)
-                }
                 // A new token is a new page: RUDDER_NATIVE is fixed per document.
                 AppWebView(model: model, token: token)
                     .id(token)
                     .opacity(model.webState == .ready ? 1 : 0)
+                    .overlay(alignment: .topTrailing) {
+                        FindOverlay(find: model.find)
+                    }
             }
             .ignoresSafeArea()
 

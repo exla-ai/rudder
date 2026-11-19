@@ -299,32 +299,162 @@ final class PageFind {
 
 // MARK: Bar
 
-/// Under the titlebar while finding: the query with "3 of 12", previous and
-/// next, and Done, in the app's own colors.
+/// Over the page while finding: the bar floats at the top of the chat's side,
+/// takes no layout space, so the page never moves or resizes, and slides down
+/// from under the titlebar strip. With Reduce Motion it fades in place.
+///
+/// The slide is AppKit's: SwiftUI does not carry an AppKit field (the query)
+/// through an animated offset or opacity, so the bar has a hosting view of
+/// its own that Core Animation moves or fades whole, inside a corner of the
+/// page that clips it at the strip.
+struct FindOverlay: NSViewRepresentable {
+    let find: PageFind
+
+    func makeNSView(context: Context) -> Host {
+        Host(find: find)
+    }
+
+    func updateNSView(_ host: Host, context: Context) {
+        host.show(find.isVisible, reduceMotion: context.environment.accessibilityReduceMotion)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: Host, context: Context) -> CGSize? {
+        Host.size
+    }
+
+    final class Host: NSView {
+        /// Room around the bar for its shadow.
+        private static let room: CGFloat = 24
+        private static let top: CGFloat = 10
+        private static let trailing: CGFloat = 16
+        static let size = CGSize(width: room + FindBar.width + trailing, height: top + FindBar.height + room)
+
+        private let bar: NSView
+        private var showing = false
+        /// Each show or close: only the latest one's end hides the bar.
+        private var generation = 0
+
+        init(find: PageFind) {
+            let bar = NSHostingView(rootView: FindBar(find: find).padding(Self.room))
+            bar.sizingOptions = []
+            bar.frame = Self.barFrame(shown: false)
+            bar.isHidden = true
+            self.bar = bar
+            super.init(frame: CGRect(origin: .zero, size: Self.size))
+            wantsLayer = true
+            clipsToBounds = true
+            addSubview(bar)
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("FindOverlay.Host is made in code")
+        }
+
+        override var isFlipped: Bool { true }
+
+        /// Shown, just under the strip; closed, parked above it with its shadow.
+        private static func barFrame(shown: Bool) -> CGRect {
+            let size = CGSize(width: FindBar.width + 2 * room, height: FindBar.height + 2 * room)
+            return CGRect(origin: CGPoint(x: 0, y: shown ? top - room : -size.height), size: size)
+        }
+
+        func show(_ visible: Bool, reduceMotion: Bool) {
+            guard visible != showing else { return }
+            showing = visible
+            generation += 1
+            let current = generation
+            bar.isHidden = false
+            let finish: @Sendable () -> Void = { [weak self] in
+                MainActor.assumeIsolated {
+                    // Closed and done sliding: out of the key view loop and VoiceOver.
+                    guard let self, current == self.generation, !self.showing else { return }
+                    self.bar.isHidden = true
+                }
+            }
+            if reduceMotion {
+                bar.frame = Self.barFrame(shown: true)
+                if visible { bar.alphaValue = 0 }
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.15
+                    bar.animator().alphaValue = visible ? 1 : 0
+                }, completionHandler: finish)
+            } else {
+                bar.alphaValue = 1
+                NSAnimationContext.runAnimationGroup({ context in
+                    // Down quick and settling, up quicker: the curves of a macOS sheet.
+                    context.duration = visible ? 0.32 : 0.2
+                    context.timingFunction = visible
+                        ? CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+                        : CAMediaTimingFunction(controlPoints: 0.4, 0, 0.9, 0.6)
+                    bar.animator().frame = Self.barFrame(shown: visible)
+                }, completionHandler: finish)
+            }
+        }
+
+        /// Only the bar takes clicks; the rest of the corner is the page's.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard showing else { return nil }
+            let local = convert(point, from: superview)
+            guard bar.frame.insetBy(dx: Self.room, dy: Self.room).contains(local) else { return nil }
+            return super.hitTest(point)
+        }
+    }
+}
+
+/// A compact panel on the window's material: the query with "3 of 12",
+/// previous and next, and close.
 struct FindBar: View {
+    static let width: CGFloat = 372
+    static let height: CGFloat = 40
+
     let find: PageFind
     @State private var focused = false
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        HStack(spacing: 2) {
             field
-            steps
-            Button("Done") { find.close() }
-                .buttonStyle(BarButtonStyle())
+                .padding(.trailing, 6)
+            Button { find.previous() } label: {
+                Image(systemName: "chevron.up")
+            }
+            .help("Previous Match (Shift-Command-G)")
+            .accessibilityLabel("Previous match")
+            .disabled(cannotStep)
+            Button { find.next() } label: {
+                Image(systemName: "chevron.down")
+            }
+            .help("Next Match (Command-G)")
+            .accessibilityLabel("Next match")
+            .disabled(cannotStep)
+            Button { find.close() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10.5, weight: .bold))
+            }
+            .help("Close (Esc)")
+            .accessibilityLabel("Close find")
         }
-        .padding(.horizontal, 12)
-        .frame(height: 40)
-        .background(Theme.canvas)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.line).frame(height: 1)
-        }
+        .buttonStyle(PanelButtonStyle())
+        .padding(.horizontal, 6)
+        .frame(width: Self.width, height: Self.height)
+        .background(.regularMaterial, in: shape)
+        .overlay(shape.strokeBorder(Color.primary.opacity(scheme == .dark ? 0.18 : 0.12), lineWidth: 1 / displayScale))
+        .shadow(color: .black.opacity(scheme == .dark ? 0.4 : 0.14), radius: 16, y: 6)
+        .shadow(color: .black.opacity(scheme == .dark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Find on page")
+    }
+
+    private var cannotStep: Bool {
+        find.query.isEmpty || find.status == .notFound
     }
 
     private var field: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
             FindField(
                 text: find.query,
@@ -342,16 +472,22 @@ struct FindBar: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.2), value: text)
                     .help(failure ?? text)
             }
         }
-        .padding(.horizontal, 9)
-        .frame(width: 280, height: 26)
+        .padding(.horizontal, 8)
+        .frame(height: 28)
         .background {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-            shape.fill(Theme.surface)
-                .overlay(shape.strokeBorder(focused ? Theme.accent.opacity(0.85) : Theme.line, lineWidth: focused ? 1.5 : 1))
-                .shadow(color: Theme.accent.opacity(focused ? 0.18 : 0), radius: 4)
+            let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+            shape.fill(Color.primary.opacity(scheme == .dark ? 0.09 : 0.055))
+                // The macOS focus ring: the accent, just outside the field.
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Theme.accent.opacity(focused ? 0.5 : 0), lineWidth: 3)
+                        .padding(-3)
+                )
         }
         .animation(.easeOut(duration: 0.15), value: focused)
     }
@@ -360,65 +496,11 @@ struct FindBar: View {
         if case .failed(let message) = find.status { return message }
         return nil
     }
-
-    private var steps: some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        return HStack(spacing: 0) {
-            Button { find.previous() } label: {
-                Image(systemName: "chevron.left")
-            }
-            .help("Previous Match (Shift-Command-G)")
-            .accessibilityLabel("Previous match")
-            Rectangle().fill(Theme.line).frame(width: 1, height: 14)
-            Button { find.next() } label: {
-                Image(systemName: "chevron.right")
-            }
-            .help("Next Match (Command-G)")
-            .accessibilityLabel("Next match")
-        }
-        .buttonStyle(StepButtonStyle())
-        .disabled(find.query.isEmpty || find.status == .notFound)
-        .background {
-            shape.fill(Theme.surface)
-                .overlay(shape.strokeBorder(Theme.line, lineWidth: 1))
-        }
-        .clipShape(shape)
-    }
 }
 
-/// Done: a quiet surface with a hairline, like the app's secondary buttons.
-private struct BarButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        StyledBody(configuration: configuration)
-    }
-
-    private struct StyledBody: View {
-        let configuration: Configuration
-        @Environment(\.colorScheme) private var scheme
-        @State private var hovering = false
-
-        var body: some View {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-            configuration.label
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.primary)
-                .padding(.horizontal, 11)
-                .frame(height: 26)
-                .background {
-                    shape.fill(Theme.surface)
-                        .overlay(shape.fill(Color.primary.opacity(configuration.isPressed ? 0.08 : hovering ? 0.04 : 0)))
-                        .overlay(shape.strokeBorder(Theme.line, lineWidth: 1))
-                        .shadow(color: .black.opacity(scheme == .dark ? 0 : 0.04), radius: 2, y: 1)
-                }
-                .contentShape(shape)
-                .onHover { hovering = $0 }
-                .animation(.easeOut(duration: 0.12), value: hovering)
-        }
-    }
-}
-
-/// One half of the previous/next pair: the pair draws the surface and hairline.
-private struct StepButtonStyle: ButtonStyle {
+/// Previous, next and close: a plain symbol that gets a soft rounded fill
+/// under the pointer, like the controls in a macOS toolbar.
+private struct PanelButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         StyledBody(configuration: configuration)
     }
@@ -429,13 +511,14 @@ private struct StepButtonStyle: ButtonStyle {
         @State private var hovering = false
 
         var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
             configuration.label
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.primary)
-                .frame(width: 30, height: 26)
-                .background(Color.primary.opacity(configuration.isPressed ? 0.08 : hovering ? 0.04 : 0))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .background(shape.fill(Color.primary.opacity(configuration.isPressed ? 0.12 : hovering ? 0.07 : 0)))
                 .opacity(isEnabled ? 1 : 0.4)
-                .contentShape(Rectangle())
+                .contentShape(shape)
                 .onHover { hovering = $0 && isEnabled }
                 .animation(.easeOut(duration: 0.12), value: hovering)
         }

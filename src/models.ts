@@ -962,8 +962,8 @@ const ANTIGRAVITY: Harness = {
   name: (display) => display,
   // Models in the order agy lists them.
   tiers: tiersByListOrder,
-  // `agy --effort` (native launch.rs); none offered: agy lists a slug per effort.
-  efforts: ["low", "medium", "high", "xhigh", "max"],
+  // None: agy lists a slug per effort and runs no --effort (native launch.rs).
+  efforts: [],
 };
 
 const HARNESSES: Harness[] = [CLAUDE, CODEX, OPENCODE, ANTIGRAVITY];

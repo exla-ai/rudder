@@ -1936,7 +1936,7 @@ async function checkAntigravity(env) {
   if (!status.loggedIn) {
     return { ok: false, account: null, plan: null, detail: status.code !== 0 ? firstLine(status.text) || `exit ${status.code}` : "not logged in" };
   }
-  const probe = await capture("agy", ["-p", "Reply with exactly: OK", "--effort", "low"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
     return { ok: true, account: null, plan: null, detail: null };
   }

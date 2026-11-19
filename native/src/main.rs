@@ -9398,7 +9398,7 @@ impl App {
             Backend::Opencode => opencode_command(model, effort, Some(prompt), AgentMode::RudderPlan),
             // Antigravity's reconcile planner: its TUI in plan mode, the plan
             // block read out of the pane like its other planners.
-            Backend::Antigravity => antigravity_planner_command(model, effort, prompt),
+            Backend::Antigravity => antigravity_planner_command(model, prompt),
         }
     }
 

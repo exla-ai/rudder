@@ -1604,6 +1604,8 @@ fn antigravity_model_list_is_its_slugs_in_order() {
 
 #[test]
 fn antigravity_workers_run_unattended_and_planners_plan_first() {
+    // The program is RUDDER_AGY_BIN when a test sets it.
+    let _env = env_guard();
     let worker = agent_command_with_orchestrator_mode(
         Backend::Antigravity,
         "gemini-3.8-flash",
@@ -1616,14 +1618,18 @@ fn antigravity_workers_run_unattended_and_planners_plan_first() {
     assert_eq!(worker.program, "agy");
     assert!(worker.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
     assert!(worker.args.windows(2).any(|w| w[0] == "--model" && w[1] == "gemini-3.8-flash"));
-    assert!(worker.args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
+    assert!(
+        !worker.args.iter().any(|arg| arg == "--effort"),
+        "agy lists a slug per effort; an effort carried in is not passed: {:?}",
+        worker.args
+    );
     assert!(
         worker.args.windows(2).any(|w| w[0] == "-i" && w[1].contains("fix the tests")),
         "-i runs the first turn and keeps the pane open; -p would exit: {:?}",
         worker.args
     );
 
-    let planner = antigravity_planner_command("", None, "decompose this");
+    let planner = antigravity_planner_command("", "decompose this");
     assert!(planner.args.windows(2).any(|w| w[0] == "--mode" && w[1] == "plan"));
     assert!(!planner.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
     assert!(
@@ -1645,6 +1651,7 @@ fn antigravity_resumes_its_conversation_and_refuses_to_fake_a_fork() {
         .windows(2)
         .any(|w| w[0] == "--conversation" && w[1] == "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"));
     assert!(resume.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+    assert!(!resume.args.iter().any(|arg| arg == "--effort"), "{:?}", resume.args);
 
     let refused = fork_command(Backend::Antigravity, "", None, "7f0c2a52", Some("go"));
     assert_eq!(refused.err().as_deref(), Some(ANTIGRAVITY_NO_FORK));
@@ -1660,9 +1667,9 @@ fn antigravity_names_and_models_route_to_its_backend() {
     }
     assert_eq!(backend_for_model("gemini-3.8-flash"), Backend::Antigravity);
     assert_eq!(
-        effort_options_for(Backend::Antigravity, "gemini-4-argon").last(),
-        Some(&Some(EffortLevel::Max)),
-        "agy --effort takes low through max"
+        effort_options_for(Backend::Antigravity, "gemini-3.8-flash-high"),
+        vec![None],
+        "agy lists a slug per effort, so its models take none of their own"
     );
 }
 
@@ -32412,6 +32419,44 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
     let args = recorded_args(&agy_args);
     assert!(args.windows(2).any(|pair| pair[0] == "--model" && pair[1] == model), "{args:?}");
     assert!(args.iter().any(|arg| arg == "-i"), "starts interactive on the handoff: {args:?}");
+    app.agents[0].terminal = None;
+    std::env::remove_var("RUDDER_AGY_BIN");
+}
+
+#[test]
+#[cfg(not(windows))]
+fn a_claude_chat_with_an_effort_moved_to_antigravity_drops_it() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("chat-harness-agy-effort");
+    let home = dir.join("home");
+    env.set_home(&dir, &home);
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    fs::create_dir_all(home.join(".rudder")).unwrap();
+    let agy_args = dir.join("agy-args.txt");
+    let fake_agy = dir.join("fake-agy.sh");
+    write_args_recording_bin(&fake_agy, &agy_args);
+    std::env::set_var("RUDDER_AGY_BIN", &fake_agy);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("chat-run", "fix the flaky test");
+    run.cwd = dir.clone();
+    run.backend = Backend::Claude;
+    run.model = "opus".to_string();
+    run.effort = Some(EffortLevel::High);
+    run.session_id = Some("claude-session".to_string());
+    run.status = AgentStatus::Running;
+    app.agents.push(run);
+    let handoff = "Rudder handoff: this chat moved to you from Claude · Opus 5.5 · high.\n## Goal\nfix the flaky test";
+
+    // The app sends auto (agy's rows take no effort); an app that still sends
+    // the chat's effort moves it all the same, without it.
+    let spec = format!("antigravity gemini-3.8-flash-high high\n{handoff}");
+    assert!(matches!(app.deliver_harness_request("chat-run", &spec), SteerDelivery::Delivered));
+    let run = &app.agents[0];
+    assert_eq!((run.backend, run.model.as_str(), run.effort), (Backend::Antigravity, "gemini-3.8-flash-high", None));
+    let args = recorded_args(&agy_args);
+    assert!(args.windows(2).any(|pair| pair[0] == "--model" && pair[1] == "gemini-3.8-flash-high"), "{args:?}");
+    assert!(!args.iter().any(|arg| arg == "--effort"), "no effort reaches agy: {args:?}");
     app.agents[0].terminal = None;
     std::env::remove_var("RUDDER_AGY_BIN");
 }

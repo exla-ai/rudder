@@ -85,15 +85,13 @@ function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): 
  * in agy's plan mode.
  */
 function antigravityArgs(run: RunRecord, prompt: string, modeArgs: string[]): string[] {
-  const effort = normalizeEffortForBackend("antigravity", run.effort);
+  // No --effort: agy lists a slug per effort (native launch.rs push_antigravity_model).
   const conversation = run.session?.nativeSessionId;
   return compact([
     "agy",
     ...modeArgs,
     run.model ? "--model" : undefined,
     run.model || undefined,
-    effort ? "--effort" : undefined,
-    effort,
     conversation ? "--conversation" : undefined,
     conversation,
     "-i",

@@ -287,7 +287,7 @@ function antigravityBackend(): BackendAdapter {
       const prompt = stripRudderPromptWrappers(request.prompt);
       const sessionId = request.run.session?.nativeSessionId;
       const isFollowUp = (request.run.turns?.length ?? 0) > 1 && Boolean(sessionId);
-      const effort = normalizeEffortForBackend("antigravity", request.run.effort);
+      // No --effort: agy lists a slug per effort (native launch.rs push_antigravity_model).
       const args = compact([
         "-p",
         `${request.contract}\n\n${prompt}`,
@@ -296,8 +296,6 @@ function antigravityBackend(): BackendAdapter {
         "--dangerously-skip-permissions",
         request.run.model ? "--model" : undefined,
         request.run.model || undefined,
-        effort ? "--effort" : undefined,
-        effort,
         isFollowUp ? "--conversation" : undefined,
         isFollowUp ? sessionId : undefined,
       ]);

@@ -183,6 +183,9 @@ impl App {
         if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
             return SteerDelivery::Failed(format!("unknown effort: {effort_arg}"));
         }
+        // An Antigravity model takes no effort of its own (its slug names
+        // one), so a chat moved there drops the one it ran at.
+        let effort = if backend == Backend::Antigravity { None } else { effort };
         let handoff = sanitize_steer_instruction(handoff);
         if handoff.is_empty() {
             return SteerDelivery::Failed("the handoff is empty".to_string());

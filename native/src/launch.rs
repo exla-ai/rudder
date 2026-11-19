@@ -378,7 +378,7 @@ pub(crate) fn rudder_plan_refine_command(
         // out of the pane like the first turn's.
         Backend::Antigravity => {
             let mut args = antigravity_mode_args(AgentMode::RudderPlan, false);
-            push_antigravity_model(&mut args, model, effort);
+            push_antigravity_model(&mut args, model);
             args.push("--conversation".to_string());
             args.push(session_id.to_string());
             push_antigravity_prompt(&mut args, Some(feedback_prompt));
@@ -709,7 +709,7 @@ fn build_agent_command(
         Backend::Opencode => opencode_command(model, effort, prompt.as_deref(), mode),
         Backend::Antigravity => {
             let mut args = antigravity_mode_args(mode, orchestrator_interactive);
-            push_antigravity_model(&mut args, model, effort);
+            push_antigravity_model(&mut args, model);
             push_antigravity_prompt(&mut args, prompt.as_deref());
             TerminalCommand::with_args(antigravity_program(), args)
         }
@@ -743,17 +743,16 @@ pub(crate) fn antigravity_mode_args(mode: AgentMode, orchestrator_interactive: b
     }
 }
 
-/// `--model` and `--effort`, each only when set: an empty model means the
-/// model chosen in Antigravity's own `/model`, a real choice.
-fn push_antigravity_model(args: &mut Vec<String>, model: &str, effort: Option<EffortLevel>) {
+/// `--model` when set: an empty model means the model chosen in
+/// Antigravity's own `/model`, a real choice. Never `--effort`: agy lists a
+/// slug per effort ("gemini-3.8-flash-high") and refuses `--effort` for a
+/// model that takes none, so an effort carried from another harness would
+/// fail the launch.
+fn push_antigravity_model(args: &mut Vec<String>, model: &str) {
     let model = model.trim();
     if !model.is_empty() {
         args.push("--model".to_string());
         args.push(model.to_string());
-    }
-    if let Some(effort) = effort {
-        args.push("--effort".to_string());
-        args.push(effort.as_str().to_string());
     }
 }
 
@@ -767,13 +766,9 @@ fn push_antigravity_prompt(args: &mut Vec<String>, prompt: Option<&str>) {
 }
 
 /// A plan-mode Antigravity planner running `prompt` as its first turn.
-pub(crate) fn antigravity_planner_command(
-    model: &str,
-    effort: Option<EffortLevel>,
-    prompt: &str,
-) -> TerminalCommand {
+pub(crate) fn antigravity_planner_command(model: &str, prompt: &str) -> TerminalCommand {
     let mut args = antigravity_mode_args(AgentMode::RudderPlan, false);
-    push_antigravity_model(&mut args, model, effort);
+    push_antigravity_model(&mut args, model);
     push_antigravity_prompt(&mut args, Some(prompt));
     TerminalCommand::with_args(antigravity_program(), args)
 }
@@ -782,7 +777,7 @@ pub(crate) fn antigravity_planner_command(
 /// permission footing.
 pub(crate) fn antigravity_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
     let mut args = antigravity_mode_args(run.mode, run.interactive_orchestrator);
-    push_antigravity_model(&mut args, &run.model, run.effort);
+    push_antigravity_model(&mut args, &run.model);
     args.push("--conversation".to_string());
     args.push(session_id.to_string());
     TerminalCommand::with_args(antigravity_program(), args)
@@ -1039,7 +1034,7 @@ pub(crate) fn rudder_orchestrator_resume_command(
         }
         Backend::Antigravity => {
             let mut args = antigravity_mode_args(AgentMode::RudderPlan, true);
-            push_antigravity_model(&mut args, model, effort);
+            push_antigravity_model(&mut args, model);
             args.push("--conversation".to_string());
             args.push(session_id.to_string());
             push_antigravity_prompt(&mut args, Some(continuation));

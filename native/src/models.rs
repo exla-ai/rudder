@@ -297,6 +297,11 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
 }
 
 pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<EffortLevel>> {
+    // agy lists a slug per effort ("gemini-3.8-flash-high"), so its models
+    // take none of their own (launch.rs push_antigravity_model).
+    if backend == Backend::Antigravity {
+        return vec![None];
+    }
     // Claude Code's own list, kept in the catalog, names exactly the levels a
     // model takes; the picker (src/models.ts modelEfforts) reads the same list.
     if let Some(levels) = cached_model_efforts(backend, model) {
@@ -313,7 +318,7 @@ pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<Ef
         Some(EffortLevel::High),
         Some(EffortLevel::XHigh),
     ];
-    if matches!(backend, Backend::Claude | Backend::Antigravity) {
+    if backend == Backend::Claude {
         options.push(Some(EffortLevel::Max));
     }
     options
@@ -385,12 +390,7 @@ pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<
             .into_iter()
             .find(|entry| entry.id == model)
             .map(|entry| entry.efforts),
-        Backend::Antigravity => cached_antigravity_models()
-            .ok()?
-            .iter()
-            .any(|id| id == model)
-            .then(Vec::new),
-        Backend::Codex => None,
+        Backend::Codex | Backend::Antigravity => None,
     }
 }
 

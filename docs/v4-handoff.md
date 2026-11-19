@@ -263,7 +263,24 @@ download still serves 1.0.2; a signed build needs the Developer ID identity
 (the MacBook Pro, or a Developer ID Application .p12 as the
 MAC_DEVELOPER_ID_P12 and MAC_DEVELOPER_ID_PASSWORD secrets for mac.yml).
 
-5.0.5 is published as npm latest and deployed to Cloud (Fly release 210,
+5.0.10 is published as npm latest and deployed to Cloud (Fly release 214,
+2026-11-19 04:12Z, worker image `rudder-workers-exla:5.0.10`, built from the
+tag's source with `worker-image.mjs --compile`). Rudder for Mac 5.0.10
+(5000010) is the latest Mac release (`mac-v5.0.10-5000010`): the Mac version
+now follows Rudder's (`npm version` runs `scripts/mac-version.mjs`), and
+`mac-publish.yml` signs its appcast with the repo secret. 5.0.6 to 5.0.9 never
+reached npm (Release CI on macOS: a PTY test racing `stty raw`, and
+`kill(-group, 0)` answering EPERM for a group of exiting processes); Cloud ran
+5.0.8 and 5.0.9 images meanwhile. In it: Notes (RUDDER_NOTES.md), Files for
+agents' own workspaces, edit any message in place (also mid-turn and the
+first one), Close removes the row at once, drag to reorder agents, a faster
+"/" menu, All agents speed and framing, a new Codex chat shows its first reply
+within a second, the Codex permission false positive, vibeprint 1.0.0, and on
+the Mac Cmd+F, a new About window and a DMG whose Applications item shows its
+icon. Open: older chat messages past the last 300 are out of reach (find and
+scroll), and the dashboard reads its steer inbox once a second.
+
+5.0.5 was published as npm latest and deployed to Cloud (Fly release 210,
 2026-11-18 15:28Z, worker image `rudder-workers-exla:5.0.5`, also in
 `rudder-worker-images`). It qualified first on a `release-check/5.0.5` branch
 and the tag reused that run. Fixes from a real-Mac run of 5.0.4: a merge lands

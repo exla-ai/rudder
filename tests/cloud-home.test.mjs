@@ -421,6 +421,20 @@ serverTest("signing out of the app revokes its token and the next sign-in can pi
   }
 });
 
+// GitHub lets only the owner authorize a private app, and without Email
+// addresses a user who hides their email has none to sign in with.
+serverTest("the GitHub App manifest makes a sign-in anyone can use", async (t) => {
+  const { base } = await bootServer(t, { RUDDER_ADMIN_TOKEN: "admin-test-token" });
+  assert.equal((await fetch(`${base}/setup/github`)).status, 401);
+  const page = await (await fetch(`${base}/setup/github`, { headers: { authorization: "Bearer admin-test-token" } })).text();
+  const raw = page.match(/name="manifest" value="([^"]*)"/)?.[1];
+  assert.ok(raw, "the setup page posts a manifest");
+  const manifest = JSON.parse(raw.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
+  assert.equal(manifest.public, true);
+  assert.deepEqual(manifest.default_permissions, { emails: "read" });
+  assert.deepEqual(manifest.callback_urls, [`${base}/api/auth/callback/github`]);
+});
+
 serverTest("a failed worker heartbeat records why", async (t) => {
   const { base, dbPath } = await bootServer(t);
   const workerToken = "rdrw_fail_test";

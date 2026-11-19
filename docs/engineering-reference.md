@@ -844,7 +844,12 @@ Subcommands: `login`, `logout`, `launch`, `sail`, `list`/`ls`, `status`, `logs`,
 
 ### 9.3 Auth + account isolation
 Better Auth handles Google + GitHub OAuth; there is also a GitHub device flow and a
-`gh auth token` exchange. The control plane issues a Rudder CLI token stored HASHED as
+`gh auth token` exchange. GitHub sign-in is the "Rudder Cloud" GitHub App
+(`GITHUB_CLIENT_ID` in `cloud/fly.toml`, callback
+`<BETTER_AUTH_URL>/api/auth/callback/github`). It must be public, because GitHub
+lets only the owning account authorize a private app, and it needs the Email
+addresses (read) account permission, or people who hide their email fail with
+`email_not_found`. The control plane issues a Rudder CLI token stored HASHED as
 `rdr_<base64>` in `rudder_tokens`. Every query is keyed to an `account_id`
 (`github:<id>` or `better-auth:<uuid>`), so tenants never see each other's sails or
 workspaces. Worker-to-control-plane auth uses a separate `RUDDER_WORKER_TOKEN`

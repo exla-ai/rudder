@@ -2107,9 +2107,12 @@ function renderGithubAppSetup(url: URL, res: ServerResponse): void {
     ],
     setup_url: `${baseURL}/setup/github`,
     description: "Rudder Cloud login and coding-agent orchestration.",
-    public: false,
+    // Sign-in for everyone: GitHub lets only the owning account authorize a
+    // private app. Email addresses lets Better Auth read /user/emails, the only
+    // source of an email for people who hide theirs on their profile.
+    public: true,
     request_oauth_on_install: false,
-    default_permissions: {},
+    default_permissions: { emails: "read" },
     default_events: [],
   };
   sendHtml(res, renderShell({

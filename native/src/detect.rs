@@ -164,33 +164,10 @@ pub(crate) fn terminal_looks_ready_for_input_from_lines(
         // Waiting on a question, not "done".
         return false;
     }
-
-    let recent = lines
-        .iter()
-        .rev()
-        .take(12)
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-
-    if recent.iter().any(|line| looks_busy(line)) {
-        return false;
-    }
-
-    // Strongest signal: the agent's idle chrome footer is visible. That footer
-    // is only rendered while the agent is sitting at its prompt waiting for
-    // input, so it never appears mid-turn. Falls back to the prompt-char
-    // heuristic if we don't see chrome (older claude versions, raw shells).
-    if recent
-        .iter()
-        .any(|line| looks_like_idle_chrome(backend, line))
-    {
-        return true;
-    }
-
-    recent
-        .iter()
-        .any(|line| looks_like_agent_prompt(backend, line))
+    // At its composer with no spinner above it. Read from the bottom twelve
+    // rows, a lead's agent list under Claude's footer hid the spinner while
+    // the footer stayed in view, so a working lead read as ready.
+    terminal_at_idle_prompt(backend, lines)
 }
 
 /// opencode draws its hints as a compact footer strip. Anything appreciably
@@ -709,7 +686,9 @@ pub(crate) fn terminal_interrupted_from_lines(backend: Backend, lines: &[String]
     if !matches!(backend, Backend::Claude) {
         return false;
     }
-    let recent: Vec<String> = lines
+    // Above the composer: with a list of agents under Claude's footer, the
+    // receipt left a window counted from the screen's bottom.
+    let recent: Vec<String> = rows_above_composer(backend, lines)
         .iter()
         .rev()
         .map(|line| normalize_terminal_line(line))

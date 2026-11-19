@@ -1038,11 +1038,13 @@ fn detects_busy_lines() {
 
 #[test]
 fn idle_chrome_is_recognized_for_prompt_input() {
-    // Claude's footer when idle at prompt
+    // Claude's composer box and footer when idle at prompt
     let lines: Vec<String> = vec![
         "Edited 3 files".to_string(),
-        "> ".to_string(),
-        "  bypass permissions on (shift+tab to cycle)".to_string(),
+        "────────────────────────────────────────".to_string(),
+        "❯ ".to_string(),
+        "────────────────────────────────────────".to_string(),
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)".to_string(),
     ];
     assert!(terminal_looks_ready_for_input_from_lines(
         Backend::Claude,
@@ -1059,7 +1061,7 @@ fn codex_idle_chrome_is_recognized_for_prompt_input() {
         "- pnpm build".to_string(),
         "Worked for 4m 46s".to_string(),
         "1 background terminal running \u{00b7} /ps to view \u{00b7} /stop to close".to_string(),
-        "> Run /review on my current changes".to_string(),
+        "\u{203a} Run /review on my current changes".to_string(),
         "gpt-5.5 xhigh fast \u{00b7} ~/Documents/.rudder-workspaces/foo-bar".to_string(),
     ];
     assert!(terminal_looks_ready_for_input_from_lines(
@@ -24737,6 +24739,11 @@ fn the_interrupt_receipt_is_recognised_only_at_rest() {
         "❯ carry on",
         "✻ Thinking… (esc to interrupt)",
         "",
+        "────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        "",
     ];
     assert!(!receipt(&working), "a spinner means a new turn is under way");
     let codex: Vec<String> = parked.iter().map(|l| l.to_string()).collect();
@@ -24767,7 +24774,7 @@ fn an_interrupted_claude_turn_is_shown_as_waiting_until_the_next_prompt() {
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
-    let script = "printf '⏺ Writing the essay\\n  ⎿  Interrupted · What should Claude do instead?\\n\\n❯ \\n\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\\n'; sleep 30";
+    let script = "printf '⏺ Writing the essay\\n  ⎿  Interrupted · What should Claude do instead?\\n\\n──────────────────────────────\\n❯ \\n──────────────────────────────\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\\n'; sleep 30";
     let pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
         TerminalPaneOptions {
@@ -30332,9 +30339,8 @@ fn a_scrolled_back_pane_is_judged_by_its_live_rows() {
 /// The lead's pane mid-turn (2.1.328, its own mirror): the spinner sat 16
 /// rows up, over the composer and a list of agents, out of a window counted
 /// from the screen's bottom.
-#[test]
-fn a_long_agent_list_does_not_hide_claudes_spinner() {
-    let busy: Vec<String> = [
+fn claude_2_1_328_busy_lead_with_agents() -> Vec<String> {
+    [
         "❯ in another subagent notes should be specific to per agent not per project",
         "",
         "* Wandering… (25s · ↓ 2.4k tokens · thinking with xhigh effort)",
@@ -30359,7 +30365,12 @@ fn a_long_agent_list_does_not_hide_claudes_spinner() {
     ]
     .iter()
     .map(|line| line.to_string())
-    .collect();
+    .collect()
+}
+
+#[test]
+fn a_long_agent_list_does_not_hide_claudes_spinner() {
+    let busy = claude_2_1_328_busy_lead_with_agents();
     assert!(recent_lines_look_busy(Backend::Claude, &busy));
     assert!(recent_lines_show_turn_work(Backend::Claude, &busy));
     assert!(!terminal_at_idle_prompt(Backend::Claude, &busy));
@@ -30368,6 +30379,66 @@ fn a_long_agent_list_does_not_hide_claudes_spinner() {
     let idle = claude_2_1_328_idle_lead_with_agents();
     assert!(!recent_lines_look_busy(Backend::Claude, &idle));
     assert!(terminal_at_idle_prompt(Backend::Claude, &idle));
+}
+
+/// Claude 2.1.328 after Esc, with eight teammates listed under its footer
+/// (captured): the receipt sits above the composer box, twelve rows up.
+fn claude_2_1_328_interrupted_lead_with_agents() -> Vec<String> {
+    [
+        "  to invest in making those crossings possible.",
+        "",
+        "❯ Run this exact shell command with the Bash tool in the foreground: python3 -c \"import time;",
+        "  time.sleep(40)\"",
+        "",
+        "● Bash(python3 -c \"import time; time.sleep(40)\")",
+        "  ⎿  Interrupted · What should Claude do instead?",
+        "",
+        "───────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-3357365 a` ─",
+        "❯",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor · ↓ to manage",
+        "",
+        "  ● main",
+        "  ◯ alpha    Teammate alpha: reply ok                                                       3m 50s",
+        "  ◯ beta     Teammate beta: reply ok                                                        3m 50s",
+        "  ◯ gamma    Teammate gamma: reply ok                                                       3m 49s",
+        "  ◯ delta    Teammate delta: reply ok                                                       2m 39s",
+        "  ◯ epsilon  Teammate epsilon: reply ok                                                     2m 39s",
+        "  ↓ 3 more",
+        "",
+        "",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+#[test]
+fn a_long_agent_list_hides_neither_an_interrupt_nor_a_working_lead() {
+    let mut interrupted = claude_2_1_328_interrupted_lead_with_agents();
+    assert!(terminal_interrupted_from_lines(Backend::Claude, &interrupted));
+    // One status row under the footer (this one showed in the same session
+    // three minutes earlier, as "◎ /goal active" and "/rc active" do on the
+    // lead) put the receipt past a window counted from the screen's bottom.
+    let footer = interrupted.iter().position(|row| row.contains("bypass permissions on")).unwrap();
+    interrupted.insert(
+        footer + 1,
+        "                                  You've used 90% of your weekly limit · resets Nov 22, 11pm (UTC)"
+            .to_string(),
+    );
+    assert!(terminal_interrupted_from_lines(Backend::Claude, &interrupted));
+    assert!(terminal_looks_ready_for_input_from_lines(Backend::Claude, &interrupted));
+
+    // Working, its footer in the bottom twelve rows and its spinner above
+    // them: not ready for input.
+    let busy = claude_2_1_328_busy_lead_with_agents();
+    assert!(!terminal_looks_ready_for_input_from_lines(Backend::Claude, &busy));
+    assert!(!terminal_interrupted_from_lines(Backend::Claude, &busy));
+    assert!(terminal_looks_ready_for_input_from_lines(
+        Backend::Claude,
+        &claude_2_1_328_idle_lead_with_agents()
+    ));
 }
 
 /// Claude 2.1.318 mid-turn, as the libra "bild" agent showed it while its row
@@ -32173,13 +32244,15 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     let old = "22222222-2222-4222-8222-222222222222";
     let source = chat_edit_claude_session(&home, &workspace, old);
     crate::signals::prepare_worker_signals("edit-mid", Backend::Claude).unwrap();
-    // The turn runs until a key arrives; Esc ends it with Claude's receipt.
+    // The turn runs until a key arrives; Esc ends it with Claude's receipt
+    // over its composer box.
     // `ready` appears once the tty is raw: an Esc sent before that sits in the
     // canonical line buffer and dd never sees it (a slow CI machine did this).
     let esc_file = dir.join("esc");
     let ready_file = dir.join("ready");
+    let rule = "\\342\\224\\200".repeat(20);
     let script = format!(
-        "stty raw -echo; : > '{}'; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '  \\342\\216\\277  Interrupted \\302\\267 What should Claude do instead?\\r\\n\\r\\n\\342\\235\\257 \\r\\n'; sleep 30",
+        "stty raw -echo; : > '{}'; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '  \\342\\216\\277  Interrupted \\302\\267 What should Claude do instead?\\r\\n\\r\\n{rule}\\r\\n\\342\\235\\257 \\r\\n{rule}\\r\\n  \\342\\217\\265\\342\\217\\265 bypass permissions on (shift+tab to cycle)\\r\\n'; sleep 30",
         ready_file.display(),
         esc_file.display()
     );

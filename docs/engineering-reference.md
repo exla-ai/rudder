@@ -1841,8 +1841,8 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   frame the palette is open (`cached_models_dev_rows`; the memo is off under tests).
 - `src/effort.ts`: `EffortLevel = low | medium | high | xhigh | max` and the
   per-backend mapping (Claude uses `effort`, Codex uses `reasoningEffort`).
-  opencode gets `undefined`: it has no effort flag, and passing one it would
-  reject is worse than offering no dial.
+  OpenCode's effort is the model's variant of that name; a model offers the
+  efforts its variants name and no others.
 - **Codex launch policy (4.0.0-alpha.17).** Every Codex CLI launch (native
   panes and TS workers) carries one config list, `CODEX_COMMON_CONFIG` (`native/src/launch.rs`), mirrored by
   `CODEX_RUDDER_COMMON_CONFIG_ARGS` (`src/codex-config.ts`); a test in
@@ -1855,17 +1855,43 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   whole v4 session at `max`. The acpx backend has no Codex config passthrough;
   it gets only the effort default, through its `model/effort` string. Evidence and the analyzer: PLAN.md section 20 and
   `research/agent-efficiency/`.
-- **opencode (third backend, added with `/handoff`).** `Backend::Opencode` /
-  `BackendId "opencode"`. Model ids are provider-qualified (`anthropic/claude-…`);
-  an EMPTY model is legal and means "opencode's own default", so `-m` is omitted
-  rather than passed empty. The picker reads a cached `opencode models` list
-  (`<rudder home>/opencode-models.txt`, refreshed detached once a day) because
-  only opencode knows which providers the user authenticated. Every launch is the
-  interactive TUI (`--auto` for workers, omitted for planners so an unexpected
-  edit stops for approval, `--prompt` for the first turn); there is no headless
-  streaming mode to parse, so planner output is read from the pane like the
-  interactive orchestrator. Known gaps, deliberate: no token/cost accounting
-  (`usage.rs` reports zero), no cloud-worker support, no `/fast` preset.
+- **OpenCode (pinned at 1.19.5).** `Backend::Opencode` / `BackendId
+  "opencode"`. Model ids are provider-qualified (`anthropic/claude-…`); an
+  EMPTY model is legal and means "OpenCode's own default", so `-m` is omitted
+  rather than passed empty. The picker reads a cached `opencode models
+  --verbose` list (`<rudder home>/opencode-models-verbose.txt`, refreshed
+  detached once a day) because only OpenCode knows which providers the user
+  authenticated; each model's `variants` are its efforts. Every dashboard
+  launch is the interactive TUI (`--auto` for workers; planners go without it
+  and follow OpenCode's own permission config, which in 1.19.5 runs bash
+  without asking; `--prompt` for the first turn of a new session); an effort
+  goes in as the build agent's `variant` through `OPENCODE_CONFIG_CONTENT`
+  (the TUI has no flag for it). OpenCode also remembers the last variant
+  used with each model and uses it when a launch names none.
+  - Rudder's plugin (`native/src/opencode_plugin.mjs`, installed in the
+    signals dir at dashboard start and per worker, loaded through
+    `OPENCODE_CONFIG`) maps root-session events to the signal file
+    (`session.status` busy is a turn start, `session.idle` done,
+    `session.error` error, `permission.asked` / `question.asked` waits),
+    writes `<run>.opencode-session` (OpenCode mints its own ids; the dashboard
+    adopts it), and writes Claude-shaped ask files whose phone answers it
+    posts to `/permission/<id>/reply` and `/question/<id>/reply`. It prints
+    nothing, since output would land on the TUI.
+  - OpenCode 1.19 ignores `--prompt` with `--session`, so a message into a
+    session the TUI opens (fork, regoal, planner refine, conductor resume)
+    goes through the plugin: `RUDDER_OPENCODE_PROMPT` (with `_SESSION`,
+    `_MODEL`, `_AGENT`, `_VARIANT`), posted to `/session/<id>/prompt_async`.
+  - Sessions are read from OpenCode's SQLite database
+    (`$XDG_DATA_HOME/opencode/opencode.db`, WAL, opened read-only):
+    `native/src/opencode.rs` (usage, a planner's lost plan block) and
+    `cloud/worker/opencode.mjs` (the app's chat, preview, handoff files,
+    idle time from row times, since WAL leaves the file's mtime stale).
+  - Headless `opencode run --format json --auto` takes its message on stdin:
+    1.19 stores a message argument that has spaces wrapped in quote marks.
+  - Cloud homes check it with one real request and sign its OpenAI provider in
+    with ChatGPT's device code (`opencode providers login -p openai -m
+    "ChatGPT Pro/Plus (headless)"`); without a sign-in it runs OpenCode Zen's
+    free models. No `/fast` preset.
 - **Kimi and GLM (Claude Code on OpenRouter, 2026-11).** Not a backend: a Kimi
   or GLM agent is `Backend::Claude` with model `kimi` or `glm`, so hooks,
   signals, the subagent tree, compaction, resume and `--settings` stay on the

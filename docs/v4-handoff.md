@@ -327,6 +327,19 @@ helpers. Open: a backup of the key (the secret is the only copy since a
 machine update deleted `~/.rudder-sparkle-ed25519` on 2026-11-19), and a
 server-side web app version so the Mac app can reload after a Cloud deploy.
 
+OpenCode (`opencode`, pinned at 1.19.5 in the worker image) is a full agent
+harness: the dashboard, the CLI, Cloud homes and the phone app start, resume,
+fork and read it, and chats move to and from it. Rudder's plugin
+(`native/src/opencode_plugin.mjs`, loaded through `OPENCODE_CONFIG`) reports
+turns, the session id, permissions and questions, answers the phone's asks
+over OpenCode's HTTP API, and sends a first message into a session the TUI
+opens (1.19 ignores `--prompt` with `--session`). An effort is the model's
+variant, set through `OPENCODE_CONFIG_CONTENT`. Transcripts, usage and context
+are read from OpenCode's SQLite database. The phone signs OpenCode's OpenAI
+provider in with ChatGPT's device code; with no sign-in it runs OpenCode Zen's
+free models. Open: OpenCode subagents in the app's tray, the app's "/" list
+for it, and token use in the dashboard's timeline.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

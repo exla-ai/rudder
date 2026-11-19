@@ -31,11 +31,15 @@ test("Claude shows only the branch it is on, with parallel tool results and hist
   ]).split("\n");
   const active = activeClaudeLines(lines);
   assert.deepEqual(uuids(active), ["u1", "a1", "a2", "r1", "r2", "a3", "c1", "u3", "a5"]);
-  assert.deepEqual(editablePrompts(active, "claude"), [{ messageId: "u3", entry: "u3", text: "second ask, reworded" }]);
+  assert.deepEqual(editablePrompts(active, "claude"), [
+    { messageId: "u1", entry: "u1", text: "first ask" },
+    { messageId: "u3", entry: "u3", text: "second ask, reworded" },
+  ]);
 
-  // Every turn-starting prompt but the first, oldest first. A text-block
-  // prompt is the transcript's `${uuid}:${index}` message; one sent mid-turn
-  // (after a tool result) is not editable.
+  // Every turn-starting prompt, oldest first. A text-block prompt is the
+  // transcript's `${uuid}:${index}` message; one sent mid-turn (after a tool
+  // result) is not editable, and neither is Claude's note that a turn was
+  // interrupted.
   const blocks = jsonl([
     user("u1", null, "first"),
     assistant("a1", "u1", [{ type: "text", text: "ok" }]),
@@ -45,12 +49,15 @@ test("Claude shows only the branch it is on, with parallel tool results and hist
     user("q1", "r1", "also this"),
     assistant("a3", "q1", [{ type: "text", text: "done" }]),
     user("u3", "a3", "third"),
+    assistant("a4", "u3", [{ type: "text", text: "partly" }]),
+    user("i1", "a4", [{ type: "text", text: "[Request interrupted by user]" }]),
   ]).split("\n");
   assert.deepEqual(editablePrompts(blocks, "claude"), [
+    { messageId: "u1", entry: "u1", text: "first" },
     { messageId: "u2:1", entry: "u2", text: "see this" },
     { messageId: "u3", entry: "u3", text: "third" },
   ]);
-  assert.deepEqual(editablePrompts(blocks.slice(0, 2), "claude"), []);
+  assert.deepEqual(editablePrompts(blocks.slice(0, 2), "claude"), [{ messageId: "u1", entry: "u1", text: "first" }]);
 });
 
 test("a Codex fork reads its base rollout up to the fork point, then its own lines", () => {
@@ -84,8 +91,9 @@ test("a Codex fork reads its base rollout up to the fork point, then its own lin
     assert.equal(truncated, false);
     const asks = text.split("\n").filter(Boolean).map((line) => JSON.parse(line).payload?.content?.[0]?.text).filter(Boolean);
     assert.deepEqual(asks, ["<environment_context>cwd</environment_context>", "first ask", "one", "second ask", "two", "third ask, edited"]);
-    // Every turn-starting prompt after the first, across the fork.
+    // Every turn-starting prompt, across the fork.
     assert.deepEqual(editablePrompts(text.split("\n"), "codex"), [
+      { messageId: "m2", entry: "m2", text: "first ask" },
       { messageId: "m3", entry: "m3", text: "second ask" },
       { messageId: "m5", entry: "m5", text: "third ask, edited" },
     ]);
@@ -96,9 +104,10 @@ test("a Codex fork reads its base rollout up to the fork point, then its own lin
     assert.ok(tail.text.endsWith(`${JSON.stringify(ask("m5", "third ask, edited"))}\n`));
     assert.doesNotThrow(() => tail.text.split("\n").filter(Boolean).forEach((line) => JSON.parse(line)));
 
-    // The first turn has no earlier turn to fork through; without the latest
-    // prompt's id the edit request can't name it, so nothing is editable.
-    assert.deepEqual(editablePrompts(jsonl([turn("t"), ask("m", "only ask")]).split("\n"), "codex"), []);
+    // The only prompt is editable too (it starts the conversation over).
+    // Without the latest prompt's id the edit request can't name it, so
+    // nothing is editable.
+    assert.deepEqual(editablePrompts(jsonl([turn("t"), ask("m", "only ask")]).split("\n"), "codex"), [{ messageId: "m", entry: "m", text: "only ask" }]);
     const noId = { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "no id" }] } };
     assert.deepEqual(editablePrompts(jsonl([turn("t1"), ask("m1", "one"), turn("t2"), noId]).split("\n"), "codex"), []);
 

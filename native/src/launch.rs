@@ -150,6 +150,16 @@ pub(crate) fn conversation_can_reopen(run: &AgentRun) -> bool {
 }
 
 pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
+    claude_session_command(run, "--resume", session_id)
+}
+
+/// A new, empty conversation `session_id` for the agent, with the tool
+/// policy it resumes with: its chat's first message was edited (chat_edit.rs).
+pub(crate) fn claude_new_session_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
+    claude_session_command(run, "--session-id", session_id)
+}
+
+fn claude_session_command(run: &AgentRun, session_flag: &str, session_id: &str) -> TerminalCommand {
     // A saved conversation does not replace the launch-time tool policy.
     // Historical planners/reviewers keep their original restrictions on resume.
     let mut args = match run.mode {
@@ -180,7 +190,7 @@ pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> Termina
         args.push("--effort".to_string());
         args.push(effort.as_str().to_string());
     }
-    args.push("--resume".to_string());
+    args.push(session_flag.to_string());
     args.push(session_id.to_string());
     claude_command(args).with_env("CLAUDE_CODE_NO_FLICKER", "0")
 }
@@ -429,18 +439,16 @@ pub(crate) fn swarm_orchestrator_command(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_agent_command(
+/// An agent's first prompt: `task` in Rudder's framing for `mode`. Editing a
+/// chat's first message starts it over with this too (chat_edit.rs).
+pub(crate) fn launch_prompt(
     backend: Backend,
-    model: &str,
-    effort: Option<EffortLevel>,
     task: &str,
     mode: AgentMode,
-    session_id: Option<&str>,
     orchestrator_interactive: bool,
     swarm: bool,
-) -> TerminalCommand {
-    let prompt = match mode {
+) -> Option<String> {
+    match mode {
         AgentMode::Execute => Some(execution_prompt(task)),
         AgentMode::Plan => Some(plan_prompt(task)),
         AgentMode::RudderPlan if orchestrator_interactive && backend == Backend::Claude => {
@@ -470,7 +478,21 @@ fn build_agent_command(
         AgentMode::OneOff => Some(oneoff_prompt(task)),
         // For the gam reviewer the "task" IS the review packet Rudder assembled.
         AgentMode::GamAdversarial => Some(task.to_string()),
-    };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_agent_command(
+    backend: Backend,
+    model: &str,
+    effort: Option<EffortLevel>,
+    task: &str,
+    mode: AgentMode,
+    session_id: Option<&str>,
+    orchestrator_interactive: bool,
+    swarm: bool,
+) -> TerminalCommand {
+    let prompt = launch_prompt(backend, task, mode, orchestrator_interactive, swarm);
     match backend {
         Backend::Claude => {
             let mut args = match mode {

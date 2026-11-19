@@ -3838,7 +3838,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
   // Context left and where the backend compacts, at the row's end (context-meter.js).
   const contextMeter = ContextMeter(chatTools);
-  // Edit on any prompt but the first: rewinds the conversation to it (chat-edit.js).
+  // Edit on any prompt: rewinds the conversation to it, in place (chat-edit.js).
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript() });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
@@ -4261,7 +4261,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       return;
     }
-    const wasBottom = firstPaint || atBottom;
+    // A message open for editing stays where it is.
+    const wasBottom = firstPaint || (atBottom && !editAction.editing());
     const items = [];
     let lastDay = null;
     // A run of tool calls between two things the agent SAYS is one collapsed

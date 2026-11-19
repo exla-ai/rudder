@@ -107,7 +107,7 @@ fn split_leading_goal_block(task: &str) -> (String, String) {
     (block.join("\n"), body)
 }
 
-fn starts_goal_prompt(value: &str) -> bool {
+pub(crate) fn starts_goal_prompt(value: &str) -> bool {
     value == "/goal"
         || value
             .strip_prefix("/goal")

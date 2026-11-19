@@ -2020,10 +2020,13 @@ struct App {
     cloud_delete_tx: mpsc::Sender<CloudDeleteOutcome>,
     cloud_delete_rx: mpsc::Receiver<CloudDeleteOutcome>,
     /// Edit a sent message (chat_edit.rs): rewinds report back here, and a
-    /// chat has at most one in flight.
+    /// chat has at most one in flight (waiting for its turn to stop, or
+    /// rewinding).
     chat_edit_tx: mpsc::Sender<ChatEditOutcome>,
     chat_edit_rx: mpsc::Receiver<ChatEditOutcome>,
     chat_edits_in_flight: HashSet<String>,
+    /// Edits sent mid-turn, waiting for the turn they interrupted to stop.
+    chat_edits_waiting: Vec<WaitingChatEdit>,
     /// Runs the `rudder cloud … delete` CLI. A field so tests can stand in for
     /// the network without shelling out.
     cloud_delete_runner: fn(&Path, &[String]) -> Result<bool, String>,
@@ -3626,6 +3629,7 @@ impl App {
             chat_edit_tx: chat_edits.0,
             chat_edit_rx: chat_edits.1,
             chat_edits_in_flight: HashSet::new(),
+            chat_edits_waiting: Vec::new(),
             cloud_delete_runner: run_cloud_delete_cli,
             conflict_prompt: None,
             pending_jj_conflict: None,

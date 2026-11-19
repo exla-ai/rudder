@@ -139,9 +139,11 @@ function claudeSessionUrl(lines) {
 }
 
 // Rudder launches an agent with its own framing around the request
-// ("Objective: ...", "Rudder-specific context injected by Rudder: ..."). In the
-// chat that turn is what the user asked for, so it shows as the task itself.
-const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:/;
+// ("Objective: ...", "Rudder-specific context injected by Rudder: ...", a
+// discussion's scope, a main agent's context). In the chat that turn is what
+// the user asked for, so it shows as the task itself, which is also the text
+// Edit offers to change (chat-edit.js).
+const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:|^Rudder discussion scope:|\n\nRudder: you own this request in the user's checkout\./;
 
 function showUserTask(messages, record) {
   const task = userTask(record.task);

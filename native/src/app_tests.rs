@@ -31517,6 +31517,177 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// A Claude chat on disk in `home` for an agent in `cwd`: "first ask" (u1),
+/// then "second ask" (u2), whose turn was interrupted. Returns the file.
+#[cfg(not(windows))]
+fn chat_edit_claude_session(home: &Path, cwd: &Path, session: &str) -> PathBuf {
+    let folder = home.join(".claude").join("projects").join(encode_claude_project_dir(cwd));
+    fs::create_dir_all(&folder).unwrap();
+    let user = |uuid: &str, parent: Option<&str>, text: &str| {
+        serde_json::json!({ "type": "user", "uuid": uuid, "parentUuid": parent, "message": { "role": "user", "content": [{ "type": "text", "text": text }] } })
+    };
+    let reply = |uuid: &str, parent: &str, text: &str| {
+        serde_json::json!({ "type": "assistant", "uuid": uuid, "parentUuid": parent, "message": { "content": [{ "type": "text", "text": text }] } })
+    };
+    let lines = [
+        user("u1", None, "first ask"),
+        reply("a1", "u1", "one"),
+        user("u2", Some("a1"), "second ask"),
+        reply("a2", "u2", "two, cut short"),
+        // What Claude records when Esc stops the turn: not a prompt.
+        user("i1", Some("a2"), "[Request interrupted by user]"),
+    ];
+    let file = folder.join(format!("{session}.jsonl"));
+    fs::write(&file, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    file
+}
+
+/// Runs the App loop's edit steps until the edit `request` has a receipt.
+#[cfg(not(windows))]
+fn chat_edit_receipt(app: &mut App, request: &str) -> serde_json::Value {
+    let file = app.cwd.join(".rudder").join("steer-receipts").join(format!("{request}.json"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        app.poll_agents();
+        app.drain_chat_edits();
+        if let Some(receipt) = fs::read_to_string(&file).ok().and_then(|raw| serde_json::from_str(&raw).ok()) {
+            return receipt;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("no receipt for {request}; activity: {:?}", app.activity_log);
+}
+
+/// The arguments the stand-in `claude` was started with (one NUL after each).
+#[cfg(not(windows))]
+fn chat_edit_launch_args(file: &Path) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(raw) = fs::read_to_string(file) {
+            if raw.ends_with('\0') {
+                return raw.trim_end_matches('\0').split('\0').map(str::to_string).collect();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("the relaunched claude never started");
+}
+
+/// Isolated HOME, RUDDER_HOME and a stand-in `claude` recording its args.
+#[cfg(not(windows))]
+fn chat_edit_env(dir: &Path) -> (PathBuf, PathBuf) {
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("RUDDER_HOME", dir.join("rudder-home"));
+    let args = dir.join("claude-args");
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, &format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nsleep 30\n", args.display()));
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    (home, args)
+}
+
+#[cfg(not(windows))]
+#[test]
+fn chat_edit_of_the_first_message_starts_the_conversation_over() {
+    let _env = env_guard();
+    let dir = unique_test_repo("chat-edit-first");
+    let (home, args_file) = chat_edit_env(&dir);
+    let workspace = dir.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let old = "11111111-1111-4111-8111-111111111111";
+    let source = chat_edit_claude_session(&home, &workspace, old);
+    let before = fs::read(&source).unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("edit-first", &manual_goal_prompt("first ask"));
+    run.cwd = workspace.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Done;
+    run.session_id = Some(old.to_string());
+    app.agents.push(run);
+
+    assert!(app.deliver_edit_request("edit-first", "u1 u2\nfirst ask, said better", "edit-first-0001").is_none());
+    let receipt = chat_edit_receipt(&mut app, "edit-first-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
+
+    // A new, empty Claude session: nothing of the old one is copied, and the
+    // old file is untouched.
+    let new = app.agents[0].session_id.clone().unwrap();
+    assert_ne!(new, old);
+    assert!(valid_session_id(&new));
+    assert!(!source.with_file_name(format!("{new}.jsonl")).exists());
+    assert_eq!(fs::read(&source).unwrap(), before);
+    let args = chat_edit_launch_args(&args_file);
+    let at = args.iter().position(|arg| arg == "--session-id").expect("starts a new session");
+    assert_eq!(args[at + 1], new);
+    assert!(!args.iter().any(|arg| arg == "--resume"), "{args:?}");
+    // The first prompt is the edited text in the framing the agent launched
+    // with, and it is the agent's task now.
+    let task = manual_goal_prompt("first ask, said better");
+    assert_eq!(args[args.len() - 2..], ["--".to_string(), execution_prompt(&task)]);
+    let run = &app.agents[0];
+    assert_eq!(run.task, task);
+    assert_eq!(run.turns.iter().map(|turn| turn.prompt.as_str()).collect::<Vec<_>>(), [task.as_str()]);
+    assert_eq!(run.status, AgentStatus::Running);
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
+fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
+    let _env = env_guard();
+    let dir = unique_test_repo("chat-edit-mid-turn");
+    let (home, args_file) = chat_edit_env(&dir);
+    let workspace = dir.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let old = "22222222-2222-4222-8222-222222222222";
+    let source = chat_edit_claude_session(&home, &workspace, old);
+    crate::signals::prepare_worker_signals("edit-mid", Backend::Claude).unwrap();
+    // The turn runs until a key arrives; Esc ends it with Claude's receipt.
+    let esc_file = dir.join("esc");
+    let script = format!(
+        "stty raw -echo; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '  \\342\\216\\277  Interrupted \\302\\267 What should Claude do instead?\\r\\n\\r\\n\\342\\235\\257 \\r\\n'; sleep 30",
+        esc_file.display()
+    );
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
+        TerminalPaneOptions { size: TerminalSize { rows: 12, cols: 80 }, cwd: Some(workspace.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("edit-mid", "first ask");
+    run.cwd = workspace.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.session_id = Some(old.to_string());
+    run.terminal = Some(pane);
+    app.agents.push(run);
+
+    // Mid-turn: accepted, the turn is interrupted, nothing is rewound yet.
+    assert!(app.deliver_edit_request("edit-mid", "u2 u2\nsecond ask, said better", "edit-mid-0001").is_none());
+    assert!(app.chat_edits_in_flight.contains("edit-mid"));
+    let receipt = chat_edit_receipt(&mut app, "edit-mid-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
+    assert_eq!(fs::read_to_string(&esc_file).unwrap().trim(), "1b", "the turn got Esc first");
+
+    // Then it went back to before u2, as for an idle chat.
+    let new = app.agents[0].session_id.clone().unwrap();
+    assert_ne!(new, old);
+    let kept = fs::read_to_string(source.with_file_name(format!("{new}.jsonl"))).unwrap();
+    let kept: Vec<String> = kept.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["uuid"].as_str().unwrap().to_string()).collect();
+    assert_eq!(kept, ["u1", "a1"]);
+    let args = chat_edit_launch_args(&args_file);
+    let at = args.iter().position(|arg| arg == "--resume").expect("resumes the cut copy");
+    assert_eq!(args[at + 1], new);
+    assert_eq!(args[args.len() - 2..], ["--".to_string(), "second ask, said better".to_string()]);
+    assert!(app.chat_edits_in_flight.is_empty());
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn needs_you_groups_what_waits_on_you_like_the_app_does() {
     // The app's "Needs you": blocked prompts, failed turns and runs, conflicts

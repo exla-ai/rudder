@@ -1,9 +1,9 @@
 //! Edit a sent message: the Edit action on any message in a chat that started
-//! a turn, except the first. The agent's conversation goes back to just
-//! before that message and the edited text runs as the new prompt, so the
-//! agent no longer has the turns after it in context. Files the agent changed
-//! stay as they are (Rudder keeps no per-turn workspace snapshot to restore),
-//! and the old conversation stays on disk untouched:
+//! a turn. The agent's conversation goes back to just before that message
+//! and the edited text runs as the new prompt, so the agent no longer has the
+//! turns after it in context. Files the agent changed stay as they are
+//! (Rudder keeps no per-turn workspace snapshot to restore), and the old
+//! conversation stays on disk untouched:
 //!
 //! - Claude: the conversation before the edited prompt (the session file up
 //!   to it, without branches gone back from) is copied to a new session file
@@ -16,26 +16,59 @@
 //!   (`history_base`) instead of copying it, so an old rollout must never be
 //!   deleted or moved.
 //!
+//! Nothing comes before the first message, so editing it starts the
+//! conversation over in the same agent and workspace: Claude relaunches on a
+//! new session id (`--session-id T`), Codex on a new, empty thread the
+//! app-server makes (`thread/start`). The first prompt is the edited text in
+//! the framing the agent launched with (`launch_prompt`), and it becomes the
+//! agent's task.
+//!
+//! An edit sent while the agent is mid-turn first interrupts that turn with
+//! Esc, as the app's Interrupt button does, and rewinds once the agent is
+//! idle (`drain_chat_edits`).
+//!
 //! The steer request is `{"kind": "edit", "instruction": "<entry> <latest>\n<text>"}`:
 //! `entry` is the edited prompt's id in the session file (Claude's entry
 //! uuid, Codex's message id) and `latest` the id of the chat's latest prompt
 //! when it was shown. A rewind is refused when a newer prompt has arrived
 //! since, so a stale chat view cannot drop turns nobody saw. The file copy
-//! and the app-server call run on a thread; the App loop relaunches the PTY
+//! and the app-server calls run on a thread; the App loop relaunches the PTY
 //! when it reports back (`drain_chat_edits`) and writes the request's receipt
 //! then.
 use super::*;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
-pub(crate) const FIRST_MESSAGE_REFUSAL: &str =
-    "The first message can't be edited; start a new agent instead";
 const STALE_REFUSAL: &str = "This chat has new messages since it was shown. Reload the chat and try again";
 const GONE_REFUSAL: &str = "That message is no longer in this chat. Reload the chat and try again";
 const SENT_MID_TURN_REFUSAL: &str =
     "A message sent while the agent was working can't be edited; edit the one that started that turn";
-const MID_TURN_REFUSAL: &str = "It is in the middle of a turn; edit when it finishes";
-const CODEX_FORK_DEADLINE: Duration = Duration::from_secs(30);
+const CODEX_APP_SERVER_DEADLINE: Duration = Duration::from_secs(30);
+/// How long an edit sent mid-turn waits for the turn it interrupted to stop.
+const TURN_STOP_DEADLINE: Duration = Duration::from_secs(20);
+/// The note Claude records as a user message when a turn is interrupted:
+/// "[Request interrupted by user]", or "... for tool use]".
+const CLAUDE_INTERRUPT_NOTE: &str = "[Request interrupted by user";
+
+/// A checked edit request, ready to rewind.
+pub(crate) struct ChatEdit {
+    run_id: String,
+    request_id: String,
+    backend: Backend,
+    cwd: PathBuf,
+    model: String,
+    /// The conversation it rewinds. The row must still be on it at the end.
+    session: String,
+    entry: String,
+    latest: String,
+    text: String,
+}
+
+/// An edit sent mid-turn, waiting for the turn it interrupted to stop.
+pub(crate) struct WaitingChatEdit {
+    edit: ChatEdit,
+    until: Instant,
+}
 
 /// A finished rewind, reported back from its thread.
 pub(crate) struct ChatEditOutcome {
@@ -47,19 +80,13 @@ pub(crate) struct ChatEditOutcome {
     pub(crate) result: Result<Rewound, String>,
 }
 
-pub(crate) enum Rewound {
-    /// Relaunch with `--resume <session>`: the cut copy.
-    Claude { session: String },
-    /// Relaunch with `resume <session>`: the forked thread.
-    Codex { session: String },
-}
-
-impl Rewound {
-    fn session(&self) -> &str {
-        match self {
-            Rewound::Claude { session } | Rewound::Codex { session } => session,
-        }
-    }
+pub(crate) struct Rewound {
+    /// The conversation the agent relaunches on: a cut copy (Claude) or fork
+    /// (Codex) of the old one, or a new one.
+    session: String,
+    /// The first message was edited: `session` is a new, empty conversation
+    /// the edited text starts.
+    over: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +103,10 @@ fn flag(value: &serde_json::Value, key: &str) -> bool {
 
 /// Text a person typed, as the chat shows it (cloud/worker/transcripts.mjs
 /// cleanUserText): harness-injected turns (command output, reminders,
-/// notifications) are not the user.
+/// notifications) are not the user. Neither is the note Claude records when
+/// a turn is interrupted: the chat shows it, but it starts no turn, so an
+/// edit that interrupts a turn still names that turn's prompt as the latest
+/// (session-lineage.mjs typedText).
 fn typed_text(text: &str) -> bool {
     const HARNESS: [&str; 6] = [
         "<local-command",
@@ -87,7 +117,9 @@ fn typed_text(text: &str) -> bool {
         "<task-notification",
     ];
     let text = text.trim();
-    !text.is_empty() && !HARNESS.iter().any(|prefix| text.starts_with(prefix))
+    !text.is_empty()
+        && !HARNESS.iter().any(|prefix| text.starts_with(prefix))
+        && !text.starts_with(CLAUDE_INTERRUPT_NOTE)
 }
 
 fn claude_typed_prompt(entry: &serde_json::Value) -> bool {
@@ -126,17 +158,18 @@ fn claude_mid_turn(parent: &serde_json::Value) -> bool {
 }
 
 /// The lines of a Claude session file that come before the turn-starting
-/// prompt `entry`, any one but the first, without the branches gone back
-/// from: the conversation that prompt was sent in, as the chat shows it
-/// (activeClaudeLines in cloud/worker/session-lineage.mjs). Off the prompt's
-/// own history, a branch that starts with a prompt is one the person went
-/// back from (Claude's rewind in the pane) and is left out; any other branch
-/// (a parallel tool call's result) stays. The latest turn-starting prompt
-/// must still be `latest`. A file-history-snapshot written for the edited
-/// prompt just before it goes too. The copy must end exactly at the prompt's
-/// parent, so resuming it continues that conversation; anything else is
-/// refused.
-pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Result<Vec<u8>, String> {
+/// prompt `entry`, without the branches gone back from: the conversation
+/// that prompt was sent in, as the chat shows it (activeClaudeLines in
+/// cloud/worker/session-lineage.mjs). Off the prompt's own history, a branch
+/// that starts with a prompt is one the person went back from (Claude's
+/// rewind in the pane) and is left out; any other branch (a parallel tool
+/// call's result) stays. The latest turn-starting prompt must still be
+/// `latest`. A file-history-snapshot written for the edited prompt just
+/// before it goes too. The copy must end exactly at the prompt's parent, so
+/// resuming it continues that conversation; anything else is refused.
+/// `None`: `entry` is the conversation's first prompt, with nothing before it
+/// to keep.
+pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Result<Option<Vec<u8>>, String> {
     let mut lines = Vec::new();
     let mut values = Vec::new();
     for piece in source.split_inclusive(|byte| *byte == b'\n') {
@@ -178,7 +211,7 @@ pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Re
         return Err(if typed { SENT_MID_TURN_REFUSAL } else { GONE_REFUSAL }.to_string());
     };
     if position == 0 {
-        return Err(FIRST_MESSAGE_REFUSAL.to_string());
+        return Ok(None);
     }
     let edited = prompts[position];
     let mut cut = edited;
@@ -193,7 +226,9 @@ pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Re
     let branched = || "This chat's history branches just before that message, so it can't be rewound there".to_string();
     // No history before it: the first prompt of a conversation the person
     // went all the way back from.
-    let parent_uuid = parent_at(edited).ok_or_else(|| FIRST_MESSAGE_REFUSAL.to_string())?;
+    let Some(parent_uuid) = parent_at(edited) else {
+        return Ok(None);
+    };
     let parent = by_uuid.get(parent_uuid).copied().filter(|&parent| parent < cut).ok_or_else(branched)?;
     // The prompt's history: from its parent back to the start. A compact
     // boundary starts a new chain, so the history goes on from the entry
@@ -254,7 +289,7 @@ pub(crate) fn claude_rewind_copy(source: &[u8], entry: &str, latest: &str) -> Re
     if last_kept != Some(parent) {
         return Err(branched());
     }
-    Ok(copy)
+    Ok(Some(copy))
 }
 
 fn claude_session_file(cwd: &Path, session: &str) -> Result<PathBuf, String> {
@@ -291,8 +326,14 @@ fn rewind_claude(cwd: &Path, session: &str, entry: &str, latest: &str) -> Result
         .map_err(|error| format!("could not read {}: {error}", source.display()))?;
     let copy = claude_rewind_copy(&bytes, entry, latest)?;
     let session = crate::gitio::new_rudder_session_id();
-    write_private_new(&source.with_file_name(format!("{session}.jsonl")), &copy)?;
-    Ok(Rewound::Claude { session })
+    match copy {
+        Some(copy) => {
+            write_private_new(&source.with_file_name(format!("{session}.jsonl")), &copy)?;
+            Ok(Rewound { session, over: false })
+        }
+        // Claude writes the new session's file when it starts on it.
+        None => Ok(Rewound { session, over: true }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,23 +531,24 @@ fn codex_fork_point(events: &[CodexEvent], entry: &str, latest: &str) -> Result<
         .unwrap_or(CodexForkPoint::NoTurnBefore))
 }
 
-/// Reads back through `history_base` only as far as the edited prompt needs.
-fn codex_turn_before_edit(sessions: &Path, thread: &str, entry: &str, latest: &str) -> Result<String, String> {
+/// The turn to fork through, reading back through `history_base` only as
+/// far as the edited prompt needs. `None`: the edited prompt started the
+/// conversation's first turn, so there is nothing before it to keep.
+fn codex_turn_before_edit(sessions: &Path, thread: &str, entry: &str, latest: &str) -> Result<Option<String>, String> {
     let own = read_codex_rollout(&codex_rollout_file(sessions, thread)?, None)?;
     let mut events = own.events;
     let mut base = own.base;
     loop {
         let point = codex_fork_point(&events, entry, latest)?;
         if let CodexForkPoint::Through(turn) = point {
-            return Ok(turn);
+            return Ok(Some(turn));
         }
         let Some((older, offset)) = base.take() else {
-            return Err(match point {
-                CodexForkPoint::NoPrompt => "This chat has no message to edit",
-                CodexForkPoint::NotFound => GONE_REFUSAL,
-                _ => FIRST_MESSAGE_REFUSAL,
-            }
-            .to_string());
+            return match point {
+                CodexForkPoint::NoTurnBefore => Ok(None),
+                CodexForkPoint::NoPrompt => Err("This chat has no message to edit".to_string()),
+                _ => Err(GONE_REFUSAL.to_string()),
+            };
         };
         let older = read_codex_rollout(&codex_rollout_file(sessions, &older)?, Some(offset))?;
         events.splice(0..0, older.events);
@@ -526,6 +568,7 @@ fn send_rpc(stdin: &mut std::process::ChildStdin, message: serde_json::Value) ->
 fn await_rpc(
     lines: &mpsc::Receiver<std::io::Result<String>>,
     id: u64,
+    method: &str,
     deadline: Instant,
 ) -> Result<serde_json::Value, String> {
     loop {
@@ -536,7 +579,7 @@ fn await_rpc(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 return Err(format!(
                     "codex app-server did not answer within {} seconds",
-                    CODEX_FORK_DEADLINE.as_secs()
+                    CODEX_APP_SERVER_DEADLINE.as_secs()
                 ))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -552,18 +595,38 @@ fn await_rpc(
         }
         if let Some(error) = message.get("error") {
             let text = str_field(error, "message").unwrap_or("unknown error");
-            return Err(format!("Codex could not fork the conversation: {text}"));
+            return Err(format!("Codex refused {method}: {text}"));
         }
         return Ok(message.get("result").cloned().unwrap_or_default());
     }
 }
 
-fn codex_fork_exchange(child: &mut Child, params: serde_json::Value) -> Result<String, String> {
-    let mut stdin = child.stdin.take().ok_or_else(|| "codex app-server has no stdin".to_string())?;
+/// Requests to one `codex app-server`, after its handshake.
+struct CodexRpc {
+    stdin: std::process::ChildStdin,
+    lines: mpsc::Receiver<std::io::Result<String>>,
+    deadline: Instant,
+    last_id: u64,
+}
+
+impl CodexRpc {
+    fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.last_id += 1;
+        let id = self.last_id;
+        send_rpc(&mut self.stdin, serde_json::json!({ "id": id, "method": method, "params": params }))?;
+        await_rpc(&self.lines, id, method, self.deadline)
+    }
+}
+
+fn codex_exchange(
+    child: &mut Child,
+    work: impl FnOnce(&mut CodexRpc) -> Result<String, String>,
+) -> Result<String, String> {
+    let stdin = child.stdin.take().ok_or_else(|| "codex app-server has no stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "codex app-server has no stdout".to_string())?;
     let (tx, lines) = mpsc::channel();
     thread::Builder::new()
-        .name("rudder-codex-fork".to_string())
+        .name("rudder-codex-app-server".to_string())
         .spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 if tx.send(line).is_err() {
@@ -572,60 +635,52 @@ fn codex_fork_exchange(child: &mut Child, params: serde_json::Value) -> Result<S
             }
         })
         .map_err(|error| format!("could not read codex app-server: {error}"))?;
-    let deadline = Instant::now() + CODEX_FORK_DEADLINE;
-    send_rpc(
-        &mut stdin,
+    let mut rpc = CodexRpc { stdin, lines, deadline: Instant::now() + CODEX_APP_SERVER_DEADLINE, last_id: 0 };
+    rpc.call(
+        "initialize",
         serde_json::json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": { "name": "rudder", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "experimentalApi": true },
-            },
+            "clientInfo": { "name": "rudder", "version": env!("CARGO_PKG_VERSION") },
+            "capabilities": { "experimentalApi": true },
         }),
     )?;
-    await_rpc(&lines, 1, deadline)?;
-    send_rpc(&mut stdin, serde_json::json!({ "method": "initialized" }))?;
-    send_rpc(
-        &mut stdin,
-        serde_json::json!({
-            "id": 2,
-            "method": "thread/fork",
-            "params": params,
-        }),
-    )?;
-    let result = await_rpc(&lines, 2, deadline)?;
+    send_rpc(&mut rpc.stdin, serde_json::json!({ "method": "initialized" }))?;
+    work(&mut rpc)
+}
+
+/// The thread a `thread/start` or `thread/fork` answered with, once Codex
+/// has saved it to disk.
+fn saved_thread(result: &serde_json::Value) -> Result<String, String> {
     let session = result
         .pointer("/thread/id")
         .and_then(serde_json::Value::as_str)
         .filter(|id| valid_session_id(id))
-        .ok_or_else(|| "Codex answered the fork without a thread id".to_string())?;
+        .ok_or_else(|| "Codex answered without a thread id".to_string())?;
     let saved = result
         .pointer("/thread/path")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|path| Path::new(path).is_file());
     if !saved {
-        return Err(format!("Codex did not save the forked conversation {session}"));
+        return Err(format!("Codex did not save the conversation {session}"));
     }
     Ok(session.to_string())
 }
 
-/// How much of the app-server's error output a failed fork reports.
-const CODEX_FORK_STDERR_TAIL: usize = 1500;
+/// How much of the app-server's error output a failed call reports.
+const CODEX_STDERR_TAIL: usize = 1500;
 
 /// Read `stderr` to its end on a thread and send back its last
-/// `CODEX_FORK_STDERR_TAIL` bytes.
-fn codex_fork_stderr_tail(stderr: std::process::ChildStderr) -> Result<mpsc::Receiver<String>, String> {
+/// `CODEX_STDERR_TAIL` bytes.
+fn codex_stderr_tail(stderr: std::process::ChildStderr) -> Result<mpsc::Receiver<String>, String> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
-        .name("rudder-codex-fork-stderr".to_string())
+        .name("rudder-codex-app-server-stderr".to_string())
         .spawn(move || {
             let mut tail = String::new();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 tail.push_str(&line);
                 tail.push('\n');
-                if tail.len() > 2 * CODEX_FORK_STDERR_TAIL {
-                    let cut = tail.len() - CODEX_FORK_STDERR_TAIL;
+                if tail.len() > 2 * CODEX_STDERR_TAIL {
+                    let cut = tail.len() - CODEX_STDERR_TAIL;
                     let cut = (cut..=tail.len()).find(|at| tail.is_char_boundary(*at)).unwrap_or(tail.len());
                     tail.drain(..cut);
                 }
@@ -636,12 +691,14 @@ fn codex_fork_stderr_tail(stderr: std::process::ChildStderr) -> Result<mpsc::Rec
     Ok(rx)
 }
 
-/// One `thread/fork` (`params`) on a one-shot `codex app-server` (stdio
-/// JSON-RPC) with the same CODEX_HOME the agent uses. No turn runs. Returns
-/// the new thread's id, recorded as a conversation Rudder made. Branching an
-/// agent (branch.rs) forks this way too. A failure carries the end of the
-/// app-server's error output.
-pub(crate) fn codex_fork(cwd: &Path, params: serde_json::Value) -> Result<String, String> {
+/// `work` on a one-shot `codex app-server` (stdio JSON-RPC) with the same
+/// CODEX_HOME the agent uses. No turn runs. `work` returns the id of a thread
+/// it saved, recorded as a conversation Rudder made. A failure carries the
+/// end of the app-server's error output.
+fn codex_app_server(
+    cwd: &Path,
+    work: impl FnOnce(&mut CodexRpc) -> Result<String, String>,
+) -> Result<String, String> {
     let mut child = Command::new(codex_program())
         .arg("app-server")
         .current_dir(cwd)
@@ -652,8 +709,8 @@ pub(crate) fn codex_fork(cwd: &Path, params: serde_json::Value) -> Result<String
         .map_err(|error| format!("could not start codex app-server: {error}"))?;
     let stderr = child.stderr.take().ok_or_else(|| "codex app-server has no stderr".to_string());
     let result = stderr
-        .and_then(codex_fork_stderr_tail)
-        .map(|tail| (tail, codex_fork_exchange(&mut child, params)));
+        .and_then(codex_stderr_tail)
+        .map(|tail| (tail, codex_exchange(&mut child, work)));
     // Its stdin is closed by now (dropped with the exchange): it exits on EOF.
     let stop_by = Instant::now() + Duration::from_secs(5);
     while Instant::now() < stop_by && matches!(child.try_wait(), Ok(None)) {
@@ -678,14 +735,50 @@ pub(crate) fn codex_fork(cwd: &Path, params: serde_json::Value) -> Result<String
     }
 }
 
-fn rewind_codex(cwd: &Path, session: &str, entry: &str, latest: &str) -> Result<Rewound, String> {
+/// One `thread/fork` (`params`). Returns the new thread's id. Branching an
+/// agent (branch.rs) forks this way too.
+pub(crate) fn codex_fork(cwd: &Path, params: serde_json::Value) -> Result<String, String> {
+    codex_app_server(cwd, |rpc| saved_thread(&rpc.call("thread/fork", params)?))
+}
+
+/// A new, empty thread in `cwd` on `model` (empty: Codex's default), named
+/// `name` and saved, so `codex resume` starts on it.
+fn codex_new_thread(cwd: &Path, model: &str, name: &str) -> Result<String, String> {
+    codex_app_server(cwd, |rpc| {
+        let mut params = serde_json::json!({ "cwd": cwd });
+        if !model.trim().is_empty() {
+            params["model"] = serde_json::json!(live_codex_model(model));
+        }
+        let started = rpc.call("thread/start", params)?;
+        let thread = started
+            .pointer("/thread/id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Codex answered thread/start without a thread id".to_string())?
+            .to_string();
+        // Codex writes a new thread to disk only once something is recorded
+        // in it. Its name is the one record that adds nothing to the
+        // conversation (measured on codex 0.170).
+        rpc.call("thread/name/set", serde_json::json!({ "threadId": thread, "name": name }))?;
+        saved_thread(&started)
+    })
+}
+
+fn rewind_codex(cwd: &Path, session: &str, entry: &str, latest: &str, model: &str, text: &str) -> Result<Rewound, String> {
     let sessions = codex_home()?.join("sessions");
-    let last_turn = codex_turn_before_edit(&sessions, session, entry, latest)?;
-    let forked = codex_fork(
-        cwd,
-        serde_json::json!({ "threadId": session, "lastTurnId": last_turn, "excludeTurns": true }),
-    )?;
-    Ok(Rewound::Codex { session: forked })
+    match codex_turn_before_edit(&sessions, session, entry, latest)? {
+        Some(last_turn) => {
+            let forked = codex_fork(
+                cwd,
+                serde_json::json!({ "threadId": session, "lastTurnId": last_turn, "excludeTurns": true }),
+            )?;
+            Ok(Rewound { session: forked, over: false })
+        }
+        None => {
+            let name = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(text);
+            let thread = codex_new_thread(cwd, model, &truncate_chars(name, 60))?;
+            Ok(Rewound { session: thread, over: true })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -761,9 +854,6 @@ impl App {
         if let Some(refusal) = edit_refusal(run) {
             return Err(refusal);
         }
-        if mid_turn(run) {
-            return Err(MID_TURN_REFUSAL.to_string());
-        }
         let session = run
             .session_id
             .clone()
@@ -772,37 +862,102 @@ impl App {
         if !run.cwd.is_dir() {
             return Err(format!("Its workspace is gone: {}", run.cwd.display()));
         }
-        let run_id = run.id.clone();
-        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
-        let backend = run.backend;
-        let cwd = run.cwd.clone();
-        if !self.chat_edits_in_flight.insert(run_id.clone()) {
+        if self.chat_edits_in_flight.contains(&run.id) {
             return Err("This chat is already going back to an earlier message".to_string());
         }
-        let tx = self.chat_edit_tx.clone();
-        let request_id = request_id.to_string();
-        let spawned = thread::Builder::new()
-            .name("rudder-chat-edit".to_string())
-            .spawn({
-                let run_id = run_id.clone();
-                move || {
-                    let result = match backend {
-                        Backend::Claude => rewind_claude(&cwd, &session, &entry, &latest),
-                        Backend::Codex => rewind_codex(&cwd, &session, &entry, &latest),
-                        Backend::Opencode => Err("Editing a message works in Claude and Codex chats".to_string()),
-                    };
-                    let _ = tx.send(ChatEditOutcome { run_id, request_id, source_session: session, text, result });
-                }
-            });
-        if let Err(error) = spawned {
-            self.chat_edits_in_flight.remove(&run_id);
-            return Err(format!("could not start the rewind: {error}"));
+        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
+        let edit = ChatEdit {
+            run_id: run.id.clone(),
+            request_id: request_id.to_string(),
+            backend: run.backend,
+            cwd: run.cwd.clone(),
+            model: run.model.clone(),
+            session,
+            entry,
+            latest,
+            text,
+        };
+        if mid_turn(run) {
+            // Esc, as the app's Interrupt button sends it (deliver_keys_request).
+            let esc = remote_key_bytes("esc").ok_or_else(|| "no bytes for the Esc key".to_string())?;
+            let written = run
+                .terminal
+                .as_mut()
+                .ok_or_else(|| "it has no terminal to interrupt".to_string())
+                .and_then(|terminal| terminal.write_input(esc).map_err(|error| error.to_string()));
+            if let Err(error) = written {
+                return Err(format!("could not interrupt its turn: {error}"));
+            }
+            run.last_worker_input_at = Some(Instant::now());
+            self.chat_edits_in_flight.insert(edit.run_id.clone());
+            self.chat_edits_waiting.push(WaitingChatEdit { edit, until: Instant::now() + TURN_STOP_DEADLINE });
+            self.push_activity(format!("{label}: stopping its turn to go back to an earlier message"));
+            self.dirty = true;
+            return Ok(());
         }
+        self.chat_edits_in_flight.insert(edit.run_id.clone());
+        self.spawn_chat_rewind(edit)?;
         self.push_activity(format!("{label}: going back to an earlier message"));
         Ok(())
     }
 
+    /// The file copy, or the app-server calls, on a thread that reports to
+    /// `drain_chat_edits`. The chat is in `chat_edits_in_flight` until then.
+    fn spawn_chat_rewind(&mut self, edit: ChatEdit) -> Result<(), String> {
+        let run_id = edit.run_id.clone();
+        let tx = self.chat_edit_tx.clone();
+        let spawned = thread::Builder::new().name("rudder-chat-edit".to_string()).spawn(move || {
+            let ChatEdit { run_id, request_id, backend, cwd, model, session, entry, latest, text } = edit;
+            let result = match backend {
+                Backend::Claude => rewind_claude(&cwd, &session, &entry, &latest),
+                Backend::Codex => rewind_codex(&cwd, &session, &entry, &latest, &model, &text),
+                Backend::Opencode => Err("Editing a message works in Claude and Codex chats".to_string()),
+            };
+            let _ = tx.send(ChatEditOutcome { run_id, request_id, source_session: session, text, result });
+        });
+        if let Err(error) = spawned {
+            self.chat_edits_in_flight.remove(&run_id);
+            return Err(format!("could not start the rewind: {error}"));
+        }
+        Ok(())
+    }
+
+    /// Edits sent mid-turn rewind once the turn they interrupted has stopped:
+    /// the agent is idle, waiting on its composer, or its process ended.
+    fn start_stopped_chat_edits(&mut self) {
+        let mut index = 0;
+        while index < self.chat_edits_waiting.len() {
+            let waiting = &self.chat_edits_waiting[index];
+            let run = self.agents.iter_mut().find(|run| run.id == waiting.edit.run_id);
+            let ready = match run.map(|run| (mid_turn(run), run.node_id.clone().unwrap_or_else(|| run.id.clone()))) {
+                None => Err("The agent was deleted while its turn stopped".to_string()),
+                Some((false, label)) => Ok(label),
+                Some(_) if Instant::now() >= waiting.until => Err(format!(
+                    "Its turn did not stop within {} seconds; nothing changed",
+                    TURN_STOP_DEADLINE.as_secs()
+                )),
+                Some(_) => {
+                    index += 1;
+                    continue;
+                }
+            };
+            let WaitingChatEdit { edit, .. } = self.chat_edits_waiting.remove(index);
+            let (run_id, request_id) = (edit.run_id.clone(), edit.request_id.clone());
+            let started = ready.and_then(|label| {
+                self.spawn_chat_rewind(edit)?;
+                self.push_activity(format!("{label}: going back to an earlier message"));
+                Ok(())
+            });
+            if let Err(reason) = started {
+                self.chat_edits_in_flight.remove(&run_id);
+                self.push_activity(format!("edit: {reason}"));
+                let _ = self.write_steer_receipt(&request_id, &SteerDelivery::Failed(reason));
+            }
+        }
+    }
+
     pub(crate) fn drain_chat_edits(&mut self) {
+        self.start_stopped_chat_edits();
         while let Ok(outcome) = self.chat_edit_rx.try_recv() {
             self.chat_edits_in_flight.remove(&outcome.run_id);
             let request_id = outcome.request_id.clone();
@@ -819,6 +974,8 @@ impl App {
 
     /// Relaunch the agent on the rewound conversation with the edited text as
     /// its first turn, the way a model switch relaunches it on the same one.
+    /// A conversation started over gets the edited text as its task, in the
+    /// framing the agent launched with.
     fn finish_chat_edit(&mut self, outcome: ChatEditOutcome) -> Result<(), String> {
         let rewound = outcome.result?;
         let index = self
@@ -835,10 +992,35 @@ impl App {
         }
         let backend = run.backend;
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
-        let mut command = match &rewound {
-            Rewound::Claude { session } => claude_resume_command(run, session),
-            Rewound::Codex { session } => codex_resume_command(run, session),
+        let mut command = match (backend, rewound.over) {
+            (Backend::Claude, false) => claude_resume_command(run, &rewound.session),
+            (Backend::Claude, true) => claude_new_session_command(run, &rewound.session),
+            (Backend::Codex, _) => codex_resume_command(run, &rewound.session),
+            (Backend::Opencode, _) => return Err("Editing a message works in Claude and Codex chats".to_string()),
         };
+        // Started over: the agent's task is the edited text, framed as the
+        // old one was (an "Objective:" block for a task from the task bar).
+        // Orchestrators are refused, so the orchestrator flags are off.
+        let new_task = if rewound.over {
+            let task = if starts_goal_prompt(&run.task) {
+                manual_goal_prompt(&outcome.text)
+            } else {
+                outcome.text.clone()
+            };
+            Some(task)
+        } else {
+            None
+        };
+        // A discussion (route_fresh_task) launched with its scope as the first
+        // turn, and it keeps that scope when it starts over.
+        let discussion = run.turns.first().is_some_and(|turn| turn.prompt.starts_with(DISCUSSION_PROMPT_PREFIX));
+        let first_turn = new_task.as_ref().map(|task| if discussion { discussion_task_prompt(task) } else { task.clone() });
+        let prompt = match &first_turn {
+            Some(task) => launch_prompt(backend, task, run.mode, false, false)
+                .ok_or_else(|| "This agent has no first prompt to start over with".to_string())?,
+            None => outcome.text.clone(),
+        };
+        let turn_prompt = first_turn.unwrap_or_else(|| outcome.text.clone());
         let wired = if run.is_main() && run.execution_profile.is_none() {
             signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
         } else {
@@ -857,7 +1039,7 @@ impl App {
         // The edited text is the first turn. After `--`, text that starts
         // with "-" (a list) is the prompt, not a flag.
         command.args.push("--".to_string());
-        command.args.push(outcome.text.clone());
+        command.args.push(prompt);
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(run.cwd.clone()),
@@ -881,7 +1063,7 @@ impl App {
         let run = &mut self.agents[index];
         run.execution_profile = terminal.execution_profile().map(str::to_string);
         run.terminal = Some(terminal);
-        run.session_id = Some(rewound.session().to_string());
+        run.session_id = Some(rewound.session.clone());
         run.status = AgentStatus::Running;
         run.completed_at = None;
         run.last_output_at = Instant::now();
@@ -890,8 +1072,14 @@ impl App {
         run.wait_signal = None;
         run.last_error = None;
         run.worker_exit_note = None;
-        run.current_prompt = outcome.text.clone();
-        run.turns.push(AgentTurn { ts: now.clone(), prompt: outcome.text.clone(), source: "user".to_string() });
+        if let Some(task) = new_task {
+            // Until the backend writes the new conversation, the chat shows
+            // the prompts recorded here, and none of the old ones are in it.
+            run.task = task;
+            run.turns.clear();
+        }
+        run.current_prompt = turn_prompt.clone();
+        run.turns.push(AgentTurn { ts: now.clone(), prompt: turn_prompt, source: "user".to_string() });
         run.last_user_input_at = now;
         run.last_worker_input_at = Some(Instant::now());
         // The agent runs on the edited message from here, so every record of
@@ -900,10 +1088,8 @@ impl App {
         if let Err(error) = save_native_run_record(&self.cwd, run) {
             unrecorded.push(format!("its record was not saved: {error}"));
         }
-        self.push_activity(format!(
-            "{label}: went back to an earlier message and sent \"{}\"",
-            steer_preview(&outcome.text)
-        ));
+        let went = if rewound.over { "started over from its first message" } else { "went back to an earlier message" };
+        self.push_activity(format!("{label}: {went} and sent \"{}\"", steer_preview(&outcome.text)));
         self.mirror_graph();
         self.dirty = true;
         if backend == Backend::Claude {
@@ -913,7 +1099,7 @@ impl App {
                 .ok_or_else(|| "HOME is not set".to_string())
                 .and_then(|file| {
                     let temp = file.with_extension(format!("claude-session.{}.tmp", std::process::id()));
-                    std::fs::write(&temp, rewound.session())
+                    std::fs::write(&temp, &rewound.session)
                         .and_then(|()| std::fs::rename(&temp, &file))
                         .map_err(|error| error.to_string())
                 });
@@ -970,16 +1156,16 @@ mod tests {
 
         // The cut drops the edited prompt, its file-history-snapshot and all after.
         let kept = claude_rewind_copy(&file, "u2", "u2").unwrap();
-        assert_eq!(kept, [first.clone(), tool_turn.clone()].concat());
+        assert_eq!(kept, Some([first.clone(), tool_turn.clone()].concat()));
 
         // Without a snapshot for it, the cut is at the prompt itself.
         let plain = [first.clone(), tool_turn.clone(), session(&[prompt("u2", Some("s2"), "second ask")])].concat();
-        assert_eq!(claude_rewind_copy(&plain, "u2", "u2").unwrap(), [first.clone(), tool_turn.clone()].concat());
+        assert_eq!(claude_rewind_copy(&plain, "u2", "u2").unwrap(), Some([first.clone(), tool_turn.clone()].concat()));
 
         // An earlier prompt: the turns after it go too.
         let longer = [file.clone(), later.clone()].concat();
-        assert_eq!(claude_rewind_copy(&longer, "u2", "u3").unwrap(), [first.clone(), tool_turn.clone()].concat());
-        assert_eq!(claude_rewind_copy(&longer, "u3", "u3").unwrap(), file);
+        assert_eq!(claude_rewind_copy(&longer, "u2", "u3").unwrap(), Some([first.clone(), tool_turn.clone()].concat()));
+        assert_eq!(claude_rewind_copy(&longer, "u3", "u3").unwrap(), Some(file.clone()));
 
         // A newer prompt than the chat showed: nothing is cut.
         assert!(matches!(claude_rewind_copy(&longer, "u2", "u2"), Err(reason) if reason == STALE_REFUSAL));
@@ -988,8 +1174,18 @@ mod tests {
         assert!(matches!(claude_rewind_copy(&longer, "q1", "u3"), Err(reason) if reason == SENT_MID_TURN_REFUSAL));
         assert!(matches!(claude_rewind_copy(&longer, "gone", "u3"), Err(reason) if reason == GONE_REFUSAL));
 
-        // The first message has no earlier turn to go back to.
-        assert!(matches!(claude_rewind_copy(&longer, "u1", "u3"), Err(reason) if reason == FIRST_MESSAGE_REFUSAL));
+        // The first message has nothing before it: the conversation starts over.
+        assert_eq!(claude_rewind_copy(&longer, "u1", "u3"), Ok(None));
+
+        // The note Claude writes when a turn is interrupted starts no turn, so
+        // an edit that interrupted a turn still names that turn's prompt.
+        let interrupted = [
+            longer.clone(),
+            session(&[serde_json::json!({ "type": "user", "uuid": "i1", "parentUuid": "a5", "message": { "role": "user", "content": [{ "type": "text", "text": "[Request interrupted by user]" }] } })]),
+        ]
+        .concat();
+        assert_eq!(claude_rewind_copy(&interrupted, "u3", "u3").unwrap(), Some(file.clone()));
+        assert_eq!(claude_rewind_copy(&interrupted, "u1", "u3"), Ok(None));
 
         // Claude's own rewind in the pane: the prompt sent in u2's place hangs
         // off u2's parent, after the turn gone back from. That turn stays out
@@ -1001,8 +1197,8 @@ mod tests {
         ]);
         let rewound = [file.clone(), again.clone(), session(&[prompt("u3b", Some("a6"), "third ask")])].concat();
         let before_u2 = [first.clone(), tool_turn.clone(), snapshot.clone()].concat();
-        assert_eq!(claude_rewind_copy(&rewound, "u2b", "u3b").unwrap(), before_u2);
-        assert_eq!(claude_rewind_copy(&rewound, "u3b", "u3b").unwrap(), [before_u2, again].concat());
+        assert_eq!(claude_rewind_copy(&rewound, "u2b", "u3b").unwrap(), Some(before_u2.clone()));
+        assert_eq!(claude_rewind_copy(&rewound, "u3b", "u3b").unwrap(), Some([before_u2, again].concat()));
 
         // A prompt whose parent is not the last entry kept is on a branch.
         let branched = [first, tool_turn, session(&[prompt("u2", Some("a1"), "second ask")])].concat();

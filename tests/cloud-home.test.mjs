@@ -554,6 +554,27 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
   assert.deepEqual([transcript.messages[2].tool.output, transcript.messages[2].tool.isError], ["boom", true]);
 });
 
+nodeTest("a discussion's or main agent's first message shows as what the user asked", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const cwd = "/workspace/code/libra";
+  const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const framed = {
+    "33333333-2222-3333-4444-555555555551": "Rudder discussion scope:\nYou own one discussion or planning session in the current checkout.\n\nOriginal request:\nlet's discuss the webhook",
+    "33333333-2222-3333-4444-555555555552": "let's discuss the webhook\n\nRudder: you own this request in the user's checkout. Preserve unrelated edits.\n- Ship only when asked.",
+  };
+  for (const [sessionId, content] of Object.entries(framed)) {
+    const lines = [
+      { type: "user", uuid: "u1", message: { role: "user", content } },
+      { type: "assistant", uuid: "a1", parentUuid: "u1", message: { role: "assistant", content: [{ type: "text", text: "Sure." }] } },
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    const repo = fixtureRepo({ id: "run-5", backend: "claude", task: "let's discuss the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
+    const transcript = readTranscript(repo, "run-5", { limit: 50, home });
+    assert.deepEqual(transcript.messages.map((m) => [m.role, m.text]), [["user", "let's discuss the webhook"], ["assistant", "Sure."]]);
+  }
+});
+
 nodeTest("a compacted conversation shows one marker holding the summary, not a message from the user", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
   const cwd = "/workspace/code/libra";

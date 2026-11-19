@@ -27,6 +27,12 @@ import path from "node:path";
 // an editable prompt is always a message the chat shows.
 export const CLAUDE_HARNESS_TEXT = /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/;
 
+// The note Claude records when a turn is interrupted ("[Request interrupted
+// by user]", "... for tool use]"). The chat shows it, but it starts no turn:
+// an edit sent mid-turn interrupts the turn first and still names that turn's
+// prompt as the latest (native chat_edit.rs typed_text).
+const CLAUDE_INTERRUPT_NOTE = "[Request interrupted by user";
+
 // A multi-line message reaches Claude Code as a terminal paste, which it
 // records wrapped in <pasted_content id="..."> tags. The chat shows the text.
 export function unwrapPastedContent(text) {
@@ -35,7 +41,7 @@ export function unwrapPastedContent(text) {
 
 function typedText(text) {
   const value = String(text || "").trim();
-  return value !== "" && !CLAUDE_HARNESS_TEXT.test(value);
+  return value !== "" && !CLAUDE_HARNESS_TEXT.test(value) && !value.startsWith(CLAUDE_INTERRUPT_NOTE);
 }
 
 // A prompt a person typed: what the chat shows as their message.
@@ -285,13 +291,14 @@ export function readCodexLineage(file, home, maxBytes) {
 // ---------------------------------------------------------------------------
 
 /**
- * The chat's turn-starting prompts after its first, oldest first:
- * `[{ messageId, entry, text }]`. `messageId` is the transcript message the
- * Edit action goes on, `entry` is what the edit request names (Claude's entry
- * uuid, Codex's message id). The last one is the chat's latest prompt, which
- * the request also names so native chat_edit.rs can refuse when a newer one
- * has arrived since; when that cannot hold the list is empty. Pass Claude
- * lines through activeClaudeLines first.
+ * The chat's turn-starting prompts, oldest first: `[{ messageId, entry, text }]`.
+ * `messageId` is the transcript message the Edit action goes on, `entry` is
+ * what the edit request names (Claude's entry uuid, Codex's message id). The
+ * first one starts the conversation over when edited (native chat_edit.rs).
+ * The last one is the chat's latest prompt, which the request also names so
+ * native chat_edit.rs can refuse when a newer one has arrived since; when
+ * that cannot hold the list is empty. Pass Claude lines through
+ * activeClaudeLines first.
  */
 export function editablePrompts(lines, backend) {
   return backend === "codex" ? codexEditable(lines) : claudeEditable(lines);
@@ -306,7 +313,7 @@ function claudeEditable(lines) {
     }
   }
   const prompts = entries.filter((entry) => entry && claudeTypedPrompt(entry) && !claudeMidTurn(byUuid.get(entry.parentUuid)));
-  return prompts.slice(1).map((prompt) => {
+  return prompts.map((prompt) => {
     const content = prompt.message.content;
     if (typeof content === "string") {
       return { messageId: prompt.uuid, entry: prompt.uuid, text: unwrapPastedContent(content).trim() };
@@ -325,13 +332,11 @@ export function codexTypedText(text) {
 }
 
 function codexEditable(lines) {
-  let turns = 0;
   let prompted = false;
   const prompts = [];
   for (const entry of parseLines(lines)) {
     const payload = entry?.payload;
     if (entry?.type === "event_msg" && payload?.type === "task_started") {
-      turns += 1;
       prompted = false;
       continue;
     }
@@ -343,13 +348,12 @@ function codexEditable(lines) {
       continue;
     }
     if (!prompted) {
-      prompts.push({ turn: turns, id: payload.id, text });
+      prompts.push({ id: payload.id, text });
     }
     prompted = true;
   }
-  // The edit forks through the turn before the prompt's own, so it needs one,
-  // and names prompts by id. The request names the latest prompt too.
-  const editable = prompts.filter((prompt) => prompt.turn >= 2 && typeof prompt.id === "string" && prompt.id);
+  // The edit names prompts by id, and the request names the latest prompt too.
+  const editable = prompts.filter((prompt) => typeof prompt.id === "string" && prompt.id);
   if (editable[editable.length - 1] !== prompts[prompts.length - 1]) {
     return [];
   }

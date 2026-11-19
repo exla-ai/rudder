@@ -192,6 +192,23 @@ conversation while a branch of it is being set up. Checked with native filter
 Codex luna agent, branched through the steer inbox with and without a prompt.
 A 4.4.2 home answers "unknown method agentBranch"; Cloud now says to update it.
 
+Edit any sent message (not released yet): Edit under a message in the app
+turns it into a text box in place (Enter sends on a desktop, Shift+Enter is a
+new line, Esc cancels; the turns after it fade). Every turn-starting prompt is
+editable, the first one too (`editablePrompts` in `session-lineage.mjs`).
+Steer kind `edit`, `<entry> <latest>\n<text>`, handled in
+`native/src/chat_edit.rs`. An earlier prompt rewinds (Claude: a prefix copy of
+the session resumed; Codex: `thread/fork` before that turn). The first prompt
+starts over in the same agent and workspace: Claude `--session-id <new>`, Codex
+a new thread (`thread/start` plus `thread/name/set`, which is what makes Codex
+save it), with the edited text as the task in the framing it launched with
+(goal, discussion scope). Mid-turn, the edit first writes Esc (the app's Stop)
+and waits up to 20 seconds for the turn to end. The chat shows a discussion's
+or main agent's first message as the user's text. Checked with native filter
+`chat_edit` and for real (11-19): a scratch dashboard with a Claude haiku and
+a Codex luna agent, first-message and mid-turn edits; both forgot the dropped
+turns.
+
 All agents (shipped in 5.0.4): a button at the top of the app's sidebar
 (phone: the home top bar) opens one chat that talks to every agent in every
 project on the home: list, read, message, interrupt, start, answer prompts and

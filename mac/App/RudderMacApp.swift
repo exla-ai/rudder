@@ -37,6 +37,24 @@ struct RudderMacApp: App {
             }
             // One window: no File > New Window.
             CommandGroup(replacing: .newItem) {}
+            // Edit > Find, as in Safari: the page's find bar (Find.swift). The
+            // items stay enabled (commands do not follow the model's changes);
+            // without a page they beep.
+            CommandGroup(replacing: .textEditing) {
+                Menu("Find") {
+                    Button("Find…") {
+                        model.showMainWindow()
+                        model.find.show()
+                    }
+                    .keyboardShortcut("f", modifiers: .command)
+                    Button("Find Next") { model.find.next() }
+                        .keyboardShortcut("g", modifiers: .command)
+                    Button("Find Previous") { model.find.previous() }
+                        .keyboardShortcut("g", modifiers: [.command, .shift])
+                    Button("Use Selection for Find") { model.find.useSelection() }
+                        .keyboardShortcut("e", modifiers: .command)
+                }
+            }
             CommandGroup(before: .toolbar) {
                 Button("Reload") { model.reload() }
                     .keyboardShortcut("r", modifiers: .command)
@@ -158,6 +176,9 @@ struct SignedInView: View {
                 // The traffic lights sit here, over the app's own color, and the
                 // strip drags the window; the page starts below it.
                 Theme.canvas.frame(height: Theme.titlebarHeight)
+                if model.find.isVisible {
+                    FindBar(find: model.find)
+                }
                 // A new token is a new page: RUDDER_NATIVE is fixed per document.
                 AppWebView(model: model, token: token)
                     .id(token)

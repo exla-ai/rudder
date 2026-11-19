@@ -20,7 +20,12 @@ final class AppModel {
 
     @ObservationIgnored var failedURL: URL?
 
-    @ObservationIgnored weak var webView: WKWebView?
+    /// Edit > Find for the page (Find.swift).
+    let find = PageFind()
+
+    @ObservationIgnored weak var webView: WKWebView? {
+        didSet { find.webView = webView }
+    }
     /// A page to open once the web view exists (a notification clicked while
     /// the window was closed).
     @ObservationIgnored var pendingURL: URL?
@@ -98,6 +103,7 @@ final class AppModel {
     }
 
     func signOut() {
+        find.close()
         webState = .loading
         failedURL = nil
         session.signOut()

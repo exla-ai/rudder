@@ -593,9 +593,9 @@ Linear (removed 2026-11-18): Rudder no longer has its own Linear
 integration (connect, issue mapping, Generate tasks, the webhook, tracking and
 the "From Linear" chip are gone). People file issues with the Linear tool in
 their agent. Old `rudder_linear_*` tables stay in existing databases, unused.
-Still to do outside the repo: delete the Linear OAuth app's webhook and unset
-the `RUDDER_LINEAR_*` and `RUDDER_TASKGEN_MODEL` Fly secrets; drop the unused
-`@anthropic-ai/sdk` from `cloud/package.json` after the release.
+Still to do outside the repo: delete the Linear OAuth app's webhook, revoke
+its workspace authorization in Linear, and unset the `RUDDER_LINEAR_*` and
+`RUDDER_TASKGEN_MODEL` Fly secrets.
 
 4.2 external home host (2026-11-05): `rudder cloud host <ssh-target>` runs
 the home on any Linux box with Docker (engineering reference §9.6). The

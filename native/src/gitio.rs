@@ -2448,13 +2448,24 @@ pub(crate) fn forget_jj_workspace(
             path.display()
         );
     }
-    // Forget from jj first (best-effort: a workspace jj already dropped is fine).
+    // Forget from jj first. A name jj already dropped is only a warning there.
+    // Any failure keeps the directory: a registered workspace must never point
+    // at a deleted checkout. Forgetting needs only the repo view, so it does
+    // not snapshot the user's checkout, which could fail for its own reasons.
     if !workspace_name.trim().is_empty() {
-        let _ = Command::new(jj_program())
-            .args(["workspace", "forget", workspace_name])
+        let output = Command::new(jj_program())
+            .args(["--ignore-working-copy", "workspace", "forget", workspace_name])
             .current_dir(repo_root)
             .stdin(Stdio::null())
-            .output();
+            .output()
+            .map_err(|error| anyhow::anyhow!("could not run jj workspace forget {workspace_name}: {error}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "jj workspace forget {workspace_name} failed, kept {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
     }
     remove_fork_state(path);
     if path.exists() {

@@ -153,6 +153,20 @@ struct EnvGuard {
     // test is allowed to take the lock.
     _lock: std::sync::MutexGuard<'static, ()>,
     prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    /// Temp dirs HOME pointed into, removed only after HOME is put back.
+    home_roots: Vec<PathBuf>,
+}
+
+impl EnvGuard {
+    /// Point HOME at `home`, created here, inside `root`: a temp dir this test
+    /// owns and must not remove itself. The guard removes `root` after it puts
+    /// HOME back, so tests outside the lock never see HOME name a missing dir.
+    fn set_home(&mut self, root: &Path, home: &Path) {
+        assert!(home.starts_with(root), "{} is not inside {}", home.display(), root.display());
+        fs::create_dir_all(home).expect("create test HOME");
+        std::env::set_var("HOME", home);
+        self.home_roots.push(root.to_path_buf());
+    }
 }
 
 impl Drop for EnvGuard {
@@ -162,6 +176,9 @@ impl Drop for EnvGuard {
                 Some(value) => std::env::set_var(key, value),
                 None => std::env::remove_var(key),
             }
+        }
+        for root in &self.home_roots {
+            let _ = fs::remove_dir_all(root);
         }
     }
 }
@@ -175,6 +192,7 @@ fn env_guard() -> EnvGuard {
             .iter()
             .map(|key| (*key, std::env::var_os(key)))
             .collect(),
+        home_roots: Vec::new(),
         _lock: lock,
     }
 }
@@ -1751,10 +1769,10 @@ fn a_paused_codex_main_chat_survives_model_changes_elsewhere() {
 
 #[test]
 fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let home = unique_test_repo("model-command-refusal");
     std::env::set_var("RUDDER_HOME", home.join(".rudder"));
-    std::env::set_var("HOME", &home);
+    env.set_home(&home, &home);
     std::env::set_var("CODEX_HOME", home.join(".codex"));
     let config = crate::config::rudder_config_path().unwrap();
     let mut app = App::new();
@@ -1802,7 +1820,6 @@ fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
     assert_eq!((app.backend, app.model.as_str()), (Backend::Claude, "sonnet"));
     app.handle_command("/model claude fable[1m] auto");
     assert_eq!((app.backend, app.model.as_str(), app.effort), (Backend::Claude, "fable[1m]", None));
-    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -2013,9 +2030,9 @@ fn a_codex_session_is_matched_by_start_time_not_by_being_newest() {
 
 #[test]
 fn a_codex_rows_session_is_looked_up_off_the_app_loop() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let home = unique_test_repo("codex-session-lookup");
-    std::env::set_var("HOME", &home);
+    env.set_home(&home, &home);
     let started_at_ms = parse_iso8601_millis("2026-07-28T23:45:48.000Z").expect("parsed") as u64;
     let session = "019fabfa-0000-0000-0000-0000000000a1";
     write_codex_rollout(&home.join(".codex/sessions/2026/07/28"), session, "/repo", "2026-07-28T23:45:49.186Z");
@@ -2037,7 +2054,6 @@ fn a_codex_rows_session_is_looked_up_off_the_app_loop() {
     }
     assert_eq!(app.agents[0].session_id.as_deref(), Some(session));
     assert!(app.codex_session_lookup_rx.is_none(), "the lookup is done");
-    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -9374,11 +9390,10 @@ fn historical_claude_resume_preserves_planner_and_reviewer_tool_policy() {
 #[cfg(unix)]
 #[test]
 fn historical_readonly_modes_survive_restarts_with_and_without_sessions() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let repo = unique_test_repo("historical-readonly-restart").canonicalize().unwrap();
     let home = repo.join("home");
-    fs::create_dir_all(&home).unwrap();
-    std::env::set_var("HOME", &home);
+    env.set_home(&repo, &home);
     std::env::set_var("RUDDER_HOME", home.join(".rudder"));
     let cli = repo.join("fake-rudder");
     write_fake_bin(&cli, "#!/bin/sh\nexit 0\n");
@@ -9440,7 +9455,6 @@ fn historical_readonly_modes_survive_restarts_with_and_without_sessions() {
             }
         }
     }
-    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -9502,9 +9516,9 @@ fn fork_commands_branch_the_session_without_touching_the_original() {
 #[test]
 fn branch_guards_main_orchestrator_and_sessionless_runs() {
     // HERMETIC HOME: nothing here may read the developer's real sessions.
-    let _env = env_guard();
+    let mut env = env_guard();
     let home = unique_test_repo("branch-guards-home");
-    std::env::set_var("HOME", &home);
+    env.set_home(&home, &home);
     let mut app = App::new();
 
     // A MAIN row is branchable: it is just a conversation in the checkout. With
@@ -9540,20 +9554,18 @@ fn branch_guards_main_orchestrator_and_sessionless_runs() {
         assert_eq!(app.agents.len(), 4, "no branch row without a conversation");
         assert_eq!(app.notice.as_deref(), Some("Nothing to branch yet"));
     }
-    let _ = fs::remove_dir_all(&home);
 }
 
 #[test]
 fn stage_claude_session_copies_the_transcript_to_the_fork_cwd() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let base = unique_test_repo("stage-session");
     let home = base.join("home");
     let source_cwd = base.join("source-ws");
     let target_cwd = base.join("fork-ws");
     fs::create_dir_all(&source_cwd).unwrap();
     fs::create_dir_all(&target_cwd).unwrap();
-    let prior_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
+    env.set_home(&base, &home);
 
     let sid = "22222222-2222-4222-8222-222222222222";
     let source_dir = home
@@ -9581,20 +9593,15 @@ fn stage_claude_session_copies_the_transcript_to_the_fork_cwd() {
     // The ORIGINAL transcript is untouched.
     assert!(source_dir.join(format!("{sid}.jsonl")).is_file());
 
-    match prior_home {
-        Some(value) => std::env::set_var("HOME", value),
-        None => std::env::remove_var("HOME"),
-    }
-    let _ = fs::remove_dir_all(&base);
 }
 
 #[cfg(not(windows))]
 #[test]
 fn branch_starts_a_new_agent_from_a_copy_of_its_files_and_conversation() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let repo = unique_test_repo("branch-agent");
     let home = repo.join("home");
-    std::env::set_var("HOME", &home);
+    env.set_home(&repo, &home);
     let jj = |dir: &std::path::Path, args: &[&str]| {
         let output = Command::new(jj_program())
             .args(args)
@@ -9714,7 +9721,6 @@ fn branch_starts_a_new_agent_from_a_copy_of_its_files_and_conversation() {
     assert_eq!(fs::read_to_string(source_ws.join("app.txt")).unwrap(), "half done\n");
 
     app.agents[1].terminal = None;
-    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]
@@ -17499,8 +17505,7 @@ fn forget_jj_workspace_refuses_paths_outside_rudder_workspaces() {
         danger.exists(),
         "the refused directory must be left untouched"
     );
-    // A path under .rudder-workspaces is allowed (jj forget is best-effort; the
-    // dir removal is what we assert).
+    // A path under .rudder-workspaces is allowed.
     let ok_path = repo
         .join(".rudder-workspaces")
         .join("proj")
@@ -17513,7 +17518,15 @@ fn forget_jj_workspace_refuses_paths_outside_rudder_workspaces() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
-    let _ = forget_jj_workspace(&repo, "rudder-y", &ok_path);
+    // jj cannot forget anything outside a jj repo: the failure is returned and
+    // the checkout stays, so no registered workspace points at a deleted one.
+    let err = forget_jj_workspace(&repo, "rudder-y", &ok_path).expect_err("no jj repo here");
+    assert!(err.to_string().contains("jj workspace forget rudder-y failed"), "{err:#}");
+    assert!(ok_path.exists() && fork.exists(), "a failed forget removes nothing");
+    // In a jj repo, a name jj does not know is already forgotten.
+    let init = Command::new(jj_program()).args(["git", "init"]).current_dir(&repo).output().unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    forget_jj_workspace(&repo, "rudder-y", &ok_path).unwrap();
     assert!(
         !ok_path.exists(),
         "an in-tree workspace directory is removed"
@@ -19463,10 +19476,10 @@ fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
 fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change() {
     use crate::agent_life::{cleanup_since, untouched_agents, ConversationRoots, UNTOUCHED_AGENT_TTL};
     use crate::gitio::note_rudder_session;
-    let _env = env_guard();
+    let mut env = env_guard();
     let repo = unique_test_repo("agent-gc");
     let home = repo.join("home");
-    std::env::set_var("HOME", &home);
+    env.set_home(&repo, &home);
     std::env::set_var("CODEX_HOME", home.join(".codex"));
     let old = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
     let jj = |dir: &Path, args: &[&str]| {
@@ -19484,7 +19497,6 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     };
     if jj(&repo, &["git", "init", "--colocate"]).is_none() {
         eprintln!("skipping untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change: no jj");
-        let _ = fs::remove_dir_all(&repo);
         return;
     }
     let age = |path: &Path| {
@@ -19658,7 +19670,6 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
     assert!(!workspaces.contains("rudder-node-old"), "{workspaces}");
     assert!(workspaces.contains("rudder-node-failed"), "unmerged work keeps its workspace: {workspaces}");
     assert!(failed_workspace.join("unmerged.txt").is_file());
-    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]
@@ -20132,10 +20143,9 @@ fn fleet_note_terminal(repo: &std::path::Path, label: &str) -> TerminalPane {
 
 #[cfg(not(windows))]
 fn fleet_note_app(repo: &std::path::Path) -> (EnvGuard, App) {
-    let guard = env_guard();
+    let mut guard = env_guard();
     let home = repo.join("home");
-    fs::create_dir_all(&home).unwrap();
-    std::env::set_var("HOME", &home);
+    guard.set_home(repo, &home);
     std::env::set_var("RUDDER_HOME", &home);
     // Each launch records the folder it ran in. Tests run in parallel and the
     // provider path is process-wide env, so another test's agent can run this
@@ -20258,7 +20268,6 @@ fn fleet_nudge_status_and_keep_going_preserve_unavailable_runs_until_explicit_re
         }
     }
     drop(app);
-    let _ = fs::remove_dir_all(repo);
 }
 
 #[cfg(not(windows))]
@@ -20297,7 +20306,6 @@ fn fleet_nudge_sends_to_the_same_live_claude_and_codex_attempt() {
         assert!(app.pending_enters.is_empty());
         app.agents[0].terminal = None;
         drop(app);
-        let _ = fs::remove_dir_all(repo);
     }
 }
 
@@ -20338,7 +20346,6 @@ fn fleet_nudge_reports_partial_failure_without_replacing_a_dead_attempt() {
     app.agents[0].terminal = None;
     app.agents[1].terminal = None;
     drop(app);
-    let _ = fs::remove_dir_all(repo);
 }
 
 #[cfg(not(windows))]
@@ -20363,7 +20370,6 @@ fn fleet_nudge_excludes_finished_orchestrator_and_stopped_rows_even_with_a_termi
     assert!(app.pending_enters.is_empty());
     for run in &mut app.agents { run.terminal = None; }
     drop(app);
-    let _ = fs::remove_dir_all(repo);
 }
 
 #[cfg(not(windows))]
@@ -20389,7 +20395,6 @@ fn pending_enter_cannot_submit_to_a_replacement_attempt_with_the_same_run_id() {
     assert_eq!(wait_for_log(&repo, "replacement-input", "replacement-control"), "replacement-control\n");
     app.agents[0].terminal = None;
     drop(app);
-    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -30918,10 +30923,10 @@ fn a_requested_merge_conflict_found_at_startup_gets_a_resolver_and_others_wait_f
 
 #[test]
 fn main_and_oneoff_agents_take_their_summary_from_the_last_message() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let home = unique_test_repo("last-message-home");
     let cwd = unique_test_repo("last-message-cwd");
-    std::env::set_var("HOME", &home);
+    env.set_home(&home, &home);
     let project = home.join(".claude").join("projects").join(encode_claude_project_dir(&cwd));
     fs::create_dir_all(&project).unwrap();
     fs::write(
@@ -30938,7 +30943,6 @@ fn main_and_oneoff_agents_take_their_summary_from_the_last_message() {
     app.agents = vec![run];
     app.ingest_direct_completion_notes();
     let summary = app.agents[0].done_summary.clone();
-    let _ = fs::remove_dir_all(&home);
     let _ = fs::remove_dir_all(&cwd);
     assert_eq!(summary.as_deref(), Some("Shipped the parser fix."));
 }
@@ -31567,8 +31571,25 @@ fn agent_pin_keeps_a_planned_conversation_awake_and_out_of_automatic_review() {
 #[cfg(not(windows))]
 #[test]
 fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let dir = unique_test_repo("chat-model-switch");
+    // Its own homes: the efforts a model takes come from the models.dev cache in
+    // the Rudder home, and a real one can list levels this test must refuse.
+    let home = dir.join("home");
+    env.set_home(&dir, &home);
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    fs::create_dir_all(home.join(".rudder")).unwrap();
+    let efforts = serde_json::json!(["low", "medium", "high", "xhigh", "max"]);
+    fs::write(
+        home.join(".rudder/models-dev.json"),
+        serde_json::json!({ "anthropic": { "models": {
+            "opus": { "efforts": efforts },
+            "sonnet": { "efforts": efforts },
+            "haiku": { "efforts": [] },
+        }}})
+        .to_string(),
+    )
+    .unwrap();
     let mut app = App::new();
     app.cwd = dir.clone();
     let mut run = test_agent_run("chat-run", "keep going");
@@ -31599,7 +31620,6 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     assert!(matches!(app.deliver_model_request("chat-run", "opus high"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
     assert_eq!(app.agents[0].model, "haiku");
     app.agents[0].terminal = None;
-    fs::remove_dir_all(dir).unwrap();
 }
 
 /// A Claude chat on disk in `home` for an agent in `cwd`: "first ask" (u1),
@@ -31660,10 +31680,9 @@ fn chat_edit_launch_args(file: &Path) -> Vec<String> {
 
 /// Isolated HOME, RUDDER_HOME and a stand-in `claude` recording its args.
 #[cfg(not(windows))]
-fn chat_edit_env(dir: &Path) -> (PathBuf, PathBuf) {
+fn chat_edit_env(env: &mut EnvGuard, dir: &Path) -> (PathBuf, PathBuf) {
     let home = dir.join("home");
-    fs::create_dir_all(&home).unwrap();
-    std::env::set_var("HOME", &home);
+    env.set_home(dir, &home);
     std::env::set_var("RUDDER_HOME", dir.join("rudder-home"));
     let args = dir.join("claude-args");
     let fake = dir.join("fake-claude.sh");
@@ -31675,9 +31694,9 @@ fn chat_edit_env(dir: &Path) -> (PathBuf, PathBuf) {
 #[cfg(not(windows))]
 #[test]
 fn chat_edit_of_the_first_message_starts_the_conversation_over() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let dir = unique_test_repo("chat-edit-first");
-    let (home, args_file) = chat_edit_env(&dir);
+    let (home, args_file) = chat_edit_env(&mut env, &dir);
     let workspace = dir.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let old = "11111111-1111-4111-8111-111111111111";
@@ -31716,15 +31735,14 @@ fn chat_edit_of_the_first_message_starts_the_conversation_over() {
     assert_eq!(run.turns.iter().map(|turn| turn.prompt.as_str()).collect::<Vec<_>>(), [task.as_str()]);
     assert_eq!(run.status, AgentStatus::Running);
     app.agents[0].terminal = None;
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[cfg(not(windows))]
 #[test]
 fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
-    let _env = env_guard();
+    let mut env = env_guard();
     let dir = unique_test_repo("chat-edit-mid-turn");
-    let (home, args_file) = chat_edit_env(&dir);
+    let (home, args_file) = chat_edit_env(&mut env, &dir);
     let workspace = dir.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let old = "22222222-2222-4222-8222-222222222222";
@@ -31779,7 +31797,6 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     assert_eq!(args[args.len() - 2..], ["--".to_string(), "second ask, said better".to_string()]);
     assert!(app.chat_edits_in_flight.is_empty());
     app.agents[0].terminal = None;
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

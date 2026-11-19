@@ -18069,8 +18069,9 @@ Address the objection directly. If you disagree, say why inside \
         let repo = self.cwd.clone();
         let mut cleaned = 0usize;
         let mut swept: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
         for run in self.agents.iter_mut() {
-            if cleaned >= MAX_PER_SWEEP {
+            if cleaned + failed.len() >= MAX_PER_SWEEP {
                 break;
             }
             let (Some(name), Some(path)) = (run.workspace_name.clone(), run.workspace_path.clone())
@@ -18080,29 +18081,36 @@ Address the objection directly. If you disagree, say why inside \
             if !merged_workspace_is_sweepable(run, now, grace) {
                 continue;
             }
-            if forget_jj_workspace(&repo, &name, &path).is_ok() {
-                run.workspace_path = None;
-                let _ = save_native_run_record(&repo, run);
-                cleaned += 1;
-                // Durable, not just a notice: "where did my workspace go?" has to
-                // be answerable after the fact.
-                swept.push(format!(
-                    "swept merged workspace {} ({})",
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    run.id
-                ));
+            let label = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Err(error) = forget_jj_workspace(&repo, &name, &path) {
+                failed.push(format!("sweeping merged workspace {label} ({}) failed: {error}", run.id));
+                continue;
+            }
+            run.workspace_path = None;
+            cleaned += 1;
+            // Durable, not just a notice: "where did my workspace go?" has to
+            // be answerable after the fact.
+            swept.push(format!("swept merged workspace {label} ({})", run.id));
+            if let Err(error) = save_native_run_record(&repo, run) {
+                failed.push(format!("saving {} after sweeping its workspace failed: {error}", run.id));
             }
         }
         if cleaned > 0 {
-            for entry in swept {
-                self.push_activity(entry);
-            }
             self.notice = Some(format!(
                 "reclaimed {cleaned} merged workspace{} from disk",
                 if cleaned == 1 { "" } else { "s" }
             ));
+        }
+        if let Some(last) = failed.last() {
+            self.notice = Some(last.clone());
+        }
+        if cleaned > 0 || !failed.is_empty() {
+            for entry in swept.into_iter().chain(failed) {
+                self.push_activity(entry);
+            }
             self.dirty = true;
         }
     }
@@ -18188,12 +18196,22 @@ Address the objection directly. If you disagree, say why inside \
                 )
             })
             .unwrap_or_default();
+        // Forgetting reads only the repo view, so it skips the snapshot too.
         for name in &registry.forget {
-            let _ = Command::new("jj")
-                .args(["workspace", "forget", name])
+            let failure = match Command::new("jj")
+                .args(["--ignore-working-copy", "workspace", "forget", name])
                 .current_dir(&repo)
                 .stdin(std::process::Stdio::null())
-                .output();
+                .output()
+            {
+                Ok(output) if output.status.success() => continue,
+                Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                Err(error) => error.to_string(),
+            };
+            let message = format!("forgetting orphaned jj workspace {name} failed: {failure}");
+            self.push_activity(message.clone());
+            self.notice = Some(message);
+            self.dirty = true;
         }
         if registry.foreign_root_unknown {
             return;

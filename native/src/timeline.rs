@@ -663,7 +663,7 @@ pub(crate) fn compute_timeline(request: &TimelineRequest) -> TimelineSummary {
             summary.model.as_ref().map(|(_, model)| model.as_str()),
         ),
         Backend::Codex => summary.context.as_ref().and_then(|c| c.capacity),
-        Backend::Opencode => None,
+        Backend::Opencode | Backend::Antigravity => None,
     };
     summary
 }
@@ -719,6 +719,15 @@ pub(crate) fn compute_timeline_in(
             }
         }
         Backend::Opencode => {}
+        // Totals only: Antigravity's transcript carries usage but no per-call
+        // timing Rudder can split into model and tool time.
+        Backend::Antigravity => {
+            if let Some(session) = signals::read_antigravity_session(&request.run_id) {
+                let usage = crate::antigravity::token_usage(&session);
+                summary.input += usage.input;
+                summary.output += usage.output;
+            }
+        }
     }
     let (start, last) = read_timeline_file(&request.repo_root, &request.run_id);
     summary.start_ms = start;

@@ -137,7 +137,7 @@ pub(crate) fn pane_latest_line(backend: Backend, lines: &[String]) -> Option<Str
     let glyph = match backend {
         Backend::Claude => '\u{23fa}',
         Backend::Codex => '\u{2022}',
-        Backend::Opencode => return None,
+        Backend::Opencode | Backend::Antigravity => return None,
     };
     lines.iter().rev().find_map(|line| {
         let rest = line.trim().strip_prefix(glyph)?.trim();

@@ -180,7 +180,7 @@ pub(crate) fn fork_conversation(source: &BranchSource, target_cwd: &Path) -> Res
             )?;
             Ok(Branched::Codex { session })
         }
-        Backend::Opencode => Err(only_claude_and_codex()),
+        Backend::Opencode | Backend::Antigravity => Err(branch_unsupported(source.backend)),
     }
 }
 
@@ -188,8 +188,15 @@ pub(crate) fn fork_conversation(source: &BranchSource, target_cwd: &Path) -> Res
 // The App side.
 // ---------------------------------------------------------------------------
 
-fn only_claude_and_codex() -> String {
-    "Branching works for Claude and Codex agents".to_string()
+/// Antigravity forks a conversation only from inside it (`/fork` in its
+/// pane); there is no command to copy one into a new agent from outside.
+fn branch_unsupported(backend: Backend) -> String {
+    match backend {
+        Backend::Antigravity => {
+            "Antigravity can't copy a chat into a new agent; type /fork in the agent's pane".to_string()
+        }
+        _ => "Branching works for Claude and Codex agents".to_string(),
+    }
 }
 
 fn branch_refusal(run: &AgentRun) -> Option<String> {
@@ -205,8 +212,8 @@ fn branch_refusal(run: &AgentRun) -> Option<String> {
     if is_cloud_owned_agent(run) {
         return Some("This agent runs on another machine".to_string());
     }
-    if run.backend == Backend::Opencode {
-        return Some(only_claude_and_codex());
+    if matches!(run.backend, Backend::Opencode | Backend::Antigravity) {
+        return Some(branch_unsupported(run.backend));
     }
     if let Some(profile) = run.execution_profile.as_deref().filter(|profile| *profile != "native") {
         return Some(format!("This agent runs on the {profile} profile, which can't be branched"));

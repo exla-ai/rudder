@@ -785,6 +785,19 @@ fn rewind_codex(cwd: &Path, session: &str, entry: &str, latest: &str, model: &st
 // The App side: checks, the thread, and the relaunch.
 // ---------------------------------------------------------------------------
 
+/// Why a backend's chats can't be edited from outside, or None when they can.
+/// Antigravity keeps its conversations in its own store with no command to
+/// rewind one from outside; its pane has `/rewind`.
+pub(crate) fn edit_unsupported(backend: Backend) -> Option<&'static str> {
+    match backend {
+        Backend::Claude | Backend::Codex => None,
+        Backend::Opencode => Some("Editing a message works in Claude and Codex chats"),
+        Backend::Antigravity => {
+            Some("Antigravity can't rewind a chat from outside; type /rewind in the agent's pane")
+        }
+    }
+}
+
 fn edit_refusal(run: &AgentRun) -> Option<String> {
     if is_cloud_owned_agent(run) {
         return Some("This agent runs on another machine now".to_string());
@@ -795,8 +808,8 @@ fn edit_refusal(run: &AgentRun) -> Option<String> {
     if run.status == AgentStatus::Merged {
         return Some("Its work is already merged; start a new agent instead".to_string());
     }
-    if run.backend == Backend::Opencode {
-        return Some("Editing a message works in Claude and Codex chats".to_string());
+    if let Some(reason) = edit_unsupported(run.backend) {
+        return Some(reason.to_string());
     }
     if let Some(profile) = run.execution_profile.as_deref().filter(|profile| *profile != "native") {
         return Some(format!("This agent runs on the {profile} profile, which can't rewind a conversation"));
@@ -911,7 +924,9 @@ impl App {
             let result = match backend {
                 Backend::Claude => rewind_claude(&cwd, &session, &entry, &latest),
                 Backend::Codex => rewind_codex(&cwd, &session, &entry, &latest, &model, &text),
-                Backend::Opencode => Err("Editing a message works in Claude and Codex chats".to_string()),
+                Backend::Opencode | Backend::Antigravity => {
+                    Err(edit_unsupported(backend).unwrap_or_default().to_string())
+                }
             };
             let _ = tx.send(ChatEditOutcome { run_id, request_id, source_session: session, text, result });
         });
@@ -996,7 +1011,9 @@ impl App {
             (Backend::Claude, false) => claude_resume_command(run, &rewound.session),
             (Backend::Claude, true) => claude_new_session_command(run, &rewound.session),
             (Backend::Codex, _) => codex_resume_command(run, &rewound.session),
-            (Backend::Opencode, _) => return Err("Editing a message works in Claude and Codex chats".to_string()),
+            (Backend::Opencode | Backend::Antigravity, _) => {
+                return Err(edit_unsupported(backend).unwrap_or_default().to_string())
+            }
         };
         // Started over: the agent's task is the edited text, framed as the
         // old one was (an "Objective:" block for a task from the task bar).

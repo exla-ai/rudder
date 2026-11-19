@@ -65,7 +65,7 @@ pub(crate) fn config_model(config: &serde_json::Value, backend: Backend) -> Opti
 pub(crate) fn config_effort(config: &serde_json::Value, backend: Backend) -> Option<EffortLevel> {
     let backend_config = config.get("backends")?.get(backend.as_str())?;
     let keys: &[&str] = match backend {
-        Backend::Claude => &["effort", "reasoningEffort"],
+        Backend::Claude | Backend::Antigravity => &["effort", "reasoningEffort"],
         Backend::Codex => &["reasoningEffort", "effort"],
         // opencode has no effort flag; read the keys anyway so a config written by
         // hand is not silently ignored if opencode ever gains one.
@@ -411,7 +411,7 @@ pub(crate) fn save_model_defaults(
         );
     }
     match backend {
-        Backend::Claude => {
+        Backend::Claude | Backend::Antigravity => {
             if let Some(effort) = effort {
                 backend_config.insert(
                     "effort".to_string(),

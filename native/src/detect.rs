@@ -231,6 +231,7 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
                         .any(|label| mode.starts_with(label))
                     })
         }
+        Backend::Antigravity => false,
         // opencode's idle footer: the status/help hints it draws under the
         // composer. Every one of these used to be a bare substring test against
         // the whole line, so an agent WRITING about "ctrl+c" or "the tab bar" —
@@ -664,6 +665,7 @@ pub(crate) fn looks_like_agent_prompt(backend: Backend, line: &str) -> bool {
                 || line.starts_with("❯ ")
                 || line.contains("Type a message")
         }
+        Backend::Antigravity => line == ">" || line.starts_with("> "),
     }
 }
 
@@ -755,7 +757,7 @@ fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
     match backend {
         Backend::Claude => claude_composer_top(&rows).is_some(),
         Backend::Codex => codex_composer_row(&rows).is_some(),
-        Backend::Opencode => rows
+        Backend::Opencode | Backend::Antigravity => rows
             .iter()
             .rev()
             .filter(|row| !row.is_empty())
@@ -770,14 +772,14 @@ fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
 /// counted from the screen's bottom lost the lead's spinner behind its agent
 /// list. Claude and Codex draw their composer for the whole of a turn and at
 /// rest, and only a dialog takes its place: with no composer on screen there
-/// are no rows. opencode draws nothing under its composer that varies, so its
-/// whole screen counts.
+/// are no rows. opencode and Antigravity draw nothing under their composer
+/// that varies, so the whole screen counts.
 pub(crate) fn rows_above_composer(backend: Backend, lines: &[String]) -> &[String] {
     let rows = || lines.iter().map(|line| normalize_terminal_line(line)).collect::<Vec<_>>();
     let composer = match backend {
         Backend::Claude => claude_composer_top(&rows()),
         Backend::Codex => codex_composer_row(&rows()),
-        Backend::Opencode => return lines,
+        Backend::Opencode | Backend::Antigravity => return lines,
     };
     composer.map_or(&[], |row| &lines[..row])
 }
@@ -865,15 +867,15 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
 /// True when the pane shows the backend parked at its composer, with no
 /// spinner above it. The precondition for `WaitSignal::Idle` (main.rs), the
 /// backstop for a turn that ended with no signal at all. Claude and Codex are
-/// found by their composer (`idle_footer_showing`); opencode by its prompt line
-/// or idle footer in the bottom rows.
+/// found by their composer (`idle_footer_showing`); opencode and Antigravity
+/// by a prompt line or idle footer in the bottom rows.
 pub(crate) fn terminal_at_idle_prompt(backend: Backend, lines: &[String]) -> bool {
     if recent_lines_look_busy(backend, lines) {
         return false;
     }
     match backend {
         Backend::Claude | Backend::Codex => idle_footer_showing(backend, lines),
-        Backend::Opencode => lines
+        Backend::Opencode | Backend::Antigravity => lines
             .iter()
             .rev()
             .take(8)

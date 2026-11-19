@@ -377,6 +377,14 @@ pub(crate) fn collect_run_token_usage_in(
                 output += session_output;
             }
         }
+        // Antigravity's transcript records each model call's usage.
+        Backend::Antigravity => {
+            if let Some(session) = run.session_id.as_deref() {
+                let usage = crate::antigravity::token_usage(session);
+                input += usage.input;
+                output += usage.output;
+            }
+        }
         Backend::Codex => {
             for usage in collect_codex_usage_in(codex_sessions_root, &run.cwd, &since).values() {
                 input += usage.input_tokens;

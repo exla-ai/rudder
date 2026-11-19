@@ -17,6 +17,15 @@
 //!   sees `session.status`, `session.idle`, `session.error`, `permission.asked` /
 //!   `permission.replied` and `question.asked` / `question.replied`.
 //!
+//! - **Antigravity** (`agy`, its built-in `agy-customizations` skill,
+//!   `docs/hooks.md`): `hooks.json` lifecycle hooks. Antigravity reads hooks
+//!   only from `~/.gemini/config/hooks.json` and `<workspace>/.agents/hooks.json`
+//!   (no launch flag, and `--settings` ignores a `hooks` key), so Rudder keeps
+//!   one named `rudder` entry in the global file whose commands do nothing
+//!   unless `RUDDER_AGY_HOOK` names a run's script, which only Rudder's own
+//!   launches set. `SessionStart` reports the conversation id, `PreInvocation`
+//!   the start of a turn and `Stop` its end.
+//!
 //! All write `<rudder_home>/signals/<run_id>.json` =
 //! `{"state":"done"|"input"|"permission"|"working"|"error"|"compacted","detail":"..."}`.
 //! `detail` is optional and only carried by `error` (the backend's error type).
@@ -78,6 +87,9 @@ pub(crate) struct WorkerSignals {
     pub(crate) opencode_config: Option<PathBuf>,
     /// The plugin's environment: the run's signal, session and asks paths.
     pub(crate) opencode_env: Vec<(String, String)>,
+    /// The run's hook script, handed to Antigravity's global `rudder` hook
+    /// entry through `RUDDER_AGY_HOOK` (Antigravity workers only).
+    pub(crate) antigravity_hook: Option<PathBuf>,
 }
 
 pub(crate) fn rudder_home() -> Option<PathBuf> {
@@ -117,6 +129,7 @@ pub(crate) fn worker_has_config(run_id: &str, backend: Backend) -> bool {
         dir.join(format!("{run_id}-claude.json")),
         dir.join(format!("{run_id}-notify.sh")),
         dir.join(format!("{run_id}-opencode.json")),
+        dir.join(format!("{run_id}-agy-hook.sh")),
     ]
     .iter()
     .any(|file| file.exists())
@@ -152,6 +165,8 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.claude-session")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.opencode-session")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}-agy-hook.sh")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.agy-session")));
     let _ = std::fs::remove_dir_all(asks_dir_in(&dir, run_id));
     let _ = std::fs::remove_dir_all(dir.join(format!("{run_id}.subagents")));
 }
@@ -683,6 +698,142 @@ pub(crate) fn opencode_config_json(plugin: &Path) -> String {
     .to_string()
 }
 
+/// Path of the file an Antigravity worker's `SessionStart` hook keeps its
+/// conversation id in. Antigravity mints its own ids and has no flag to
+/// declare one, so this is how a row learns which conversation to resume.
+pub(crate) fn antigravity_session_path(run_id: &str) -> Option<PathBuf> {
+    Some(signals_dir()?.join(format!("{run_id}.agy-session")))
+}
+
+/// The conversation id the run's Antigravity hooks last reported, if any.
+pub(crate) fn read_antigravity_session(run_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(antigravity_session_path(run_id)?).ok()?;
+    let id = text.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// The hook events Rudder's global `rudder` entry listens on, in
+/// `~/.gemini/config/hooks.json`. Each command passes the event name to the
+/// run's script, since Antigravity 1.5.0's payload does not name its event.
+pub(crate) const ANTIGRAVITY_HOOK_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
+
+/// One hook command: run the script `RUDDER_AGY_HOOK` names, or answer `{}`
+/// (no decision, nothing injected) for every Antigravity session Rudder did
+/// not launch. Antigravity runs it with `sh -c` and the agent's environment.
+pub(crate) fn antigravity_hook_command(event: &str) -> String {
+    format!("if [ -n \"$RUDDER_AGY_HOOK\" ]; then exec \"$RUDDER_AGY_HOOK\" {event}; else printf '{{}}'; fi")
+}
+
+/// The `rudder` entry of Antigravity's global hooks file. `SessionStart`,
+/// `PreInvocation` and `Stop` are flat lists of handlers (docs/hooks.md).
+pub(crate) fn antigravity_hooks_entry() -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    for event in ANTIGRAVITY_HOOK_EVENTS {
+        entry.insert(
+            event.to_string(),
+            serde_json::json!([{ "type": "command", "command": antigravity_hook_command(event), "timeout": 10 }]),
+        );
+    }
+    serde_json::Value::Object(entry)
+}
+
+/// `hooks.json` text with Rudder's entry set, every other named hook kept as
+/// it was. None when the existing text is not a JSON object, which is left
+/// for its owner to fix rather than overwritten.
+pub(crate) fn antigravity_hooks_with_rudder(existing: Option<&str>) -> Option<String> {
+    let mut hooks = match existing.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return None,
+        },
+        None => serde_json::Map::new(),
+    };
+    hooks.insert("rudder".to_string(), antigravity_hooks_entry());
+    serde_json::to_string_pretty(&serde_json::Value::Object(hooks)).ok()
+}
+
+/// Antigravity's global hooks file: `~/.gemini/config/hooks.json`.
+pub(crate) fn antigravity_hooks_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+    Some(PathBuf::from(home).join(".gemini").join("config").join("hooks.json"))
+}
+
+/// Make sure the global hooks file carries Rudder's entry, rewriting it only
+/// when that entry is missing or different. A file that is not a JSON object
+/// fails the launch with the reason: the worker could never report a turn.
+fn ensure_antigravity_hooks(path: &Path) -> Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("could not read {}", path.display())),
+    };
+    if let Some(text) = existing.as_deref() {
+        let current = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok();
+        if current.as_ref().and_then(|value| value.get("rudder")) == Some(&antigravity_hooks_entry()) {
+            return Ok(());
+        }
+    }
+    let body = antigravity_hooks_with_rudder(existing.as_deref())
+        .with_context(|| format!("{} is not a JSON object; fix it so Rudder can add its hook", path.display()))?;
+    let dir = path.parent().context("the hooks file has no folder")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let tmp = dir.join(format!("hooks.json.rudder.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, body).with_context(|| format!("could not write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("could not install {}", path.display()))
+}
+
+/// The per-run Antigravity hook script: the event name in `$1`, the payload
+/// (camelCase JSON) on stdin, and a JSON answer on stdout, `{}` for all three
+/// events (no decision, nothing injected, the stop allowed).
+///
+/// - `SessionStart` records `conversationId`: the id `--conversation` resumes.
+/// - `PreInvocation` with `invocationNum` 1 is the first model call of a turn:
+///   the human answered, back to work. Later calls of the same turn write
+///   nothing.
+/// - `Stop` ends the turn: `done`, or `error` with the error text when
+///   `terminationReason` is `ERROR`. An interrupt (`USER_CANCELED`) is `done`:
+///   the agent is back at its prompt.
+pub(crate) fn antigravity_hook_script(signal: &Path) -> String {
+    let path = signal.display();
+    let dir = signal
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let session = signal.with_extension("agy-session");
+    let session = session.display();
+    format!(
+        r#"#!/bin/sh
+# Rudder Antigravity lifecycle signal: hooks.json command, event name in $1, payload on stdin.
+# Temp + mv so the TUI never reads a torn half-written signal.
+payload=$(cat)
+field() {{
+  printf '%s' "$payload" | sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" | head -n 1
+}}
+number() {{
+  printf '%s' "$payload" | sed -n "s/.*\"$1\": *\"*\([0-9][0-9]*\).*/\1/p" | head -n 1
+}}
+emit() {{
+  mkdir -p '{dir}' && printf '{{"state":"%s"}}' "$1" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}'
+}}
+case "$1" in
+  SessionStart)
+    id=$(field conversationId)
+    [ -n "$id" ] && printf '%s' "$id" > '{session}'.$$.tmp && mv -f '{session}'.$$.tmp '{session}' ;;
+  PreInvocation)
+    [ "$(number invocationNum)" = "1" ] && emit working ;;
+  Stop)
+    case "$(field terminationReason)" in
+      ERROR)
+        detail=$(field error | tr -d '\\"' | cut -c1-80)
+        mkdir -p '{dir}' && printf '{{"state":"error","detail":"%s"}}' "$detail" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
+      *) emit done ;;
+    esac ;;
+esac
+printf '{{}}'
+"#
+    )
+}
+
 /// Whether this backend+mode is an INTERACTIVE worker that idles between turns
 /// (so it needs a hook to signal completion). Headless planner modes run
 /// `claude -p` / `codex exec` and complete via process exit, so they are excluded.
@@ -762,6 +913,17 @@ pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> Result<W
                 ..WorkerSignals::default()
             })
         }
+        Backend::Antigravity => {
+            let hooks = antigravity_hooks_path().context("no home directory for Antigravity's hooks file")?;
+            ensure_antigravity_hooks(&hooks)?;
+            let script = dir.join(format!("{run_id}-agy-hook.sh"));
+            write(&script, &antigravity_hook_script(&signal))?;
+            set_executable(&script)?;
+            Ok(WorkerSignals {
+                antigravity_hook: Some(script),
+                ..WorkerSignals::default()
+            })
+        }
     }
 }
 
@@ -777,11 +939,31 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The cloud worker sets `RUDDER_REMOTE_CONTROL=1` for the panes it hosts.
+pub(crate) fn remote_control_enabled() -> bool {
+    std::env::var("RUDDER_REMOTE_CONTROL").ok().as_deref() == Some("1")
+}
+
+/// Antigravity's Remote Control needs a Google sign-in: with a Gemini API key
+/// (`modelProvider: "gemini"` in its settings) `agy --remote-control` exits
+/// at launch, so such a home runs its Antigravity panes without it.
+pub(crate) fn antigravity_remote_control_available() -> bool {
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return false;
+    };
+    let settings = PathBuf::from(home).join(".gemini").join("antigravity-cli").join("settings.json");
+    let provider = std::fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok())
+        .and_then(|value| value.get("modelProvider").and_then(|v| v.as_str()).map(str::to_string));
+    provider.as_deref() != Some("gemini")
+}
+
 /// Claude's Remote Control puts a session in the Claude phone app and on
 /// claude.ai. The cloud worker turns it on for every Claude pane it hosts
 /// (`RUDDER_REMOTE_CONTROL=1`); the name tells the sessions apart in the app.
 pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
-    if std::env::var("RUDDER_REMOTE_CONTROL").ok().as_deref() != Some("1") {
+    if !remote_control_enabled() {
         return None;
     }
     let repo = std::env::var("RUDDER_REPO_NAME")
@@ -879,6 +1061,19 @@ pub(crate) fn augment_worker_command(
                     .env
                     .push(("OPENCODE_CONFIG".to_string(), path.display().to_string()));
                 command.env.extend(signals.opencode_env);
+            }
+        }
+        Backend::Antigravity => {
+            if let Some(path) = signals.antigravity_hook {
+                command
+                    .env
+                    .push(("RUDDER_AGY_HOOK".to_string(), path.display().to_string()));
+            }
+            // Antigravity's Remote Control: the session in the Antigravity app
+            // and on the web, like Claude's. It takes no name, so the app lists
+            // it under the machine.
+            if remote_control_enabled() && antigravity_remote_control_available() {
+                command.args.push("--remote-control".to_string());
             }
         }
     }

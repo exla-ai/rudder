@@ -118,6 +118,8 @@ use crate::publish::*;
 mod handoff;
 use crate::handoff::*;
 mod opencode;
+mod antigravity;
+use crate::antigravity::antigravity_session_exists;
 mod plan_stream;
 mod telemetry;
 
@@ -589,6 +591,13 @@ enum Backend {
     /// is a turn-end hook (see signals.rs) or a reasoning-effort flag, so those
     /// surfaces degrade rather than pretend.
     Opencode,
+    /// Google's Antigravity CLI (`agy`, github.com/google-antigravity/antigravity-cli),
+    /// the successor to Gemini CLI. An interactive TUI with `--conversation <id>`
+    /// resume, `-i` for the first turn, `--model`/`--effort`, and lifecycle hooks
+    /// (`~/.gemini/config/hooks.json`) that report turn end and the conversation
+    /// id. It has no way to fork a conversation from the command line, so
+    /// branching an Antigravity chat is refused rather than faked.
+    Antigravity,
 }
 
 impl Backend {
@@ -597,6 +606,7 @@ impl Backend {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -605,6 +615,7 @@ impl Backend {
             "claude" | "anthropic" => Some(Self::Claude),
             "codex" | "openai" => Some(Self::Codex),
             "opencode" | "oc" => Some(Self::Opencode),
+            "antigravity" | "agy" | "google" | "gemini" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -6812,6 +6823,13 @@ impl App {
                 env_override("RUDDER_REVIEW_MODEL_OPENCODE").unwrap_or_default(),
                 EffortLevel::Medium,
             ),
+            // Antigravity reviews on its flagship at the review effort.
+            Backend::Antigravity => (
+                Backend::Antigravity,
+                env_override("RUDDER_REVIEW_MODEL_ANTIGRAVITY")
+                    .unwrap_or_else(|| flagship_model_for(Backend::Antigravity).to_string()),
+                REVIEW_ALL_EFFORT,
+            ),
         }
     }
 
@@ -9378,6 +9396,9 @@ impl App {
             // its TUI (no --auto: OpenCode's own permission config applies) and its
             // plan block is read out of the pane like every other opencode planner.
             Backend::Opencode => opencode_command(model, effort, Some(prompt), AgentMode::RudderPlan),
+            // Antigravity's reconcile planner: its TUI in plan mode, the plan
+            // block read out of the pane like its other planners.
+            Backend::Antigravity => antigravity_planner_command(model, effort, prompt),
         }
     }
 
@@ -9976,11 +9997,11 @@ impl App {
             generator,
             in_main,
         } = request;
-        if adversarial_backend == Backend::Opencode {
-            self.notice = Some(
-                "gam: the reviewer must be claude or codex (opencode has no read-only sandbox yet); opencode can still generate with `gen opencode`"
-                    .to_string(),
-            );
+        if matches!(adversarial_backend, Backend::Opencode | Backend::Antigravity) {
+            let name = adversarial_backend.as_str();
+            self.notice = Some(format!(
+                "gam: the reviewer must be claude or codex ({name} has no read-only sandbox); {name} can still generate with `gen {name}`"
+            ));
             return;
         }
         self.notice = None;
@@ -12455,6 +12476,9 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Claude => claude_resume_command(run, session_id.as_deref().unwrap()),
                 Backend::Codex => codex_resume_command(run, session_id.as_deref().unwrap()),
                 Backend::Opencode => opencode_resume_command(run, session_id.as_deref().unwrap()),
+                Backend::Antigravity => {
+                    antigravity_resume_command(run, session_id.as_deref().unwrap())
+                }
             }
         } else {
             agent_command(
@@ -12550,7 +12574,7 @@ Address the objection directly. If you disagree, say why inside \
     fn start_restore_task(&mut self, backend: Backend, session_id: &str) {
         let session_id = session_id.trim().to_string();
         if session_id.is_empty() {
-            self.notice = Some("usage: /restore claude|codex <session-id>".to_string());
+            self.notice = Some("usage: /restore claude|codex|antigravity <session-id>".to_string());
             return;
         }
         // Claude scopes --resume lookup to the current directory's project folder
@@ -12584,6 +12608,7 @@ Address the objection directly. If you disagree, say why inside \
             Backend::Claude => claude_resume_command(&run, &session_id),
             Backend::Codex => codex_resume_command(&run, &session_id),
             Backend::Opencode => opencode_resume_command(&run, &session_id),
+            Backend::Antigravity => antigravity_resume_command(&run, &session_id),
         };
         // Re-wire completion hooks like every other (re)spawn path; without this
         // the run would sit "running" forever waiting for a signal the resumed
@@ -12644,12 +12669,19 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
         let short_id: String = session_id.chars().take(8).collect();
+        if request.backend == Backend::Antigravity {
+            self.notice = Some(format!(
+                "{ANTIGRAVITY_NO_FORK} · /restore antigravity {session_id} reopens it in place"
+            ));
+            return;
+        }
         // A conversation that does not exist must never create a workspace: check
         // BOTH backends here, because queued requests name their own backend.
         let exists = match request.backend {
             Backend::Claude => claude_transcript_path(&self.cwd, &session_id).is_some(),
             Backend::Codex => codex_session_exists(&session_id),
             Backend::Opencode => opencode_session_exists(&session_id),
+            Backend::Antigravity => antigravity_session_exists(&session_id),
         };
         if !exists {
             self.notice = Some(format!(
@@ -12743,13 +12775,15 @@ Address the objection directly. If you disagree, say why inside \
         }
         let model = self.model.clone();
         let effort = self.effort;
+        let mut command = match fork_command(backend, &model, effort, session_id, instruction) {
+            Ok(command) => command,
+            Err(reason) => {
+                self.notice = Some(format!("handoff failed: {reason}"));
+                return;
+            }
+        };
         let mut run = create_oneoff_agent(&self.cwd, backend, &model, effort, task);
         run.task_summary = truncate_chars(&format!("handoff: {title}"), 56);
-        let mut command = match backend {
-            Backend::Claude => claude_fork_command(&model, effort, session_id, instruction),
-            Backend::Codex => codex_fork_command(&model, effort, session_id, instruction),
-            Backend::Opencode => opencode_fork_command(&model, effort, session_id, instruction),
-        };
         let wired = signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
@@ -13078,14 +13112,14 @@ Address the objection directly. If you disagree, say why inside \
                             Some(backend) => self.start_restore_task(backend, session_id),
                             None => {
                                 self.notice = Some(format!(
-                                "unknown provider {provider}; usage: /restore claude|codex <session-id>"
+                                "unknown provider {provider}; usage: /restore claude|codex|antigravity <session-id>"
                             ));
                             }
                         }
                     }
                     _ => {
                         self.notice = Some(
-                            "usage: /restore claude|codex <session-id> — reopen that conversation in a new pane with permissions bypassed"
+                            "usage: /restore claude|codex|antigravity <session-id> — reopen that conversation in a new pane with permissions bypassed"
                                 .to_string(),
                         );
                     }
@@ -13417,6 +13451,19 @@ Address the objection directly. If you disagree, say why inside \
                             "opencode has no fast mode: pick a faster model with /model opencode <provider/model>, or a lower effort"
                                 .to_string(),
                         );
+                    }
+                    // Antigravity's speed lever is its Flash model; low effort on top.
+                    Backend::Antigravity => {
+                        let model = fast_model_for(backend).to_string();
+                        let warning =
+                            self.set_model_defaults(backend, model, Some(EffortLevel::Low));
+                        self.notice = warning.or_else(|| {
+                            Some(format!(
+                                "fast mode: {} {} (low effort) for NEW agents · antigravity has no fast mode, so this picks its Flash model · /model switches back",
+                                self.backend.as_str(),
+                                self.model
+                            ))
+                        });
                     }
                 }
                 true
@@ -15524,6 +15571,9 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Opencode => session_id
                     .as_deref()
                     .and_then(crate::opencode::final_assistant_text),
+                Backend::Antigravity => session_id
+                    .as_deref()
+                    .and_then(crate::antigravity::final_assistant_text),
             };
             if let Some(text) = fallback_text {
                 if extract_rudder_plan_tasks(&text)
@@ -16648,6 +16698,7 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Claude => claude_resume_command(run, &session),
                 Backend::Codex => codex_resume_command(run, &session),
                 Backend::Opencode => opencode_resume_command(run, &session),
+                Backend::Antigravity => antigravity_resume_command(run, &session),
             };
             let wired = if run.is_main() && run.execution_profile.is_none() {
                 signals::augment_worker_command(&mut command, backend, run.mode, &run.id)
@@ -19683,6 +19734,11 @@ Address the objection directly. If you disagree, say why inside \
             ));
             return;
         }
+        // No workspace for a fork that can't start.
+        if backend == Backend::Antigravity {
+            self.notice = Some(format!("{}: {ANTIGRAVITY_NO_FORK}", notices.failed));
+            return;
+        }
         let run_id = new_run_id(&label);
         let job = WorkspacePrepJob {
             cwd: self.cwd.clone(),
@@ -19780,13 +19836,12 @@ Address the objection directly. If you disagree, say why inside \
         if let Err(error) = self.write_rudder_context_timed(None) {
             self.notice = Some(format!("context warning: {error}"));
         }
-        let mut command = match backend {
-            Backend::Claude => claude_fork_command(&model, effort, &session_id, seed.as_deref()),
-            Backend::Codex => codex_fork_command(&model, effort, &session_id, seed.as_deref()),
-            Backend::Opencode => opencode_fork_command(&model, effort, &session_id, seed.as_deref()),
-        };
-        let command = signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
-            .map(|()| command);
+        let command = fork_command(backend, &model, effort, &session_id, seed.as_deref())
+            .map_err(anyhow::Error::msg)
+            .and_then(|mut command| {
+                signals::augment_worker_command(&mut command, backend, AgentMode::Execute, &workspace.id)
+                    .map(|()| command)
+            });
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(workspace.path.clone()),
@@ -20421,6 +20476,9 @@ Address the objection directly. If you disagree, say why inside \
                     Backend::Claude => (claude_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
                     Backend::Codex => (codex_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
                     Backend::Opencode => (opencode_continue_command(run, sid, new_goal), None, session.clone()),
+                    Backend::Antigravity => {
+                        (antigravity_resume_command(run, sid), Some(new_goal.to_string()), session.clone())
+                    }
                 }
             } else {
                 // No session to resume: fresh spawn carrying a handoff. Files persist
@@ -21371,12 +21429,12 @@ What to do\n\
     /// Recording it while the run is alive closes that window, and running the same
     /// lookup for rows that RELOAD without an id rescues the ones already lost —
     /// the rollout is still on disk, Rudder just never wrote down which one it was.
-    /// Follow the conversation a Claude or OpenCode agent is on. Their hooks
-    /// report the live session id: Claude's after `/resume` or `/clear` in the
-    /// pane, OpenCode's always, since OpenCode mints its own session ids. The
-    /// run record keeps the one Rudder launched with otherwise, so the phone's
-    /// chat view showed an empty transcript and a reopen resumed the wrong
-    /// conversation.
+    /// Follow the conversation a Claude, OpenCode or Antigravity agent is on.
+    /// Their hooks report the live session id: Claude's after `/resume` or
+    /// `/clear` in the pane, OpenCode's and Antigravity's always, since both
+    /// mint their own session ids. The run record keeps the one Rudder
+    /// launched with otherwise, so the phone's chat view showed an empty
+    /// transcript and a reopen resumed the wrong conversation.
     fn adopt_reported_sessions(&mut self) {
         let cwd = self.cwd.clone();
         let mut adopted = Vec::new();
@@ -21384,6 +21442,9 @@ What to do\n\
             let (reported, kind) = match run.backend {
                 Backend::Claude => (signals::read_claude_session(&run.id), "Claude session"),
                 Backend::Opencode => (signals::read_opencode_session(&run.id), "OpenCode session"),
+                Backend::Antigravity => {
+                    (signals::read_antigravity_session(&run.id), "Antigravity conversation")
+                }
                 Backend::Codex => continue,
             };
             let Some(reported) = reported else {

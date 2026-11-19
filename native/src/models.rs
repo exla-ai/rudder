@@ -19,6 +19,10 @@ pub(crate) fn live_codex_model(model: &str) -> &str {
     }
 }
 
+/// Antigravity's flagship and its fast model, as `agy models` names them.
+pub(crate) const ANTIGRAVITY_DEFAULT_MODEL: &str = "gemini-4-argon";
+pub(crate) const ANTIGRAVITY_FAST_MODEL: &str = "gemini-3.8-flash";
+
 pub(crate) fn default_model_for(backend: Backend) -> &'static str {
     match backend {
         Backend::Claude => "sonnet",
@@ -27,6 +31,7 @@ pub(crate) fn default_model_for(backend: Backend) -> &'static str {
         // default; an empty model means "use it" rather than Rudder guessing a
         // provider the user may not even be authenticated for.
         Backend::Opencode => "",
+        Backend::Antigravity => ANTIGRAVITY_DEFAULT_MODEL,
     }
 }
 
@@ -45,14 +50,20 @@ pub(crate) fn fast_model_for(backend: Backend) -> &'static str {
         Backend::Codex => CODEX_DEFAULT_MODEL,
         // No fast tier to select: opencode's speed is whatever model is configured.
         Backend::Opencode => "",
+        // Antigravity has no fast mode either; its Flash model is the fast one.
+        Backend::Antigravity => ANTIGRAVITY_FAST_MODEL,
     }
 }
 
 /// Each provider's flagship: what `/gam` reviews with when you do not pick a
-/// model, and what a bare provider name ("/gam claude ...") means. The same
-/// models `/fast` selects, because both mean "the best this provider has".
+/// model, and what a bare provider name ("/gam claude ...") means. For Claude
+/// and Codex the same models `/fast` selects, because both mean "the best this
+/// provider has"; Antigravity's fast model is a smaller one.
 pub(crate) fn flagship_model_for(backend: Backend) -> &'static str {
-    fast_model_for(backend)
+    match backend {
+        Backend::Antigravity => ANTIGRAVITY_DEFAULT_MODEL,
+        _ => fast_model_for(backend),
+    }
 }
 
 /// Rudder's one default reasoning tier. On the measured v4 session (PLAN.md
@@ -133,6 +144,7 @@ pub(crate) fn observed_model_update(backend: Backend, current: &str, observed: &
         Backend::Opencode => None,
         Backend::Codex => (observed != current && live_codex_model(current) != observed)
             .then(|| observed.to_string()),
+        Backend::Antigravity => (observed != current).then(|| observed.to_string()),
         Backend::Claude => {
             if !observed.starts_with("claude-") {
                 return None;
@@ -165,6 +177,7 @@ pub(crate) fn provider_backend(provider: &str) -> Option<Backend> {
         "claude" | "anthropic" => Some(Backend::Claude),
         "codex" | "openai" => Some(Backend::Codex),
         "opencode" | "oc" => Some(Backend::Opencode),
+        "antigravity" | "agy" | "google" | "gemini" => Some(Backend::Antigravity),
         _ => None,
     }
 }
@@ -230,7 +243,7 @@ pub(crate) fn known_model(backend: Backend, model: &str) -> Option<String> {
 /// known model or a valid effort for it is refused with the reason, so an
 /// unknown value is never saved.
 pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option<EffortLevel>), String> {
-    const USAGE: &str = "usage: /model claude|codex|opencode <model> [effort]";
+    const USAGE: &str = "usage: /model claude|codex|opencode|antigravity <model> [effort]";
     let Some((first, rest)) = args.split_first() else {
         return Err(USAGE.to_string());
     };
@@ -251,7 +264,7 @@ pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option
                 backend = backend.as_str()
             )
         })?,
-        None => [Backend::Claude, Backend::Codex, Backend::Opencode]
+        None => [Backend::Claude, Backend::Codex, Backend::Opencode, Backend::Antigravity]
             .into_iter()
             .find_map(|backend| known_model(backend, model).map(|known| (backend, known)))
             .ok_or_else(|| format!("unknown model: {model}; pick one from /model"))?,
@@ -289,7 +302,7 @@ pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<Ef
         Some(EffortLevel::High),
         Some(EffortLevel::XHigh),
     ];
-    if backend == Backend::Claude {
+    if matches!(backend, Backend::Claude | Backend::Antigravity) {
         options.push(Some(EffortLevel::Max));
     }
     options
@@ -303,7 +316,7 @@ pub(crate) fn effort_detail(backend: Backend, effort: Option<EffortLevel>) -> &'
         (_, Some(EffortLevel::Medium)) => "balanced",
         (_, Some(EffortLevel::High)) => "deeper reasoning",
         (_, Some(EffortLevel::XHigh)) => "extended reasoning",
-        (Backend::Claude, Some(EffortLevel::Max)) => "maximum reasoning",
+        (Backend::Claude | Backend::Antigravity, Some(EffortLevel::Max)) => "maximum reasoning",
         (Backend::Codex, Some(EffortLevel::Max)) => "not used",
         (Backend::Opencode, Some(EffortLevel::Max)) => "maximum reasoning",
     }
@@ -326,6 +339,8 @@ pub(crate) fn model_supports_reasoning(backend: Backend, model: &str) -> bool {
         // An OpenCode model's efforts are exactly its variants
         // (cached_model_efforts); one OpenCode does not list has none.
         Backend::Opencode => false,
+        // `agy --effort` applies to every model it lists.
+        Backend::Antigravity => true,
     };
     // OR the heuristic with the cache rather than letting the cache override it: a
     // stale or wrong models.dev entry (`reasoning: false`) must never REMOVE the
@@ -343,7 +358,7 @@ pub(crate) fn is_reasoning_alias(backend: Backend, model: &str) -> bool {
         Backend::Codex => {
             is_gpt_text_model(model) || model.contains("codex") || is_o_series_model(model)
         }
-        Backend::Opencode => false,
+        Backend::Opencode | Backend::Antigravity => false,
     }
 }
 
@@ -359,7 +374,7 @@ pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<
             .into_iter()
             .find(|entry| entry.id == model)
             .map(|entry| entry.efforts),
-        Backend::Codex => None,
+        Backend::Codex | Backend::Antigravity => None,
     }
 }
 
@@ -422,7 +437,8 @@ pub(crate) fn cached_model_reasoning(backend: Backend, model_id: &str) -> Option
         Backend::Codex => "openai",
         // opencode ids already carry their provider ("anthropic/claude-sonnet-4-5");
         // there is no single models.dev provider to look them up under.
-        Backend::Opencode => return None,
+        // Antigravity's list comes from `agy models`, not models.dev.
+        Backend::Opencode | Backend::Antigravity => return None,
     };
     data.get(provider)?
         .get("models")?
@@ -806,7 +822,7 @@ fn searchable_command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::Insert("/resume ".to_string()),
         },
         Suggestion {
-            label: "/restore <claude|codex> <session-id>".to_string(),
+            label: "/restore <claude|codex|antigravity> <session-id>".to_string(),
             detail: "reopen an existing CLI conversation in a new pane, permissions bypassed".to_string(),
             action: SuggestionAction::Insert("/restore ".to_string()),
         },
@@ -1013,10 +1029,11 @@ const GAM_REVIEWER_BACKENDS: [(Backend, &str); 2] =
     [(Backend::Claude, "Claude Code"), (Backend::Codex, "Codex")];
 
 /// Every provider can WRITE the code.
-const GAM_GENERATOR_BACKENDS: [(Backend, &str); 3] = [
+const GAM_GENERATOR_BACKENDS: [(Backend, &str); 4] = [
     (Backend::Claude, "Claude Code"),
     (Backend::Codex, "Codex"),
     (Backend::Opencode, "opencode"),
+    (Backend::Antigravity, "Antigravity"),
 ];
 
 /// The reviewer provider rows. Each says what the choice is FOR (this picks
@@ -1328,9 +1345,11 @@ pub(crate) fn gam_line_preview(app: &App, input: &str) -> Option<String> {
             "isolated workspace"
         }
     );
-    if reviewer.backend == Backend::Opencode {
-        preview = "gam: the reviewer must be claude or codex (opencode has no read-only sandbox)"
-            .to_string();
+    if matches!(reviewer.backend, Backend::Opencode | Backend::Antigravity) {
+        preview = format!(
+            "gam: the reviewer must be claude or codex ({} has no read-only sandbox)",
+            reviewer.backend.as_str()
+        );
     } else if generator.backend == reviewer.backend && generator.model.trim() == reviewer.model.trim() {
         preview.push_str(" · same model on both sides: it will tend to agree with itself");
     }
@@ -1559,8 +1578,9 @@ pub(crate) fn collect_provider_models(
             Backend::Claude => is_claude_picker_model(id, model),
             Backend::Codex => is_codex_picker_model(id, model),
             // opencode's own `opencode models` output is the authoritative list for
-            // that backend (it knows which providers are authenticated).
-            Backend::Opencode => false,
+            // that backend (it knows which providers are authenticated), and
+            // `agy models` is Antigravity's.
+            Backend::Opencode | Backend::Antigravity => false,
         })
         // A dated snapshot ("claude-opus-4-5-20251101") duplicates its un-dated
         // (latest) twin in the picker; list the twin only.
@@ -1714,9 +1734,9 @@ pub(crate) fn score_model(backend: Backend, id: &str) -> i32 {
             }
             score
         }
-        // opencode's own list is already ordered the way opencode presents it;
-        // Rudder does not second-guess a catalog that spans every provider.
-        Backend::Opencode => 0,
+        // opencode's and agy's own lists are already ordered the way each CLI
+        // presents them; Rudder does not second-guess them.
+        Backend::Opencode | Backend::Antigravity => 0,
     }
 }
 
@@ -1936,6 +1956,8 @@ pub(crate) fn backend_for_model(model: &str) -> Backend {
     }
     if model.starts_with("gpt-") || model.contains("codex") || is_o_series_model(model) {
         Backend::Codex
+    } else if model.starts_with("gemini-") {
+        Backend::Antigravity
     } else {
         Backend::Claude
     }

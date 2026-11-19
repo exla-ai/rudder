@@ -1981,6 +1981,7 @@ fn push_orchestrator_row<'a>(
             Backend::Claude => "Claude Code",
             Backend::Codex => "Codex",
             Backend::Opencode => "opencode",
+            Backend::Antigravity => "Antigravity",
         };
         ("plan mode", format!("{backend} · researching the plan"))
     } else if awaiting {
@@ -3027,6 +3028,7 @@ pub(crate) fn render_orchestrator(frame: &mut Frame<'_>, area: Rect, app: &mut A
         Backend::Claude => "Claude Code",
         Backend::Codex => "Codex",
         Backend::Opencode => "opencode",
+        Backend::Antigravity => "Antigravity",
     };
     let model_label = if agent.model.trim().is_empty() {
         backend_label.to_string()

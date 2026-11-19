@@ -28,9 +28,10 @@ const ORCHESTRATOR_SKILLS_DIR: &str = ".claude/skills";
 pub(crate) fn mint_session_id_for(backend: Backend) -> Option<String> {
     match backend {
         Backend::Claude => Some(crate::gitio::new_rudder_session_id()),
-        // Codex and opencode mint their own session ids and offer no way to
-        // pre-declare one; Rudder discovers theirs after the fact.
-        Backend::Codex | Backend::Opencode => None,
+        // Codex, opencode and Antigravity mint their own session ids and offer
+        // no way to pre-declare one; Rudder learns theirs after the fact
+        // (Antigravity's from its SessionStart hook, signals.rs).
+        Backend::Codex | Backend::Opencode | Backend::Antigravity => None,
     }
 }
 
@@ -73,7 +74,7 @@ const ORCHESTRATOR_SKILLS: &[OrchestratorSkill] = &[
         slug: "rudder-model",
         name: "rudder-model",
         description: "Use when the user asks to change the default Claude or Codex model or effort.",
-        body: "Write one control line to RUDDER.md: RUDDER_MODEL <provider> <model> [effort]. Provider is claude or codex. Effort is optional and may be low, medium, high, xhigh, or max. Rudder consumes the marker and updates the dashboard defaults.",
+        body: "Write one control line to RUDDER.md: RUDDER_MODEL <provider> <model> [effort]. Provider is claude, codex or antigravity. Effort is optional and may be low, medium, high, xhigh, or max. Rudder consumes the marker and updates the dashboard defaults.",
     },
     OrchestratorSkill {
         slug: "rudder-main",
@@ -121,7 +122,7 @@ const ORCHESTRATOR_SKILLS: &[OrchestratorSkill] = &[
         slug: "rudder-worker-control",
         name: "rudder-worker-control",
         description: "Use when the user asks to control, pause, resume, re-goal, or change the model of a worker.",
-        body: "Read RUDDER.md and resolve the requested scope to exact node ids (n0/n1) or run ids. For status, read the current rows without restarting work. RUDDER_INJECT <node-or-run-id> <message> sends an addressed note to a live worker; a failed send does not authorize a restart. RUDDER_STOP <node-or-run-id> pauses a worker while preserving its workspace. For authorized resumption, use RUDDER_RESUME <node-or-run-id> <claude|codex> <model> [low|medium|high|xhigh|max|auto] [new direction], or RUDDER_REGOAL <node-or-run-id> <new goal> to resume without changing model. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested pause/model change, STOP then RESUME each named worker. RUDDER_MERGE <node-or-run-id> merges one completed worker. Never target the orchestrator with these controls.",
+        body: "Read RUDDER.md and resolve the requested scope to exact node ids (n0/n1) or run ids. For status, read the current rows without restarting work. RUDDER_INJECT <node-or-run-id> <message> sends an addressed note to a live worker; a failed send does not authorize a restart. RUDDER_STOP <node-or-run-id> pauses a worker while preserving its workspace. For authorized resumption, use RUDDER_RESUME <node-or-run-id> <claude|codex|antigravity> <model> [low|medium|high|xhigh|max|auto] [new direction], or RUDDER_REGOAL <node-or-run-id> <new goal> to resume without changing model. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested pause/model change, STOP then RESUME each named worker. RUDDER_MERGE <node-or-run-id> merges one completed worker. Never target the orchestrator with these controls.",
     },
     OrchestratorSkill {
         slug: "rudder-help",
@@ -133,7 +134,9 @@ const ORCHESTRATOR_SKILLS: &[OrchestratorSkill] = &[
 
 pub(crate) fn can_resume_agent(run: &AgentRun) -> bool {
     match run.backend {
-        Backend::Claude | Backend::Codex | Backend::Opencode => run.session_id.is_some(),
+        Backend::Claude | Backend::Codex | Backend::Opencode | Backend::Antigravity => {
+            run.session_id.is_some()
+        }
     }
 }
 
@@ -370,6 +373,17 @@ pub(crate) fn rudder_plan_refine_command(
             push_opencode_model(&mut args, model);
             opencode_tui(args, model, effort, Some(OpencodeFirstMessage { session: Some(session_id), text: feedback_prompt }))
         }
+        // Antigravity resumes the planner conversation in its TUI, in plan
+        // mode, with the feedback as the next turn; the revised block is read
+        // out of the pane like the first turn's.
+        Backend::Antigravity => {
+            let mut args = antigravity_mode_args(AgentMode::RudderPlan, false);
+            push_antigravity_model(&mut args, model, effort);
+            args.push("--conversation".to_string());
+            args.push(session_id.to_string());
+            push_antigravity_prompt(&mut args, Some(feedback_prompt));
+            TerminalCommand::with_args(antigravity_program(), args)
+        }
     }
 }
 
@@ -459,6 +473,13 @@ pub(crate) fn launch_prompt(
                 codex_swarm_orchestrator_prompt(task)
             } else {
                 codex_orchestrator_prompt(task)
+            })
+        }
+        AgentMode::RudderPlan if orchestrator_interactive && backend == Backend::Antigravity => {
+            Some(if swarm {
+                antigravity_swarm_orchestrator_prompt(task)
+            } else {
+                antigravity_orchestrator_prompt(task)
             })
         }
         AgentMode::RudderPlan if swarm => Some(swarm_plan_prompt(task)),
@@ -686,7 +707,119 @@ fn build_agent_command(
             TerminalCommand::with_args(codex_program(), args)
         }
         Backend::Opencode => opencode_command(model, effort, prompt.as_deref(), mode),
+        Backend::Antigravity => {
+            let mut args = antigravity_mode_args(mode, orchestrator_interactive);
+            push_antigravity_model(&mut args, model, effort);
+            push_antigravity_prompt(&mut args, prompt.as_deref());
+            TerminalCommand::with_args(antigravity_program(), args)
+        }
     }
+}
+
+/// The permission flags an Antigravity launch carries for `mode`.
+///
+/// Workers, main agents and the interactive conductor run with
+/// `--dangerously-skip-permissions`, the same unattended footing as Claude's
+/// `bypassPermissions` and Codex's bypass flag (the conductor's prompt
+/// contract limits it to RUDDER.md). Rules the user wrote under
+/// `permissions.ask` or `permissions.deny` in Antigravity's settings still
+/// apply, and an `ask` still shows its prompt, which the dashboard flags.
+///
+/// Planners run in Antigravity's own plan mode (`--mode plan`), which plans
+/// before it edits. Antigravity has no read-only sandbox, so it is never the
+/// gam reviewer (main.rs refuses that pairing); the arm below only keeps the
+/// match whole.
+pub(crate) fn antigravity_mode_args(mode: AgentMode, orchestrator_interactive: bool) -> Vec<String> {
+    match mode {
+        AgentMode::Execute | AgentMode::ReviewAll | AgentMode::Main | AgentMode::OneOff => {
+            vec!["--dangerously-skip-permissions".to_string()]
+        }
+        AgentMode::RudderPlan if orchestrator_interactive => {
+            vec!["--dangerously-skip-permissions".to_string()]
+        }
+        AgentMode::RudderPlan | AgentMode::Plan | AgentMode::GamAdversarial => {
+            vec!["--mode".to_string(), "plan".to_string()]
+        }
+    }
+}
+
+/// `--model` and `--effort`, each only when set: an empty model means the
+/// model chosen in Antigravity's own `/model`, a real choice.
+fn push_antigravity_model(args: &mut Vec<String>, model: &str, effort: Option<EffortLevel>) {
+    let model = model.trim();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(effort) = effort {
+        args.push("--effort".to_string());
+        args.push(effort.as_str().to_string());
+    }
+}
+
+/// The first turn: `-i` (`--prompt-interactive`) runs it and keeps the
+/// session open, which is what a pane needs. `-p` would print and exit.
+fn push_antigravity_prompt(args: &mut Vec<String>, prompt: Option<&str>) {
+    if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("-i".to_string());
+        args.push(prompt.to_string());
+    }
+}
+
+/// A plan-mode Antigravity planner running `prompt` as its first turn.
+pub(crate) fn antigravity_planner_command(
+    model: &str,
+    effort: Option<EffortLevel>,
+    prompt: &str,
+) -> TerminalCommand {
+    let mut args = antigravity_mode_args(AgentMode::RudderPlan, false);
+    push_antigravity_model(&mut args, model, effort);
+    push_antigravity_prompt(&mut args, Some(prompt));
+    TerminalCommand::with_args(antigravity_program(), args)
+}
+
+/// Continue an Antigravity conversation in place with its launch-time
+/// permission footing.
+pub(crate) fn antigravity_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
+    let mut args = antigravity_mode_args(run.mode, run.interactive_orchestrator);
+    push_antigravity_model(&mut args, &run.model, run.effort);
+    args.push("--conversation".to_string());
+    args.push(session_id.to_string());
+    TerminalCommand::with_args(antigravity_program(), args)
+}
+
+/// Antigravity forks a conversation only from inside it (`/fork` in its pane)
+/// and has no command to copy one into another process, so a handoff or a
+/// branch of an Antigravity chat is refused with this reason.
+pub(crate) const ANTIGRAVITY_NO_FORK: &str =
+    "Antigravity can't copy a chat into a new agent; type /fork in the agent's pane";
+
+/// FORK a chat into a new session that opens interactive, with `prompt` as
+/// its next turn when given. The source conversation is left untouched.
+pub(crate) fn fork_command(
+    backend: Backend,
+    model: &str,
+    effort: Option<EffortLevel>,
+    session_id: &str,
+    prompt: Option<&str>,
+) -> std::result::Result<TerminalCommand, String> {
+    match backend {
+        Backend::Claude => Ok(claude_fork_command(model, effort, session_id, prompt)),
+        Backend::Codex => Ok(codex_fork_command(model, effort, session_id, prompt)),
+        Backend::Opencode => Ok(opencode_fork_command(model, effort, session_id, prompt)),
+        Backend::Antigravity => Err(ANTIGRAVITY_NO_FORK.to_string()),
+    }
+}
+
+/// The Antigravity executable: the `agy` on PATH. RUDDER_AGY_BIN only points
+/// tests at a fake. A missing `agy` fails the launch with its install command
+/// (`require_agent_program` in pty_terminal.rs).
+pub(crate) fn antigravity_program() -> String {
+    env::var("RUDDER_AGY_BIN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "agy".to_string())
 }
 
 /// Every opencode launch has the same shape: the interactive TUI, optionally
@@ -903,6 +1036,14 @@ pub(crate) fn rudder_orchestrator_resume_command(
             let mut args = vec!["--session".to_string(), session_id.to_string()];
             push_opencode_model(&mut args, model);
             opencode_tui(args, model, effort, Some(OpencodeFirstMessage { session: Some(session_id), text: continuation }))
+        }
+        Backend::Antigravity => {
+            let mut args = antigravity_mode_args(AgentMode::RudderPlan, true);
+            push_antigravity_model(&mut args, model, effort);
+            args.push("--conversation".to_string());
+            args.push(session_id.to_string());
+            push_antigravity_prompt(&mut args, Some(continuation));
+            TerminalCommand::with_args(antigravity_program(), args)
         }
     }
 }

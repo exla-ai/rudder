@@ -229,7 +229,7 @@ fn orchestrator_system_prompt_for(
         "Rudder renders the DAG in the pane ABOVE this terminal and reloads it LIVE from RUDDER.md. The plan is a LIVING document: whenever the user asks to ADD, CHANGE, REMOVE, reorder, re-scope, or re-split tasks at ANY point before they approve, UPDATE the DAG by re-writing the FULL RUDDER_PLAN_TASKS block in RUDDER.md to match - keep stable `id`s for unchanged nodes, add new ones with fresh ids, drop removed ones, and fix up `deps` so the edges stay correct. Always keep the block in sync with what you and the user have agreed; never describe a plan change only in chat without also writing it to the file.".to_string(),
         "APPROVAL / LAUNCH: After - and ONLY after - the user has EXPLICITLY confirmed in the conversation that the plan is good to run (e.g. \"yes\", \"go\", \"approve\", \"launch it\"), signal Rudder to launch the workers by WRITING (Edit/Write) the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the RUDDER_PLAN_TASKS block in the file. Writing it into RUDDER.md (a structured Write) is the reliable channel; you MAY also print the same line in the chat as a fallback. Never write/print it preemptively, while you are still asking questions, or while you are revising the plan. When you merely need to REFER to the marker in prose, write it as RUDDER_APPROVE_PLAN_TEMPLATE so Rudder does not treat the mention as a launch trigger. Once you write RUDDER_APPROVE_PLAN, Rudder generates graph.json and launches the SEPARATE worker fleet, but this session stays alive as the high-level conductor. Keep talking with the user, explain status from RUDDER.md/graph state, and control workers only through RUDDER_* markers. Do not implement product code yourself.".to_string(),
         "POST-APPROVAL CONDUCTOR ROLE: Follow-ups in your pane address this plan; plain task input starts separate isolated work. Resolve exact node/run ids from RUDDER.md. Use RUDDER_ADD_TASK <task> for additive DAG work, RUDDER_RUN <task> for one isolated worker without a DAG, RUDDER_MAIN <prompt> for work in the shared main checkout, and RUDDER_REPLAN <direction> for structural pivots.".to_string(),
-        "WORKER CONTROLS: RUDDER_INJECT <node-or-run-id> <message> sends an addressed follow-up to a live worker. For status, read the job snapshot; do not restart work to obtain a status check or send a generic keep-going message. RUDDER_STOP <node-or-run-id> pauses a worker. Use RUDDER_RESUME <node-or-run-id> <claude|codex> <model> [effort] [new direction] or RUDDER_REGOAL <node-or-run-id> <new goal> only for authorized resumption. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested model change, STOP then RESUME each named worker.".to_string(),
+        "WORKER CONTROLS: RUDDER_INJECT <node-or-run-id> <message> sends an addressed follow-up to a live worker. For status, read the job snapshot; do not restart work to obtain a status check or send a generic keep-going message. RUDDER_STOP <node-or-run-id> pauses a worker. Use RUDDER_RESUME <node-or-run-id> <claude|codex|antigravity> <model> [effort] [new direction] or RUDDER_REGOAL <node-or-run-id> <new goal> only for authorized resumption. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested model change, STOP then RESUME each named worker.".to_string(),
         "INTEGRATION: Finished workers integrate automatically. RUDDER_MERGE <node-or-run-id> merges one completed worker by hand. Use RUDDER_CLOUD_MIGRATE for a requested current/active fleet move, not a single-run onload action.".to_string(),
         "DELIVERY: When the user asked to ship, use RUDDER_MAIN <prompt> for the release/push/deploy workflow after all nodes are integrated; do not run those commands from the conductor.".to_string(),
         "CONTROL RESULTS: a consumed marker line is not a success. Check RUDDER.md's \"Your last control markers, and what they did\" section before reporting an effect.".to_string(),
@@ -268,6 +268,18 @@ pub(crate) fn codex_orchestrator_prompt(task: &str) -> String {
     let system = orchestrator_system_prompt_for(
         "Codex",
         "your loaded Codex instructions and settings",
+        "When the user asks for dashboard actions from this orchestrator session, write the exact matching `RUDDER_*` control marker to RUDDER.md. Rudder consumes the marker and runs the dashboard action.",
+        "RUDDER.md and RUDDER_SHARED.md",
+    );
+    format!("{system}\n\n{}", rudder_orchestrator_prompt(task))
+}
+
+/// Antigravity has no system-prompt flag either, so its conductor gets the full
+/// contract in the first user turn, like Codex's.
+pub(crate) fn antigravity_orchestrator_prompt(task: &str) -> String {
+    let system = orchestrator_system_prompt_for(
+        "Antigravity CLI",
+        "your loaded Antigravity rules (GEMINI.md, AGENTS.md) and settings",
         "When the user asks for dashboard actions from this orchestrator session, write the exact matching `RUDDER_*` control marker to RUDDER.md. Rudder consumes the marker and runs the dashboard action.",
         "RUDDER.md and RUDDER_SHARED.md",
     );
@@ -360,6 +372,12 @@ pub(crate) fn swarm_orchestrator_prompt(task: &str) -> String {
 /// contract in the first turn.
 pub(crate) fn codex_swarm_orchestrator_prompt(task: &str) -> String {
     let system = swarm_orchestrator_system_prompt_for("Codex", "RUDDER.md and RUDDER_SHARED.md");
+    format!("{system}\n\n{}", swarm_orchestrator_prompt(task))
+}
+
+/// The Antigravity swarm conductor: the contract in the first turn, like Codex's.
+pub(crate) fn antigravity_swarm_orchestrator_prompt(task: &str) -> String {
+    let system = swarm_orchestrator_system_prompt_for("Antigravity CLI", "RUDDER.md and RUDDER_SHARED.md");
     format!("{system}\n\n{}", swarm_orchestrator_prompt(task))
 }
 

@@ -1,4 +1,4 @@
-//! Pre-accepts the folder-trust prompt Claude Code and Codex show the first
+//! Pre-accepts the folder-trust prompt Claude Code, Codex and Antigravity show the first
 //! time they run in a folder ("Yes, I trust this folder", "Trust and
 //! continue"). Every Rudder agent starts in a fresh workspace, so without this
 //! each one stopped on that prompt until someone answered it, and on a Cloud
@@ -7,7 +7,7 @@
 //! itself, so it records the same decision the user would have made, once per
 //! repository, before every launch.
 //!
-//! Both CLIs key trust by the Git repository root (a Rudder workspace inside a
+//! The CLIs key trust by the Git repository root (a Rudder workspace inside a
 //! repo inherits the repo's decision), so the root is what gets trusted. An
 //! explicit `trust_level` the user already chose in Codex is never changed, and
 //! a file this code cannot read safely is left alone.
@@ -29,6 +29,7 @@ pub(crate) fn prepare_for_launch(program: &str, cwd: &Path) {
     let config = match name {
         "claude" if std::env::var_os("RUDDER_CLAUDE_BIN").is_none() => claude_config_path(),
         "codex" if std::env::var_os("RUDDER_CODEX_BIN").is_none() => codex_config_path(),
+        "agy" if std::env::var_os("RUDDER_AGY_BIN").is_none() => antigravity_settings_path(),
         _ => return,
     };
     if let Some(config) = config {
@@ -43,6 +44,7 @@ pub(crate) fn trust_for(name: &str, config: &Path, cwd: &Path) {
     let trust: fn(&Path, &str) -> std::io::Result<bool> = match name {
         "claude" => trust_claude,
         "codex" => trust_codex,
+        "agy" => trust_antigravity,
         _ => return,
     };
     for root in trust_roots(cwd) {
@@ -63,6 +65,10 @@ fn claude_config_path() -> Option<PathBuf> {
         Some(dir) => Some(PathBuf::from(dir).join(".claude.json")),
         None => home().map(|home| home.join(".claude.json")),
     }
+}
+
+fn antigravity_settings_path() -> Option<PathBuf> {
+    home().map(|home| home.join(".gemini").join("antigravity-cli").join("settings.json"))
 }
 
 fn codex_config_path() -> Option<PathBuf> {
@@ -144,6 +150,52 @@ fn trust_claude_once(config: &Path, root: &str) -> std::io::Result<Outcome> {
     let mut out = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
     out.push('\n');
     replace_file(config, &text, out.as_bytes())
+}
+
+/// Adds `root` to `trustedWorkspaces` in Antigravity's `settings.json`.
+/// Returns whether the file changed. A missing file is created when agy has
+/// its data folder here (it writes settings only once one changes).
+pub(crate) fn trust_antigravity(settings: &Path, root: &str) -> std::io::Result<bool> {
+    retry_if_changed(|| trust_antigravity_once(settings, root))
+}
+
+fn trust_antigravity_once(settings: &Path, root: &str) -> std::io::Result<Outcome> {
+    let text = match fs::read_to_string(settings) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !settings.parent().is_some_and(Path::is_dir) {
+                return Ok(Outcome::Unchanged);
+            }
+            String::new()
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(out) = antigravity_settings_with_trust(&text, root) else {
+        return Ok(Outcome::Unchanged);
+    };
+    replace_file(settings, &text, out.as_bytes())
+}
+
+/// The edited settings, or None when `root` is already trusted or the file is
+/// not a JSON object this code can edit safely.
+pub(crate) fn antigravity_settings_with_trust(text: &str, root: &str) -> Option<String> {
+    let mut value = if text.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str::<serde_json::Value>(text).ok()?
+    };
+    let list = value
+        .as_object_mut()?
+        .entry("trustedWorkspaces")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()?;
+    if list.iter().any(|entry| entry.as_str() == Some(root)) {
+        return None;
+    }
+    list.push(serde_json::Value::String(root.to_string()));
+    let mut out = serde_json::to_string_pretty(&value).ok()?;
+    out.push('\n');
+    Some(out)
 }
 
 /// Adds `[projects."<root>"] trust_level = "trusted"` to Codex's
@@ -291,6 +343,23 @@ fn replace_file(config: &Path, original: &str, bytes: &[u8]) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_trust_adds_the_root_once() {
+        let first = antigravity_settings_with_trust("", "/repo").expect("new file");
+        let value: serde_json::Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(value["trustedWorkspaces"], serde_json::json!(["/repo"]));
+        assert_eq!(antigravity_settings_with_trust(&first, "/repo"), None);
+        let kept = antigravity_settings_with_trust(
+            r#"{"altScreenMode":"never","trustedWorkspaces":["/other"]}"#,
+            "/repo",
+        )
+        .expect("added");
+        let value: serde_json::Value = serde_json::from_str(&kept).expect("json");
+        assert_eq!(value["altScreenMode"], "never");
+        assert_eq!(value["trustedWorkspaces"], serde_json::json!(["/other", "/repo"]));
+        assert_eq!(antigravity_settings_with_trust("not json", "/repo"), None);
+    }
 
     /// A temp dir removed on drop (this crate has no tempfile dependency).
     struct TempDir(PathBuf);

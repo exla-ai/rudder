@@ -1454,7 +1454,10 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
                     .flat_map(|config| ["-c".to_string(), config]),
             );
         }
-        Backend::Opencode => {}
+        // Antigravity reads MCP servers only from `mcp_config.json` in
+        // `~/.gemini/config/` or the workspace's `.agents/`, with no launch
+        // flag, so a per-run peer server has nowhere to go.
+        Backend::Opencode | Backend::Antigravity => {}
     }
     Ok(())
 }

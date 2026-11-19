@@ -1572,6 +1572,134 @@ fn opencode_model_list_keeps_provider_qualified_ids_and_their_variants() {
 }
 
 #[test]
+fn antigravity_workers_run_unattended_and_planners_plan_first() {
+    let worker = agent_command_with_orchestrator_mode(
+        Backend::Antigravity,
+        "gemini-3.8-flash",
+        Some(EffortLevel::High),
+        "fix the tests",
+        AgentMode::Execute,
+        None,
+        false,
+    );
+    assert_eq!(worker.program, "agy");
+    assert!(worker.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+    assert!(worker.args.windows(2).any(|w| w[0] == "--model" && w[1] == "gemini-3.8-flash"));
+    assert!(worker.args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
+    assert!(
+        worker.args.windows(2).any(|w| w[0] == "-i" && w[1].contains("fix the tests")),
+        "-i runs the first turn and keeps the pane open; -p would exit: {:?}",
+        worker.args
+    );
+
+    let planner = antigravity_planner_command("", None, "decompose this");
+    assert!(planner.args.windows(2).any(|w| w[0] == "--mode" && w[1] == "plan"));
+    assert!(!planner.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+    assert!(
+        !planner.args.iter().any(|arg| arg == "--model" || arg == "--effort"),
+        "no model means agy's own choice, not an empty flag: {:?}",
+        planner.args
+    );
+}
+
+#[test]
+fn antigravity_resumes_its_conversation_and_refuses_to_fake_a_fork() {
+    let mut run = test_agent_run("agy-1", "fix the tests");
+    run.backend = Backend::Antigravity;
+    run.model = "gemini-4-argon".into();
+    run.effort = Some(EffortLevel::Low);
+    let resume = antigravity_resume_command(&run, "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10");
+    assert!(resume
+        .args
+        .windows(2)
+        .any(|w| w[0] == "--conversation" && w[1] == "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"));
+    assert!(resume.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+
+    let refused = fork_command(Backend::Antigravity, "", None, "7f0c2a52", Some("go"));
+    assert_eq!(refused.err().as_deref(), Some(ANTIGRAVITY_NO_FORK));
+    assert!(chat_edit::edit_unsupported(Backend::Antigravity).is_some_and(|why| why.contains("/rewind")));
+    assert!(fork_command(Backend::Claude, "opus", None, "abc", None).is_ok());
+}
+
+#[test]
+fn antigravity_names_and_models_route_to_its_backend() {
+    for name in ["antigravity", "agy", "gemini"] {
+        assert_eq!(Backend::parse(name), Some(Backend::Antigravity), "{name}");
+        assert_eq!(provider_backend(name), Some(Backend::Antigravity), "{name}");
+    }
+    assert_eq!(backend_for_model("gemini-3.8-flash"), Backend::Antigravity);
+    assert_eq!(
+        effort_options_for(Backend::Antigravity, "gemini-4-argon").last(),
+        Some(&Some(EffortLevel::Max)),
+        "agy --effort takes low through max"
+    );
+}
+
+#[test]
+fn antigravity_hooks_merge_beside_the_users_own() {
+    let existing = r#"{"mine":{"Stop":[{"type":"command","command":"say done"}]}}"#;
+    let merged = signals::antigravity_hooks_with_rudder(Some(existing)).expect("object file");
+    let value: serde_json::Value = serde_json::from_str(&merged).expect("json");
+    assert_eq!(value["mine"]["Stop"][0]["command"], "say done", "the user's entry stays");
+    for event in ["SessionStart", "PreInvocation", "Stop"] {
+        let command = value["rudder"][event][0]["command"].as_str().expect(event);
+        assert!(command.contains("RUDDER_AGY_HOOK") && command.contains(event), "{command}");
+    }
+    assert_eq!(
+        signals::antigravity_hooks_with_rudder(Some("[1, 2]")),
+        None,
+        "a file that is not an object is left alone"
+    );
+    assert!(signals::antigravity_hooks_with_rudder(None).is_some());
+}
+
+#[test]
+fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
+    let dir = std::env::temp_dir().join(format!("rudder-agy-hook-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let signal = dir.join("run-1.json");
+    let script = dir.join("run-1-agy-hook.sh");
+    std::fs::write(&script, signals::antigravity_hook_script(&signal)).expect("script");
+    let hook = |event: &str, payload: &str| {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg(&script)
+            .arg(event)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        child.stdin.take().expect("stdin").write_all(payload.as_bytes()).expect("payload");
+        let output = child.wait_with_output().expect("hook ran");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "{}", "{event} answers {{}}");
+    };
+    let state = || std::fs::read_to_string(&signal).unwrap_or_default();
+
+    hook(
+        "SessionStart",
+        r#"{"conversationId":"7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10","workspacePaths":["/w"],"modelName":"Gemini 3.8 Flash"}"#,
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("run-1.agy-session")).unwrap_or_default(),
+        "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"
+    );
+    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":1,"initialNumSteps":3}"#);
+    assert_eq!(state(), r#"{"state":"working"}"#);
+    std::fs::remove_file(&signal).expect("clear");
+    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":2,"initialNumSteps":5}"#);
+    assert_eq!(state(), "", "later calls in the same turn write nothing");
+    hook("Stop", r#"{"conversationId":"7f0c","terminationReason":"NO_TOOL_CALL","fullyIdle":true}"#);
+    assert_eq!(state(), r#"{"state":"done"}"#);
+    hook(
+        "Stop",
+        r#"{"conversationId":"7f0c","terminationReason":"ERROR","error":"quota exhausted","fullyIdle":true}"#,
+    );
+    assert_eq!(state(), r#"{"state":"error","detail":"quota exhausted"}"#);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn option_brackets_step_agents_without_leaving_the_worker_pane() {
     // The worker pane forwards every keystroke to the agent's own TUI, so j/k
     // cannot select there. This chord is claimed by the dashboard first.
@@ -1857,7 +1985,7 @@ fn the_model_command_refuses_what_no_backend_lists_and_saves_nothing() {
     }
     assert_eq!(
         app.notice.as_deref(),
-        Some("usage: /model claude|codex|opencode <model> [effort]")
+        Some("usage: /model claude|codex|opencode|antigravity <model> [effort]")
     );
     app.handle_command("/model claude /model codex");
     assert_eq!(

@@ -83,7 +83,9 @@ pub(crate) fn is_question_start(backend: Backend, line: &str) -> bool {
     match backend {
         Backend::Claude => is_claude_question_start(line),
         Backend::Codex => is_codex_question_start(line),
-        Backend::Opencode => is_claude_question_start(line) || is_codex_question_start(line),
+        Backend::Opencode | Backend::Antigravity => {
+            is_claude_question_start(line) || is_codex_question_start(line)
+        }
     }
 }
 

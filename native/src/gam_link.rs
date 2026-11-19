@@ -258,7 +258,7 @@ fn cli_supports_gam_link(backend: Backend) -> bool {
             claude_version_supports_channels(&output(claude_program(), "--version"))
         }),
         Backend::Codex => *CODEX.get_or_init(|| output(codex_program(), "--help").contains("--remote")),
-        Backend::Opencode => false,
+        Backend::Opencode | Backend::Antigravity => false,
     }
 }
 
@@ -562,7 +562,7 @@ impl App {
         let link = match backend {
             Backend::Claude => wire_claude_link(command, run_id, role),
             Backend::Codex => wire_codex_link(command, run_id, self.gam_link_tx.clone()),
-            Backend::Opencode => None,
+            Backend::Opencode | Backend::Antigravity => None,
         };
         if let Some(link) = link {
             self.gam_links.insert(run_id.to_string(), link);

@@ -624,6 +624,11 @@ pub(crate) fn resolve_session(cwd: &Path, partial: &str) -> SessionLookup {
                 .into_iter()
                 .map(|id| (Backend::Opencode, id)),
         )
+        .chain(
+            crate::antigravity::conversation_ids_starting_with(partial)
+                .into_iter()
+                .map(|id| (Backend::Antigravity, id)),
+        )
     {
         if id == partial {
             return SessionLookup::Found {

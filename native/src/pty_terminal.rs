@@ -2267,6 +2267,7 @@ const AGENT_PROGRAMS: &[(&str, &str)] = &[
     ("claude", "npm install -g @anthropic-ai/claude-code"),
     ("codex", "npm install -g @openai/codex"),
     ("opencode", "npm install -g opencode-ai"),
+    ("agy", "curl -fsSL https://antigravity.google/cli/install.sh | bash"),
 ];
 
 /// An agent CLI that is not on PATH. Rudder never installs or downloads one.

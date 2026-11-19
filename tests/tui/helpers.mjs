@@ -213,9 +213,22 @@ const rudderNormalizers = [
  * state under a per-test RUDDER_HOME, backends faked, network off, and the
  * repo's own CLI (dist/index.js) rather than any globally installed rudder.
  */
+/**
+ * A Rudder home that has chosen its backend, as onboarding leaves a real one:
+ * with none chosen the dashboard refuses to start.
+ */
+export async function seedBackend(rudderHome) {
+  await fsp.mkdir(rudderHome, { recursive: true });
+  try {
+    await fsp.writeFile(path.join(rudderHome, "config.json"), `${JSON.stringify({ version: 1, defaultBackend: "claude" })}\n`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+}
+
 export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows = 40, env = {} }) {
   const rudderHome = path.join(repo, ".tui-home");
-  await fsp.mkdir(rudderHome, { recursive: true });
+  await seedBackend(rudderHome);
   const session = await launch({
     binary: nativeBin,
     cols,

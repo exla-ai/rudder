@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { launch } from "tui-integration-tests";
-import { assertPrerequisites, nativeBin, pidAlive, removeScratch, repoRoot, scratchRepo, waitPidGone, waitUntil } from "./helpers.mjs";
+import { assertPrerequisites, nativeBin, pidAlive, removeScratch, repoRoot, scratchRepo, seedBackend, waitPidGone, waitUntil } from "./helpers.mjs";
 
 assertPrerequisites();
 const exec = promisify(execFile);
@@ -34,6 +34,7 @@ function exited(child, timeout = 10_000) {
 async function fixture(t, backendBody) {
   const repo = await scratchRepo("rudder-engine-");
   const home = path.join(repo, ".engine-home");
+  await seedBackend(home);
   const bin = path.join(repo, "fake-bin");
   await fsp.mkdir(bin);
   const backend = path.join(bin, "claude");

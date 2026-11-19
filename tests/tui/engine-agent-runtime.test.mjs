@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import readline from 'node:readline';
 import test from 'node:test';
 import { launch } from 'tui-integration-tests';
-import { nativeBin, repoRoot, scratchRepo, removeScratch, waitUntil } from './helpers.mjs';
+import { nativeBin, repoRoot, scratchRepo, removeScratch, seedBackend, waitUntil } from './helpers.mjs';
 
 const fakeClaude = `#!/usr/bin/env node
 const fs=require('node:fs'),rl=require('node:readline');
@@ -34,7 +34,7 @@ rl.createInterface({input:process.stdin}).on('line',raw=>{const x=JSON.parse(raw
 async function fixture(t) {
   try { await fs.access(nativeBin); } catch { if(process.env.CI)assert.fail('runtime journey requires current native artifact');t.skip('build native binary');return; }
   const dir=await scratchRepo('rudder-live-runtime-'),home=path.join(dir,'.test-home'),bin=path.join(dir,'fake-bin');
-  await fs.mkdir(bin);await fs.mkdir(home,{mode:0o700});
+  await fs.mkdir(bin);await fs.mkdir(home,{mode:0o700});await seedBackend(home);
   const claude=path.join(bin,'claude');await fs.writeFile(claude,fakeClaude,{mode:0o755});
   const wsModule=path.join(repoRoot,'node_modules/ws/index.js');
   const codex=path.join(bin,'codex');

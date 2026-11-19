@@ -32363,6 +32363,26 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
     assert!(args.iter().any(|arg| arg.starts_with("Rudder: you work in your own jj workspace")), "framed as a worker's task: {args:?}");
     assert!(!args.iter().any(|arg| arg == "resume"), "a new conversation, not a resumed one: {args:?}");
     app.agents[0].terminal = None;
+
+    // On to Antigravity: a conversation reported by an earlier stint there is
+    // not this one, so its report goes until agy names the new one.
+    let agy_args = dir.join("agy-args.txt");
+    let fake_agy = dir.join("fake-agy.sh");
+    write_args_recording_bin(&fake_agy, &agy_args);
+    std::env::set_var("RUDDER_AGY_BIN", &fake_agy);
+    let stale = signals::antigravity_session_path("chat-run").unwrap();
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, "0d3c9a52-1b9e-4c55-9f43-2d0a8e6c1b10").unwrap();
+    let model = crate::models::ANTIGRAVITY_FAST_MODEL;
+    assert!(matches!(app.deliver_harness_request("chat-run", &format!("antigravity {model} auto\n{handoff}")), SteerDelivery::Delivered));
+    let run = &app.agents[0];
+    assert_eq!((run.backend, run.model.as_str(), run.session_id.as_deref()), (Backend::Antigravity, model, None));
+    assert!(!stale.exists(), "the earlier stint's conversation is not adopted");
+    let args = recorded_args(&agy_args);
+    assert!(args.windows(2).any(|pair| pair[0] == "--model" && pair[1] == model), "{args:?}");
+    assert!(args.iter().any(|arg| arg == "-i"), "starts interactive on the handoff: {args:?}");
+    app.agents[0].terminal = None;
+    std::env::remove_var("RUDDER_AGY_BIN");
 }
 
 /// A Claude chat on disk in `home` for an agent in `cwd`: "first ask" (u1),

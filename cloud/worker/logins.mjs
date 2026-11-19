@@ -24,9 +24,10 @@
 // OpenCode signs in with ChatGPT's device code only (OpenCode 1.19's
 // "ChatGPT Pro/Plus (headless)" method), the same page and code as Codex's.
 //
-// Antigravity has only the code: its Google sign-in redirects to
-// antigravity.google, whose page shows a code that `agy` takes at its
-// "authorization code" prompt. agy then carries on into its own session, so
+// Antigravity has only the code: `agy` asks for a login method (Google OAuth
+// is taken), then its Google sign-in redirects to antigravity.google, whose
+// page shows a code that agy takes at its "authorization code" prompt. agy
+// then carries on into its own session, so
 // the login is done when `signedIn("antigravity")` (agy lists its models)
 // says so, and the session is closed.
 
@@ -210,6 +211,8 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       codeUrl: null,
       userCode: null,
       verifyUrl: null,
+      // agy's login method was picked (readUrls).
+      chose: false,
       term: null,
       exitCode: null,
       waiters: [],
@@ -291,6 +294,12 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       return Boolean(session.url && session.callback && session.codeUrl);
     }
     if (session.provider === "antigravity") {
+      // A machine agy never signed in on asks how first; Google OAuth is
+      // its first choice, already highlighted.
+      if (!session.chose && /Select login method/.test(stripAnsi(session.output))) {
+        session.chose = true;
+        session.term.write("\r");
+      }
       session.codeUrl ||= antigravityCodeUrl(session.output);
       session.url = session.codeUrl;
       session.callback = null;

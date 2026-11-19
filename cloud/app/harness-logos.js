@@ -11,6 +11,8 @@ const LOGOS = {
   // The OpenCode mark: its block "O" with the lower half filled, in the
   // chip's ink, the fill a shade lighter as on OpenCode's own mark.
   opencode: '<path fill="currentColor" fill-rule="evenodd" d="M2.4 0h19.2v24H2.4zm4.8 4.8v14.4h9.6V4.8z"/><path fill="currentColor" opacity=".4" d="M7.2 9.6h9.6v9.6H7.2z"/>',
+  // The Antigravity arch, as its CLI draws it at start, in the chip's ink.
+  antigravity: '<path fill="currentColor" d="M12 2C8.7 2 6.4 5.4 4.6 10.3 3.3 13.9 2.4 18 1.5 22h4.6c.7-3.2 1.4-6.2 2.4-8.6C9.6 10.6 10.7 9 12 9s2.4 1.6 3.5 4.4c1 2.4 1.7 5.4 2.4 8.6h4.6c-.9-4-1.8-8.1-3.1-11.7C17.6 5.4 15.3 2 12 2z"/>',
 };
 
 /** The harness's logo as an inline SVG, or "" for a harness without one. */

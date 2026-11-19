@@ -263,8 +263,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const url = "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=x.apps.googleusercontent.com&code_challenge=c&code_challenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=openid&state=st1";
 process.stdout.write("\u001b]7501;state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==\u0007");
-console.log(" Your browser should open automatically. If not:\n " + url + "\n → \u001b]8;;" + url + "\u0007Click here to authenticate\u001b]8;;\u0007\n If you aren't automatically redirected, paste the authorization code below:\n authorization code...");
+console.log(" Welcome to the Antigravity CLI. You are currently not signed in.\n Select login method:\n > 1. Google OAuth\n   2. Use a Google Cloud project");
+let chosen = false;
 process.stdin.on("data", (d) => {
+  if (!chosen) {
+    chosen = d.toString() === "\r";
+    if (chosen) console.log(" Your browser should open automatically. If not:\n " + url + "\n → \u001b]8;;" + url + "\u0007Click here to authenticate\u001b]8;;\u0007\n If you aren't automatically redirected, paste the authorization code below:\n authorization code...");
+    return;
+  }
   if (d.toString().trim() === "4/0AbCdEf-good") {
     fs.writeFileSync(path.join(process.env.HOME, "agy-login.json"), "{}");
     console.log(" Signed in");

@@ -263,6 +263,31 @@ download still serves 1.0.2; a signed build needs the Developer ID identity
 (the MacBook Pro, or a Developer ID Application .p12 as the
 MAC_DEVELOPER_ID_P12 and MAC_DEVELOPER_ID_PASSWORD secrets for mac.yml).
 
+5.0.13 is published to npm (Release CI passed 2026-11-19 10:49Z) and deployed
+to Cloud (Fly release 226 at 10:33Z, worker image `rudder-workers-exla:5.0.13`
+pinned, built with `worker-image.mjs --compile`, copied to
+`rudder-worker-images`). 5.0.12 never reached npm: Release CI's macOS
+qualification failed two steer_watch tests, a kqueue race (a directory deleted
+between open and registration was watched as a dead vnode; 17 of 30 runs
+failed on an Offstage Mac, 0 of 130 after the fix). Cloud ran the 5.0.12 image
+meanwhile (releases 224 and 225). The Mac app is still 5.0.11: signing needs the
+MacBook Pro, which was asleep. In 5.0.12 and 5.0.13: OpenCode as a full
+harness (opencode-ai 1.19.5 in the image); one right-side panel for Files,
+Canvas, Notes, the agent's terminal (xterm.js, read only) and file links;
+notes per agent (`.rudder/runs/<id>/notes.md`, replacing RUDDER_NOTES.md);
+file paths in messages and tool cards open in the viewer (the home reads them
+for the owner only, with a deny list); Goal active in the chat header;
+teammate and subagent messages as From cards; compaction as a folded card
+with sizes, duration and summary, live while Claude compacts (run.json
+`compactingSince` from the pane), and Compact now in the meter popover; the
+send check, busy, idle, interrupt, ready and question detectors read the
+live rows above the composer (Claude 2.1.328 draws an agent list under its
+footer); the Mac find bar floats (ships with the next Mac build). Open:
+Antigravity is on a branch waiting for its sign-in code; the GitHub App must
+be made public by its owner for other accounts to sign in; an interactive
+shell for the terminal panel is not built; the Mac and CLI GitHub sign-in
+pass no error callback URL.
+
 5.0.11 is published as npm latest and deployed to Cloud (web app Fly release
 215 at 2026-11-19 06:15Z, worker image `rudder-workers-exla:5.0.11` pinned in
 release 216 at 06:27Z, built with `worker-image.mjs --compile`). Rudder for Mac

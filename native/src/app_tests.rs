@@ -31728,9 +31728,13 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     let source = chat_edit_claude_session(&home, &workspace, old);
     crate::signals::prepare_worker_signals("edit-mid", Backend::Claude).unwrap();
     // The turn runs until a key arrives; Esc ends it with Claude's receipt.
+    // `ready` appears once the tty is raw: an Esc sent before that sits in the
+    // canonical line buffer and dd never sees it (a slow CI machine did this).
     let esc_file = dir.join("esc");
+    let ready_file = dir.join("ready");
     let script = format!(
-        "stty raw -echo; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '  \\342\\216\\277  Interrupted \\302\\267 What should Claude do instead?\\r\\n\\r\\n\\342\\235\\257 \\r\\n'; sleep 30",
+        "stty raw -echo; : > '{}'; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '  \\342\\216\\277  Interrupted \\302\\267 What should Claude do instead?\\r\\n\\r\\n\\342\\235\\257 \\r\\n'; sleep 30",
+        ready_file.display(),
         esc_file.display()
     );
     let pane = TerminalPane::spawn_shell_or_command(
@@ -31747,6 +31751,11 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     run.session_id = Some(old.to_string());
     run.terminal = Some(pane);
     app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready_file.exists() {
+        assert!(Instant::now() < deadline, "the stand-in turn never put its tty in raw mode");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     // Mid-turn: accepted, the turn is interrupted, nothing is rewound yet.
     assert!(app.deliver_edit_request("edit-mid", "u2 u2\nsecond ask, said better", "edit-mid-0001").is_none());

@@ -436,12 +436,15 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, onFirst = nu
   }
 }
 
-function groupAlive(group) {
+// Signals the group; false once no process of ours is left in it. ESRCH: the
+// group is gone. EPERM: only members we may not signal remain, which on macOS
+// are its exiting (zombie) processes: they run no code and write nothing.
+function signalGroup(group, signal) {
   try {
-    process.kill(-group, 0);
+    process.kill(-group, signal);
     return true;
   } catch (error) {
-    if (error.code === "ESRCH") return false;
+    if (error.code === "ESRCH" || error.code === "EPERM") return false;
     throw error;
   }
 }
@@ -449,11 +452,11 @@ function groupAlive(group) {
 async function reapGroup(group) {
   const settle = async (ms) => {
     const until = Date.now() + ms;
-    while (groupAlive(group) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
-    return !groupAlive(group);
+    while (signalGroup(group, 0) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+    return !signalGroup(group, 0);
   };
   if (await settle(5_000)) return;
-  process.kill(-group, "SIGKILL");
+  signalGroup(group, "SIGKILL");
   if (!(await settle(2_000))) throw new Error(`Claude Code's menu probe (process group ${group}) did not exit`);
 }
 

@@ -281,7 +281,12 @@ impl App {
             .collect()
     }
 
-    fn sync_entry(&self, index: usize) -> SyncEntry {
+    fn sync_entry(&mut self, index: usize) -> SyncEntry {
+        let backend = self.agents[index].backend;
+        let pane = self.agents[index]
+            .terminal
+            .as_mut()
+            .and_then(|terminal| pane_latest_line(backend, &terminal.live_lines_snapshot()));
         let run = &self.agents[index];
         let title = if run.task_summary.trim().is_empty() {
             summarize_task(&run.task)
@@ -304,10 +309,6 @@ impl App {
             && task != "main branch"
             && !task.eq_ignore_ascii_case(&title))
         .then_some(task);
-        let pane = run
-            .terminal
-            .as_ref()
-            .and_then(|terminal| pane_latest_line(run.backend, &terminal.visible_lines_snapshot()));
         let summary = run
             .done_summary
             .as_deref()
@@ -340,7 +341,7 @@ impl App {
 
     /// The sync message for `recipient`, built from the current state. None
     /// when there is nobody else to tell it about.
-    pub(crate) fn sync_message_for(&self, recipient: usize) -> Option<String> {
+    pub(crate) fn sync_message_for(&mut self, recipient: usize) -> Option<String> {
         let participants = self.sync_participants();
         let you = participants.iter().position(|index| *index == recipient)?;
         if participants.len() < 2 {

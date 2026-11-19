@@ -796,8 +796,8 @@ impl App {
             }
             let lines = self.agents[index]
                 .terminal
-                .as_ref()
-                .map(|terminal| terminal.visible_lines_snapshot())
+                .as_mut()
+                .map(|terminal| terminal.live_lines_snapshot())
                 .unwrap_or_default();
             let last_output_at = self.agents[index].last_output_at;
             let label = self.gam_row_label(&run_id);

@@ -7978,20 +7978,24 @@ fn busy_spinner_reopens_a_falsely_completed_agent() {
     // no user input (mis-detected completion during an inter-step lull).
     let busy: Vec<String> = vec![
         "Editing src/main.rs".to_string(),
-        "> ".to_string(),
         "* Cogitating... (12s \u{00b7} esc to interrupt)".to_string(),
+        "──────────────────────────────".to_string(),
+        "❯ ".to_string(),
+        "──────────────────────────────".to_string(),
         "  bypass permissions on (shift+tab to cycle)".to_string(),
     ];
-    assert!(recent_lines_look_busy(&busy));
+    assert!(recent_lines_look_busy(Backend::Claude, &busy));
 
     // The idle resize/repaint that caused the old flicker shows NO spinner, so it
     // must NOT reopen a finished agent.
     let idle: Vec<String> = vec![
         "Edited 3 files".to_string(),
-        "> ".to_string(),
+        "──────────────────────────────".to_string(),
+        "❯ ".to_string(),
+        "──────────────────────────────".to_string(),
         "  bypass permissions on (shift+tab to cycle)".to_string(),
     ];
-    assert!(!recent_lines_look_busy(&idle));
+    assert!(!recent_lines_look_busy(Backend::Claude, &idle));
 }
 
 #[test]
@@ -24782,7 +24786,7 @@ fn a_minute_of_silence_at_the_composer_stops_a_running_row_spinning() {
 
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
-    let script = "printf '⏺ All set.\\n\\n❯ \\n\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\\n'; sleep 30";
+    let script = "printf '⏺ All set.\\n\\n──────────────────────────────\\n❯ \\n──────────────────────────────\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\\n'; sleep 30";
     let pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
         TerminalPaneOptions {
@@ -25032,12 +25036,19 @@ fn the_idle_composer_detector_needs_the_composer_and_no_spinner() {
     let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     assert!(terminal_at_idle_prompt(
         Backend::Claude,
-        &lines(&["⏺ All set.", "", "❯ ", "", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"])
+        &lines(&["⏺ All set.", "", "──────────────────────────────", "❯ ", "──────────────────────────────", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"])
     ));
     assert!(
         !terminal_at_idle_prompt(
             Backend::Claude,
-            &lines(&["⏺ Working", "✻ Thinking… (esc to interrupt)", "❯ ", ""])
+            &lines(&[
+                "⏺ Working",
+                "✻ Thinking… (esc to interrupt)",
+                "──────────────────────────────",
+                "❯ ",
+                "──────────────────────────────",
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+            ])
         ),
         "a spinner means a turn is running"
     );
@@ -30055,24 +30066,10 @@ fn claude_2_1_328_idle_lead_with_agents() -> Vec<String> {
     .collect()
 }
 
-#[test]
-fn agent_rows_under_claudes_footer_do_not_read_as_a_permission_prompt() {
-    let idle = claude_2_1_328_idle_lead_with_agents();
-    assert!(!terminal_needs_permission_from_lines(Backend::Claude, &idle));
-    assert_eq!(terminal_composer_blocked(Backend::Claude, &idle), None);
-
-    // The same with text typed into the composer, and in manual mode, whose
-    // footer (captured, 2.1.328) has no "(shift+tab" once it lists anything.
-    let mut typed = idle.clone();
-    typed[15] = "❯ and it shoudl open on the side like side by sid".to_string();
-    assert_eq!(terminal_composer_blocked(Backend::Claude, &typed), None);
-    let mut manual = idle.clone();
-    manual[17] = "  ⏸ manual mode on · 1 monitor · ↓ to manage".to_string();
-    assert_eq!(terminal_composer_blocked(Backend::Claude, &manual), None);
-
-    // A real 2.1.328 permission dialog with teammates (captured): the composer
-    // and the agent list are gone, one labelled rule is left under the dialog.
-    let dialog: Vec<String> = [
+/// A real 2.1.328 permission dialog with teammates (captured): the composer
+/// and the agent list are gone, one labelled rule is left under the dialog.
+fn claude_2_1_328_permission_dialog_with_teammates() -> Vec<String> {
+    [
         "❯ Run the shell command: touch made-by-test.txt",
         "",
         "● Bash(touch made-by-test.txt)",
@@ -30097,7 +30094,26 @@ fn agent_rows_under_claudes_footer_do_not_read_as_a_permission_prompt() {
     ]
     .iter()
     .map(|line| line.to_string())
-    .collect();
+    .collect()
+}
+
+#[test]
+fn agent_rows_under_claudes_footer_do_not_read_as_a_permission_prompt() {
+    let idle = claude_2_1_328_idle_lead_with_agents();
+    assert!(!terminal_needs_permission_from_lines(Backend::Claude, &idle));
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &idle), None);
+
+    // The same with text typed into the composer, and in manual mode, whose
+    // footer (captured, 2.1.328) has no "(shift+tab" once it lists anything.
+    let mut typed = idle.clone();
+    typed[15] = "❯ and it shoudl open on the side like side by sid".to_string();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &typed), None);
+    let mut manual = idle.clone();
+    manual[17] = "  ⏸ manual mode on · 1 monitor · ↓ to manage".to_string();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &manual), None);
+
+    // A real 2.1.328 permission dialog with teammates still blocks.
+    let dialog = claude_2_1_328_permission_dialog_with_teammates();
     assert!(terminal_needs_permission_from_lines(Backend::Claude, &dialog));
     assert!(terminal_composer_blocked(Backend::Claude, &dialog).is_some());
 
@@ -30190,6 +30206,120 @@ fn the_live_screen_ignores_a_scrolled_back_view() {
     assert_ne!(pane.visible_lines_snapshot(), live, "and it stays where the user put it");
 }
 
+/// The row's state comes from the live screen, not the view the user
+/// scrolled to. Scrolled back over an old permission dialog, an idle lead read
+/// as "needs permission", and the phone's mirror showed the old dialog.
+#[cfg(not(windows))]
+#[test]
+fn a_scrolled_back_pane_is_judged_by_its_live_rows() {
+    let _env = env_guard();
+    let run_id = "perm-scrolled-view-itest";
+    let Some(sig) = crate::signals::signal_path(run_id) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&sig);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
+    let repo = unique_test_repo("perm-scrolled-view");
+    let printed = repo.join("pane.txt");
+    let mut screens = claude_2_1_328_permission_dialog_with_teammates();
+    screens.extend(claude_2_1_328_idle_lead_with_agents());
+    fs::write(&printed, screens.join("\n")).unwrap();
+    let script = format!("cat '{}'; sleep 30", printed.display());
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 20, cols: 100 },
+            scrollback_lines: 100,
+            cwd: Some(std::env::temp_dir()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn worker pty");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let mut run = test_agent_run(run_id, "lead");
+    run.cwd = repo.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    save_native_run_record(&repo, &run).expect("seed record");
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_agents();
+        let terminal = app.agents[0].terminal.as_mut().unwrap();
+        if terminal.live_lines_snapshot().iter().any(|line| line.contains("antigravity-backend")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the idle screen never landed");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let terminal = app.agents[0].terminal.as_mut().unwrap();
+    terminal.scrollback_by(1000);
+    assert!(
+        terminal.visible_lines_snapshot().iter().any(|line| line.contains("Do you want to proceed?")),
+        "the view shows the old dialog"
+    );
+    app.agents[0].needs_permission = true;
+    app.poll_agents();
+    assert!(!app.agents[0].needs_permission);
+    let terminal = app.agents[0].terminal.as_mut().unwrap();
+    assert!(terminal.scrollback() > 0, "the user's view stays where it was");
+
+    fs::write(native_run_dir(&repo, run_id).join("screen.watch"), "").unwrap();
+    app.write_watched_screens();
+    let mirrored = fs::read_to_string(native_run_dir(&repo, run_id).join("screen.txt")).unwrap();
+    assert!(mirrored.contains("antigravity-backend"), "{mirrored}");
+    assert!(!mirrored.contains("Do you want to proceed?"), "{mirrored}");
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    if let Some(terminal) = app.agents[0].terminal.as_mut() {
+        terminal.request_termination();
+    }
+    let _ = std::fs::remove_file(&sig);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+/// The lead's pane mid-turn (2.1.328, its own mirror): the spinner sat 16
+/// rows up, over the composer and a list of agents, out of a window counted
+/// from the screen's bottom.
+#[test]
+fn a_long_agent_list_does_not_hide_claudes_spinner() {
+    let busy: Vec<String> = [
+        "❯ in another subagent notes should be specific to per agent not per project",
+        "",
+        "* Wandering… (25s · ↓ 2.4k tokens · thinking with xhigh effort)",
+        "  ⎿  Tip: Run /ultrareview for a cloud-based multi-agent review that finds and verifies bugs in your",
+        "     branch — 3 free reviews left",
+        "",
+        "──────────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-2879 a` ─",
+        "❯ and it shoudl open on the side like side by sid",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor · /tasks to see subagents",
+        "                                                          1 teammate started · ◎ /goal active (1h)",
+        "                                                                                        /rc active",
+        "",
+        "  ● main",
+        "  ◯ find-bar             Apple-style floating find bar                                     23m 36s",
+        "  ◯ opencode-backend     Reviewing OpenCode changes in transcripts.mjs   20m 49s · ↓ 235.8k tokens",
+        "  ◯ antigravity-backend  Waiting for agy authorization code              20m 40s · ↓ 333.6k tokens",
+        "  ◯ perm-false-block     Fix false \"waiting on permission\" send refusal                     2m 59s",
+        "  ◯ teammate-bubbles     Teammate messages render as user bubbles                           2m 44s",
+        "  ↓ 4 more",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(recent_lines_look_busy(Backend::Claude, &busy));
+    assert!(recent_lines_show_turn_work(Backend::Claude, &busy));
+    assert!(!terminal_at_idle_prompt(Backend::Claude, &busy));
+
+    // At rest with its agents listed, the idle backstop finds the composer.
+    let idle = claude_2_1_328_idle_lead_with_agents();
+    assert!(!recent_lines_look_busy(Backend::Claude, &idle));
+    assert!(terminal_at_idle_prompt(Backend::Claude, &idle));
+}
+
 /// Claude 2.1.318 mid-turn, as the libra "bild" agent showed it while its row
 /// said "needs permission" for the whole turn: the spinner no longer carries
 /// "esc to interrupt", and the tip under it ("pre-approve ... edit") matched
@@ -30216,7 +30346,7 @@ fn claude_2_1_318_working_screen() -> Vec<String> {
 #[test]
 fn claude_2_1_318_spinner_and_tip_are_work_not_a_permission_prompt() {
     let working = claude_2_1_318_working_screen();
-    assert!(recent_lines_look_busy(&working), "the 2.1.318 spinner is a busy spinner");
+    assert!(recent_lines_look_busy(Backend::Claude, &working), "the 2.1.318 spinner is a busy spinner");
     assert!(!terminal_needs_permission_from_lines(Backend::Claude, &working));
     assert!(!terminal_needs_user_input_from_lines(Backend::Claude, &working));
     assert_eq!(terminal_composer_blocked(Backend::Claude, &working), None);
@@ -30246,7 +30376,7 @@ fn claude_2_1_318_spinner_and_tip_are_work_not_a_permission_prompt() {
     .iter()
     .map(|line| line.to_string())
     .collect();
-    assert!(!recent_lines_look_busy(&dialog));
+    assert!(!recent_lines_look_busy(Backend::Claude, &dialog));
     assert!(terminal_needs_permission_from_lines(Backend::Claude, &dialog));
 }
 
@@ -30361,7 +30491,8 @@ fn a_spinner_clearing_an_error_wait_reaches_run_json() {
     let repo = unique_test_repo("attention-spinner");
     let mut app = App::new();
     app.cwd = repo.clone();
-    let script = "printf '* Thinking... (esc to interrupt)\\n'; sleep 30";
+    // The spinner over Claude's composer box, which it draws for the whole turn.
+    let script = "printf '* Thinking... (esc to interrupt)\\n\\n──────────────────────────────\\n❯ \\n──────────────────────────────\\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\\n'; sleep 30";
     let pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
         TerminalPaneOptions {

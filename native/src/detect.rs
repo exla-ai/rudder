@@ -20,9 +20,9 @@ pub(crate) fn post_completion_output_is_new_turn(
 /// Blank rows are skipped, as the permission and input readers skip them: a
 /// pane that is not full yet has empty rows under Claude's footer, and counting
 /// them pushed the spinner out of this window while the tip above stayed in
-/// theirs.
-pub(crate) fn recent_lines_look_busy(lines: &[String]) -> bool {
-    lines
+/// theirs. The window starts at the composer (`rows_above_composer`).
+pub(crate) fn recent_lines_look_busy(backend: Backend, lines: &[String]) -> bool {
+    rows_above_composer(backend, lines)
         .iter()
         .rev()
         .filter(|line| !line.trim().is_empty())
@@ -37,8 +37,8 @@ pub(crate) fn recent_lines_look_busy(lines: &[String]) -> bool {
 /// reopened a finished row (and lifted a wait) that nothing then ended: the
 /// row said "working" with the agent idle at its prompt. An automatic
 /// compaction runs inside a turn its prompt already opened.
-pub(crate) fn recent_lines_show_turn_work(lines: &[String]) -> bool {
-    lines
+pub(crate) fn recent_lines_show_turn_work(backend: Backend, lines: &[String]) -> bool {
+    rows_above_composer(backend, lines)
         .iter()
         .rev()
         .filter(|line| !line.trim().is_empty())
@@ -434,7 +434,7 @@ pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[St
     // Without this, a tip or a tool line full of permission words held a working
     // agent at "needs permission" for its whole turn, since this is re-read
     // every tick.
-    if backend == Backend::Claude && recent_lines_look_busy(lines) {
+    if backend == Backend::Claude && recent_lines_look_busy(backend, lines) {
         return false;
     }
     // A permission prompt REPLACES the composer, so a pane parked at its
@@ -749,8 +749,8 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
 fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
     let rows: Vec<String> = lines.iter().map(|line| normalize_terminal_line(line)).collect();
     match backend {
-        Backend::Claude => claude_composer_showing(&rows),
-        Backend::Codex => codex_composer_showing(&rows),
+        Backend::Claude => claude_composer_top(&rows).is_some(),
+        Backend::Codex => codex_composer_row(&rows).is_some(),
         Backend::Opencode => rows
             .iter()
             .rev()
@@ -760,27 +760,41 @@ fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
     }
 }
 
-/// Claude Code's composer box on screen: its last two rules enclose the `❯`
-/// input row (with the rows its text wraps onto), and the mode footer is among
-/// the rows under the box. A permission dialog or a menu takes the box's place
-/// and keeps at most its top rule under it (2.1.328, labelled `View teammates`
-/// when there are teammates), and a menu's `❯ 1. Yes` is an option, never an
-/// input row.
-fn claude_composer_showing(rows: &[String]) -> bool {
-    let Some(bottom) = rows.iter().rposition(|row| is_claude_rule(row)) else {
-        return false;
+/// The rows above the backend's composer, where its spinner, its last words
+/// and its receipts are. Claude Code 2.1.328 draws a block of varying height
+/// under the composer (footer, status rows, one row per agent), so a window
+/// counted from the screen's bottom lost the lead's spinner behind its agent
+/// list. Claude and Codex draw their composer for the whole of a turn and at
+/// rest, and only a dialog takes its place: with no composer on screen there
+/// are no rows. opencode draws nothing under its composer that varies, so its
+/// whole screen counts.
+pub(crate) fn rows_above_composer(backend: Backend, lines: &[String]) -> &[String] {
+    let rows = || lines.iter().map(|line| normalize_terminal_line(line)).collect::<Vec<_>>();
+    let composer = match backend {
+        Backend::Claude => claude_composer_top(&rows()),
+        Backend::Codex => codex_composer_row(&rows()),
+        Backend::Opencode => return lines,
     };
-    let Some(top) = rows[..bottom].iter().rposition(|row| is_claude_rule(row)) else {
-        return false;
-    };
+    composer.map_or(&[], |row| &lines[..row])
+}
+
+/// Where Claude Code's composer box starts (its top rule), when the box is on
+/// screen: its last two rules enclose the `❯` input row (with the rows its
+/// text wraps onto), and the mode footer is among the rows under the box. A
+/// permission dialog or a menu takes the box's place and keeps at most its top
+/// rule under it (2.1.328, labelled `View teammates` when there are
+/// teammates), and a menu's `❯ 1. Yes` is an option, never an input row.
+fn claude_composer_top(rows: &[String]) -> Option<usize> {
+    let bottom = rows.iter().rposition(|row| is_claude_rule(row))?;
+    let top = rows[..bottom].iter().rposition(|row| is_claude_rule(row))?;
     let is_input = rows[top + 1..bottom].iter().any(|row| {
         row.strip_prefix('\u{276f}')
             .is_some_and(|text| !is_numbered_option(text))
     });
-    is_input
-        && rows[bottom + 1..]
-            .iter()
-            .any(|row| looks_like_idle_chrome(Backend::Claude, row))
+    let footer = rows[bottom + 1..]
+        .iter()
+        .any(|row| looks_like_idle_chrome(Backend::Claude, row));
+    (is_input && footer).then_some(top)
 }
 
 /// A rule Claude Code draws across the pane above and below its composer,
@@ -789,18 +803,19 @@ fn is_claude_rule(row: &str) -> bool {
     row.starts_with("\u{2500}\u{2500}") && row.ends_with('\u{2500}')
 }
 
-/// Codex's composer at rest: its last `›` row is the input (an approval, the
-/// trust dialog and every picker put the cursor on a numbered option instead),
-/// and the pane's last row is its status bar or hint row, which Codex draws
-/// under the composer only.
-fn codex_composer_showing(rows: &[String]) -> bool {
-    let input = rows.iter().rev().find_map(|row| row.strip_prefix('\u{203a}'));
-    input.is_some_and(|text| !is_numbered_option(text))
-        && rows
-            .iter()
-            .rev()
-            .find(|row| !row.is_empty())
-            .is_some_and(|row| looks_like_idle_chrome(Backend::Codex, row))
+/// Codex's composer row, when it is on screen: its last `›` row is the input
+/// (an approval, the trust dialog and every picker put the cursor on a
+/// numbered option instead), and the pane's last row is its status bar or
+/// hint row, which Codex draws under the composer only.
+fn codex_composer_row(rows: &[String]) -> Option<usize> {
+    let input = rows.iter().rposition(|row| row.starts_with('\u{203a}'))?;
+    let is_input = !is_numbered_option(&rows[input]['\u{203a}'.len_utf8()..]);
+    let footer = rows
+        .iter()
+        .rev()
+        .find(|row| !row.is_empty())
+        .is_some_and(|row| looks_like_idle_chrome(Backend::Codex, row));
+    (is_input && footer).then_some(input)
 }
 
 /// `1. Yes`, `2) No`: a menu option after its cursor glyph.
@@ -843,18 +858,22 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
     menu_open.then_some("a menu is open in its pane (Esc closes it)")
 }
 
-/// True when the pane's bottom rows show the backend parked at its composer:
-/// its prompt line or its idle footer, with no spinner anywhere near. The
-/// precondition for `WaitSignal::Idle` (main.rs), the backstop for a turn
-/// that ended with no signal at all.
+/// True when the pane shows the backend parked at its composer, with no
+/// spinner above it. The precondition for `WaitSignal::Idle` (main.rs), the
+/// backstop for a turn that ended with no signal at all. Claude and Codex are
+/// found by their composer (`idle_footer_showing`); opencode by its prompt line
+/// or idle footer in the bottom rows.
 pub(crate) fn terminal_at_idle_prompt(backend: Backend, lines: &[String]) -> bool {
-    if recent_lines_look_busy(lines) {
+    if recent_lines_look_busy(backend, lines) {
         return false;
     }
-    lines
-        .iter()
-        .rev()
-        .take(8)
-        .map(|line| normalize_terminal_line(line))
-        .any(|line| looks_like_idle_chrome(backend, &line) || looks_like_agent_prompt(backend, &line))
+    match backend {
+        Backend::Claude | Backend::Codex => idle_footer_showing(backend, lines),
+        Backend::Opencode => lines
+            .iter()
+            .rev()
+            .take(8)
+            .map(|line| normalize_terminal_line(line))
+            .any(|line| looks_like_idle_chrome(backend, &line) || looks_like_agent_prompt(backend, &line)),
+    }
 }

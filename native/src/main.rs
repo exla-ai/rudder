@@ -7424,8 +7424,8 @@ impl App {
         }
     }
 
-    fn selected_worker_accepts_prompt_input(&self) -> bool {
-        let Some(run) = self.agents.get(self.selected_agent) else {
+    fn selected_worker_accepts_prompt_input(&mut self) -> bool {
+        let Some(run) = self.agents.get_mut(self.selected_agent) else {
             return false;
         };
         if run.needs_permission {
@@ -7437,11 +7437,9 @@ impl App {
         ) {
             return true;
         }
-        run.terminal.as_ref().is_some_and(|terminal| {
-            terminal_looks_ready_for_input_from_lines(
-                run.backend,
-                &terminal.visible_lines_snapshot(),
-            )
+        let backend = run.backend;
+        run.terminal.as_mut().is_some_and(|terminal| {
+            terminal_looks_ready_for_input_from_lines(backend, &terminal.live_lines_snapshot())
         })
     }
 
@@ -10573,11 +10571,11 @@ Until the first packet arrives, reply only: \"standing by\"."
     }
 
     /// The tail of a run's visible pane, bounded, for the mid-turn packet.
-    fn gam_pane_tail(&self, index: usize) -> String {
-        let Some(terminal) = self.agents.get(index).and_then(|run| run.terminal.as_ref()) else {
+    fn gam_pane_tail(&mut self, index: usize) -> String {
+        let Some(terminal) = self.agents.get_mut(index).and_then(|run| run.terminal.as_mut()) else {
             return String::new();
         };
-        let lines = terminal.visible_lines_snapshot();
+        let lines = terminal.live_lines_snapshot();
         let joined = lines
             .iter()
             .map(|line| line.trim_end())
@@ -10693,8 +10691,8 @@ Until the first packet arrives, reply only: \"standing by\"."
             self.take_gam_verdict(&peer_id, since).or_else(|| {
                 let lines = self.agents[peer]
                     .terminal
-                    .as_ref()
-                    .map(|terminal| terminal.visible_lines_snapshot())
+                    .as_mut()
+                    .map(|terminal| terminal.live_lines_snapshot())
                     .unwrap_or_default();
                 parse_gam_verdict(&lines)
             })
@@ -10887,8 +10885,8 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
             .or_else(|| {
                 self.agents[generator_index]
                     .terminal
-                    .as_ref()
-                    .and_then(|terminal| lift_gam_reply(&terminal.visible_lines_snapshot()))
+                    .as_mut()
+                    .and_then(|terminal| lift_gam_reply(&terminal.live_lines_snapshot()))
             });
         let mut gam = match self.agents[generator_index].gam.as_ref() {
             Some(gam) => gam.clone(),
@@ -10993,8 +10991,8 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
         let verdict = self.take_gam_verdict(&peer_id, since).or_else(|| {
             let lines = self.agents[peer_index]
                 .terminal
-                .as_ref()
-                .map(|terminal| terminal.visible_lines_snapshot())
+                .as_mut()
+                .map(|terminal| terminal.live_lines_snapshot())
                 .unwrap_or_default();
             parse_gam_verdict(&lines)
         });
@@ -16478,8 +16476,9 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     /// While a phone is looking at an agent's terminal it touches
-    /// `.rudder/runs/<id>/screen.watch`; the visible screen is mirrored to
-    /// `screen.txt` beside it (only when it changed, and only while watched).
+    /// `.rudder/runs/<id>/screen.watch`; the live screen (not where a dashboard
+    /// user has scrolled this pane) is mirrored to `screen.txt` beside it (only
+    /// when it changed, and only while watched).
     fn write_watched_screens(&mut self) {
         let repo = self.cwd.clone();
         for run in &mut self.agents {
@@ -16495,7 +16494,7 @@ Address the objection directly. If you disagree, say why inside \
             let Some(terminal) = run.terminal.as_mut() else {
                 continue;
             };
-            let text = terminal.visible_lines_snapshot().join("\n");
+            let text = terminal.live_lines_snapshot().join("\n");
             let target = dir.join("screen.txt");
             if std::fs::read_to_string(&target).ok().as_deref() == Some(text.as_str()) {
                 continue;
@@ -21852,7 +21851,7 @@ What to do\n\
                     let resumed_work = !user_started_new_turn
                         && settled
                         && !(run.backend == Backend::Codex && hooks_say_new_turn)
-                        && recent_lines_show_turn_work(&terminal.visible_lines_snapshot());
+                        && recent_lines_show_turn_work(run.backend, &terminal.live_lines_snapshot());
                     if user_started_new_turn || resumed_work {
                         run.status = AgentStatus::Running;
                         run.completed_at = None;
@@ -21867,7 +21866,7 @@ What to do\n\
                 let lull = run.last_output_at.elapsed() >= READY_EVAL_LULL;
                 let visible_lines =
                     if had_output || run.needs_permission || run.needs_user_input || lull {
-                        Some(terminal.visible_lines_snapshot())
+                        Some(terminal.live_lines_snapshot())
                     } else {
                         None
                     };
@@ -21881,7 +21880,7 @@ What to do\n\
                 if run.wait_signal.is_some()
                     && visible_lines
                         .as_ref()
-                        .is_some_and(|lines| recent_lines_show_turn_work(lines))
+                        .is_some_and(|lines| recent_lines_show_turn_work(run.backend, lines))
                 {
                     run.wait_signal = None;
                 }
@@ -21937,7 +21936,7 @@ What to do\n\
                     && !is_orchestrator
                     && !run.plain_process
                     && run.last_output_at.elapsed() >= IDLE_WITHOUT_SIGNAL
-                    && terminal_at_idle_prompt(run.backend, &terminal.visible_lines_snapshot())
+                    && terminal_at_idle_prompt(run.backend, &terminal.live_lines_snapshot())
                 {
                     run.wait_signal = Some(WaitSignal::Idle);
                     run.needs_user_input = true;
@@ -21973,7 +21972,7 @@ What to do\n\
                                 // in to Rudder Cloud...") says more than any code.
                                 run.last_error = Some(if run.plain_process {
                                     let last = terminal
-                                        .visible_lines_snapshot()
+                                        .live_lines_snapshot()
                                         .into_iter()
                                         .rev()
                                         .map(|line| line.trim().to_string())

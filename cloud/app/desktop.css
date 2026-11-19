@@ -77,8 +77,12 @@
 .mp-mt { grid-area: t; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .mp-name { font-weight: 600; font-size: 15.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-badge { font-size: 11.5px; font-weight: 600; color: var(--done); background: var(--done-soft); border-radius: 999px; padding: 2px 8px; flex: none; }
-.mp-detail { grid-area: d; font-size: 12.5px; color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.mp-detail:empty { display: none; }
+.mp-detail { grid-area: d; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mp-id { font-family: var(--mono); font-size: 12px; }
+.mp-desc:not(:empty)::before { content: " · "; }
+.mp-group { font-size: 12px; font-weight: 600; color: var(--muted); margin: 6px 4px -2px; }
+.mp-group:first-child { margin-top: 0; }
+.mp-error { padding: 0 2px; margin: -4px 0 10px; font-size: 13px; }
 .mp-radio { grid-area: r; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-strong); display: grid; place-items: center; color: transparent; }
 .mp-radio svg { width: 13px; height: 13px; stroke-width: 3; }
 .mp-model[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -334,6 +338,22 @@ body.desktop .toasts { left: var(--side); }
 .ds-proj.dragging { opacity: 0.4; }
 .ds-insert { position: absolute; z-index: 2; left: 10px; right: 8px; height: 2px; margin-top: -1px; border-radius: 1px; background: var(--accent); pointer-events: none; }
 .ds-insert::before { content: ""; position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; box-sizing: border-box; border-radius: 50%; border: 2px solid var(--accent); background: var(--bg); }
+/* Moving an agent (app.js): the row lifts off its list and follows the
+   pointer, the others slide around a gap, and it settles into the gap. A
+   long press lifts it on a touch screen, so it must not select or preview. */
+.ds-list .ds-agent:not(.renaming), .ds-agents .ds-agent:not(.renaming) { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.ds-agent.ds-held { display: none; }
+.ds-gap { flex: none; border-radius: 9px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
+.sorting > .ds-agent { transition: transform 160ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.ds-lift { position: fixed; z-index: 40; left: 0; top: 0; margin: 0; padding: 5px 8px; box-sizing: border-box; border-radius: 9px; background: var(--surface); box-shadow: var(--shadow-2); pointer-events: none; will-change: transform; }
+.ds-lift .ds-open-r { display: none; }
+.ds-lift.refused > * { opacity: 0.4; }
+.ds-lift.settling { transition: transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 180ms, box-shadow 180ms; box-shadow: none; }
+.ds-lift.gone { opacity: 0; }
+body.ds-moving, body.ds-moving * { cursor: grabbing !important; }
+@media (prefers-reduced-motion: reduce) {
+  .sorting > .ds-agent, .ds-lift.settling { transition: none; }
+}
 .ds-more { display: block; font-size: 12.5px; color: var(--muted); text-decoration: none; padding: 2px 10px 8px 52px; }
 .ds-none { font-size: 13px; color: var(--faint); padding: 6px 10px; }
 .ds-foot { border-top: 1px solid var(--line); padding: 8px 8px calc(var(--sab) + 10px); display: flex; flex-direction: column; gap: 2px; }

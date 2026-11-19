@@ -599,14 +599,13 @@ document.addEventListener("click", (e) => {
   if (external && NATIVE) { e.preventDefault(); openExternal(a.href); }
   else if (external && a.target !== "_blank") { a.target = "_blank"; a.rel = "noopener noreferrer"; }
 });
-// A file dropped anywhere but a composer, or an agent or project dragged from
-// the sidebar dropped outside its targets, must not open in place of the app.
-const AGENT_DRAG = "application/x-rudder-agent";
+// A file dropped anywhere but a composer, or a project dragged from the
+// sidebar dropped outside its list, must not open in place of the app.
 const PROJECT_DRAG = "application/x-rudder-project";
 for (const type of ["dragover", "drop"]) {
   document.addEventListener(type, (e) => {
     const types = [...e.dataTransfer.types];
-    if (e.defaultPrevented || !["Files", AGENT_DRAG, PROJECT_DRAG].some((t) => types.includes(t))) return;
+    if (e.defaultPrevented || !["Files", PROJECT_DRAG].some((t) => types.includes(t))) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "none";
   });
@@ -874,24 +873,17 @@ function DesktopShell() {
     }, { signal: drag.signal });
     divider.addEventListener("lostpointercapture", () => { drag.abort(); main.classList.remove("resizing"); saveSplit(); }, { signal: drag.signal });
   });
-  // Dragging an agent row: the main area shows where it can land.
-  const carriesAgent = (e) => [...e.dataTransfer.types].includes(AGENT_DRAG);
+  // An agent row dragged out of the sidebar (moving agents, below): the main
+  // area shows where it can open.
   const hideDrop = () => { dropEl.hidden = true; for (const z of zones) z.classList.remove("over"); };
-  nav.addEventListener("dragstart", (e) => {
-    const a = e.target instanceof Element ? e.target.closest(".ds-agent") : null;
-    if (!a?.dataset.run) return;
-    // No room for two panes here: the drag does nothing.
-    if (!SPLIT_MQ.matches) { e.preventDefault(); return; }
-    e.dataTransfer.setData(AGENT_DRAG, JSON.stringify({ ws: a.dataset.ws, run: a.dataset.run }));
-    e.dataTransfer.effectAllowed = "copy";
-    e.dataTransfer.setDragImage(a, 24, a.offsetHeight / 2);
+  const showDrop = () => {
+    if (!dropEl.hidden) return;
     const beside = !!agentOf(route);
     zones[1].hidden = !beside;
     setText(zones[0].querySelector(".sd-label"), beside ? "Open here" : "Open");
     setText(zones[1].querySelector(".sd-label span"), splitShown ? "Open here" : "Open side by side");
     dropEl.hidden = false;
-  });
-  document.addEventListener("dragend", hideDrop, { signal: life.signal });
+  };
 
   // Reordering projects: drag a project's row (a line shows where it lands),
   // or Alt+Up / Alt+Down on it. Pinned and other projects each keep to their
@@ -963,22 +955,246 @@ function DesktopShell() {
     if (m) announce(moveSaid(m, up));
   });
 
-  for (const z of zones) {
-    const over = (e) => {
-      if (!carriesAgent(e)) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      z.classList.add("over");
-    };
-    z.addEventListener("dragenter", over);
-    z.addEventListener("dragover", over);
-    z.addEventListener("dragleave", () => z.classList.remove("over"));
-    z.addEventListener("drop", (e) => {
-      if (!carriesAgent(e)) return;
-      e.preventDefault();
+  // Moving an agent within its project: drag its row (on a touch screen,
+  // press and hold it first, so a swipe still scrolls), Alt+Up / Alt+Down on
+  // it, or Move up / Move down in its menu. The lifted row follows the
+  // pointer, the others make room, and it settles into the gap. It keeps to
+  // its own project: let go anywhere else in the sidebar, or press Esc, and
+  // it goes back. Held and let go without moving, it opens its menu. Any row,
+  // "Needs you" too, dropped on the main area opens there (beside the agent
+  // on screen when there is room).
+  const HOLD_MS = 350, SETTLE_MS = 180, EDGE = 48;
+  const scroller = el.querySelector(".ds-scroll");
+  let drag = null; // the pressed row, then the lifted one
+  let droppedAt = 0;
+  const movable = (p) => sideAgents(p).filter((a) => !a.pending);
+  // Puts agent `run` before agent `before` (null: last) and saves the list.
+  const moveAgent = (ws, run, before) => {
+    const p = findProject(ws);
+    const list = p ? movable(p) : [];
+    const from = list.findIndex((a) => a.id === run);
+    if (from < 0) return null;
+    const [a] = list.splice(from, 1);
+    const at = before === null ? list.length : list.findIndex((x) => x.id === before);
+    if (at < 0) return null;
+    list.splice(at, 0, a);
+    if (at !== from) setAgentOrder(ws, list.map((x) => x.id));
+    return { name: a.title || "Agent", project: p.name || p.repo || "its project", from, at, count: list.length };
+  };
+  // One place up (dir -1) or down (1), said aloud as a screen reader would not notice it.
+  const nudgeAgent = (ws, run, dir) => {
+    const p = findProject(ws);
+    const rows = p ? movable(p) : [];
+    const from = rows.findIndex((a) => a.id === run);
+    if (from < 0) return;
+    const to = from + dir;
+    if (to < 0 || to >= rows.length) {
+      announce(`${rows[from].title || "Agent"} is already ${dir < 0 ? "first" : "last"} in ${p.name || p.repo || "its project"}`);
+      return;
+    }
+    const m = moveAgent(ws, run, dir < 0 ? rows[to].id : rows[to + 1]?.id ?? null);
+    if (m) announce(`${m.name} moved to ${m.at + 1} of ${m.count} in ${m.project}`);
+  };
+  projectsEl.addEventListener("keydown", (e) => {
+    if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    const row = rowOf(e.target);
+    if (!row?.matches(".ds-agent") || !row._target || row._target.a.pending) return;
+    e.preventDefault();
+    nudgeAgent(row.dataset.ws, row.dataset.run, e.key === "ArrowUp" ? -1 : 1);
+    // The repaint moved the row, which drops focus: put it back.
+    row.focus();
+  });
+
+  const endPress = () => { clearTimeout(drag.timer); drag.stop.abort(); drag = null; };
+  nav.addEventListener("pointerdown", (e) => {
+    if (drag || !e.isPrimary || e.button !== 0) return;
+    const row = rowOf(e.target);
+    if (!row?.matches(".ds-agent") || !row._target || row._target.a.pending || row.classList.contains("renaming") || e.target.closest("button")) return;
+    const sortable = !!row.closest(".ds-agents");
+    // A "Needs you" row can only go to the main area, which needs room for two.
+    if (!sortable && !SPLIT_MQ.matches) return;
+    const hold = e.pointerType !== "mouse";
+    const stop = new AbortController();
+    drag = { row, sortable, hold, id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, stop, lifted: false, moved: false };
+    drag.timer = hold ? setTimeout(lift, HOLD_MS) : 0;
+    addEventListener("pointermove", onDragMove, { signal: stop.signal });
+    addEventListener("pointerup", onDragUp, { signal: stop.signal });
+    addEventListener("pointercancel", (ev) => { if (ev.pointerId === drag.id) { if (drag.lifted) settle("back"); else endPress(); } }, { signal: stop.signal });
+    addEventListener("blur", () => { if (drag.lifted) settle("back"); else endPress(); }, { signal: stop.signal });
+    addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      if (!drag.lifted) { endPress(); return; }
+      ev.preventDefault();
+      ev.stopPropagation();
+      settle("back");
+    }, { capture: true, signal: stop.signal });
+  }, { signal: life.signal });
+  // Once a row is lifted, a finger moves it instead of scrolling the sidebar.
+  nav.addEventListener("touchmove", (e) => { if (drag?.lifted) e.preventDefault(); }, { passive: false, signal: life.signal });
+  // A long press opens a menu on some phones; a held row has its own.
+  nav.addEventListener("contextmenu", (e) => { if (drag?.hold) { e.preventDefault(); e.stopPropagation(); } }, { capture: true, signal: life.signal });
+  // The click that ends a drag must not open what it ends on.
+  el.addEventListener("click", (e) => { if (Date.now() - droppedAt < 400) { e.preventDefault(); e.stopPropagation(); } }, { capture: true, signal: life.signal });
+
+  function onDragMove(e) {
+    if (e.pointerId !== drag.id) return;
+    drag.x = e.clientX; drag.y = e.clientY;
+    const far = Math.hypot(drag.x - drag.x0, drag.y - drag.y0) > (drag.hold ? 10 : 4);
+    if (!drag.lifted) {
+      if (!far) return;
+      // A finger that moves before the hold is up is scrolling.
+      if (drag.hold) { endPress(); return; }
+      lift();
+    }
+    if (far) drag.moved = true;
+    follow();
+  }
+  function onDragUp(e) {
+    if (e.pointerId !== drag.id) return;
+    if (!drag.lifted) { endPress(); return; }
+    droppedAt = Date.now();
+    if (drag.hold && !drag.moved) { settle("menu"); return; }
+    // Let go over another project: say why it went back.
+    const own = drag.row.closest(".ds-proj");
+    const onProject = document.elementFromPoint(e.clientX, e.clientY)?.closest(".ds-proj");
+    if (drag.over === "away" && drag.sortable && onProject && onProject !== own) toast("An agent stays in its own project");
+    settle(drag.over);
+  }
+  function lift() {
+    clearTimeout(drag.timer);
+    const { row } = drag;
+    const r = row.getBoundingClientRect();
+    const ghost = row.cloneNode(true);
+    for (const attr of ["href", "aria-current", "aria-describedby", "title"]) ghost.removeAttribute(attr);
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.classList.add("ds-lift");
+    ghost.style.width = `${r.width}px`;
+    ghost.style.height = `${r.height}px`;
+    document.body.appendChild(ghost);
+    const gap = h(`<div class="ds-gap" aria-hidden="true"></div>`);
+    gap.style.height = `${r.height}px`;
+    row.before(gap);
+    row.classList.add("ds-held");
+    Object.assign(drag, { lifted: true, ghost, gap, list: row.parentElement, dx: drag.x0 - r.left, dy: drag.y0 - r.top, h: r.height, over: "away", zone: null });
+    drag.list.classList.add("sorting");
+    document.body.classList.add("ds-moving");
+    follow();
+    drag.raf = requestAnimationFrame(autoScroll);
+  }
+  // The lifted row under the pointer, and where it would land: in its own
+  // project (anywhere over it, header and "earlier" link included), on a
+  // pane of the main area, or nowhere.
+  function follow() {
+    const d = drag;
+    d.ghost.style.transform = `translate3d(${d.x - d.dx}px, ${d.y - d.dy}px, 0)`;
+    let over = "away", zone = null;
+    if (d.x >= nav.getBoundingClientRect().right) {
+      if (SPLIT_MQ.matches) {
+        showDrop();
+        zone = zones.find((z) => {
+          const b = z.getBoundingClientRect();
+          return !z.hidden && d.x >= b.left && d.x < b.right && d.y >= b.top && d.y < b.bottom;
+        }) || null;
+        if (zone) over = "zone";
+      }
+    } else {
       hideDrop();
-      openIn(Number(z.dataset.pane), JSON.parse(e.dataTransfer.getData(AGENT_DRAG)));
+      const b = d.list.closest(".ds-proj")?.getBoundingClientRect();
+      if (d.sortable && b && d.y >= b.top && d.y < b.bottom) over = "list";
+    }
+    for (const z of zones) z.classList.toggle("over", z === zone);
+    d.over = over; d.zone = zone;
+    d.ghost.classList.toggle("refused", over === "away");
+    placeGap(over !== "list");
+  }
+  // The gap goes to the slot nearest the lifted row's middle, or back where
+  // it was (`home`). The rows it passes slide out of its way.
+  function placeGap(home) {
+    const { list, gap, row } = drag;
+    let before = null;
+    if (home) {
+      before = row.nextElementSibling === gap ? gap.nextElementSibling : row.nextElementSibling;
+    } else {
+      const mid = drag.y - drag.dy + drag.h / 2 - list.getBoundingClientRect().top;
+      // Laid out without the lifted row: the gap before a row at `top` would
+      // have its middle at top + h/2, and after it at top + ht + h/2.
+      let top = 0;
+      for (const c of list.children) {
+        if (c === row || c === gap) continue;
+        const ht = c.offsetHeight + 1;
+        // A starting agent (no id yet) keeps the top.
+        if (c.dataset.run && mid < top + (ht + drag.h) / 2) { before = c; break; }
+        top += ht;
+      }
+    }
+    const now = gap.nextElementSibling === row ? row.nextElementSibling : gap.nextElementSibling;
+    if (now === before) return;
+    const others = [...list.children].filter((c) => c !== gap && c !== row);
+    const was = others.map((c) => c.offsetTop);
+    list.insertBefore(gap, before);
+    const slid = others.filter((c, i) => {
+      const dy = was[i] - c.offsetTop;
+      if (dy) { c.style.transition = "none"; c.style.transform = `translateY(${dy}px)`; }
+      return dy !== 0;
     });
+    void list.offsetHeight;
+    for (const c of slid) { c.style.transition = ""; c.style.transform = ""; }
+  }
+  // Near the top or bottom edge, the sidebar scrolls under the lifted row.
+  function autoScroll() {
+    const d = drag;
+    if (!d?.lifted || d.settling) return;
+    const b = scroller.getBoundingClientRect();
+    let v = 0;
+    if (d.x >= b.left && d.x < b.right) {
+      if (d.y < b.top + EDGE) v = -Math.min(EDGE, b.top + EDGE - d.y);
+      else if (d.y > b.bottom - EDGE) v = Math.min(EDGE, d.y - (b.bottom - EDGE));
+    }
+    if (v) {
+      const was = scroller.scrollTop;
+      scroller.scrollTop = was + Math.round(v / 3);
+      if (scroller.scrollTop !== was) follow();
+    }
+    d.raf = requestAnimationFrame(autoScroll);
+  }
+  // Lets go: "list" moves it to the gap, "zone" opens it on that pane, and
+  // anything else puts it back ("menu" then opens its menu).
+  function settle(how) {
+    const d = drag;
+    if (d.settling) return;
+    d.settling = true;
+    cancelAnimationFrame(d.raf);
+    d.stop.abort();
+    hideDrop();
+    const t = { ws: d.row.dataset.ws, run: d.row.dataset.run };
+    if (how !== "list") placeGap(true);
+    let next = d.gap.nextElementSibling;
+    while (next && (next === d.row || !next.dataset.run)) next = next.nextElementSibling;
+    const before = next ? next.dataset.run : null;
+    d.ghost.classList.add("settling");
+    if (how === "zone") {
+      d.ghost.classList.add("gone");
+      openIn(Number(d.zone.dataset.pane), t);
+    } else {
+      const g = d.gap.getBoundingClientRect();
+      d.ghost.style.transform = `translate3d(${g.left}px, ${g.top}px, 0)`;
+    }
+    setTimeout(() => {
+      d.ghost.remove();
+      d.gap.remove();
+      d.row.classList.remove("ds-held");
+      d.list.classList.remove("sorting");
+      for (const c of d.list.children) { c.style.transition = ""; c.style.transform = ""; }
+      document.body.classList.remove("ds-moving");
+      drag = null;
+      if (how === "list") {
+        const m = moveAgent(t.ws, t.run, before);
+        if (m && m.at !== m.from) announce(`${m.name} moved to ${m.at + 1} of ${m.count} in ${m.project}`);
+      }
+      // The list held still while the row was up: catch it up.
+      update();
+      if (how === "menu" && d.row.isConnected) agentMenu(d.row, { anchor: d.row });
+    }, SETTLE_MS);
   }
 
   grip.addEventListener("pointerdown", (e) => {
@@ -1011,14 +1227,15 @@ function DesktopShell() {
   const stepHint = `${alt}+[ and ${alt}+] step through agents`;
   const sideAgent = (x) => {
     // The status line: in "Needs you" the project name gives way before the status does.
-    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><span class="ds-apin" hidden aria-hidden="true">${icon("pin")}</span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
+    const a = h(`<a class="ds-agent" data-link draggable="false"><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"><span class="ds-ap"></span><span class="ds-sep" aria-hidden="true">·</span><span class="ds-sl"></span></span></span><span class="ds-apin" hidden aria-hidden="true">${icon("pin")}</span><button type="button" class="ds-open-r" hidden aria-label="Open on the right" title="Open on the right">${icon("split")}</button></a>`);
     a.title = stepHint;
     return a;
   };
   // A project's rows: live and recent agents (the project screen has the
-  // rest), plus the one on screen even when it is older.
-  const sideAgents = (p) => (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
-    .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
+  // rest), plus the one on screen even when it is older, in the account's
+  // order (orderAgents).
+  const sideAgents = (p) => orderAgents(p, (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
+    .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12));
 
   // Alt+[ and Alt+] step to the previous and next agent in the sidebar's
   // project lists (folded projects included), wrapping at the ends, as the
@@ -1054,7 +1271,8 @@ function DesktopShell() {
     if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
     const target = { ws: p.workspaceId, run: ag.id };
     a.dataset.ws = target.ws; a.dataset.run = ag.pending ? "" : target.run;
-    a.draggable = !ag.pending;
+    // A project's own rows move (moving agents, above); "Needs you" keeps its order.
+    if (showProject || ag.pending) a.removeAttribute("aria-describedby"); else a.setAttribute("aria-describedby", "ds-move-hint");
     const openR = a.querySelector(".ds-open-r");
     openR.hidden = !!ag.pending || !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, target));
     openR.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openIn(1, target); };
@@ -1104,6 +1322,11 @@ function DesktopShell() {
     const t = { ws: p.workspaceId, run: a.id };
     const find = () => findAgent(t.ws, t.run);
     const pinned = !!(find() || a).pinned;
+    // In its project's sidebar list it moves up and down too.
+    const proj = row.closest(".ds-agents") ? findProject(t.ws) : null;
+    const rows = proj ? movable(proj) : [];
+    const place = rows.findIndex((x) => x.id === t.run);
+    const nudge = (dir) => { nudgeAgent(t.ws, t.run, dir); row.focus(); };
     showAgentMenu({
       ...at,
       label: a.title || "Agent",
@@ -1113,6 +1336,11 @@ function DesktopShell() {
         { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pinAgent({ ws: t.ws, run: t.run, find, pinned: !pinned, repaint: updateScreen }) },
         { label: "Branch", icon: "branch", run: () => branchAgent({ ws: t.ws, run: t.run, title: (find() || a).title }) },
         { label: "Open beside", icon: "split", disabled: !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, t)), run: () => openIn(1, t) },
+        ...(place < 0 ? [] : [
+          "divider",
+          { label: "Move up", icon: "up", disabled: place === 0, run: () => nudge(-1) },
+          { label: "Move down", icon: "down", disabled: place === rows.length - 1, run: () => nudge(1) },
+        ]),
         "divider",
         { label: "Close", icon: "trash", danger: true, run: () => deleteAgent(t.ws, find() || a, { after: () => leaveClosed(t) }) },
       ],
@@ -1168,7 +1396,7 @@ function DesktopShell() {
     setText(needsSec.querySelector(".ds-c"), needs.length ? String(needs.length) : "");
     needsToggle.setAttribute("aria-expanded", String(needsOpen));
     needsEl.hidden = !needsOpen;
-    reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
+    if (needsEl !== drag?.list) reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
 
     const projects = sortProjects(s?.projects || []);
     // Arriving on a project or one of its agents opens that project once.
@@ -1210,6 +1438,8 @@ function DesktopShell() {
         pEl.classList.toggle("on", onProject);
         if (onProject) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
         const list = pEl.querySelector(".ds-agents");
+        // An agent being moved holds its list still until it is let go.
+        if (list === drag?.list) return;
         list.hidden = !open;
         if (!open) { list.replaceChildren(); pEl.querySelector(".ds-more")?.remove(); return; }
         const agents = sideAgents(p);
@@ -1248,10 +1478,12 @@ function DesktopShell() {
     show,
     destroy() {
       life.abort();
+      // A row lifted as the layout changes: its stand-in lives on the body.
+      if (drag) { clearTimeout(drag.timer); drag.stop.abort(); drag.ghost?.remove(); drag = null; }
       planUsage.destroy();
       for (const p of panes) p.screen?.destroy?.();
       el.remove();
-      document.body.classList.remove("desktop", "side-closed");
+      document.body.classList.remove("desktop", "side-closed", "ds-moving");
       document.body.style.removeProperty("--side-w");
     },
   };
@@ -2641,6 +2873,58 @@ async function setProjectOrder(ids) {
   }
   updateScreen();
 }
+
+// A project's agents in the order the account put them in the sidebar
+// (moving agents in DesktopShell), kept on the project like the project
+// order, so every device shows it; a phone's project screen keeps it within
+// each group. An agent never moved (every agent until its project's first
+// move, and each new one after it) sits above the moved ones, newest
+// activity first, as before any move. A move shows at once and stays until
+// the save is through; a failed save puts the server's order back.
+const agentOrderOverrides = new Map(); // workspace id -> run ids set here
+const agentOrderSeqs = new Map(); // workspace id -> its latest move
+const agentOrderSaves = new Map(); // workspace id -> the save in flight
+function orderAgents(p, list) {
+  const order = agentOrderOverrides.get(p.workspaceId) || p.agentOrder;
+  if (!order) return list.slice().sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
+  const place = new Map(order.map((id, i) => [id, i]));
+  return list.slice().sort((x, y) => {
+    const ox = place.get(x.id), oy = place.get(y.id);
+    if ((ox === undefined) !== (oy === undefined)) return ox === undefined ? -1 : 1;
+    if (ox !== oy) return ox - oy;
+    return (y.updatedAt || 0) - (x.updatedAt || 0);
+  });
+}
+async function setAgentOrder(ws, runs) {
+  const mine = (agentOrderSeqs.get(ws) || 0) + 1;
+  agentOrderSeqs.set(ws, mine);
+  agentOrderOverrides.set(ws, runs);
+  updateScreen();
+  // One save at a time, and a move made meanwhile saves instead, so quick
+  // moves (Alt+Down, Alt+Down) can't reach the server out of order.
+  const prev = agentOrderSaves.get(ws);
+  const save = (async () => {
+    if (prev) await prev;
+    if (mine !== agentOrderSeqs.get(ws)) return;
+    try {
+      await api("/api/app/agent-order", { method: "POST", body: { workspace: ws, runs } });
+      // A poll sent before the save would bring the old order back for a moment.
+      await stateInflight;
+      if (mine !== agentOrderSeqs.get(ws)) return;
+      const p = findProject(ws);
+      if (p) p.agentOrder = runs;
+      agentOrderOverrides.delete(ws);
+    } catch (err) {
+      if (mine !== agentOrderSeqs.get(ws)) return;
+      agentOrderOverrides.delete(ws);
+      if (err.status !== 401) toast(`Couldn't move it: ${err.message}`, { error: true });
+    }
+    updateScreen();
+  })();
+  agentOrderSaves.set(ws, save);
+  await save;
+  if (agentOrderSaves.get(ws) === save) agentOrderSaves.delete(ws);
+}
 // What a screen reader hears after a move, which it would not otherwise notice.
 function moveSaid(m, up) {
   const group = m.pinned ? " pinned projects" : "";
@@ -3190,11 +3474,10 @@ function ProjectScreen(ws) {
         a.setAttribute("aria-label", `Open preview ${x.label || ""} on port ${x.port}`);
       });
 
-    // Groups
-    const items = (p.agents || []).map((a) => ({ p, a }));
+    // Groups, each in the order the sidebar keeps (orderAgents)
     const groups = GROUPS.map((g) => ({
       ...g,
-      rows: items.filter((x) => groupOf(x.a) === g.id).sort((x, y) => (y.a.updatedAt || 0) - (x.a.updatedAt || 0)),
+      rows: orderAgents(p, (p.agents || []).filter((a) => groupOf(a) === g.id)).map((a) => ({ p, a })),
     })).filter((g) => g.rows.length);
     emptySlot.querySelectorAll(".sk").forEach((n) => n.remove());
     reconcile(groupsEl, groups, (g) => g.id,

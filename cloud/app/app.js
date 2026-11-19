@@ -20,7 +20,7 @@ import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
 import { duration, paintSubagent } from "/app/subagents.js";
-import { applyAgentEdits, branchAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
+import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
@@ -1883,20 +1883,9 @@ async function deleteAgent(ws, a, { after } = {}) {
     danger: true,
   });
   if (!ok) return false;
-  try {
-    await api("/api/app/action", { method: "POST", body: { workspace: ws, run: a.id, action: "delete" } });
-    // Gone now: the dashboard deleted its record, so the next state agrees.
-    const p = findProject(ws);
-    if (p?.agents) p.agents = p.agents.filter((x) => x.id !== a.id);
-    toast("Agent closed");
-    after?.();
-    updateScreen();
-    refreshState();
-    return true;
-  } catch (err) {
-    if (err.status !== 401) toast(err.message, { error: true });
-    return false;
-  }
+  // Off its screen and out of every list now; the dashboard's teardown is not waited on.
+  after?.();
+  return closeAgent({ ws, run: a.id, title: a.title, project: () => findProject(ws), repaint: updateScreen });
 }
 
 function updateAgentRow(el, { p, a }) {

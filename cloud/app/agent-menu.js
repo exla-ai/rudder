@@ -4,9 +4,10 @@
 // click. The dashboard saves a name the way its own rename does (native
 // rename_agent_at), so every screen shows it. A pin keeps an agent from the
 // cleanup that deletes agents nobody touched for a day. Close is the app's
-// one delete (deleteAgent in app.js).
+// one delete (closeAgent here, after deleteAgent in app.js asks).
 import { h, icon } from "/app/render.js";
 import { app, api, openSheet, toast } from "/app/core.js";
+import { hideClosed } from "/app/closing.js";
 
 /** The longest name the dashboard keeps (native AGENT_TITLE_MAX_CHARS). */
 export const TITLE_MAX = 200;
@@ -29,9 +30,15 @@ function forget(ws, run, field) {
   if (e) delete e[field];
 }
 
-/** Lay this viewer's unconfirmed renames and pins over a fresh `/api/app/state`. */
+// Agents closed here and not yet gone from the polled state (closing.js).
+const closing = new Map(); // `${ws}|${run}` -> { title, answered }
+
+/** Lay this viewer's unconfirmed renames, pins and closes over a fresh `/api/app/state`. */
 export function applyAgentEdits(state) {
   const now = Date.now();
+  for (const c of hideClosed(state, closing, now)) {
+    toast(`"${c.title || "The agent"}" is still open: its dashboard did not close it`, { error: true });
+  }
   for (const p of state?.projects || []) {
     for (const a of p.agents || []) {
       const k = editKey(p.workspaceId, a.id);
@@ -87,6 +94,36 @@ export async function pinAgent({ ws, run, find, pinned, repaint }) {
     forget(ws, run, "pinned");
     set(!pinned);
     if (err.status !== 401) toast(`Couldn't ${pinned ? "pin" : "unpin"} it: ${err.message}`, { error: true });
+    return false;
+  }
+}
+
+/**
+ * Close (delete) an agent. Its row leaves every list now, the dashboard stops
+ * it and removes its workspace in the background, and a refusal puts the row
+ * back with the reason. `project()` returns the agent's current project.
+ */
+export async function closeAgent({ ws, run, title, project, repaint }) {
+  const k = editKey(ws, run);
+  closing.set(k, { title, answered: null });
+  const list = project()?.agents;
+  const at = list ? list.findIndex((a) => a.id === run) : -1;
+  const row = at >= 0 ? list.splice(at, 1)[0] : null;
+  repaint();
+  try {
+    const res = await api("/api/app/action", { method: "POST", body: { workspace: ws, run, action: "delete" } });
+    closing.set(k, { title, answered: Date.now() });
+    // A dashboard busy for longer than the home waits still has it queued.
+    toast(res?.status === "queued" ? "Closing. Its dashboard is busy, so it goes in a moment" : "Agent closed");
+    app.refreshState();
+    return true;
+  } catch (err) {
+    closing.delete(k);
+    const current = project()?.agents;
+    if (row && current && !current.some((a) => a.id === run)) current.splice(Math.min(at, current.length), 0, row);
+    repaint();
+    if (err.status !== 401) toast(`Couldn't close "${title || "the agent"}": ${err.message}`, { error: true });
+    app.refreshState();
     return false;
   }
 }

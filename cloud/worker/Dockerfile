@@ -141,8 +141,8 @@ RUN set -eux; \
     tailscale version
 
 # Agent CLIs are installed later, as the non-root user, into locations that
-# user can write: Claude Code and Antigravity (agy) through their native installers (~/.local/bin, which
-# their own updaters can replace in place), the npm ones
+# user can write: Claude Code through its native installer (~/.local/bin, which
+# its own updater can replace in place), agy as one pinned binary there, the npm ones
 # under an npm prefix in the user's home. The image used to `npm install -g`
 # claude-code as root, so a worker could never actually update it: the
 # auto-updater printed "Updated to latest" into ~/.local/share/claude while
@@ -187,14 +187,32 @@ ENV RUDDER_CODEX_VERSION=${CODEX_VERSION}
 # (cloud/worker/opencode.mjs, native/src/opencode.rs); its own updater is off.
 ARG OPENCODE_VERSION=1.19.5
 ENV OPENCODE_DISABLE_AUTOUPDATE=1
+# Antigravity (agy) stays at the version whose transcripts, prompts and model
+# list Rudder reads; its own updater is off. The tarballs and sha512s are the
+# ones agy's per-platform manifest names (what antigravity.google/cli/install.sh
+# would fetch for this version).
+ARG AGY_VERSION=1.5.13
+ARG AGY_BUILD=5999302598852608
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=1
 WORKDIR /home/rudder
 USER rudder
 RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH} \
   && curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
-  && curl -fsSL https://antigravity.google/cli/install.sh | bash \
-  && agy --version \
+  && case "${TARGETARCH:-amd64}" in \
+       amd64) AGY_PKG=linux-x64/cli_linux_x64.tar.gz AGY_SHA512=014b37387703acab1f47cd532c8bb60167a6a3537b0f9891de03f1b1ffa9614307bc83c4b2f7551273b0877d722716b0cd9e26782f6b2a50705db4f05e18c68f ;; \
+       arm64) AGY_PKG=linux-arm/cli_linux_arm64.tar.gz AGY_SHA512=dccea2eb455099f5175f0c87cc47b38fcefe4cb0cb44dea3927469bb4bbf68ac3c0b30fc04affb24c17e90959386a93c3785e8e4b8b1a3338ca4e4d57b80057b ;; \
+       *) echo "unsupported TARGETARCH=${TARGETARCH}"; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}-${AGY_BUILD}/${AGY_PKG}" -o /tmp/agy.tar.gz \
+  && echo "${AGY_SHA512}  /tmp/agy.tar.gz" | sha512sum -c - \
+  && mkdir -p /home/rudder/.local/bin \
+  && tar -xzf /tmp/agy.tar.gz -C /tmp antigravity \
+  && mv /tmp/antigravity /home/rudder/.local/bin/agy \
+  && chmod +x /home/rudder/.local/bin/agy \
+  && rm /tmp/agy.tar.gz \
+  && agy --version | grep -qx "${AGY_VERSION}" \
   && npm install -g @openai/codex@${CODEX_VERSION} opencode-ai@${OPENCODE_VERSION} acpx@latest hunkdiff@latest pnpm@latest \
   && npm cache clean --force \
   && codex --version | grep -qx "codex-cli ${CODEX_VERSION}" \

@@ -368,22 +368,145 @@ const chatLabel = (a) => modelText(a.backend, a.modelName, a.effort);
  */
 export function mountChatModelControl(container, { workspace, run, agent }) {
   const el = h(CHIP);
+  const effortEl = h(EFFORT_CHIP);
   const refresh = () => {
     const a = agent();
     // The sheet switches among its harness's models: none for a harness the
     // list lacks. An agent started without a model shows what it runs.
     el.hidden = !a || !harnessOf(modelsCache, a.backend);
+    // The effort has a chip of its own: one for a model that takes any.
+    const row = el.hidden ? null : rowFor(a.backend, a.model);
+    effortEl.hidden = !effortsOf(row).length;
     if (el.hidden) return;
-    paintChip(el, { backend: a.backend, name: a.modelName, effort: a.effort });
+    paintChip(el, { backend: a.backend, name: a.modelName, effort: null });
     el.setAttribute("aria-label", `This chat runs on ${chatLabel(a)}. Change`);
     el.title = a.model ? `This chat runs on ${chatLabel(a)} (${a.model})` : `This chat runs on ${chatLabel(a)}`;
+    // As the model sheet reads it: an effort the model does not list is Auto.
+    if (!effortEl.hidden) paintEffortChip(effortEl, effortFor(row, a.effort || "auto"));
   };
   el.addEventListener("click", () => openChatModelPicker({ workspace, run, agent, onSwitched: refresh }));
-  container.appendChild(el);
+  effortEl.addEventListener("click", () => {
+    if (closeEffortMenu) { closeEffortMenu(); return; }
+    openEffortMenu(effortEl, { workspace, run, agent, onSwitched: refresh });
+  });
+  container.append(el, effortEl);
   refresh();
   // The label reads the list; a failed fetch shows when the sheet opens.
   if (!modelsFresh) loadModels().then(refresh).catch(() => {});
   return { el, refresh };
+}
+
+/**
+ * Switch an agent's chat to another model of its own harness, or the same
+ * model at another effort: the dashboard reopens the conversation on it
+ * (POST /api/app/agent-model). The model sheet's Switch and the effort chip
+ * both land here. Throws what the request threw.
+ */
+async function switchChatModel({ workspace, run, agent, backend, row, effort }) {
+  const model = row.value;
+  const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort } });
+  track("chat_model_switched", { backend, model, effort });
+  // The dashboard took it (or will within seconds): show it now, the next
+  // state refresh carries the real row.
+  const a = agent();
+  if (a) { a.model = model; a.modelName = row.label; a.effort = effort === "auto" ? null : effort; }
+  toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${modelText(backend, row.label, effort)}`);
+  app.refreshState();
+}
+
+/* The effort chip beside the model chip -------------------------------- */
+
+// A dial whose needle leans further right the harder the agent thinks; Auto
+// points straight up.
+const NEEDLE = { auto: 0, low: -60, medium: -25, high: 25, xhigh: 50, max: 70 };
+const GAUGE = `<svg class="ec-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 17a8.5 8.5 0 0 1 17 0"/><path class="ec-needle" d="M12 17V10"/><circle cx="12" cy="17" r="1.2" fill="currentColor" stroke="none"/></svg>`;
+const EFFORT_CHIP = `<button type="button" class="model-chip effort-chip" aria-haspopup="menu" aria-expanded="false">${GAUGE}<span class="mc-n"></span>${icon("chevron").replace("<svg", '<svg class="mc-caret"')}</button>`;
+
+function paintEffortChip(el, effort) {
+  const label = effortLabel(effort);
+  setText(el.querySelector(".mc-n"), label);
+  el.querySelector(".ec-needle").setAttribute("transform", `rotate(${NEEDLE[effort]} 12 17)`);
+  el.setAttribute("aria-label", `Effort: ${label}. Change`);
+  el.title = `Effort: ${label}`;
+}
+
+let closeEffortMenu = null;
+
+/**
+ * The effort levels of the chat's model, as a menu above the effort chip.
+ * Up and Down move, Enter picks, Esc or a click elsewhere closes. A pick
+ * switches the chat the way the model sheet does (switchChatModel). It lives
+ * in the composer, like the attach menu, so it rides up with the keyboard.
+ */
+function openEffortMenu(chip, { workspace, run, agent, onSwitched }) {
+  const a = agent();
+  const row = a && rowFor(a.backend, a.model);
+  const choices = effortsOf(row);
+  if (!choices.length) return;
+  const current = effortFor(row, a.effort || "auto");
+  const busy = a.status === "working";
+  const composer = chip.closest(".composer");
+  const menu = h(`<div class="menu effort-menu" role="menu" aria-label="Effort"></div>`);
+  if (busy) {
+    const note = h(`<div class="em-note"></div>`);
+    setText(note, "It is working right now. Change the effort when this turn ends.");
+    menu.appendChild(note);
+  }
+  for (const e of choices) {
+    const b = h(`<button type="button" role="menuitemradio"><span class="m-label"><span></span><small></small></span>${icon("check").replace("<svg", '<svg class="em-ck"')}</button>`);
+    setText(b.querySelector(".m-label > span"), e.label);
+    setText(b.querySelector("small"), e.detail);
+    b.setAttribute("aria-checked", String(e.id === current));
+    b.disabled = busy;
+    b.addEventListener("click", async () => {
+      close();
+      if (e.id === current) return;
+      chip.disabled = true;
+      try {
+        await switchChatModel({ workspace, run, agent, backend: a.backend, row, effort: e.id });
+        onSwitched();
+      } catch (err) { showError(err); }
+      finally { chip.disabled = false; }
+    });
+    menu.appendChild(b);
+  }
+  const buttons = () => [...menu.querySelectorAll("button:not([disabled])")];
+  function close(refocus = false) {
+    if (closeEffortMenu !== close) return;
+    closeEffortMenu = null;
+    menu.remove();
+    chip.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", onKey, true);
+    removeEventListener("resize", onAway);
+    if (refocus) chip.focus();
+  }
+  const onAway = () => close();
+  const outside = (e) => { if (!menu.contains(e.target) && !chip.contains(e.target)) close(); };
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); return; }
+    if (e.key === "Tab") { close(); return; }
+    const list = buttons();
+    if (!list.length) return;
+    const at = list.indexOf(document.activeElement);
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: list.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    list[(to + list.length) % list.length].focus();
+  };
+  closeEffortMenu?.();
+  composer.appendChild(menu);
+  // Above the chip, its left edge on the chip's (kept inside the composer).
+  const c = composer.getBoundingClientRect();
+  const r = chip.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.left - c.left, c.width - menu.offsetWidth - 8))}px`;
+  menu.style.bottom = `${c.bottom - r.top + 6}px`;
+  closeEffortMenu = close;
+  chip.setAttribute("aria-expanded", "true");
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", onKey, true);
+  addEventListener("resize", onAway);
+  (menu.querySelector('[aria-checked="true"]:not([disabled])') || buttons()[0])?.focus();
 }
 
 function openChatModelPicker({ workspace, run, agent, onSwitched }) {
@@ -477,19 +600,11 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
       });
       return;
     }
-    const model = pick.model;
     useBtn.disabled = true;
     try {
-      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: eff } });
-      track("chat_model_switched", { backend, model, effort: eff });
-      // The dashboard took it (or will within seconds): show it now, the next
-      // state refresh carries the real row.
-      const a = agent();
-      if (a) { a.model = model; a.modelName = row.label; a.effort = eff === "auto" ? null : eff; }
+      await switchChatModel({ workspace, run, agent, backend, row, effort: eff });
       dlg.close();
-      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${modelText(backend, row.label)}`);
       onSwitched();
-      app.refreshState();
     } catch (err) { showError(err); render(); }
   });
 

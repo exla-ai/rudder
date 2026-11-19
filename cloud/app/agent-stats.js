@@ -116,7 +116,7 @@ function popover(anchor, { label, render, place = "below" }) {
 
 /**
  * The agent page's output speed, at the end of the header's subtitle
- * `line` ("Working · Claude · opus"). Call `update(transcript.stats)` after
+ * `line` ("Working"). Call `update(transcript.stats)` after
  * each paint of the line. Hidden while the transcript has no numbers (a new
  * agent, a backend without session logs, or a teammate's agent). When the
  * home could not work them out (`stats.error`), it says so and the popover
@@ -134,20 +134,17 @@ export function AgentStats(line) {
 
   const pop = popover(el, { label: "Agent speed", render: () => renderAgentPop(stats, problem) });
 
-  // When the line has no room, whole parts give way instead of being cut
-  // mid-word: the agent and model (the composer's model chip names it too),
-  // then the speed. The status stays. The steps are classes on the chip
-  // (agent-stats.css): the page sets the line's own classes on each paint.
-  const STEPS = ["fit-bk", "fit-tps"];
+  // When the line has no room, the speed gives way whole instead of being
+  // cut mid-word. The status stays, and so does "Speed unavailable". The step
+  // is a class on the chip (agent-stats.css): the page sets the line's own
+  // classes on each paint.
   function fit() {
-    el.classList.remove(...STEPS);
-    if (el.hidden || !line.clientWidth) return;
+    el.classList.remove("fit-tps");
+    if (el.hidden || problem || !line.clientWidth) return;
     el.classList.add("as-measure");
-    for (const step of problem ? STEPS.slice(0, 1) : STEPS) {
-      if (line.scrollWidth <= line.clientWidth) break;
-      el.classList.add(step);
-    }
+    const over = line.scrollWidth > line.clientWidth;
     el.classList.remove("as-measure");
+    el.classList.toggle("fit-tps", over);
   }
   const resize = new ResizeObserver(fit);
   resize.observe(line);

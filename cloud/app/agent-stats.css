@@ -8,18 +8,15 @@
    hides there). Sizes are the bar's content width. */
 .agent-bar { container-type: inline-size; }
 @container (max-width: 719px) {
-  .agent-bar > :is(.lock-toggle, .mac-copy, .cv-toggle, .fp-toggle) { display: none; }
+  .agent-bar > :is(.lock-toggle, .cv-toggle, .fp-toggle) { display: none; }
 }
 
-/* Header line: "· ◔ 64% left · 86 tok/s" after "Working · Claude · opus".
-   When it is short, agent-stats.js fit() drops whole parts in order (fit-*
-   classes on the chip): "left", then the agent and model, then the speed.
+/* Header line: "· 86 tok/s" after "Working". When it is short,
+   agent-stats.js fit() drops the speed whole (fit-tps on the chip).
    as-measure lays the parts out at full width to see what fits. */
-.topbar .subtitle:has(> .as-chip:not([hidden])) .bk { flex: 0 1 auto; }
-.topbar .subtitle:has(> .as-chip.fit-bk) > :is(.sep, .bk) { display: none; }
 /* Important: measuring must beat every rule above that lets a part shrink. */
 .topbar .subtitle:has(> .as-chip.as-measure) > * { flex-shrink: 0 !important; }
-.as-chip.fit-tps .as-tps { display: none; }
+.as-chip.fit-tps { display: none; }
 .as-chip {
   flex: 0 1 auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
   margin: 0; padding: 0; border: 0; background: none; cursor: pointer;

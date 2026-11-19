@@ -72,6 +72,22 @@
 .model-chip .mc-n { overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--ink); }
 .model-chip .mc-e { flex: none; white-space: pre; color: var(--muted); font-weight: 400; }
 .model-chip .mc-caret { width: 13px; height: 13px; margin-left: -2px; transform: rotate(90deg); }
+/* A chat's effort beside its model (model-picker.js): a dial and the level.
+   On a narrow row the model's name ellipsizes first; the effort stays whole. */
+.c-tools > .model-chip { flex-shrink: 1; min-width: 72px; }
+.c-tools > .effort-chip { flex-shrink: 0; }
+.effort-chip { padding: 0 7px 0 8px; }
+.effort-chip[aria-expanded="true"] { background: var(--surface-2); }
+.effort-chip .ec-gauge { width: 16px; height: 16px; color: var(--ink-2); }
+.effort-chip .ec-needle { transition: transform 160ms ease; }
+.composer .effort-menu { top: auto; right: auto; min-width: 210px; transform-origin: bottom left; }
+.effort-menu button { min-height: 46px; }
+.effort-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.effort-menu .m-label { flex: 1; }
+.effort-menu [aria-checked="true"] .m-label > span { font-weight: 600; }
+.effort-menu .em-ck { flex: none; color: var(--accent); visibility: hidden; }
+.effort-menu [aria-checked="true"] .em-ck { visibility: visible; }
+.effort-menu .em-note { max-width: 220px; padding: 8px 12px 6px; font-size: 12.5px; line-height: 1.35; color: var(--muted); }
 .head-model { height: 34px; margin-right: 2px; max-width: 168px; }
 @media (max-width: 480px) { .head-model { display: none; } }
 
@@ -424,7 +440,6 @@ body.ds-moving, body.ds-moving * { cursor: grabbing !important; }
 body.desktop.mac .ds-top { padding-top: 28px; }
 
 /* ---------- Mac app: Open a copy on this Mac ---------- */
-.icon-btn.mac-copy svg { width: 21px; height: 21px; }
 .mac-copy-sheet .mc-lead { margin: 0 0 14px; color: var(--ink-2); font-size: 14.5px; line-height: 1.45; }
 .mc-slot { display: flex; flex-direction: column; gap: 10px; min-height: 56px; }
 .mc-slot .btn svg { width: 18px; height: 18px; }

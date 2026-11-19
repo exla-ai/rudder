@@ -3717,8 +3717,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     <header class="topbar agent-bar">
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>
       <div class="titles"><div class="title"></div>
-        <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
-      ${canOpenOnMac() ? `<button type="button" class="icon-btn mac-copy" aria-label="Open a copy on this Mac" title="Open a copy on this Mac">${MAC_ICON}</button>` : ""}
+        <div class="subtitle"><span class="dot"></span><span class="st"></span></div></div>
       <button type="button" class="icon-btn lock-toggle" hidden aria-pressed="false"></button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
@@ -3771,10 +3770,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   back.href = backTo;
   back.setAttribute("aria-label", ro ? "Back to team" : allAgents ? "Back to projects" : "Back to project");
   back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
-  if (ro) for (const n of el.querySelectorAll(".mac-copy, .more")) n.hidden = true;
+  if (ro) el.querySelector(".more").hidden = true;
   else if (allAgents) {
-    // Its project is hidden and holds no work: no files, canvas or Mac copy.
-    el.querySelector(".mac-copy")?.remove();
+    // Its project is hidden and holds no work: no files or canvas.
     bar.append(h(`<a class="icon-btn" href="${ALL_PATH}/new" data-link aria-label="New chat" title="New chat">${icon("plus")}</a>`));
   } else bar.append(canvasButton({ ws, run, findAgent }), filesButton({ ws, run, findAgent }));
   // The right of two panes: history belongs to the left one, so it closes instead.
@@ -4063,7 +4061,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const a = agentNow();
     openCopyOnMac({ runId: run, repo: p?.repo || null, title: a?.title || store.transcripts.get(key)?.title || null });
   };
-  el.querySelector(".mac-copy")?.addEventListener("click", copyHere);
 
   // Overflow menu
   const moreBtn = el.querySelector(".more");
@@ -4270,9 +4267,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     sub.querySelector(".dot").classList.toggle("live", !!st.live);
     const phase = a?.phase && a.phase.toLowerCase() !== st.label.toLowerCase() && a.phase.toLowerCase() !== a.status ? a.phase : "";
     setText(sub.querySelector(".st"), phase ? `${st.label} · ${phase}` : st.label);
-    const bk = backendLabel(a || { backend: t?.backend });
-    setText(sub.querySelector(".bk"), bk);
-    sub.querySelector(".sep").hidden = !bk;
     agentStats.update(t?.stats);
     contextMeter.update(t?.context);
     return status;

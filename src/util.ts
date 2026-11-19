@@ -265,6 +265,11 @@ function resolveProgram(command: string): string {
   return command === "jj" ? jjProgram() : command;
 }
 
+/** The program a backend runs: its own name, except Antigravity's `agy`. */
+export function backendCommand(backend: string): string {
+  return backend === "antigravity" ? "agy" : backend;
+}
+
 export function commandExists(command: string): boolean {
   if (command === "jj" && rudderJjPath()) return true;
   const result = spawnSync("sh", ["-c", `command -v ${shellQuote(command)}`], {
@@ -279,6 +284,7 @@ const TOOL_INSTALL_HINTS: Record<string, string> = {
   codex: "Install with `npm install -g @openai/codex` (see https://github.com/openai/codex).",
   acpx: "Install with `npm install -g acpx@latest`.",
   opencode: "Install with `npm install -g opencode-ai` (see https://opencode.ai/docs).",
+  agy: "Install the Antigravity CLI with `curl -fsSL https://antigravity.google/cli/install.sh | bash` (see https://antigravity.google/docs/cli).",
   jj: "Rudder normally sets jj up on its own; run `rudder doctor` to retry, or install it with `brew install jj` or `cargo install jj-cli` (https://jj-vcs.github.io).",
 };
 

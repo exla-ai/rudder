@@ -235,7 +235,7 @@ function parseFileScope(value: unknown): string[] | undefined {
 }
 
 function isBackend(value: unknown): value is BackendId {
-  return value === "claude" || value === "codex" || value === "acpx" || value === "opencode";
+  return value === "claude" || value === "codex" || value === "acpx" || value === "opencode" || value === "antigravity";
 }
 
 function isEffort(value: unknown): value is EffortLevel {

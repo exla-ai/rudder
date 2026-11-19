@@ -55,6 +55,7 @@ import {
   syncRunWorkspace as syncJjRunWorkspace,
 } from "./jj.js";
 import {
+  backendCommand,
   commandExists,
   ensureDir,
   isRecord,
@@ -123,18 +124,10 @@ export async function startRun(params: {
   await captureSharedContextFromInput(repoRoot, params.task).catch(() => false);
   const config = await loadConfig();
   const backend = params.backend ?? configuredBackend(config);
-  if (!commandExists(backend)) {
-    throw new MissingToolError(backend);
+  if (!commandExists(backendCommand(backend))) {
+    throw new MissingToolError(backendCommand(backend));
   }
-  const model =
-    params.model ??
-    (backend === "claude"
-      ? config.backends.claude?.model
-      : backend === "codex"
-        ? config.backends.codex?.model
-        : backend === "opencode"
-          ? config.backends.opencode?.model
-          : config.backends.acpx?.model);
+  const model = params.model ?? config.backends[backend]?.model;
   const effort = params.effort ?? effortForBackend(backend, config);
 
   ensureJj();
@@ -956,6 +949,9 @@ function effortForBackend(backend: BackendId, config: Awaited<ReturnType<typeof 
   }
   if (backend === "opencode") {
     return config.backends.opencode?.effort;
+  }
+  if (backend === "antigravity") {
+    return config.backends.antigravity?.effort;
   }
   return config.backends.acpx?.reasoningEffort ?? config.backends.acpx?.effort;
 }

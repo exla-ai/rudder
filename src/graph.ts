@@ -156,7 +156,7 @@ export function mirrorNodeStatus(status: string | undefined): NodeStatus {
 }
 
 function mirrorBackend(backend: string | undefined): BackendId {
-  return backend === "codex" || backend === "acpx" || backend === "opencode" ? backend : "claude";
+  return backend === "codex" || backend === "acpx" || backend === "opencode" || backend === "antigravity" ? backend : "claude";
 }
 
 function mirrorEffort(effort: string | undefined): EffortLevel | undefined {

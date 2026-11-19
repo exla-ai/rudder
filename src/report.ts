@@ -260,6 +260,7 @@ function generateSummary(runs: RunRecord[]): ReportSummary {
     codex: 0,
     acpx: 0,
     opencode: 0,
+    antigravity: 0,
   };
 
   let totalDuration = 0;

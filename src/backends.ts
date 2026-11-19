@@ -39,6 +39,9 @@ export function getBackend(id: BackendId): BackendAdapter {
   if (id === "opencode") {
     return opencodeBackend();
   }
+  if (id === "antigravity") {
+    return antigravityBackend();
+  }
   return acpxBackend();
 }
 
@@ -259,6 +262,50 @@ function opencodeBackend(): BackendAdapter {
         stdin: `${request.contract}\n\n${prompt}`,
         cwd: request.run.workspace.path,
         env: process.env,
+        request,
+        emit,
+      });
+    },
+  };
+}
+
+/**
+ * Google's Antigravity CLI (`agy`). `agy -p --output-format stream-json`
+ * reports the conversation id on its events, so a follow-up turn continues
+ * the same conversation with `--conversation`. Workers run unattended with
+ * `--dangerously-skip-permissions`, as Claude and Codex workers do.
+ */
+function antigravityBackend(): BackendAdapter {
+  return {
+    id: "antigravity",
+    async verify() {
+      return commandExists("agy")
+        ? { ok: true, message: "agy found" }
+        : { ok: false, message: formatMissingToolMessage("agy") };
+    },
+    async run(request, emit) {
+      const prompt = stripRudderPromptWrappers(request.prompt);
+      const sessionId = request.run.session?.nativeSessionId;
+      const isFollowUp = (request.run.turns?.length ?? 0) > 1 && Boolean(sessionId);
+      const effort = normalizeEffortForBackend("antigravity", request.run.effort);
+      const args = compact([
+        "-p",
+        `${request.contract}\n\n${prompt}`,
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+        request.run.model ? "--model" : undefined,
+        request.run.model || undefined,
+        effort ? "--effort" : undefined,
+        effort,
+        isFollowUp ? "--conversation" : undefined,
+        isFollowUp ? sessionId : undefined,
+      ]);
+      return await spawnAndStream({
+        command: "agy",
+        args,
+        cwd: request.run.workspace.path,
+        env: { ...process.env, ...toolCacheEnv("agent", { workspace: request.run.workspace.path }) },
         request,
         emit,
       });
@@ -549,6 +596,8 @@ function sessionIdFromBackendData(data: unknown): string | undefined {
   if (data.type === "thread.started" && typeof data.thread_id === "string") {
     return data.thread_id;
   }
+  // `agy -p --output-format stream-json` names its conversation.
+  if (typeof data.conversation_id === "string") return data.conversation_id;
   // `opencode run --format json` stamps every part with its session id.
   return typeof data.sessionID === "string" ? data.sessionID : undefined;
 }

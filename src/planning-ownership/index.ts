@@ -112,7 +112,7 @@ function validateNodes(plan: OwnedPlan): void {
   for (const node of nodes) {
     insist(node && typeof node.id === "string" && /^[A-Za-z0-9_-]{1,100}$/u.test(node.id)
       && typeof node.title === "string" && node.title.trim() && typeof node.prompt === "string" && node.prompt.trim()
-      && ["claude", "codex", "acpx", "opencode"].includes(node.backend), "Invalid owned node");
+      && ["claude", "codex", "acpx", "opencode", "antigravity"].includes(node.backend), "Invalid owned node");
     validScope(node.scope);
     insist(node.scope.permissions.includes("edit"), "Implementation workers require explicit edit scope");
     insist(within(node.scope, plan.approval.scope), "Replan enlarges approved scope or execution location");

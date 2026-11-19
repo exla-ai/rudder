@@ -92,6 +92,7 @@ export type RudderConfig = {
     codex?: BackendConfig;
     acpx?: BackendConfig;
     opencode?: BackendConfig;
+    antigravity?: BackendConfig;
   };
   board?: {
     port?: number;
@@ -106,7 +107,7 @@ export type RudderConfig = {
 
 export const DEFAULT_BOARD_PORT = 4774;
 
-export type BackendId = "claude" | "codex" | "acpx" | "opencode";
+export type BackendId = "claude" | "codex" | "acpx" | "opencode" | "antigravity";
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 

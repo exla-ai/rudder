@@ -51,7 +51,7 @@ import {
 import { parseCompletionNoteArg, writeCompletionNoteFile } from "./surfaces.js";
 import type { CompletionNote } from "./surfaces.js";
 import type { BackendId } from "./types.js";
-import { commandExists, isTty, MissingToolError, newRunId, runCommand } from "./util.js";
+import { backendCommand, commandExists, isTty, MissingToolError, newRunId, runCommand } from "./util.js";
 import { autoUpdateAndRerunIfNeeded, getUpdateAvailable } from "./version-check.js";
 import { printReport } from "./report.js";
 import { applyCommandSurface, printCommandDiscovery } from "./operations/cli.js";
@@ -359,8 +359,8 @@ export async function main(): Promise<void> {
       });
       return;
     case "run": {
-      if (parsed.flags.backend && !commandExists(parsed.flags.backend)) {
-        throw new MissingToolError(parsed.flags.backend);
+      if (parsed.flags.backend && !commandExists(backendCommand(parsed.flags.backend))) {
+        throw new MissingToolError(backendCommand(parsed.flags.backend));
       }
       await maybeOnboard();
       const task = parsed.args.join(" ").trim();
@@ -844,8 +844,11 @@ function readValue(argv: string[], index: number, flag: string): string {
 }
 
 function normalizeBackend(value: string): BackendId {
-  if (value === "claude" || value === "codex" || value === "acpx" || value === "opencode") {
+  if (value === "claude" || value === "codex" || value === "acpx" || value === "opencode" || value === "antigravity") {
     return value;
+  }
+  if (value === "agy") {
+    return "antigravity";
   }
   throw new Error(`Unknown backend: ${value}`);
 }

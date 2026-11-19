@@ -165,8 +165,8 @@ function isInfrastructure(proc) {
 
 // An agent CLI itself: put to sleep through its dashboard, never killed.
 export function isAgentCli(proc) {
-  return /^(claude|codex|opencode)$/.test(proc.comm)
-    || /(^|\/)(claude|codex|opencode)( |$)/.test(proc.cmdline.split(" ")[0] ?? "")
+  return /^(claude|codex|opencode|agy)$/.test(proc.comm)
+    || /(^|\/)(claude|codex|opencode|agy)( |$)/.test(proc.cmdline.split(" ")[0] ?? "")
     || /\/claude\/versions\//.test(proc.cmdline);
 }
 

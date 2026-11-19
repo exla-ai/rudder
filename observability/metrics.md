@@ -48,7 +48,7 @@ start for every attribute set listed, so `increase()` sees the first event.
 | `rudder.home.disk.total` | gauge | By | `mount` = /workspace\|/ | `rudder_home_disk_total_bytes` |
 | `rudder.home.disk.free` | gauge | By | `mount` | `rudder_home_disk_free_bytes` |
 | `rudder.home.processes` | gauge | {process} | | `rudder_home_processes` |
-| `rudder.home.process.memory` | gauge | By | `group` = claude\|codex\|opencode\|dashboard\|supervisor\|mcp\|build\|node\|other | `rudder_home_process_memory_bytes` (RSS summed per group) |
+| `rudder.home.process.memory` | gauge | By | `group` = claude\|codex\|opencode\|antigravity\|dashboard\|supervisor\|mcp\|build\|node\|other | `rudder_home_process_memory_bytes` (RSS summed per group) |
 | `rudder.home.agents` | gauge | {agent} | `state` = working\|waiting\|idle\|asleep\|stopped | `rudder_home_agents` |
 | `rudder.home.projects` | gauge | {project} | | `rudder_home_projects` |
 | `rudder.home.supervisor.event_loop.delay` | gauge | s | `stat` = p50\|p99\|max | `rudder_home_supervisor_event_loop_delay_seconds` |
@@ -62,8 +62,8 @@ Agent `state` meanings: `working` (a live turn), `waiting` (live, asking the
 user), `idle` (live process, no turn), `asleep` (parked by the cleanup),
 `stopped` (no process: done, paused, failed).
 
-Process `group` rules (first match wins): agent CLIs (`claude`, `codex`,
-`opencode`, including Claude team members under `claude/versions/`), the
+Process `group` rules (first match wins): agent CLIs (`claude`, `codex`, `opencode`, `agy` as
+`antigravity`, including Claude team members under `claude/versions/`), the
 `rudder-native` dashboards, the supervisor (`/opt/rudder-worker/`), MCP
 helpers (`mcp` in the command line), builds (`rustc`, `cargo`, `cc1*`, `ld`,
 `tsc`, `esbuild`, `webpack`, `next build`, `vite build`, `go`, `gcc`, `clang`),

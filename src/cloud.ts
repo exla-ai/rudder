@@ -4329,7 +4329,7 @@ type CredentialCheck = { ok?: boolean; account?: string | null; detail?: string 
 type ParityRow = { tool: string; local: string | null; cloud: CredentialCheck | null; status: "match" | "missing" | "different" | "unknown"; fix?: string };
 
 async function localIdentities(): Promise<Record<string, string | null>> {
-  const [github, claude] = await Promise.all([
+  const [github, claude, antigravity] = await Promise.all([
     commandExists("gh")
       ? runCommand("gh", ["api", "user", "--jq", ".login"], { allowFailure: true }).then((r) => (r.code === 0 ? r.stdout.trim() || null : null))
       : Promise.resolve(null),
@@ -4342,6 +4342,10 @@ async function localIdentities(): Promise<Record<string, string | null>> {
             return null;
           }
         })
+      : Promise.resolve(null),
+    // agy names no account; it lists models only when signed in.
+    commandExists("agy")
+      ? runCommand("agy", ["models"], { allowFailure: true }).then((r) => (r.code === 0 && !/sign in/i.test(`${r.stdout}\n${r.stderr}`) ? "signed in" : null))
       : Promise.resolve(null),
   ]);
   const aws = commandExists("aws")
@@ -4356,7 +4360,7 @@ async function localIdentities(): Promise<Record<string, string | null>> {
   } catch {
     codex = null;
   }
-  return { github, claude, codex, opencode: await opencodeIdentity(), aws };
+  return { github, claude, codex, opencode: await opencodeIdentity(), antigravity, aws };
 }
 
 // The providers OpenCode holds credentials for, named as the home names them
@@ -4384,6 +4388,7 @@ const CREDENTIAL_FIXES: Record<string, string> = {
   claude: "run `rudder cloud`, then `/login` in a Claude pane there (the cloud keeps its own login)",
   codex: "run `rudder cloud`, then `$ codex login --device-auth` in the task pane there",
   opencode: "sign OpenCode in from the app's agent sign-in, or run `rudder cloud`, then `$ opencode providers login` in the task pane there",
+  antigravity: "run `rudder cloud`, then `$ agy` in the task pane there and sign in with Google",
   aws: "run `rudder cloud` in a repo here: it offers to copy your current ~/.aws into the vault",
 };
 
@@ -4393,7 +4398,7 @@ async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[
     client.request<{ home: { credentials?: Record<string, CredentialCheck> & { checkedAt?: string } } | null }>("/api/rudder/home", { method: "GET" }),
   ]);
   const cloud = home.home?.credentials ?? null;
-  const rows: ParityRow[] = (["github", "claude", "codex", "opencode", "aws"] as const).map((tool) => {
+  const rows: ParityRow[] = (["github", "claude", "codex", "opencode", "antigravity", "aws"] as const).map((tool) => {
     const remote = (cloud?.[tool] as CredentialCheck | undefined) ?? null;
     const mine = local[tool];
     if (!remote) {
@@ -4420,12 +4425,12 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
   if (problemsOnly && problems.length === 0) {
     return 0;
   }
-  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex", opencode: "OpenCode", aws: "AWS" })[tool] ?? tool;
+  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex", opencode: "OpenCode", antigravity: "Antigravity", aws: "AWS" })[tool] ?? tool;
   for (const row of problemsOnly ? problems : rows) {
     const here = row.local ?? "not logged in";
     const there = row.cloud ? (row.cloud.ok ? row.cloud.account ?? "logged in" : `not working (${row.cloud.detail ?? "unknown"})`) : "not checked yet";
     const mark = row.status === "match" ? "✓" : row.status === "unknown" ? "·" : row.status === "different" ? "⚠" : "✗";
-    process.stderr.write(`${mark} ${label(row.tool).padEnd(8)} here: ${here}   cloud: ${there}\n`);
+    process.stderr.write(`${mark} ${label(row.tool).padEnd(11)} here: ${here}   cloud: ${there}\n`);
     if (row.fix) {
       process.stderr.write(`    fix: ${row.fix}\n`);
     }

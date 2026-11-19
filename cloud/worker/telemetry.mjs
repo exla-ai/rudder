@@ -73,6 +73,7 @@ export function processGroup(proc) {
     const head = `${proc.comm} ${proc.cmdline.split(" ")[0] ?? ""}`;
     if (/codex/.test(head)) return "codex";
     if (/opencode/.test(head)) return "opencode";
+    if (/(^|\/)agy\b/.test(head)) return "antigravity";
     return "claude";
   }
   if (proc.comm === "rudder-native") return "dashboard";
@@ -85,7 +86,7 @@ export function processGroup(proc) {
 
 /** RSS bytes per group, plus the process count. */
 export function processMemoryByGroup(processes) {
-  const groups = Object.fromEntries(["claude", "codex", "opencode", "dashboard", "supervisor", "mcp", "build", "node", "other"].map((group) => [group, 0]));
+  const groups = Object.fromEntries(["claude", "codex", "opencode", "antigravity", "dashboard", "supervisor", "mcp", "build", "node", "other"].map((group) => [group, 0]));
   for (const proc of processes.values()) {
     groups[processGroup(proc)] += proc.rssMb * MB;
   }

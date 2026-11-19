@@ -596,8 +596,12 @@ function sessionIdFromBackendData(data: unknown): string | undefined {
   if (data.type === "thread.started" && typeof data.thread_id === "string") {
     return data.thread_id;
   }
-  // `agy -p --output-format stream-json` names its conversation.
-  if (typeof data.conversation_id === "string") return data.conversation_id;
+  // `agy -p --output-format stream-json` names its conversation in its init
+  // and result events ({"event":"init","init":{...}}).
+  if (typeof data.event === "string" && isRecord(data[data.event])) {
+    const body = data[data.event] as Record<string, unknown>;
+    if (typeof body.conversation_id === "string") return body.conversation_id;
+  }
   // `opencode run --format json` stamps every part with its session id.
   return typeof data.sessionID === "string" ? data.sessionID : undefined;
 }
@@ -717,6 +721,13 @@ function textFromBackendData(data: unknown, sawStreamingText: boolean): string {
   // OpenCode's error event: {"type":"error","error":{"name":"...","data":{"message":"..."}}}.
   if (record.type === "error" && isRecord(record.error) && isRecord(record.error.data) && typeof record.error.data.message === "string") {
     return record.error.data.message;
+  }
+  // agy: the whole reply arrives in its result event, with the error when the
+  // turn failed: {"event":"result","result":{"status":"SUCCESS","response":"..."}}.
+  if (record.event === "result" && isRecord(record.result)) {
+    const result = record.result;
+    const response = typeof result.response === "string" ? result.response : "";
+    return response || (typeof result.error === "string" ? result.error : "");
   }
   // opencode: text parts carry the assistant prose; step_start/step_finish do not.
   if (record.type === "text" && isRecord(record.part) && typeof record.part.text === "string") {

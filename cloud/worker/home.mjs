@@ -6,8 +6,9 @@
 // repo. This process:
 //   1. writes the vault (credentials, config) and persists agent state on the
 //      volume so conversations survive a stop/start,
-//   2. joins the user's tailnet (when the vault has TS_AUTHKEY) and publishes
-//      any dev server an agent starts as an HTTPS preview,
+//   2. joins the user's tailnet once they connect Tailscale from the app
+//      (tailscale-login.mjs) and publishes any dev server an agent starts as
+//      an HTTPS preview,
 //   3. keeps one control socket to the control plane: the repo list comes down,
 //      project state goes up, and the phone app's requests arrive as RPCs,
 //   4. bridges each repo's dashboard PTY to its workspace channel, so
@@ -32,7 +33,8 @@ import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
-import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
+import { runTailnetCommand } from "./tailscale-previews.mjs";
+import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
 import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
@@ -168,12 +170,17 @@ if (vault) {
 }
 acceptClaudeDialogs([]);
 
-const tailnet = { hostname: TS_HOSTNAME, dnsName: null, online: false, https: null, error: null };
-function tailnetOffline(message) {
-  Object.assign(tailnet, { online: false, error: message });
-  lastStateJson = "";
-  scheduleStateSoon();
-}
+// Tailscale, connected and disconnected from the app (tailscale-login.mjs).
+const tailscale = createTailscale({
+  socket: TS_SOCKET,
+  stateDir: path.join(PERSIST_HOME, ".tailscale"),
+  hostname: TS_HOSTNAME,
+  log,
+  onChange: () => {
+    lastStateJson = "";
+    scheduleStateSoon();
+  },
+});
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
@@ -227,9 +234,7 @@ let lastStateJson = "";
 let ports = []; // [{ port, pid, label, workspaceId|null }]
 
 connectControl();
-void startTailscale(vault?.env ?? {}).then(() => scanPorts()).catch((error) => {
-  tailnetOffline(`Tailscale could not start: ${error.code || "unavailable"}`);
-});
+void tailscale.boot().then(() => scanPorts()).catch((error) => log(`tailscale: ${error.message}`));
 void checkCredentials();
 void ensureRustToolchain().then(() => ensureGoToolchain());
 void ensureAwsTooling().then(() => checkCredentials());
@@ -269,6 +274,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     log(`received ${signal}; stopping dashboards`);
     logins.dispose();
+    tailscale.dispose();
     vibeprint.stopAll();
     for (const project of projects.values()) {
       project.stop();
@@ -834,6 +840,13 @@ async function handleRpc(method, params) {
   }
   if (method === "agentSetup") {
     return (await agentSetupService()).handle(params.request);
+  }
+  // The app's Tailscale step: Connect answers with the sign-in link.
+  if (method === "tailscaleConnect") {
+    return await tailscale.connect();
+  }
+  if (method === "tailscaleDisconnect") {
+    return await tailscale.disconnect();
   }
   const project = projects.get(params.workspaceId);
   if (!project) {
@@ -1556,7 +1569,7 @@ async function publishState() {
         .map(({ port, url, id }) => ({ port, label: "Project preview", url, https: true, access: "tailnet", previewId: id })),
     });
   }
-  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot(), host: hostInfo(process.env) };
+  const state = { type: "state", projects: list, tailnet: { ...tailscale.snapshot(), https: ports.length ? true : null }, credentials, logins: logins.snapshot(), host: hostInfo(process.env) };
   const json = JSON.stringify(state);
   if (json === lastStateJson) {
     return;
@@ -1777,9 +1790,7 @@ async function scanPorts() {
   await service.reconcile([...projects.values()].filter(project => project.status !== "cloning"));
   ports = [...projects.values()].flatMap(project => service.snapshot(project.workspaceId));
   // Read-only status does not share the superseded Serve writer or infer roles.
-  const status = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET, timeoutMs: 1500 });
-  let value = null; try { value = JSON.parse(status.stdout); } catch { /* offline */ }
-  Object.assign(tailnet, tailnetStatus(value, TS_HOSTNAME), { https: ports.length ? true : null });
+  await tailscale.refresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -2183,61 +2194,6 @@ function readPreviewPorts() {
   catch { return []; }
 }
 
-async function startTailscale(env) {
-  const authKey = (env.TS_AUTHKEY || "").trim();
-  const stateDir = path.join(PERSIST_HOME, ".tailscale");
-  const hasState = fs.existsSync(stateDir) && fs.readdirSync(stateDir).length > 0;
-  if (!authKey && !hasState) {
-    tailnetOffline("Add TS_AUTHKEY to the vault to enable private previews");
-    return;
-  }
-  if (!commandExists("tailscaled")) {
-    tailnet.error = "tailscale is not installed in this image";
-    log("tailscale: not installed");
-    return;
-  }
-  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  const daemon = spawn("tailscaled", [
-    "--tun=userspace-networking",
-    `--statedir=${stateDir}`,
-    `--socket=${TS_SOCKET}`,
-    "--port=41641",
-  ], { stdio: ["ignore", "ignore", "pipe"], detached: false });
-  daemon.stderr.on("data", () => undefined);
-  daemon.on("error", () => tailnetOffline("tailscaled could not start"));
-  daemon.on("exit", (code) => {
-    tailnetOffline(`tailscaled exited (${code})`);
-    log(`tailscaled exited (${code})`);
-  });
-  for (let attempt = 0; attempt < 50 && !fs.existsSync(TS_SOCKET); attempt += 1) {
-    await sleep(100);
-  }
-  // The node key persists on the volume, so after the first boot this rejoins
-  // as the same device without spending the auth key again.
-  const existing = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET });
-  let authenticated = false;
-  try { authenticated = JSON.parse(existing.stdout)?.BackendState === "Running"; } catch { /* no login yet */ }
-  if (!authenticated && !authKey) {
-    tailnetOffline("Tailscale needs login; refresh TS_AUTHKEY in the vault");
-    return;
-  }
-  const up = await runTailnetCommand([
-    "up",
-    ...(authKey ? [`--authkey=${authKey}`] : []),
-    `--hostname=${TS_HOSTNAME}`,
-    "--accept-dns=false",
-  ], { socket: TS_SOCKET, timeoutMs: 60_000 });
-  if (up.code !== 0) {
-    const detail = firstLine(up.stderr || up.stdout || "tailscale up failed");
-    tailnet.error = authKey ? detail.replaceAll(authKey, "[redacted]") : detail;
-    log(`tailscale up failed: ${tailnet.error}`);
-    return;
-  }
-  // Serve publication is performed only by the registered-process directory.
-  await scanPorts();
-  log(`tailscale up as ${tailnet.dnsName || tailnet.hostname}`);
-}
-
 // ---------------------------------------------------------------------------
 // Boot helpers.
 // ---------------------------------------------------------------------------
@@ -2542,10 +2498,6 @@ function run(command) {
 
 function shSoft(command) {
   spawnSync("sh", ["-c", command], { stdio: "inherit" });
-}
-
-function commandExists(name) {
-  return spawnSync("sh", ["-c", `command -v ${name}`], { stdio: "ignore" }).status === 0;
 }
 
 function q(value) {

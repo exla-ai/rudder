@@ -356,6 +356,16 @@ helpers. Open: a backup of the key (the secret is the only copy since a
 machine update deleted `~/.rudder-sparkle-ed25519` on 2026-11-19), and a
 server-side web app version so the Mac app can reload after a Cloud deploy.
 
+Tailscale is a step in the app (Settings and the Get set up card), on main and
+not released yet. Connect starts `tailscaled` on the home when it is not
+running and runs `tailscale up` with no auth key; the app opens the
+login.tailscale.com link it prints and the step turns connected once status
+says Running (`cloud/worker/tailscale-login.mjs`, `cloud/app/tailscale-step.js`).
+A tailnet that approves new devices shows Needs approval until an admin does.
+Disconnect is `tailscale logout`. The node key stays on the volume, so a
+restart rejoins with no new login. TS_AUTHKEY is no longer read. Homes get it
+with the next worker image.
+
 OpenCode (`opencode`, pinned at 1.19.5 in the worker image) is a full agent
 harness: the dashboard, the CLI, Cloud homes and the phone app start, resume,
 fork and read it, and chats move to and from it. Rudder's plugin

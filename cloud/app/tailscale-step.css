@@ -1,0 +1,7 @@
+/* Tailscale on the cloud machine (tailscale-step.js). The row reuses .acct and
+   the sheet reuses the sign-in sheet's .ls-* parts from styles.css. */
+.ts-icon svg { width: 18px; height: 18px; }
+/* State text never hides behind an ellipsis: it is the point of the row. */
+.ts-row .a-sub { white-space: normal; }
+.ts-addr { font-family: var(--mono); white-space: nowrap; }
+.ts-sheet .ts-approve { color: var(--ink-2); }

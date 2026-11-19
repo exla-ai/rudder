@@ -15,6 +15,8 @@
 // /app/__mock/update/<ok|fail> (how the next Update now of an old machine goes: home-update.js),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
+// /app/__mock/tailscale/<on|off|login|approval|connecting|error|expired> (the Tailscale step's states), and
+// /app/__mock/tailscale-flow/<ok|approval|refused> (how the next Connect goes),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
 // /app/__mock/invite (prints a join link), /app/__mock/files/agent-edit (an agent rewrites README.md
 // in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack and a plan are mocked too,
@@ -110,6 +112,21 @@ const coordinatorHealth = () => ({
 });
 const T0 = now();
 
+// Tailscale on the machine (tailscale-step.js, worker tailscale-login.mjs).
+let tailscaleMode = "on";
+let tailscaleFlow = "ok";
+let tailscaleLogin = null;
+const tailnet = () => {
+  const off = { hostname: "rudder-home", dnsName: null, online: false, https: null, backendState: homeMode === "running" ? "NeedsLogin" : null, tailnetName: null, error: null, login: tailscaleLogin };
+  if (homeMode !== "running") return off;
+  if (tailscaleMode === "on") return { ...off, dnsName: "rudder-home.tail4c2e1.ts.net", online: true, https: true, backendState: "Running", tailnetName: "example.com" };
+  if (tailscaleMode === "approval") return { ...off, backendState: "NeedsMachineAuth" };
+  if (tailscaleMode === "connecting") return { ...off, backendState: "Starting" };
+  if (tailscaleMode === "error") return { ...off, backendState: null, error: "tailscaled exited (1): listen udp4 :41641: bind: address already in use" };
+  return off;
+};
+const tailscaleSession = (status, error = null) => ({ id: `ts-${now().toString(36)}`, status, error, startedAt: iso(now()), endedAt: status === "failed" ? iso(now()) : null });
+
 const home = () => homeMode === "none" ? null : ({
   id: "ws_home_7f3a",
   status: homeMode,
@@ -124,7 +141,7 @@ const home = () => homeMode === "none" ? null : ({
   updateError,
   activeAgents: projects.reduce((n, p) => n + p.agents.filter((a) => a.status === "working").length, 0),
   lastActivityAt: iso(now() - 2 * MIN),
-  tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail4c2e1.ts.net", online: homeMode === "running", https: true },
+  tailnet: tailnet(),
   credentials: homeMode === "running" ? { ...creds, github: githubConnected ? { ok: true, account: "viraatdas", detail: null } : { ok: false, account: null, detail: "no GitHub token in the vault" }, checkedAt: iso(now()) } : null,
   logins,
 });
@@ -1032,6 +1049,20 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { Location: "/app" });
     return res.end();
   }
+  if (p.startsWith("/app/__mock/tailscale/")) {
+    tailscaleMode = p.split("/").pop();
+    tailscaleLogin = tailscaleMode === "login" ? tailscaleSession("waiting")
+      : tailscaleMode === "expired" ? tailscaleSession("failed", "The sign-in link was not used within 10 minutes, so it expired. Connect again for a new one.") : null;
+    res.writeHead(302, { Location: "/app/settings" });
+    return res.end();
+  }
+  if (p.startsWith("/app/__mock/tailscale-flow/")) {
+    tailscaleFlow = p.split("/").pop();
+    tailscaleMode = "off";
+    tailscaleLogin = null;
+    res.writeHead(302, { Location: "/app/settings" });
+    return res.end();
+  }
   if (p === "/app/__mock/fresh") {
     creds = CREDS.out();
     githubConnected = false;
@@ -1442,6 +1473,41 @@ const server = http.createServer(async (req, res) => {
         codeUrl: provider === "claude" ? "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=mock" : null,
         userCode: device ? "1QX5-T3MAL" : null,
       });
+    }
+    // Tailscale: the machine's `tailscale up` hands back a sign-in link, then
+    // finishes on its own (tailscale-login.mjs); tailscale-flow/ picks how.
+    if (p === "/api/app/tailscale/connect") {
+      if (homeMode !== "running") {
+        if (homeMode !== "queued") { homeMode = "queued"; setTimeout(() => { homeMode = "running"; }, 5000); }
+        return json(res, 503, { error: "the cloud machine is still starting; try again in a moment" });
+      }
+      const url = "https://login.tailscale.com/a/1f2e3d4c5b6a";
+      if (tailscaleMode === "on") return json(res, 200, { ...tailscaleSession("done"), url: null });
+      if (tailscaleLogin && (tailscaleLogin.status === "waiting" || tailscaleLogin.status === "approval")) return json(res, 200, { ...tailscaleLogin, url });
+      await delay(900);
+      const login = tailscaleSession("waiting");
+      tailscaleLogin = login;
+      tailscaleMode = "login";
+      const finish = (status, error = null) => {
+        if (tailscaleLogin !== login) return;
+        Object.assign(login, { status, error, endedAt: iso(now()) });
+        tailscaleMode = status === "done" ? "on" : "off";
+      };
+      setTimeout(() => {
+        if (tailscaleLogin !== login || login.status !== "waiting") return;
+        if (tailscaleFlow === "refused") return finish("failed", "backend error: this tailnet does not allow new devices right now");
+        if (tailscaleFlow !== "approval") return finish("done");
+        login.status = "approval";
+        tailscaleMode = "approval";
+        setTimeout(() => finish("done"), 8000);
+      }, 7000);
+      return json(res, 200, { ...login, url });
+    }
+    if (p === "/api/app/tailscale/disconnect") {
+      await delay(600);
+      tailscaleMode = "off";
+      tailscaleLogin = null;
+      return json(res, 200, tailnet());
     }
     if (p === "/api/app/login/finish") {
       const login = logins[body.provider];

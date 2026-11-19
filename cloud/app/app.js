@@ -34,6 +34,7 @@ import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
 import { ALL_PATH, AllAgentsScreen, allAgentPath, allAgentsButton, coordinatorTool } from "/app/all-agents.js";
+import { TailscaleRow, tailscaleState } from "/app/tailscale-step.js";
 
 function dayLabel(ms) {
   const d = new Date(ms), now = new Date();
@@ -161,6 +162,8 @@ Object.assign(app, {
   backendLabel: (a) => backendLabel(a),
   // org.js: Settings lists the same Claude Code / Codex rows as the home screen.
   accountsCard: () => AccountsCard(),
+  // tailscale-step.js: Tailscale's sign-in page, the way agent sign-ins open theirs.
+  openSignInPage: (url) => openSignInPage(url),
 });
 
 // The Mac shell posts a notification when an agent newly needs you (the
@@ -2590,11 +2593,15 @@ function SetupCard() {
     list.appendChild(row);
     rows.set(agent.id, row);
   }
+  // Tailscale is a step of its own (tailscale-step.js).
+  const tailscale = TailscaleRow({ setup: true });
+  list.appendChild(tailscale.el);
   function update(s) {
     if (ls.get(SETUP_DONE_KEY)) { el.hidden = true; return; }
     const home = s?.home;
     const st = Object.fromEntries(AGENTS.map((x) => [x.id, agentLoginState(home, x.id)]));
-    if (AGENTS.every((x) => st[x.id].kind === "ok")) { ls.set(SETUP_DONE_KEY, true); el.hidden = true; return; }
+    if (AGENTS.every((x) => st[x.id].kind === "ok") && tailscaleState(home).kind === "connected") { ls.set(SETUP_DONE_KEY, true); el.hidden = true; return; }
+    tailscale.update(home);
     // A machine that is up but has not reported its logins yet: wait for it.
     el.hidden = !!home?.connected && !home.credentials;
     for (const [id, row] of rows) {

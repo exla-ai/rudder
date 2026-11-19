@@ -9,6 +9,7 @@ import { app, api, ls, PLATFORM, rel, confirmDialog, openSheet, openExternal, sh
 import { DOWNLOAD_MAC_URL } from "/app/onboarding.js";
 import { dropdown } from "/app/select.js";
 import { planUsageShown, setPlanUsageShown } from "/app/agent-stats.js";
+import { TailscaleCard } from "/app/tailscale-step.js";
 
 const ROLE_LABEL = { admin: "Admin", member: "Member" };
 const SCOPE_KEY = "rudder.org";
@@ -184,11 +185,15 @@ export function SettingsScreen() {
   const agentsSec = section("Agents");
   const agentsCard = app.accountsCard?.();
   if (agentsCard) agentsSec.body.appendChild(agentsCard.el);
+  // Tailscale on the cloud machine: connect, or disconnect (tailscale-step.js).
+  const tailscaleSec = section("Tailscale");
+  const tailscaleCard = TailscaleCard();
+  tailscaleSec.body.appendChild(tailscaleCard.el);
   const scopeSec = section("Workspace");
   const orgSec = section("Organization");
   const intSec = section("Integrations");
   const more = h(`<div class="section set-foot"></div>`);
-  body.append(account.el, look.el, agentsSec.el, scopeSec.el, orgSec.el, intSec.el, more);
+  body.append(account.el, look.el, agentsSec.el, tailscaleSec.el, scopeSec.el, orgSec.el, intSec.el, more);
 
   // Account: who, where the agents run, sign-in helpers.
   const kvs = h(`<div class="card set-kvs"></div>`);
@@ -216,8 +221,8 @@ export function SettingsScreen() {
     const s = app.store?.state || {};
     const home = s.home;
     agentsCard?.update(home);
+    tailscaleCard.update(home);
     const rows = [["Account", s.email || "Signed in"], ["Cloud machine", home ? app.machineLabel?.(home)?.label || home.status : "None"]];
-    if (home?.tailnet?.dnsName) rows.push(["Tailscale", home.tailnet.dnsName]);
     const gh = app.githubState?.(s);
     if (gh) rows.push(["GitHub", gh.kind === "ok" ? gh.sub.replace(/^Connected as /, "") : "Not connected"]);
     if (PLATFORM) rows.push(["App", PLATFORM === "mac" ? "Mac" : "iOS"]);

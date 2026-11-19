@@ -1146,8 +1146,15 @@ brain lives in the cloud, and the phone is a first-class client.
   (`~/.claude/hooks` is synced and chmodded +x, the vault keeps no modes), and a
   hook whose command starts with an absolute path still missing here is dropped.
 - **Tailscale.** userspace `tailscaled` as the non-root user, state on the volume,
-  `--hostname=rudder-home`. Listening ports (from `/proc/net/tcp*`, owner pid ->
-  cwd -> project) that are not Rudder/agent processes get `tailscale serve --https`;
+  `--hostname=rudder-home`. The app's Tailscale step joins the tailnet
+  (`tailscale-login.mjs`, `cloud/app/tailscale-step.js`): Connect starts
+  `tailscaled` when it is not answering and runs `tailscale up` with no auth
+  key; the sign-in link it prints goes only to the request that asked, and the
+  state reports `backendState`, the tailnet name and the sign-in's status.
+  Disconnect is `tailscale logout`. A boot with `tailscaled.state` on the
+  volume starts `tailscaled` again and rejoins with no new login. Listening
+  ports (from `/proc/net/tcp*`, owner pid -> cwd -> project) that are not
+  Rudder/agent processes get `tailscale serve --https`;
   if HTTPS certs are off on the tailnet the link falls back to plain http (userspace
   mode forwards tailnet connections to 127.0.0.1).
 - **Remote Control.** `RUDDER_REMOTE_CONTROL=1` (set by the supervisor) makes

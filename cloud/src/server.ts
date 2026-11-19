@@ -7569,6 +7569,15 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await openCoordinatorOnHome(account.accountId));
     return;
   }
+  // Tailscale on the cloud machine (cloud/worker/tailscale-login.mjs). Connect
+  // runs `tailscale up` there and answers with its sign-in link, waking the
+  // machine first; Disconnect is `tailscale logout`.
+  if (req.method === "POST" && (url.pathname === "/api/app/tailscale/connect" || url.pathname === "/api/app/tailscale/disconnect")) {
+    const live = await homeWithControl(account.accountId);
+    const method = url.pathname.endsWith("/connect") ? "tailscaleConnect" : "tailscaleDisconnect";
+    sendJson(res, 200, await homeRpc(live.id, method, {}, 90_000));
+    return;
+  }
   // Add project: the GitHub repos the home machine's login can open, and
   // creating a new one. Both run on the home machine (it holds the GitHub
   // token), so a sleeping machine is woken first.

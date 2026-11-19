@@ -269,6 +269,7 @@ COPY cloud/worker/plan.mjs ./plan.mjs
 COPY cloud/worker/theme.mjs ./theme.mjs
 COPY cloud/worker/terminal-transport.mjs ./terminal-transport.mjs
 COPY cloud/worker/tailscale-previews.mjs ./tailscale-previews.mjs
+COPY cloud/worker/tailscale-login.mjs ./tailscale-login.mjs
 COPY cloud/worker/cache-env.sh ./cache-env.sh
 COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 COPY cloud/worker/steer-inbox.mjs ./steer-inbox.mjs

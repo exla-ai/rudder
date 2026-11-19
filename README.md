@@ -603,9 +603,9 @@ reach an agent (a menu is open in its pane) says so instead of vanishing. Claude
 panes in the cloud also run with Remote Control, so they appear in the Claude
 app too.
 
-**Previews.** Enroll the home machine with a Tailscale auth key in the vault
-(`rudder cloud secrets set TS_AUTHKEY`). It reuses its persisted login on later
-boots. Connect your laptop to the same tailnet and run `rudder cloud preview`
+**Previews.** Connect Tailscale from the app (Settings, or the Get set up card):
+sign in on the link it opens and the cloud machine joins your tailnet. It keeps
+that login on later boots. Connect your laptop to the same tailnet and run `rudder cloud preview`
 from the project to open its ready dev server, or `rudder cloud preview --list`
 to inspect the links. Pass a port when several servers are running.
 

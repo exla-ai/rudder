@@ -1,6 +1,7 @@
-// The chat's subagent tray: every subagent and teammate the agent started,
-// running and finished, in one strip above the composer, so they stay in reach
-// without scrolling up to their cards (cloud/worker/subagents.mjs, GET
+// The chat's subagent tray: the subagents and teammates the agent has running
+// right now (finished ones stay as the chat's cards), in one strip above the
+// composer, so they stay in reach without scrolling up to their cards
+// (cloud/worker/subagents.mjs, GET
 // /api/app/subagents). Each entry says what the chat's card says, live: status,
 // title, kind and name, how long and tool calls (subagents.js subagentFacts).
 // An entry opens that subagent's activity in the tray, painted as the card's is
@@ -104,8 +105,9 @@ export function mountSubagentTray({ workspace, run }) {
   }
 
   function paint() {
-    const running = list.filter((s) => s.status === "running").length;
-    button.hidden = !list.length && !outdated;
+    const running = list.length;
+    // One that finished while open stays until Back.
+    button.hidden = !running && !outdated && !open;
     if (button.hidden) shown = false;
     el.hidden = !shown;
     button.classList.toggle("live", running > 0);
@@ -182,7 +184,7 @@ export function mountSubagentTray({ workspace, run }) {
       const query = `workspace=${encodeURIComponent(workspace)}&run=${encodeURIComponent(run)}${asked ? `&open=${encodeURIComponent(asked)}` : ""}`;
       const r = await api(`/api/app/subagents?${query}`);
       if (destroyed) return;
-      list = r.subagents;
+      list = r.subagents.filter((s) => s.status === "running");
       error = null;
       outdated = false;
       updater?.destroy();
@@ -215,13 +217,13 @@ export function mountSubagentTray({ workspace, run }) {
     if (destroyed) return;
     paint();
     if (again) { again = false; poll(); return; }
-    const live = open || list.some((s) => s.status === "running");
+    const live = open || list.length > 0;
     timer = setTimeout(tick, live ? POLL_LIVE_MS : POLL_IDLE_MS);
   }
   const tick = () => { if (document.hidden) timer = setTimeout(tick, POLL_IDLE_MS); else poll(); };
   // Running time counts up between polls.
   const clock = setInterval(() => {
-    if (!document.hidden && shown && list.some((s) => s.status === "running")) paint();
+    if (!document.hidden && shown && list.length) paint();
   }, 1000);
   const onVisible = () => { if (!document.hidden) poll(); };
   document.addEventListener("visibilitychange", onVisible);

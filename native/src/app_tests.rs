@@ -1121,7 +1121,10 @@ fn question_mark_alone_at_bottom_triggers_input_need() {
     let lines: Vec<String> = vec![
         "What should I name the new module?".to_string(),
         String::new(),
-        String::new(),
+        "────────────────────────────────────────".to_string(),
+        "❯ ".to_string(),
+        "────────────────────────────────────────".to_string(),
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)".to_string(),
         String::new(),
     ];
     assert!(terminal_needs_user_input_from_lines(
@@ -30439,6 +30442,52 @@ fn a_long_agent_list_hides_neither_an_interrupt_nor_a_working_lead() {
         Backend::Claude,
         &claude_2_1_328_idle_lead_with_agents()
     ));
+}
+
+/// Claude 2.1.328 at rest with two teammates listed under its footer
+/// (captured), the second described as a question.
+fn claude_2_1_328_lead_with_a_questioning_teammate(reply: &[&str]) -> Vec<String> {
+    let mut rows = vec![
+        "● Alpha has also gone idle with its result, \"ok\", so both teammates are done. There is nothing",
+        "  pending from them and no request to act on.",
+        "",
+    ];
+    rows.extend_from_slice(reply);
+    rows.extend_from_slice(&[
+        "───────────────────────────────────────────────── View teammates: `tmux -L claude-swarm-3816027 a` ─",
+        "❯",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "",
+        "  ⏵⏵ bypass permissions on · 1 monitor · ↓ to manage",
+        "",
+        "  ● main",
+        "  ◯ alpha  Check the build                                                                   1m 2s",
+        "  ◯ beta   Which would you pick?                                                             1m 2s",
+    ]);
+    rows.iter().map(|line| line.to_string()).collect()
+}
+
+#[test]
+fn a_leads_closing_question_is_read_above_its_composer_not_from_its_agent_list() {
+    // At rest after a plain report: beta's description is not the lead's
+    // question, also when beta alone is listed and the footer is near the bottom.
+    let told = claude_2_1_328_lead_with_a_questioning_teammate(&[]);
+    assert!(!terminal_needs_user_input_from_lines(Backend::Claude, &told));
+    let beta_only: Vec<String> = told.iter().filter(|row| !row.contains("alpha")).cloned().collect();
+    assert!(!terminal_needs_user_input_from_lines(Backend::Claude, &beta_only));
+
+    let asked = claude_2_1_328_lead_with_a_questioning_teammate(&[
+        "❯ Do not use any tools. Reply with two short lines: first \"Both teammates are done.\", then exactly:",
+        "  Should I merge the parser branch now?",
+        "",
+        "● Both teammates are done.",
+        "  Should I merge the parser branch now?",
+        "",
+    ]);
+    assert!(terminal_needs_user_input_from_lines(Backend::Claude, &asked));
+    // With only alpha listed, nothing on the bottom rows asks anything.
+    let alpha_only: Vec<String> = asked.iter().filter(|row| !row.contains("beta")).cloned().collect();
+    assert!(terminal_needs_user_input_from_lines(Backend::Claude, &alpha_only));
 }
 
 /// Claude 2.1.318 mid-turn, as the libra "bild" agent showed it while its row

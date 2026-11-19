@@ -299,16 +299,11 @@ pub(crate) fn recent_agent_lines(backend: Backend, lines: &[String], take: usize
         .collect()
 }
 
-/// True when the pane looks like the backend sitting at rest rather than
-/// mid-output — the precondition for reading a trailing line as a question.
-///
-/// This was one rule for all three backends: "the last few rows are blank". That
-/// holds for Claude and opencode, whose composers leave empty rows beneath them,
-/// and never for Codex, which pins a status bar to the last row. So a Codex agent
-/// asking a question failed this gate on every single tick and could not be shown
-/// as waiting — and at the time Codex's `notify` reported turn-end and nothing
-/// else (its lifecycle hooks are wired now, see signals.rs), so no second source
-/// existed to catch it either. Its own idle chrome is the tell.
+/// True when an opencode pane looks like it is sitting at rest rather than
+/// mid-output, the precondition for reading a trailing line as a question:
+/// blank rows under its composer, or its idle footer in the bottom rows.
+/// Claude and Codex are at rest when their composer is found
+/// (`rows_above_composer`).
 pub(crate) fn cursor_at_rest(backend: Backend, lines: &[String]) -> bool {
     let tail_blank = lines
         .iter()
@@ -326,8 +321,14 @@ pub(crate) fn cursor_at_rest(backend: Backend, lines: &[String]) -> bool {
 }
 
 pub(crate) fn terminal_needs_user_input_from_lines(backend: Backend, lines: &[String]) -> bool {
-    // The most recent lines the AGENT wrote, newest first.
-    let recent_rev = recent_agent_lines(backend, lines, 6);
+    // The most recent lines the AGENT wrote, newest first. Claude and Codex
+    // ask at their composer, so these are the rows above it: counted from the
+    // screen's bottom, Claude 2.1.328's agent list under its footer stood in
+    // for them, so a lead's closing question was never seen and a teammate
+    // described as "Which would you pick?" read as one. Their question menus
+    // take the composer's place and report through hooks (signals.rs) and the
+    // Codex rollout instead.
+    let recent_rev = recent_agent_lines(backend, rows_above_composer(backend, lines), 6);
     if recent_rev.is_empty() {
         return false;
     }
@@ -343,10 +344,17 @@ pub(crate) fn terminal_needs_user_input_from_lines(backend: Backend, lines: &[St
     if recent_rev.iter().any(|line| looks_busy(line)) {
         return false;
     }
+    // "What should Claude do instead?" is the interrupt receipt, which
+    // `terminal_interrupted_from_lines` owns.
+    if backend == Backend::Claude && looks_like_interrupt_receipt(last) {
+        return false;
+    }
 
-    // Is the backend parked at its composer, or still emitting? Only an explicit
-    // numbered selection menu overrides a "still emitting" read.
-    let cursor_near_bottom = cursor_at_rest(backend, lines);
+    // Is the backend parked at its composer, or still emitting? A Claude or
+    // Codex composer on screen is the answer; opencode's has no anchor, so its
+    // bottom rows are read. Only an explicit numbered selection menu overrides
+    // a "still emitting" read.
+    let cursor_near_bottom = backend != Backend::Opencode || cursor_at_rest(backend, lines);
     if !cursor_near_bottom && !has_numbered_menu_pattern(&recent_rev) {
         return false;
     }

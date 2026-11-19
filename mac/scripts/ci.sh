@@ -46,7 +46,7 @@ install_tools() {
     4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
   fetch https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-apple-darwin.tar.gz uv.tar.gz \
     81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731
-  unzip -q xcodegen.zip
+  unzip -q -o xcodegen.zip
   tar xzf uv.tar.gz
   # dmgbuild needs Python 3.10 or newer; the Mac ships 3.9.
   uv-aarch64-apple-darwin/uv python install 3.12
@@ -96,7 +96,7 @@ case "$stage" in
   check)
     install_tools
     use_tools
-    xcodebuild -version | head -1
+    xcodebuild -version | sed -n 1p
     echo "xcodegen $(xcodegen --version), $(python3 --version)"
     cd mac
     xcodegen generate --quiet

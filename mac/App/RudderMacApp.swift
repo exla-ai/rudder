@@ -38,8 +38,8 @@ struct RudderMacApp: App {
             // One window: no File > New Window.
             CommandGroup(replacing: .newItem) {}
             // Edit > Find, as in Safari: the page's find bar (Find.swift). The
-            // items stay enabled (commands do not follow the model's changes);
-            // without a page they beep.
+            // items stay enabled because the web view is not observed, so a
+            // disabled state would never follow it; without a page they beep.
             CommandGroup(replacing: .textEditing) {
                 Menu("Find") {
                     Button("Find…") {

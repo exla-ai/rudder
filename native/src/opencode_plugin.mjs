@@ -1,6 +1,7 @@
 // Rudder's OpenCode plugin. The dashboard loads it into every OpenCode agent
-// it runs, through the run's OPENCODE_CONFIG (signals.rs), and says what for
-// in the environment:
+// it runs, through the run's OPENCODE_CONFIG (signals.rs) or the launch's
+// OPENCODE_CONFIG_CONTENT (launch.rs opencode_tui), and says what for in the
+// environment:
 //
 //   RUDDER_OPENCODE_SIGNAL        the run's signal file (signals.rs): done when
 //                                 the agent's own session goes idle, error,
@@ -16,8 +17,13 @@
 //                                 opens with --session (its TUI ignores
 //                                 --prompt then), or without one into the
 //                                 first session created, a --fork
-//   RUDDER_OPENCODE_MODEL, RUDDER_OPENCODE_AGENT, RUDDER_OPENCODE_VARIANT
-//                                 what that message runs on
+//   RUDDER_OPENCODE_AGENT         the agent that message runs on
+//   RUDDER_OPENCODE_MODEL         the run's model, provider/model
+//   RUDDER_OPENCODE_VARIANT       the run's effort: every message on the run's
+//                                 model runs at this variant. OpenCode's TUI
+//                                 otherwise sends the variant it last used
+//                                 with the model in any session (its
+//                                 model.json), whatever the config says.
 //
 // It only writes files: anything it printed would land on OpenCode's screen.
 // Measured on OpenCode 1.19.5: a subagent's session goes idle before its
@@ -206,6 +212,15 @@ export const RudderAgent = async ({ client }) => {
   }
 
   return {
+    // Every user message, before OpenCode saves it and runs it: on the run's
+    // own model it runs at the run's effort. Another model the user picked
+    // in the pane keeps its own variant.
+    "chat.message": async (_input, output) => {
+      const model = output?.message?.model;
+      if (env.RUDDER_OPENCODE_VARIANT && model && `${model.providerID}/${model.modelID}` === env.RUDDER_OPENCODE_MODEL) {
+        model.variant = env.RUDDER_OPENCODE_VARIANT;
+      }
+    },
     event: async ({ event }) => {
       const type = event?.type;
       const props = event?.properties ?? {};

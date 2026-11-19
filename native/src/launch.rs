@@ -694,9 +694,10 @@ fn build_agent_command(
 ///
 /// opencode has no headless streaming mode Rudder can parse (no `claude -p
 /// --output-format stream-json`, no `codex exec --json`), so planner modes run the
-/// same TUI and Rudder reads their RUDDER_PLAN_TASKS block out of the pane text —
+/// same TUI and Rudder reads their RUDDER_PLAN_TASKS block out of the pane text,
 /// the same path the interactive orchestrator already uses. Planners are launched
-/// WITHOUT `--auto` so an unexpected edit stops for approval rather than landing.
+/// without `--auto` and follow OpenCode's own permission config (1.19.5 asks for
+/// nothing by default).
 pub(crate) fn opencode_command(
     model: &str,
     effort: Option<EffortLevel>,
@@ -738,17 +739,21 @@ pub(crate) struct OpencodeFirstMessage<'a> {
 
 /// An OpenCode TUI on `model` at `effort`.
 ///
-/// OpenCode runs a model at an effort through the model's variant of that name
-/// (`opencode models --verbose` lists each model's; models.rs
-/// cached_model_efforts). Its TUI has no flag for one: an agent's configured
-/// `variant` applies when the agent runs its configured model, so the launch
-/// names both through OPENCODE_CONFIG_CONTENT, which OpenCode merges over the
-/// user's config. Rudder's agents run its build agent. src/opencode.ts builds
-/// the same config for CLI-started panes.
+/// Both an effort and a first message go through Rudder's plugin
+/// (opencode_plugin.mjs), loaded by OPENCODE_CONFIG_CONTENT, which OpenCode
+/// merges over the user's config, from where the dashboard installs it at
+/// start. A worker's own OPENCODE_CONFIG loads the plugin too (signals.rs);
+/// it runs once.
 ///
-/// A first message goes through Rudder's plugin (opencode_plugin.mjs), loaded
-/// by the same config from where the dashboard installs it at start. A worker's
-/// own OPENCODE_CONFIG loads the plugin too (signals.rs); it runs once.
+/// - An effort is the model's variant of that name (`opencode models
+///   --verbose` lists each model's; models.rs cached_model_efforts). The TUI
+///   has no flag for one and sends the variant it last used with the model in
+///   any session, whatever the config says (measured on 1.19.5), so the
+///   plugin sets the run's on every message on the run's model.
+/// - A first message into a session the TUI opens (it ignores `--prompt`
+///   then) is sent by the plugin, on the build agent, Rudder's agents' own.
+///
+/// src/opencode.ts builds the same environment for CLI-started panes.
 fn opencode_tui(
     args: Vec<String>,
     model: &str,
@@ -757,31 +762,31 @@ fn opencode_tui(
 ) -> TerminalCommand {
     let model = model.trim();
     let mut command = TerminalCommand::with_args(opencode_program(), args);
-    let mut config = serde_json::Map::new();
-    if let (Some(effort), false) = (effort, model.is_empty()) {
-        config.insert(
-            "agent".to_string(),
-            serde_json::json!({ "build": { "model": model, "variant": effort.as_str() } }),
-        );
-    }
+    let effort = effort.filter(|_| !model.is_empty());
     let first = first.filter(|first| !first.text.trim().is_empty());
-    if let (Some(first), Some(plugin)) = (first, signals::opencode_plugin_path()) {
-        config.insert("plugin".to_string(), serde_json::json!([plugin.display().to_string()]));
+    if effort.is_none() && first.is_none() {
+        return command;
+    }
+    let Some(plugin) = signals::opencode_plugin_path() else {
+        return command;
+    };
+    command = command.with_env(
+        "OPENCODE_CONFIG_CONTENT",
+        serde_json::json!({ "plugin": [plugin.display().to_string()] }).to_string(),
+    );
+    if !model.is_empty() {
+        command = command.with_env("RUDDER_OPENCODE_MODEL", model);
+    }
+    if let Some(effort) = effort {
+        command = command.with_env("RUDDER_OPENCODE_VARIANT", effort.as_str());
+    }
+    if let Some(first) = first {
         command = command
             .with_env("RUDDER_OPENCODE_PROMPT", first.text.trim())
             .with_env("RUDDER_OPENCODE_AGENT", "build");
         if let Some(session) = first.session {
             command = command.with_env("RUDDER_OPENCODE_SESSION", session);
         }
-        if !model.is_empty() {
-            command = command.with_env("RUDDER_OPENCODE_MODEL", model);
-        }
-        if let Some(effort) = effort {
-            command = command.with_env("RUDDER_OPENCODE_VARIANT", effort.as_str());
-        }
-    }
-    if !config.is_empty() {
-        command = command.with_env("OPENCODE_CONFIG_CONTENT", serde_json::Value::Object(config).to_string());
     }
     command
 }

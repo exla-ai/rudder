@@ -1,7 +1,7 @@
 import type { RunRecord } from "./types.js";
 import { CODEX_RUDDER_PLANNER_CONFIG_ARGS, CODEX_RUDDER_WORKER_CONFIG_ARGS, codexShellEnvConfigArgs } from "./codex-config.js";
 import { codexEffortConfigArgs, normalizeEffortForBackend } from "./effort.js";
-import { opencodeVariantConfig } from "./opencode.js";
+import { opencodeEffortEnv } from "./opencode.js";
 import { PLAN_MODE_CONTRACT } from "./plan-mode.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel } from "./state.js";
 import { taskDisplayLabel } from "./task-summary.js";
@@ -62,10 +62,10 @@ function claudeArgs(run: RunRecord, prompt: string, contract: string): string[] 
  * model is OpenCode's own default. An effort is the model's variant.
  */
 function opencodeArgs(run: RunRecord, prompt: string, agent: "build" | "plan"): string[] {
-  const variant = opencodeVariantConfig(agent, run.model, run.effort);
+  const effort = opencodeEffortEnv(run.model, run.effort);
   return compact([
-    variant ? "env" : undefined,
-    variant ? `OPENCODE_CONFIG_CONTENT=${variant}` : undefined,
+    effort.length ? "env" : undefined,
+    ...effort,
     "opencode",
     agent === "build" ? "--auto" : "--agent",
     agent === "build" ? undefined : "plan",

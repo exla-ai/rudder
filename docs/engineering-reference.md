@@ -1864,10 +1864,11 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   authenticated; each model's `variants` are its efforts. Every dashboard
   launch is the interactive TUI (`--auto` for workers; planners go without it
   and follow OpenCode's own permission config, which in 1.19.5 runs bash
-  without asking; `--prompt` for the first turn of a new session); an effort
-  goes in as the build agent's `variant` through `OPENCODE_CONFIG_CONTENT`
-  (the TUI has no flag for it). OpenCode also remembers the last variant
-  used with each model and uses it when a launch names none.
+  without asking; `--prompt` for the first turn of a new session). The TUI has no effort
+  flag and sends the variant it last used with the model in any session,
+  whatever an agent's config says, so Rudder's plugin sets the run's effort
+  (`RUDDER_OPENCODE_VARIANT`) on every message on the run's model, through
+  its `chat.message` hook; `OPENCODE_CONFIG_CONTENT` loads the plugin.
   - Rudder's plugin (`native/src/opencode_plugin.mjs`, installed in the
     signals dir at dashboard start and per worker, loaded through
     `OPENCODE_CONFIG`) maps root-session events to the signal file

@@ -1420,7 +1420,7 @@ fn opencode_workers_auto_approve_but_opencode_planners_do_not() {
     let planner = opencode_command("", None, Some("decompose this"), AgentMode::RudderPlan);
     assert!(
         !planner.args.iter().any(|arg| arg == "--auto"),
-        "planners stop for approval instead of editing: {:?}",
+        "planners follow OpenCode's own permission config: {:?}",
         planner.args
     );
     assert!(
@@ -1455,14 +1455,13 @@ fn opencode_forks_the_conversation_and_leaves_the_original_alone() {
     assert_eq!(env("RUDDER_OPENCODE_MODEL"), Some("opencode/big-pickle"));
     assert_eq!(env("RUDDER_OPENCODE_VARIANT"), Some("high"));
     let config: serde_json::Value =
-        serde_json::from_str(env("OPENCODE_CONFIG_CONTENT").expect("variant config")).expect("json");
-    assert_eq!(config["agent"]["build"]["variant"], "high", "the TUI's own turns run at the effort too");
-    assert_eq!(config["agent"]["build"]["model"], "opencode/big-pickle");
+        serde_json::from_str(env("OPENCODE_CONFIG_CONTENT").expect("plugin config")).expect("json");
     // (Other tests move RUDDER_HOME meanwhile, so only the file is compared.)
     assert!(
         config["plugin"][0].as_str().is_some_and(|plugin| plugin.ends_with("/signals/opencode-plugin.mjs")),
-        "the plugin that sends it is loaded by the same config: {config}"
+        "the plugin that sends it and sets the effort on every turn is loaded by the launch: {config}"
     );
+    assert!(config.get("agent").is_none(), "OpenCode's TUI overrides an agent's configured variant: {config}");
 
     // A planner's next turn goes into its own session the same way.
     let refine = rudder_plan_refine_command(Backend::Opencode, "opencode/big-pickle", None, "tighten it", "ses_plan");
@@ -1470,8 +1469,17 @@ fn opencode_forks_the_conversation_and_leaves_the_original_alone() {
     assert!(!refine.args.iter().any(|arg| arg == "--prompt"), "{:?}", refine.args);
     assert_eq!(env("RUDDER_OPENCODE_PROMPT"), Some("tighten it"));
     assert_eq!(env("RUDDER_OPENCODE_SESSION"), Some("ses_plan"));
-    let config: serde_json::Value = serde_json::from_str(env("OPENCODE_CONFIG_CONTENT").expect("plugin config")).expect("json");
-    assert!(config.get("agent").is_none(), "no effort, no variant: {config}");
+    assert_eq!(env("RUDDER_OPENCODE_VARIANT"), None, "no effort, no variant");
+    assert!(env("OPENCODE_CONFIG_CONTENT").is_some(), "the plugin sends the feedback");
+
+    // A fresh launch with an effort loads the plugin for it alone.
+    let worker = opencode_command("opencode/big-pickle", Some(EffortLevel::Max), Some("go"), AgentMode::Execute);
+    let env = |key: &str| worker.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    assert_eq!(env("RUDDER_OPENCODE_VARIANT"), Some("max"));
+    assert_eq!(env("RUDDER_OPENCODE_MODEL"), Some("opencode/big-pickle"));
+    assert_eq!(env("RUDDER_OPENCODE_PROMPT"), None, "a new session takes --prompt");
+    assert!(worker.args.windows(2).any(|w| w[0] == "--prompt" && w[1] == "go"));
+    assert!(opencode_command("opencode/big-pickle", None, Some("go"), AgentMode::Execute).env.is_empty(), "no effort, nothing to load");
 }
 
 #[test]

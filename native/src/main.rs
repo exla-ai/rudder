@@ -9368,7 +9368,7 @@ impl App {
                 TerminalCommand::with_args(codex_program(), args)
             }
             // opencode has no read-only headless mode; the reconcile planner runs in
-            // its TUI (no --auto, so an unexpected edit stops for approval) and its
+            // its TUI (no --auto: OpenCode's own permission config applies) and its
             // plan block is read out of the pane like every other opencode planner.
             Backend::Opencode => opencode_command(model, effort, Some(prompt), AgentMode::RudderPlan),
         }

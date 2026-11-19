@@ -334,7 +334,8 @@ fork and read it, and chats move to and from it. Rudder's plugin
 turns, the session id, permissions and questions, answers the phone's asks
 over OpenCode's HTTP API, and sends a first message into a session the TUI
 opens (1.19 ignores `--prompt` with `--session`). An effort is the model's
-variant, set through `OPENCODE_CONFIG_CONTENT`. Transcripts, usage and context
+variant, which the plugin sets on each of the run's messages (the TUI
+otherwise reuses the variant last used with the model). Transcripts, usage and context
 are read from OpenCode's SQLite database. The phone signs OpenCode's OpenAI
 provider in with ChatGPT's device code; with no sign-in it runs OpenCode Zen's
 free models. Open: OpenCode subagents in the app's tray, the app's "/" list

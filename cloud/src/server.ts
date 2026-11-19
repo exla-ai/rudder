@@ -1993,6 +1993,9 @@ async function handleCliOAuthStart(url: URL, res: ServerResponse, provider: "goo
     body: JSON.stringify({
       provider,
       callbackURL,
+      // A provider that refuses (the account is not allowed, the user
+      // declined) lands on a page that says so, like the app's sign-in.
+      errorCallbackURL: `${baseURL}/app/signin-error`,
       disableRedirect: true,
     }),
   }));

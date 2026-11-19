@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Rudder > About Rudder: the mark, the name, the version and build, what
+/// Rudder > About Rudder: the mark, the name, the version, what
 /// Rudder is, the website and the copyright, in the app's own look instead of
 /// the stock panel. One window; About again brings it forward.
 @MainActor
@@ -59,7 +59,6 @@ struct AboutView: View {
     private static let site = URL(string: "https://rudder.exla.ai")!
 
     private let version = AboutView.info("CFBundleShortVersionString")
-    private let build = AboutView.info("CFBundleVersion")
     private let copyright = AboutView.info("NSHumanReadableCopyright")
     @State private var copied = false
     @State private var copyReset: Task<Void, Never>?
@@ -102,11 +101,11 @@ struct AboutView: View {
         }
     }
 
-    /// The version and build; a click copies them for a bug report.
+    /// The version; a click copies it for a bug report.
     private var versionButton: some View {
         Button(action: copyVersion) {
             ZStack {
-                Text("Version \(version) (\(build))")
+                Text("Version \(version)")
                     .opacity(copied ? 0 : 1)
                 Label("Copied", systemImage: "checkmark")
                     .opacity(copied ? 1 : 0)
@@ -123,12 +122,12 @@ struct AboutView: View {
         }
         .buttonStyle(.plain)
         .help("Copy version")
-        .accessibilityLabel(copied ? "Copied" : "Version \(version), build \(build). Copy")
+        .accessibilityLabel(copied ? "Copied" : "Version \(version). Copy")
     }
 
     private func copyVersion() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("Rudder \(version) (\(build))", forType: .string)
+        NSPasteboard.general.setString("Rudder \(version)", forType: .string)
         withAnimation(.easeOut(duration: 0.15)) { copied = true }
         copyReset?.cancel()
         copyReset = Task {

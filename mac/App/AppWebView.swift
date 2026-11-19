@@ -312,6 +312,18 @@ final class RudderWebView: WKWebView {
         }
         return super.performKeyEquivalent(with: event)
     }
+
+    /// A right-click offers what makes sense on a page of the app (Copy, Look
+    /// Up, Paste in a text box), never a browser's Back, Forward and Reload.
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        let browser: Set<String> = ["WKMenuItemIdentifierGoBack", "WKMenuItemIdentifierGoForward", "WKMenuItemIdentifierReload"]
+        for item in menu.items where browser.contains(item.identifier?.rawValue ?? "") {
+            menu.removeItem(item)
+        }
+        while menu.items.first?.isSeparatorItem == true { menu.removeItem(at: 0) }
+        while menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
+        super.willOpenMenu(menu, with: event)
+    }
 }
 
 extension Bundle {

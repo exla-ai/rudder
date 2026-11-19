@@ -226,9 +226,40 @@ export async function seedBackend(rudderHome) {
   }
 }
 
+/**
+ * Rudder's one-shot summaries (a new task's title, a finished worker's note)
+ * run RUDDER_CLAUDE_BIN in plain print mode: `-p <prompt>` with no
+ * --output-format. The fakes model agent sessions and /plan's streamed print
+ * mode, and run as a summary they would act in the dashboard's checkout (a
+ * DONE file, a pid file, a sleep that never answers). This wrapper gives a
+ * summary no answer, so the row keeps its local title, and execs the fake for
+ * everything else.
+ */
+async function withoutSummaries(rudderHome, claudeBin) {
+  const file = path.join(rudderHome, "claude-fake");
+  const quoted = `'${claudeBin.replace(/'/g, `'\\''`)}'`;
+  await fsp.writeFile(
+    file,
+    `#!/bin/sh
+print=0; stream=0
+for arg in "$@"; do
+  case "$arg" in
+    -p) print=1 ;;
+    --output-format) stream=1 ;;
+  esac
+done
+if [ "$print" = 1 ] && [ "$stream" = 0 ]; then exit 0; fi
+exec ${quoted} "$@"
+`,
+    { mode: 0o755 },
+  );
+  return file;
+}
+
 export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows = 40, env = {} }) {
   const rudderHome = path.join(repo, ".tui-home");
   await seedBackend(rudderHome);
+  const claude = claudeBin && (await withoutSummaries(rudderHome, claudeBin));
   const session = await launch({
     binary: nativeBin,
     cols,
@@ -239,7 +270,7 @@ export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows 
       RUDDER_HOME: rudderHome,
       RUDDER_OFFLINE: "1",
       RUDDER_CLI: path.join(repoRoot, "dist", "index.js"),
-      RUDDER_CLAUDE_BIN: claudeBin,
+      RUDDER_CLAUDE_BIN: claude,
       RUDDER_CODEX_BIN: claudeBin,
       // Visual assertions describe a color terminal regardless of the parent
       // shell's NO_COLOR setting (CI and agent shells often set it globally).
@@ -248,9 +279,6 @@ export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows 
       // Routing tests use deterministic local policy and fake agent CLIs; a
       // developer's optional classifier config must not trigger model calls.
       RUDDER_TASK_ROUTING: "local",
-      // The workspace namer runs the real `claude` from PATH, not the fake, and
-      // starts the agent whenever its answer lands. That made a task's row (and
-      // the focus jump to its pane) arrive at a time no test could predict.
       TERM: "xterm-256color",
       ...(home ? { HOME: home } : {}),
       ...env,

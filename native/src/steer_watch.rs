@@ -53,13 +53,40 @@ pub(crate) fn spawn(
 /// recreated, so a deleted project stays deleted.
 fn ensure_inbox(inbox: &Path) -> io::Result<()> {
     let state = inbox.parent().expect("the inbox is <repo>/.rudder/steer");
-    for dir in [state, inbox] {
-        match fs::create_dir(dir) {
+    loop {
+        // NotFound here means the repo is gone.
+        match fs::create_dir(state) {
             Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
             _ => {}
         }
+        match fs::create_dir(inbox) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+            // `.rudder` was deleted after the line above: create it again.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && is_gone(state) => {}
+            result => return result,
+        }
     }
-    Ok(())
+}
+
+/// Nothing at all is at `path` now. A dangling symlink is something, so a
+/// broken link fails the watch instead of looping.
+fn is_gone(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+}
+
+/// Recreate the inbox and arm a watch on it. A deletion may still be running
+/// when the old watch drops (`rm -rf .rudder` removes `steer` before
+/// `.rudder`), so the new inbox can vanish before it is watched: start over
+/// until a watch holds an existing inbox. Each pass needs another deletion,
+/// and only a missing repo ends the watch.
+fn rearm<T>(inbox: &Path, mut arm: impl FnMut(&Path) -> io::Result<T>) -> io::Result<T> {
+    loop {
+        ensure_inbox(inbox)?;
+        match arm(inbox) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && is_gone(inbox) => {}
+            armed => return armed,
+        }
+    }
 }
 
 fn c_path(path: &Path) -> io::Result<CString> {
@@ -76,7 +103,6 @@ struct Watch {
 #[cfg(target_os = "linux")]
 impl Watch {
     fn new(inbox: PathBuf) -> io::Result<Self> {
-        ensure_inbox(&inbox)?;
         // SAFETY: a plain syscall; the descriptor is owned right after.
         let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
         if fd < 0 {
@@ -84,7 +110,7 @@ impl Watch {
         }
         // SAFETY: `fd` is a fresh descriptor nothing else owns.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let wd = Self::add(&fd, &inbox)?;
+        let wd = rearm(&inbox, |inbox| Self::add(&fd, inbox))?;
         Ok(Self { inbox, fd, wd })
     }
 
@@ -141,8 +167,8 @@ impl Watch {
                 }
             }
             if lost {
-                ensure_inbox(&self.inbox)?;
-                self.wd = Self::add(&self.fd, &self.inbox)?;
+                let fd = &self.fd;
+                self.wd = rearm(&self.inbox, |inbox| Self::add(fd, inbox))?;
                 // Anything written while unwatched is picked up by this wake.
                 request = true;
             }
@@ -163,7 +189,6 @@ struct Watch {
 #[cfg(target_os = "macos")]
 impl Watch {
     fn new(inbox: PathBuf) -> io::Result<Self> {
-        ensure_inbox(&inbox)?;
         // SAFETY: a plain syscall; the descriptor is owned right after.
         let queue = unsafe { libc::kqueue() };
         if queue < 0 {
@@ -171,7 +196,7 @@ impl Watch {
         }
         // SAFETY: `queue` is a fresh descriptor nothing else owns.
         let queue = unsafe { OwnedFd::from_raw_fd(queue) };
-        let dir = Self::register(&queue, &inbox)?;
+        let dir = rearm(&inbox, |inbox| Self::register(&queue, inbox))?;
         Ok(Self { inbox, queue, dir })
     }
 
@@ -227,8 +252,8 @@ impl Watch {
             if event.fflags & (libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE) != 0 {
                 // The directory went away: watch the inbox path again. Closing
                 // the old descriptor (on assignment) drops its registration.
-                ensure_inbox(&self.inbox)?;
-                self.dir = Self::register(&self.queue, &self.inbox)?;
+                let queue = &self.queue;
+                self.dir = rearm(&self.inbox, |inbox| Self::register(queue, inbox))?;
             }
             return Ok(());
         }
@@ -274,16 +299,30 @@ mod tests {
         assert!(woke(&wakes, Duration::from_secs(5)), "a renamed-in request wakes the loop");
 
         // Deleted under the dashboard: the watch recreates the inbox and keeps
-        // waking for new requests.
-        fs::remove_dir_all(repo.0.join(".rudder")).unwrap();
+        // waking for new requests. It can recreate `steer` inside the `.rudder`
+        // this is still removing, so the removal may end "not empty". Either
+        // way the deletion is over here, and the inbox must come back watched.
+        match fs::remove_dir_all(repo.0.join(".rudder")) {
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+            result => result.unwrap(),
+        }
         let deadline = Instant::now() + Duration::from_secs(5);
         while !inbox.is_dir() {
-            assert!(Instant::now() < deadline, "the inbox comes back");
+            assert!(Instant::now() < deadline, "the inbox comes back: {:?}", notice_rx.try_recv());
             std::thread::sleep(Duration::from_millis(5));
         }
         while woke(&wakes, Duration::from_millis(200)) {}
         deliver(&inbox, "0002-request.json");
         assert!(woke(&wakes, Duration::from_secs(5)), "the re-armed watch wakes the loop");
-        assert!(notice_rx.try_recv().is_err(), "no watch failure");
+
+        // With the loop gone, the next wake ends the watch, which drops its
+        // notice sender. Waiting for that keeps it from recreating the inbox
+        // while the temp dir is removed.
+        drop(wakes);
+        deliver(&inbox, "0003-request.json");
+        assert!(
+            matches!(notice_rx.recv_timeout(Duration::from_secs(5)), Err(mpsc::RecvTimeoutError::Disconnected)),
+            "the watch ends with the loop and reports no failure"
+        );
     }
 }

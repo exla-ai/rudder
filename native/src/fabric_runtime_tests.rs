@@ -193,8 +193,11 @@ impl Fixture {
             "51001c4a-c30d-4651-a2ef-a558a9302e5f".into(),
         ));
         run.terminal = Some(
-            TerminalPane::spawn_shell_or_command(Some(command), TerminalPaneOptions::default())
-                .unwrap(),
+            TerminalPane::spawn_shell_or_command(
+                Some(command),
+                TerminalPaneOptions { cwd: Some(dir.clone()), ..TerminalPaneOptions::default() },
+            )
+            .unwrap(),
         );
         app.agents = vec![run];
         let mut runtime = RuntimeState::default();

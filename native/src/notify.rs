@@ -97,9 +97,8 @@ pub(crate) enum NativeNotifier {
     NotifySend(PathBuf),
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+fn find_on_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
 }
@@ -211,26 +210,30 @@ pub(crate) fn ensure_rudder_notifier_app(source_app: &Path, home: &Path) -> Opti
     Some(exe)
 }
 
-pub(crate) fn detect_native_notifier() -> Option<NativeNotifier> {
+/// `search` is a PATH-style list: the process PATH, or a test's own dirs so
+/// no test has to change the process-wide PATH under its parallel siblings.
+pub(crate) fn detect_native_notifier(search: &std::ffi::OsStr) -> Option<NativeNotifier> {
     if cfg!(target_os = "macos") {
-        if let Some(path) = find_on_path("terminal-notifier") {
+        if let Some(path) = find_on_path("terminal-notifier", search) {
             // Rudder's own bundle when it can be built; the stock one otherwise.
             let branded = terminal_notifier_app_from(&path)
                 .zip(crate::signals::rudder_home())
                 .and_then(|(app, home)| ensure_rudder_notifier_app(&app, &home));
             return Some(NativeNotifier::TerminalNotifier(branded.unwrap_or(path)));
         }
-        if let Some(path) = find_on_path("osascript") {
+        if let Some(path) = find_on_path("osascript", search) {
             return Some(NativeNotifier::Osascript(path));
         }
         return None;
     }
-    find_on_path("notify-send").map(NativeNotifier::NotifySend)
+    find_on_path("notify-send", search).map(NativeNotifier::NotifySend)
 }
 
 fn native_notifier() -> Option<&'static NativeNotifier> {
     static NOTIFIER: std::sync::OnceLock<Option<NativeNotifier>> = std::sync::OnceLock::new();
-    NOTIFIER.get_or_init(detect_native_notifier).as_ref()
+    NOTIFIER
+        .get_or_init(|| detect_native_notifier(&std::env::var_os("PATH")?))
+        .as_ref()
 }
 
 /// One lifecycle notification, in parts, so each channel can lay it out the
@@ -374,10 +377,14 @@ pub(crate) fn notify_desktop(note: DesktopNote) {
 fn native_notifier_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
+        let Some(search) = std::env::var_os("PATH") else {
+            return false;
+        };
         if cfg!(target_os = "macos") {
-            find_on_path("terminal-notifier").is_some() || find_on_path("osascript").is_some()
+            find_on_path("terminal-notifier", &search).is_some()
+                || find_on_path("osascript", &search).is_some()
         } else {
-            find_on_path("notify-send").is_some()
+            find_on_path("notify-send", &search).is_some()
         }
     })
 }

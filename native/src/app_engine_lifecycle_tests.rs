@@ -59,8 +59,11 @@ impl Harness {
                 "/bin/sh",
                 ["-c", "printf 'fake backend ready\\n'; exec cat"],
             )),
+            // Without a cwd the child starts in $HOME, which app_tests points
+            // at temp dirs it deletes: the spawn then fails with ENOENT.
             TerminalPaneOptions {
                 size: TerminalSize { rows: 24, cols: 80 },
+                cwd: Some(self.app.cwd.clone()),
                 ..Default::default()
             },
         )
@@ -659,7 +662,11 @@ fn shutdown_marks_only_mid_turn_runs_to_continue_after_boot() {
     // A second live row, idle at its prompt between turns.
     let pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args("/bin/sh", ["-c", "exec cat"])),
-        TerminalPaneOptions { size: TerminalSize { rows: 24, cols: 80 }, ..Default::default() },
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 24, cols: 80 },
+            cwd: Some(h.app.cwd.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let mut idle = crate::app_tests::test_agent_run_with_terminal(&h.app, pane);

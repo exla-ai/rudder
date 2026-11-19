@@ -108,6 +108,10 @@ fn render_screen(app: &mut App, width: u16, height: u16) -> String {
 /// RUDDER_CODEX_BIN): cargo runs tests in parallel, so without this two harness
 /// tests would clobber each other's fake-backend path. Hold the guard for the
 /// whole test (set env -> use -> remove).
+///
+/// Tests that do not hold it (other modules included) still run while HOME
+/// points at a temp dir that may not exist yet or is already deleted. A PTY
+/// spawned without a cwd starts in $HOME, so such a test passes its own cwd.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Every process-global var the harness injects. `EnvGuard` snapshots these on
@@ -1657,7 +1661,7 @@ fn picking_a_model_leaves_a_running_main_row_alone() {
                 fake.to_string_lossy().to_string(),
                 Vec::<String>::new(),
             )),
-            TerminalPaneOptions::default(),
+            TerminalPaneOptions { cwd: Some(app.cwd.clone()), ..TerminalPaneOptions::default() },
         )
         .expect("spawn sleeper"),
     );
@@ -1841,7 +1845,7 @@ fn a_dead_main_row_deletes_and_a_live_one_stops_on_confirm() {
                 fake.to_string_lossy().to_string(),
                 Vec::<String>::new(),
             )),
-            TerminalPaneOptions::default(),
+            TerminalPaneOptions { cwd: Some(app.cwd.clone()), ..TerminalPaneOptions::default() },
         )
         .expect("spawn sleeper"),
     );
@@ -1938,7 +1942,7 @@ fn a_merged_workspace_with_a_live_agent_in_it_is_never_swept() {
             fake.to_string_lossy().to_string(),
             Vec::<String>::new(),
         )),
-        TerminalPaneOptions::default(),
+        TerminalPaneOptions { cwd: Some(app.cwd.clone()), ..TerminalPaneOptions::default() },
     )
     .expect("spawn sleeper");
     run.execution_profile = terminal.execution_profile().map(str::to_string);
@@ -8884,7 +8888,7 @@ fn graceful_shutdown_persists_paused_and_removes_process_owner() {
     app.cwd = repo.clone();
     let pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args("/bin/sh", ["-lc", "sleep 30"])),
-        TerminalPaneOptions::default(),
+        TerminalPaneOptions { cwd: Some(repo.clone()), ..TerminalPaneOptions::default() },
     )
     .expect("spawn live PTY");
     let mut run = test_agent_run("pause-1", "keep working");
@@ -24364,6 +24368,7 @@ fn a_worker_pane_surfaces_claude_osc_notifications_to_the_app() {
     // End to end through the REAL pane plumbing: a child process writes Claude's
     // notification OSC; the pane's drain must both keep it out of the rendered
     // screen and hand it to the app for re-emission.
+    let dir = unique_test_repo("osc-notify");
     let mut pane = TerminalPane::spawn_shell_or_command(
         Some(TerminalCommand::with_args(
             "/bin/sh",
@@ -24372,7 +24377,7 @@ fn a_worker_pane_surfaces_claude_osc_notifications_to_the_app() {
                 "printf 'before \\033]777;notify;Claude Code;needs you\\007after'; sleep 2",
             ],
         )),
-        TerminalPaneOptions::default(),
+        TerminalPaneOptions { cwd: Some(dir.clone()), ..TerminalPaneOptions::default() },
     )
     .expect("spawn test pty");
 
@@ -24394,6 +24399,7 @@ fn a_worker_pane_surfaces_claude_osc_notifications_to_the_app() {
         "payload never leaks into the rendered screen:\n{screen}"
     );
     pane.request_termination();
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -25357,7 +25363,8 @@ fn terminal_notifier_bundle_is_found_behind_a_wrapper_or_a_symlink() {
 fn rudder_notifier_app_is_a_renamed_signed_copy_of_terminal_notifier() {
     use crate::notify::{ensure_rudder_notifier_app, terminal_notifier_app_from};
     let _env = env_guard();
-    let Some(source) = crate::notify::detect_native_notifier().and_then(|n| match n {
+    let notifier = std::env::var_os("PATH").and_then(|path| crate::notify::detect_native_notifier(&path));
+    let Some(source) = notifier.and_then(|n| match n {
         crate::notify::NativeNotifier::TerminalNotifier(_) => {
             let path = std::env::var_os("PATH")?;
             std::env::split_paths(&path)
@@ -25426,14 +25433,14 @@ fn rudder_notifier_app_is_a_renamed_signed_copy_of_terminal_notifier() {
 #[test]
 fn native_notifier_detection_prefers_terminal_notifier_then_osascript() {
     use crate::notify::{detect_native_notifier, NativeNotifier};
-    let _env = env_guard();
+    // The search list is passed in: pointing the process PATH at an empty dir
+    // would fail any parallel test that spawns `jj`, `git` or `true` by name.
     let dir = std::env::temp_dir().join(format!("rudder-notifier-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("dir");
-    let saved = std::env::var_os("PATH");
-    std::env::set_var("PATH", &dir);
+    let search = dir.as_os_str();
     assert_eq!(
-        detect_native_notifier(),
+        detect_native_notifier(search),
         None,
         "empty PATH: OSC 777 fallback"
     );
@@ -25441,12 +25448,12 @@ fn native_notifier_detection_prefers_terminal_notifier_then_osascript() {
     if cfg!(target_os = "macos") {
         std::fs::write(dir.join("osascript"), "").expect("fake osascript");
         assert_eq!(
-            detect_native_notifier(),
+            detect_native_notifier(search),
             Some(NativeNotifier::Osascript(dir.join("osascript")))
         );
         std::fs::write(dir.join("terminal-notifier"), "").expect("fake tn");
         assert_eq!(
-            detect_native_notifier(),
+            detect_native_notifier(search),
             Some(NativeNotifier::TerminalNotifier(
                 dir.join("terminal-notifier")
             )),
@@ -25455,13 +25462,9 @@ fn native_notifier_detection_prefers_terminal_notifier_then_osascript() {
     } else {
         std::fs::write(dir.join("notify-send"), "").expect("fake notify-send");
         assert_eq!(
-            detect_native_notifier(),
+            detect_native_notifier(search),
             Some(NativeNotifier::NotifySend(dir.join("notify-send")))
         );
-    }
-    match saved {
-        Some(path) => std::env::set_var("PATH", path),
-        None => std::env::remove_var("PATH"),
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -30956,7 +30959,7 @@ fn the_home_cleanup_parks_only_idle_agents_and_a_woken_row_forgets_it() {
     let pane = || {
         TerminalPane::spawn_shell_or_command(
             Some(TerminalCommand::with_args(fake.to_string_lossy().to_string(), Vec::<String>::new())),
-            TerminalPaneOptions::default(),
+            TerminalPaneOptions { cwd: Some(dir.clone()), ..TerminalPaneOptions::default() },
         )
         .expect("spawn sleeper")
     };

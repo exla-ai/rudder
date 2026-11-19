@@ -97,6 +97,9 @@ pub(crate) struct EngineOwnership {
     record: OwnerRecord,
     record_path: PathBuf,
     released: bool,
+    /// The Rudder home the journal was opened in. The control socket lives
+    /// here too; HOME and RUDDER_HOME are not read again after acquisition.
+    home: PathBuf,
 
     migration_records: Option<Vec<serde_json::Value>>,
     restart_recovery: Option<restart::NativeRestartRecovery>,
@@ -384,6 +387,7 @@ impl EngineOwnership {
             record,
             record_path,
             released: false,
+            home,
 
             migration_records,
             restart_recovery,
@@ -804,7 +808,7 @@ pub(crate) struct EngineControl {
 
 impl EngineControl {
     pub(crate) fn bind(owner: &EngineOwnership, waker: Option<PtyOutputWaker>) -> Result<Self> {
-        let home = signals::rudder_home().context("no Rudder home for engine control")?;
+        let home = &owner.home;
         let hash = owner
             .record
             .owner

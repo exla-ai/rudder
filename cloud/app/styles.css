@@ -1,6 +1,8 @@
 /* Rudder app. Mobile first, light + dark. */
 
-:root {
+/* The palettes also apply to any [data-theme] element, so Settings > Appearance
+   can draw the app in a theme the page is not using. */
+:root, [data-theme="light"] {
   --bg: #f6f4ef;
   --bg-elev: #fbfaf7;
   --surface: #ffffff;
@@ -50,7 +52,7 @@
   color-scheme: light;
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="dark"], [data-theme="dark"] {
   --bg: #111214;
   --bg-elev: #15171a;
   --surface: #1a1c20;
@@ -163,7 +165,6 @@ a { color: var(--accent); }
 .topbar .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; overflow: clip; text-overflow: ellipsis; }
 .topbar .subtitle { font-size: 12.5px; color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: 1px; }
 .topbar .subtitle > span:not(.dot) { overflow: clip; text-overflow: ellipsis; min-width: 0; }
-.topbar .subtitle .bk { flex: 1; }
 .brand { display: flex; align-items: center; gap: 10px; padding-left: 8px; flex: 1; min-width: 0; }
 .brand img { width: 26px; height: 26px; border-radius: 7px; }
 .brand span { font-weight: 650; font-size: 19px; letter-spacing: -0.02em; }
@@ -820,14 +821,55 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .seg button { min-height: 42px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font: inherit; font-size: 15px; font-weight: 600;
   display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 6px 8px; cursor: pointer; transition: background 120ms, color 120ms; }
 .seg.modes { margin: 14px 0 12px; flex: none; }
-.seg.set-theme { max-width: 380px; }
-.seg.set-usage { max-width: 380px; margin-top: 10px; }
 .seg.modes button { flex-direction: row; gap: 7px; }
 .seg button svg { width: 17px; height: 17px; }
 .seg button small { font-size: 12px; font-weight: 400; color: var(--faint); }
 .seg button[aria-selected="true"], .seg button[aria-checked="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1); }
 .seg button[aria-checked="true"] small { color: var(--muted); }
 :root[data-theme="dark"] .seg button[aria-selected="true"], :root[data-theme="dark"] .seg button[aria-checked="true"] { background: var(--surface-3); }
+/* Settings > Appearance: a card per theme, each a small drawing of the app
+   (org.js lookWindow) in that theme's own tokens. System is split diagonally. */
+.look-pick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; max-width: 432px; padding: 2px 4px 0; }
+.look-opt { display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; font-weight: 500; }
+.look-opt:focus-visible { outline: none; }
+.look-card { position: relative; width: 100%; aspect-ratio: 160 / 104; border-radius: 9px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 4px 12px -6px rgba(0, 0, 0, 0.18); transition: transform 160ms cubic-bezier(.2,.7,.2,1); }
+.look-opt:active .look-card { transform: scale(0.96); }
+.look-win { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 9px; outline: 1px solid var(--line-strong); outline-offset: -1px; }
+.look-win + .look-win { clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+.look-win .lw-main { fill: var(--bg-elev); }
+.look-win .lw-side { fill: var(--bg); }
+.look-win .lw-edge { stroke: var(--line-strong); vector-effect: non-scaling-stroke; }
+.look-win .lw-r { fill: #ff5f57; }
+.look-win .lw-y { fill: #febc2e; }
+.look-win .lw-g { fill: #28c840; }
+.look-win .lw-on { fill: var(--accent-soft); }
+.look-win .lw-accent { fill: var(--accent); }
+.look-win .lw-ink { fill: var(--ink); }
+.look-win .lw-faint { fill: var(--faint); opacity: 0.7; }
+.look-win .lw-bubble { fill: var(--bubble-user); }
+.look-win .lw-text { fill: var(--ink-2); opacity: 0.5; }
+.look-win .lw-input { fill: var(--surface); stroke: var(--line-strong); vector-effect: non-scaling-stroke; }
+/* The ring: accent on the chosen card, with a soft halo while it has keyboard focus. */
+.look-card::after { content: ""; position: absolute; inset: -5px; border-radius: 14px; border: 2.5px solid var(--accent); opacity: 0; transform: scale(0.94); pointer-events: none;
+  transition: opacity 160ms ease, transform 220ms cubic-bezier(.2,.7,.2,1), border-color 160ms ease; }
+.look-opt[aria-checked="true"] .look-card::after { opacity: 1; transform: none; }
+.look-opt:focus-visible .look-card::after { opacity: 1; transform: none; box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 32%, transparent); }
+.look-opt:focus-visible:not([aria-checked="true"]) .look-card::after { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+@media (hover: hover) { .look-opt:hover:not([aria-checked="true"]) .look-card::after { opacity: 1; transform: none; border-color: var(--line-strong); } }
+.look-opt[aria-checked="true"] .look-name { color: var(--ink); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .look-card::after { transition: none; } .look-opt:active .look-card { transform: none; } }
+/* A theme change repaints every color in one frame (theme.js), with no control fading on its own clock. */
+:root.theme-snap * { transition: none !important; }
+/* A setting that is on or off: a row with a switch. */
+.set-switch { display: flex; align-items: center; gap: 14px; width: 100%; margin-top: 18px; padding: 12px 14px 12px 16px; text-align: left; color: var(--ink); font: inherit; transition: background 120ms; }
+.set-switch:active { background: var(--surface-2); }
+.ss-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ss-name { font-size: 15px; font-weight: 500; }
+.ss-sub { font-size: 13px; color: var(--muted); }
+.ss-track { position: relative; flex: none; width: 44px; height: 26px; border-radius: 13px; background: color-mix(in srgb, var(--ink) 16%, transparent); transition: background 180ms ease; }
+.ss-knob { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform 220ms cubic-bezier(.3,.7,.2,1); }
+.set-switch[aria-checked="true"] .ss-track { background: var(--accent); }
+.set-switch[aria-checked="true"] .ss-knob { transform: translateX(18px); }
 .add-pane { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .add-pane[hidden] { display: none; }
 .create-pane { overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 2px 2px 4px; margin: 0 -2px; }

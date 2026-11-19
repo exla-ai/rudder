@@ -104,6 +104,21 @@ function oauthErrorText(code, provider) {
   }
 }
 
+// A tiny Rudder window for the Appearance cards: the sidebar with the open
+// chat, a reply and the composer. data-theme scopes the real theme tokens
+// (styles.css) to it, so it is drawn in that theme whatever the page uses.
+function lookWindow(theme) {
+  return h(`<svg class="look-win" data-theme="${theme}" viewBox="0 0 160 104" aria-hidden="true">
+    <rect class="lw-main" width="160" height="104"/><rect class="lw-side" width="50" height="104"/><path class="lw-edge" d="M50.5 0V104"/>
+    <circle class="lw-r" cx="9" cy="9" r="2.4"/><circle class="lw-y" cx="16" cy="9" r="2.4"/><circle class="lw-g" cx="23" cy="9" r="2.4"/>
+    <rect class="lw-on" x="5" y="19" width="40" height="11" rx="3.5"/><circle class="lw-accent" cx="11" cy="24.5" r="2"/><rect class="lw-ink" x="16" y="23" width="23" height="3" rx="1.5"/>
+    <rect class="lw-faint" x="10" y="38" width="30" height="3" rx="1.5"/><rect class="lw-faint" x="10" y="48" width="24" height="3" rx="1.5"/><rect class="lw-faint" x="10" y="58" width="27" height="3" rx="1.5"/>
+    <rect class="lw-bubble" x="96" y="12" width="54" height="12" rx="6"/>
+    <rect class="lw-text" x="60" y="34" width="86" height="3.5" rx="1.75"/><rect class="lw-text" x="60" y="42" width="78" height="3.5" rx="1.75"/><rect class="lw-text" x="60" y="50" width="50" height="3.5" rx="1.75"/>
+    <rect class="lw-input" x="58.5" y="80.5" width="93" height="15" rx="7.5"/><circle class="lw-accent" cx="144" cy="88" r="4.5"/>
+  </svg>`);
+}
+
 export function SettingsScreen() {
   const { el, body } = screenShell("Settings");
   // Back from an OAuth round trip: say whether it worked, once.
@@ -123,33 +138,48 @@ export function SettingsScreen() {
 
   const account = section("Account");
   // Appearance: this device follows the system, or stays light or dark (theme.js).
+  // Each choice is a card with a small drawing of the app in that theme.
   const look = section("Appearance");
-  const lookSeg = h(`<div class="seg set-theme" role="radiogroup" aria-label="Appearance"></div>`);
-  for (const [value, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]]) {
-    const b = h(`<button type="button" role="radio"></button>`);
+  const LOOKS = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
+  const lookPick = h(`<div class="look-pick" role="radiogroup" aria-label="Appearance"></div>`);
+  for (const [value, label] of LOOKS) {
+    const b = h(`<button type="button" role="radio" class="look-opt"><span class="look-card"></span><span class="look-name"></span></button>`);
     b.dataset.value = value;
-    setText(b, label);
-    b.addEventListener("click", () => { window.RudderTheme.set(value); paintLook(); });
-    lookSeg.appendChild(b);
+    const card = b.querySelector(".look-card");
+    if (value === "system") card.append(lookWindow("light"), lookWindow("dark"));
+    else card.append(lookWindow(value));
+    setText(b.querySelector(".look-name"), label);
+    b.addEventListener("click", () => pickLook(value));
+    lookPick.appendChild(b);
   }
   const paintLook = () => {
-    for (const b of lookSeg.children) b.setAttribute("aria-checked", String(b.dataset.value === window.RudderTheme.get()));
+    for (const b of lookPick.children) {
+      const on = b.dataset.value === window.RudderTheme.get();
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+    }
   };
+  const pickLook = (value) => { window.RudderTheme.set(value); paintLook(); };
+  // A radio group: Tab lands on the chosen card, arrow keys move the choice.
+  lookPick.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const at = LOOKS.findIndex(([v]) => v === window.RudderTheme.get());
+    const next = (at + step + LOOKS.length) % LOOKS.length;
+    pickLook(LOOKS[next][0]);
+    lookPick.children[next].focus();
+  });
   paintLook();
   // The plan usage meter (agent-stats.js), shown or hidden on this device.
-  const usageSeg = h(`<div class="seg set-usage" role="radiogroup" aria-label="Plan usage meter"></div>`);
-  for (const [shown, label] of [[true, "Show plan usage"], [false, "Hide plan usage"]]) {
-    const b = h(`<button type="button" role="radio"></button>`);
-    setText(b, label);
-    b.addEventListener("click", () => { setPlanUsageShown(shown); paintUsage(); });
-    b.dataset.shown = String(shown);
-    usageSeg.appendChild(b);
-  }
-  const paintUsage = () => {
-    for (const b of usageSeg.children) b.setAttribute("aria-checked", String(b.dataset.shown === String(planUsageShown())));
-  };
+  const usageRow = h(`<button type="button" class="card set-switch" role="switch">
+    <span class="ss-text"><span class="ss-name">Plan usage meter</span><span class="ss-sub">How much of your Claude and Codex plans is used</span></span>
+    <span class="ss-track" aria-hidden="true"><span class="ss-knob"></span></span>
+  </button>`);
+  const paintUsage = () => usageRow.setAttribute("aria-checked", String(planUsageShown()));
+  usageRow.addEventListener("click", () => { setPlanUsageShown(!planUsageShown()); paintUsage(); });
   paintUsage();
-  look.body.append(lookSeg, usageSeg);
+  look.body.append(lookPick, usageRow);
   // Claude Code and Codex on the cloud machine: sign in, or switch accounts.
   const agentsSec = section("Agents");
   const agentsCard = app.accountsCard?.();

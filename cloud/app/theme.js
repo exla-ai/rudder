@@ -22,14 +22,25 @@
     window.webkit?.messageHandlers?.rudder?.postMessage({ type: "appearance", value: pick });
   };
 
-  systemDark.addEventListener("change", () => { if (pick === "system") apply(); });
+  // A change after load repaints every color in one frame: with transitions
+  // off (styles.css .theme-snap) while the new palette's styles are computed,
+  // no control fades on its own clock.
+  const snap = () => {
+    const root = document.documentElement;
+    root.classList.add("theme-snap");
+    apply();
+    void document.body.offsetHeight;
+    root.classList.remove("theme-snap");
+  };
+
+  systemDark.addEventListener("change", () => { if (pick === "system") snap(); });
   window.RudderTheme = {
     get: () => pick,
     set(next) {
       if (!PICKS.includes(next)) throw new Error(`Unknown appearance: ${next}`);
       pick = next;
       try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { /* private mode: this page only */ }
-      apply();
+      snap();
       tellShell();
     },
   };

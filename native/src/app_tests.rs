@@ -1573,7 +1573,7 @@ fn opencode_model_list_keeps_provider_qualified_ids_and_their_variants() {
 
 #[test]
 fn antigravity_model_list_is_its_slugs_in_order() {
-    // `agy models --output-format json`, agy 1.5.0's modelJSON.
+    // `agy --output-format json models`, agy 1.5.0's modelJSON.
     let raw = r#"[{"id":"gemini-4-argon","label":"Gemini 4 Argon"},{"id":"gemini-3.1-pro-high"}]"#;
     assert_eq!(
         crate::models::parse_antigravity_models(raw),

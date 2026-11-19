@@ -383,7 +383,7 @@ handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global
 file only). The app's Settings agents list signs it in to Google with a
 pasted code, and a chat can switch to and from it in the model picker. Its
-models come from `agy models --output-format json`, which agy prints only
+models come from `agy --output-format json models`, which agy prints only
 when signed in: an array of `{id, label}` (read from the types in agy 1.5.0
 and 1.5.13, not yet from a signed-in run). It names no efforts or default, so
 the pickers offer none for it. Open: phone answers to its permission

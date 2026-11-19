@@ -63,13 +63,13 @@ esac
 }
 
 /**
- * An `agy` whose `models --output-format json` prints `<root>/agy-models.json`,
+ * An `agy` whose `--output-format json models` prints `<root>/agy-models.json`,
  * and with none is not signed in, as agy 1.5.0 says so.
  */
 async function agyStub(root) {
   const stub = path.join(root, "agy");
   await fsp.writeFile(stub, `#!/bin/sh
-if [ "$*" != "models --output-format json" ]; then
+if [ "$*" != "--output-format json models" ]; then
   echo "unexpected agy $*" >&2
   exit 1
 fi

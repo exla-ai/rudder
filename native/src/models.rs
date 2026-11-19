@@ -1818,7 +1818,7 @@ fn maybe_refresh_opencode_models_cache() {
     }
 }
 
-/// Where `agy models --output-format json` is cached for the picker and the
+/// Where `agy --output-format json models` is cached for the picker and the
 /// `/model antigravity` check. agy lists models only when signed in, so a
 /// missing list is asked for again each minute: a sign-in from the phone
 /// shows up without a restart.
@@ -1864,7 +1864,7 @@ fn maybe_refresh_antigravity_models_cache() {
     }
     // Write to a temp and rename so a half-written list is never read.
     let script = format!(
-        "{program} models --output-format json > '{path}'.tmp 2>/dev/null && [ -s '{path}'.tmp ] && mv -f '{path}'.tmp '{path}'",
+        "{program} --output-format json models > '{path}'.tmp 2>/dev/null && [ -s '{path}'.tmp ] && mv -f '{path}'.tmp '{path}'",
         program = antigravity_program(),
         path = path.display()
     );
@@ -1897,13 +1897,13 @@ pub(crate) fn cached_antigravity_models() -> Result<Vec<String>, String> {
     }
 }
 
-/// `agy models --output-format json`: an array of `{"id": "...", "label":
+/// `agy --output-format json models`: an array of `{"id": "...", "label":
 /// "..."}` (agy 1.5.0's modelJSON). It names no efforts, so a listed model
 /// offers none and runs at agy's default thinking level.
 /// src/models.ts parseAntigravityModels reads the same output for the app.
 pub(crate) fn parse_antigravity_models(raw: &str) -> Result<Vec<String>, String> {
     let list: Vec<serde_json::Value> = serde_json::from_str(raw)
-        .map_err(|error| format!("agy models --output-format json printed no list: {error}"))?;
+        .map_err(|error| format!("agy --output-format json models printed no list: {error}"))?;
     list.iter()
         .map(|entry| {
             entry
@@ -1911,7 +1911,7 @@ pub(crate) fn parse_antigravity_models(raw: &str) -> Result<Vec<String>, String>
                 .and_then(|id| id.as_str())
                 .filter(|id| !id.is_empty())
                 .map(str::to_string)
-                .ok_or_else(|| format!("agy models --output-format json listed a model with no id: {entry}"))
+                .ok_or_else(|| format!("agy --output-format json models listed a model with no id: {entry}"))
         })
         .collect()
 }

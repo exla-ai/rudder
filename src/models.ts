@@ -283,14 +283,15 @@ function agyBin(): string {
 }
 
 /**
- * `agy models --output-format json`, whose stdout holds the list alone (agy
- * 1.5.0 prints its errors and spinner on stderr). None when agy is not
+ * `agy --output-format json models`, whose stdout holds the list alone (agy
+ * prints its errors and spinner on stderr). The flag is agy's own, so it
+ * comes before `models`, which refuses it after. None when agy is not
  * installed or not signed in: it then says "Please sign in to view available
  * models". Any other failure is an error with its reason.
  */
 async function readAntigravityModels(): Promise<CliModel[]> {
   const bin = agyBin();
-  const args = ["models", "--output-format", "json"];
+  const args = ["--output-format", "json", "models"];
   return await new Promise((resolve, reject) => {
     const child = execFile(bin, args, { cwd: os.homedir(), timeout: AGY_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT" || /Please sign in to view available models/.test(`${stdout}\n${stderr}`)) {
@@ -322,15 +323,15 @@ export function parseAntigravityModels(out: string): CliModel[] {
   try {
     list = JSON.parse(out);
   } catch (error) {
-    throw new Error(`agy models --output-format json printed no JSON: ${(error as Error).message}`);
+    throw new Error(`agy --output-format json models printed no JSON: ${(error as Error).message}`);
   }
   if (!Array.isArray(list)) {
-    throw new Error("agy models --output-format json printed no list");
+    throw new Error("agy --output-format json models printed no list");
   }
   return list.map((entry: unknown) => {
     const { id, label } = (entry ?? {}) as { id?: unknown; label?: unknown };
     if (typeof id !== "string" || !id || (label !== undefined && typeof label !== "string")) {
-      throw new Error(`agy models --output-format json listed a model with no id: ${JSON.stringify(entry)}`);
+      throw new Error(`agy --output-format json models listed a model with no id: ${JSON.stringify(entry)}`);
     }
     return { id, name: label || undefined, efforts: [], alias: false, resolved: id };
   });

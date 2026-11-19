@@ -263,6 +263,22 @@ download still serves 1.0.2; a signed build needs the Developer ID identity
 (the MacBook Pro, or a Developer ID Application .p12 as the
 MAC_DEVELOPER_ID_P12 and MAC_DEVELOPER_ID_PASSWORD secrets for mac.yml).
 
+5.0.11 is published as npm latest and deployed to Cloud (web app Fly release
+215 at 2026-11-19 06:15Z, worker image `rudder-workers-exla:5.0.11` pinned in
+release 216 at 06:27Z, built with `worker-image.mjs --compile`). Rudder for Mac
+5.0.11 (5000011) is the latest Mac release (`mac-v5.0.11-5000011`). In it:
+moving a chat to another harness (same row, a handoff built from the
+transcript with no model call, optional summary instructions), the subagent
+tray, Cmd+K command palette (the terminal button is gone), quote reply, model
+chips with harness logos and "Sol 6.1" style names in per-harness sections,
+right-click a project for a new chat, the All agents update screen, the image
+message bug, dashboard app actions within milliseconds (steer inbox watched
+with inotify/kqueue instead of read once a second), and tests that never start
+the real claude. Open: Antigravity CLI support is built in a worktree but not
+run against a signed-in agy; moving to a harness that is not signed in is not
+refused yet; slash commands in reply mode get the quote; inline teammate cards
+skip the membership rule; tests leak about 29 temp dirs per run.
+
 5.0.10 is published as npm latest and deployed to Cloud (Fly release 214,
 2026-11-19 04:12Z, worker image `rudder-workers-exla:5.0.10`, built from the
 tag's source with `worker-image.mjs --compile`). Rudder for Mac 5.0.10

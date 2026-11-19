@@ -313,20 +313,34 @@ async function readAntigravityModels(): Promise<CliModel[]> {
 }
 
 /**
- * agy's JSON model list: an array of `{"id": "...", "label": "..."}`, agy
- * 1.5.0's modelJSON (id, the slug `--model` takes, and a label when it has
- * one). It names no efforts and no default, so the section offers neither:
- * agy runs a model at its own default thinking level.
+ * agy's JSON model list: the result envelope its print mode writes, with
+ * the list under `command.data.models` as `{"id": "...", "label": "..."}`
+ * (tests/fixtures/agy-1.5.0-models.json). An id is the slug `--model` takes,
+ * one per effort ("gemini-3.8-flash-high"), so the section offers no
+ * efforts and no default, which the list does not name.
  */
 export function parseAntigravityModels(out: string): CliModel[] {
-  let list: unknown;
+  let payload: unknown;
   try {
-    list = JSON.parse(out);
+    payload = JSON.parse(out);
   } catch (error) {
     throw new Error(`agy --output-format json models printed no JSON: ${(error as Error).message}`);
   }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("agy --output-format json models printed no result envelope");
+  }
+  const { status, response, command } = payload as {
+    status?: unknown;
+    response?: unknown;
+    command?: { name?: unknown; data?: { models?: unknown } };
+  };
+  if (status !== "SUCCESS") {
+    const reason = typeof response === "string" && response.trim() ? `: ${response.trim().split("\n")[0]}` : "";
+    throw new Error(`agy --output-format json models ended ${JSON.stringify(status)}${reason}`);
+  }
+  const list = command?.name === "models" ? command.data?.models : undefined;
   if (!Array.isArray(list)) {
-    throw new Error("agy --output-format json models printed no list");
+    throw new Error(`agy --output-format json models printed no command.data.models (command ${JSON.stringify(command?.name)})`);
   }
   return list.map((entry: unknown) => {
     const { id, label } = (entry ?? {}) as { id?: unknown; label?: unknown };
@@ -944,11 +958,11 @@ const ANTIGRAVITY: Harness = {
   // agy's list does not say which model it runs when given none.
   defaultModel: async () => null,
   parse: parseAntigravityId,
-  // agy's names already read "Gemini 4 Argon".
+  // agy's labels already read "Gemini 3.8 Flash (High)".
   name: (display) => display,
   // Models in the order agy lists them.
   tiers: tiersByListOrder,
-  // `agy --effort` (native launch.rs); none offered while agy's list names none.
+  // `agy --effort` (native launch.rs); none offered: agy lists a slug per effort.
   efforts: ["low", "medium", "high", "xhigh", "max"],
 };
 
@@ -1033,7 +1047,8 @@ function parseOpencodeId(id: string): ParsedModelId {
 }
 
 /**
- * "gemini-4-argon" reads "Gemini 4 Argon", as agy names it. agy's list spans
+ * "gemini-3.8-flash-high" reads "Gemini 3.8 Flash High" when agy gives it no
+ * label. agy's list spans
  * model makers, so each model is its own family, ranked in list order.
  */
 function parseAntigravityId(id: string): ParsedModelId {

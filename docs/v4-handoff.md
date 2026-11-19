@@ -384,9 +384,10 @@ no read-only sandbox) and peer MCP (agy reads MCP servers from one global
 file only). The app's Settings agents list signs it in to Google with a
 pasted code, and a chat can switch to and from it in the model picker. Its
 models come from `agy --output-format json models`, which agy prints only
-when signed in: an array of `{id, label}` (read from the types in agy 1.5.0
-and 1.5.13, not yet from a signed-in run). It names no efforts or default, so
-the pickers offer none for it. Open: phone answers to its permission
+when signed in: a result envelope with the list under `command.data.models`
+as `{id, label}` (tests/fixtures/agy-1.5.0-models.json). An id is a slug per
+effort (`gemini-3.8-flash-high`), so the pickers offer no efforts or default
+for it. Open: phone answers to its permission
 prompts, the app's "/" list for it, the files an edit wrote in a handoff
 from it (its CODE_ACTION step), and the files hub showing `~/.gemini`
 instructions and skills.

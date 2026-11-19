@@ -1573,15 +1573,33 @@ fn opencode_model_list_keeps_provider_qualified_ids_and_their_variants() {
 
 #[test]
 fn antigravity_model_list_is_its_slugs_in_order() {
-    // `agy --output-format json models`, agy 1.5.0's modelJSON.
-    let raw = r#"[{"id":"gemini-4-argon","label":"Gemini 4 Argon"},{"id":"gemini-3.1-pro-high"}]"#;
+    // `agy --output-format json models`, as agy 1.5.0 printed it signed in.
+    let raw = include_str!("../../tests/fixtures/agy-1.5.0-models.json");
     assert_eq!(
         crate::models::parse_antigravity_models(raw),
-        Ok(vec!["gemini-4-argon".to_string(), "gemini-3.1-pro-high".to_string()])
+        Ok([
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ]
+        .map(String::from)
+        .to_vec())
     );
-    let refused = crate::models::parse_antigravity_models(r#"[{"label":"No id"}]"#).unwrap_err();
-    assert!(refused.contains("no id"), "{refused}");
-    assert!(crate::models::parse_antigravity_models("Please sign in").is_err());
+    let failed = crate::models::parse_antigravity_models(
+        r#"{"status":"ERROR","response":"quota exceeded\nmore","command":{"name":"models"}}"#,
+    )
+    .unwrap_err();
+    assert!(failed.contains("\"ERROR\": quota exceeded"), "{failed}");
+    let bare = crate::models::parse_antigravity_models(r#"[{"id":"gemini-3.8-flash-high"}]"#).unwrap_err();
+    assert!(bare.contains("no result envelope"), "{bare}");
+    let no_id = crate::models::parse_antigravity_models(
+        r#"{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"label":"No id"}]}}}"#,
+    )
+    .unwrap_err();
+    assert!(no_id.contains("no id"), "{no_id}");
 }
 
 #[test]

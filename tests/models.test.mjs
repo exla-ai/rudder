@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { discoverHarnesses, modelName, refreshModelCatalog } from "../dist/models.js";
+import { discoverHarnesses, modelName, parseAntigravityModels, refreshModelCatalog } from "../dist/models.js";
 import { harnessLogo } from "../cloud/app/harness-logos.js";
 
 /** One harness's rows, as the pickers list them. */
@@ -258,12 +258,8 @@ test("the picker sorts models by version, then tier, names them and offers only 
   await fsp.writeFile(path.join(root, "opencode-config.json"), JSON.stringify({ model: "opencode/big-pickle" }));
   // Before agy is signed in, its section is empty.
   assert.deepEqual(await modelsOf("antigravity"), []);
-  // agy's list, as its modelJSON prints it.
-  await fsp.writeFile(path.join(root, "agy-models.json"), JSON.stringify([
-    { id: "gemini-4-argon", label: "Gemini 4 Argon" },
-    { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
-    { id: "gemini-3.1-pro-high" },
-  ]));
+  // agy's list, as agy 1.5.0 printed it signed in.
+  await fsp.copyFile(new URL("./fixtures/agy-1.5.0-models.json", import.meta.url), path.join(root, "agy-models.json"));
 
   const harnesses = await discoverHarnesses();
   assert.deepEqual(harnesses.map((h) => [h.id, h.label, h.account]), [["claude", "Claude", "Claude Code"], ["codex", "Codex", "ChatGPT"], ["opencode", "OpenCode", "OpenCode"], ["antigravity", "Antigravity", "Google"]]);
@@ -333,20 +329,31 @@ test("the picker sorts models by version, then tier, names them and offers only 
   assert.equal(opencode.default, "opencode/big-pickle");
   assert.equal(modelName(harnesses, "opencode", null), "Big Pickle", "no model is the one OpenCode's config runs");
   assert.equal(modelName(harnesses, "opencode", "anthropic/claude-sonnet"), "Claude Sonnet", "a model OpenCode no longer lists");
-  // Exactly agy's models in its order, with its labels, and no efforts or
-  // default, which its list does not name.
+  // Exactly agy's models in its order, with its labels: a slug per effort,
+  // so no efforts of their own, and no default, which its list does not name.
   const antigravity = harnesses[3];
   assert.deepEqual(antigravity.models.map((row) => [row.value, row.label, row.efforts]), [
-    ["gemini-4-argon", "Gemini 4 Argon", []],
-    ["gemini-3.8-flash", "Gemini 3.8 Flash", []],
-    ["gemini-3.1-pro-high", "Gemini 3.1 Pro High", []],
+    ["gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", []],
+    ["gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", []],
+    ["gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)", []],
+    ["claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)", []],
+    ["claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)", []],
+    ["gpt-oss-120b-medium", "GPT-OSS 120B (Medium)", []],
   ]);
   assert.equal(antigravity.default, null);
-  assert.equal(modelName(harnesses, "antigravity", "gemini-4-argon"), "Gemini 4 Argon");
+  assert.equal(modelName(harnesses, "antigravity", "gemini-3.8-flash-low"), "Gemini 3.8 Flash (Low)");
+  assert.equal(modelName(harnesses, "antigravity", "gemini-9-flash-high"), "Gemini 9 Flash High", "a model agy no longer lists");
   // Model chips show the harness's logo in place of its name.
   for (const harness of harnesses) {
     assert.match(harnessLogo(harness.id), /^<svg /, `${harness.label} needs a logo in cloud/app/harness-logos.js`);
   }
+});
+
+test("agy's model list is read only from a successful models envelope", () => {
+  assert.throws(() => parseAntigravityModels('{"status":"ERROR","response":"quota exceeded\\nmore","command":{"name":"models"}}'), /ended "ERROR": quota exceeded$/);
+  assert.throws(() => parseAntigravityModels('[{"id":"gemini-3.8-flash-high"}]'), /no result envelope/);
+  assert.throws(() => parseAntigravityModels('{"status":"SUCCESS","command":{"name":"agents","data":{}}}'), /no command\.data\.models \(command "agents"\)/);
+  assert.throws(() => parseAntigravityModels("Fetching available models..."), /printed no JSON/);
 });
 
 test("an expired stored login is not sent, and a refused key fails discovery with the reason", async (t) => {

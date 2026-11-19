@@ -1897,13 +1897,42 @@ pub(crate) fn cached_antigravity_models() -> Result<Vec<String>, String> {
     }
 }
 
-/// `agy --output-format json models`: an array of `{"id": "...", "label":
-/// "..."}` (agy 1.5.0's modelJSON). It names no efforts, so a listed model
-/// offers none and runs at agy's default thinking level.
+/// `agy --output-format json models`: the result envelope agy's print mode
+/// writes, with the list under `command.data.models` as `{"id": "...",
+/// "label": "..."}` (tests/fixtures/agy-1.5.0-models.json). An id is the slug
+/// `--model` takes, one per effort ("gemini-3.8-flash-high"), so a listed
+/// model offers no effort of its own.
 /// src/models.ts parseAntigravityModels reads the same output for the app.
 pub(crate) fn parse_antigravity_models(raw: &str) -> Result<Vec<String>, String> {
-    let list: Vec<serde_json::Value> = serde_json::from_str(raw)
-        .map_err(|error| format!("agy --output-format json models printed no list: {error}"))?;
+    let payload: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("agy --output-format json models printed no JSON: {error}"))?;
+    if !payload.is_object() {
+        return Err("agy --output-format json models printed no result envelope".to_string());
+    }
+    let status = payload.get("status").and_then(|status| status.as_str());
+    if status != Some("SUCCESS") {
+        let reason = payload
+            .get("response")
+            .and_then(|response| response.as_str())
+            .and_then(|response| response.trim().lines().next())
+            .map(|line| format!(": {line}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "agy --output-format json models ended {}{reason}",
+            payload.get("status").unwrap_or(&serde_json::Value::Null)
+        ));
+    }
+    let command = payload.get("command");
+    let list = command
+        .filter(|command| command.get("name").and_then(|name| name.as_str()) == Some("models"))
+        .and_then(|command| command.pointer("/data/models"))
+        .and_then(|models| models.as_array())
+        .ok_or_else(|| {
+            format!(
+                "agy --output-format json models printed no command.data.models (command {})",
+                command.and_then(|command| command.get("name")).unwrap_or(&serde_json::Value::Null)
+            )
+        })?;
     list.iter()
         .map(|entry| {
             entry

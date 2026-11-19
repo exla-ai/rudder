@@ -270,8 +270,12 @@ pinned, built with `worker-image.mjs --compile`, copied to
 qualification failed two steer_watch tests, a kqueue race (a directory deleted
 between open and registration was watched as a dead vnode; 17 of 30 runs
 failed on an Offstage Mac, 0 of 130 after the fix). Cloud ran the 5.0.12 image
-meanwhile (releases 224 and 225). The Mac app is still 5.0.11: signing needs the
-MacBook Pro, which was asleep. In 5.0.12 and 5.0.13: OpenCode as a full
+meanwhile (releases 224 and 225). The Mac app 5.0.13 (5000013) is published as
+`mac-v5.0.13-5000013` (21:26Z): the unsigned app was built on an Offstage Mac,
+and the user signed, notarized and published it on the MacBook Pro by running
+one script (`mac/scripts/package.sh`, then `publish.sh`) because the laptop's
+Tailscale stopped answering. Release secrets still lack the Developer ID .p12,
+so Mac releases still need that laptop. In 5.0.12 and 5.0.13: OpenCode as a full
 harness (opencode-ai 1.19.5 in the image); one right-side panel for Files,
 Canvas, Notes, the agent's terminal (xterm.js, read only) and file links;
 notes per agent (`.rudder/runs/<id>/notes.md`, replacing RUDDER_NOTES.md);

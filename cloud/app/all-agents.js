@@ -59,6 +59,10 @@ const oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
 /** A tool call of the "All agents" chat as its card shows it, or null for any other tool. */
 export function coordinatorTool(tool) {
+  // Codex in code mode calls them from a script in its `exec` tool, which the
+  // transcript names by the tool it calls (worker/transcripts.mjs), without arguments.
+  const scripted = tool?.name === "exec" ? /^mcp__all_agents__([a-z_]+)$/.exec(String(tool.input || "").trim())?.[1] : null;
+  if (scripted) return Object.hasOwn(TOOL_LABELS, scripted) ? { name: TOOL_LABELS[scripted], input: "" } : null;
   const which = /^mcp__all_agents__([a-z_]+)$/.exec(String(tool?.name || ""))?.[1];
   if (!which || !Object.hasOwn(TOOL_LABELS, which)) return null;
   // The transcript keeps the arguments as JSON, or one picked field (a start's prompt).

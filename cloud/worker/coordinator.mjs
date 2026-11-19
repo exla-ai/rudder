@@ -192,6 +192,27 @@ export function writeCoordinatorFiles(dir, { node, mcpScript, socketPath }) {
 
 export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now }) {
   const userProjects = () => projects().filter((p) => !p.coordinator);
+  // What each chat (by its run id) last saw of each agent: the state just
+  // before it sent to the agent, or what its last wait reported. A wait
+  // reports what changed since then, so a reply that lands before the wait
+  // starts (a one-line reply takes under a second) is still news to it.
+  const looked = new Map(); // caller -> Map(`<workspace>/<run>` -> snapshot entry)
+  const lookedBy = (caller) => {
+    const key = caller ?? "";
+    if (!looked.has(key)) looked.set(key, new Map());
+    return looked.get(key);
+  };
+  const remember = (caller, project, agent, change = {}) => {
+    lookedBy(caller).set(`${project.workspaceId}/${agent.id}`, { ...snapshotEntry(project, agent), ...change });
+  };
+  // An agent's newest reply in its transcript ({ text, ts }), or null. The
+  // list's preview of it trails the transcript by a few seconds.
+  const lastReply = (entry) => {
+    const project = userProjects().find((p) => p.workspaceId === entry.workspaceId);
+    const { messages = [] } = readTranscript(project.dir, entry.id, { limit: 20, home });
+    const last = messages.findLast((m) => m.role === "assistant" && String(m.text || "").trim());
+    return last ? { text: last.text, ts: last.ts } : null;
+  };
 
   function findProject(query) {
     const q = String(query || "").trim().toLowerCase();
@@ -238,19 +259,21 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       const transcript = readTranscript(project.dir, agent.id, { limit, home });
       return formatTranscript(project, agent, transcript, { now: now() });
     },
-    async send_message(args) {
+    async send_message(args, { caller }) {
       const { project, agent } = findAgent(args.agent, args.project);
       const text = String(args.text || "").trim();
       if (!text) throw new Error("text is empty");
+      remember(caller, project, agent);
       const result = await rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text: text.slice(0, 16_000) });
       return delivered(result, `Sent to ${label(project, agent)}`);
     },
-    async interrupt_agent(args) {
+    async interrupt_agent(args, { caller }) {
       const { project, agent } = findAgent(args.agent, args.project);
+      remember(caller, project, agent);
       const result = await rpc("keys", { workspaceId: project.workspaceId, runId: agent.id, keys: "esc" });
       return delivered(result, `Interrupted ${label(project, agent)}`);
     },
-    async start_agent(args) {
+    async start_agent(args, { caller }) {
       const project = findProject(args.project);
       const prompt = String(args.prompt || "").trim();
       if (!prompt) throw new Error("prompt is empty");
@@ -261,6 +284,8 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       for (let waited = 0; waited < 20_000; waited += 1000) {
         const fresh = project.agents().filter((a) => !before.has(a.id) && !a.pending);
         if (fresh.length) {
+          // Still starting as far as this chat knows: a wait reports it finished even if it already has.
+          for (const a of fresh) remember(caller, project, a, { status: "starting" });
           return `Started in ${project.name}:\n${fresh.map((a) => `- ${a.id} · ${a.status} · ${clip(a.title, 120)}`).join("\n")}`;
         }
         await sleep(1000);
@@ -269,7 +294,7 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
         ? `${project.name}'s dashboard took the task but no new agent has appeared yet (it may be planning first). Check list_agents in a moment.`
         : `The task for ${project.name} is queued; its dashboard has not confirmed it yet.`;
     },
-    async answer_prompt(args) {
+    async answer_prompt(args, { caller }) {
       const { project, agent } = findAgent(args.agent, args.project);
       const askId = String(args.prompt_id || "");
       if (!(agent.asks || []).some((q) => q.id === askId)) {
@@ -277,6 +302,7 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       }
       const answer = args.answer && typeof args.answer === "object" && !Array.isArray(args.answer) ? args.answer : null;
       if (!answer) throw new Error("answer must be an object");
+      remember(caller, project, agent);
       const result = await rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId, answer });
       return result?.status === "queued" ? `Answer for ${label(project, agent)} is queued.` : sentence(`Answered ${label(project, agent)}`);
     },
@@ -287,20 +313,26 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       const inScope = (e) => (!scope || e.workspaceId === scope) && (!only || only.has(e.id));
       const callerInput = () => lastUserInput(projects(), caller);
       const startInput = callerInput();
-      let before = snapshot(userProjects());
+      // Since this chat last looked; an agent it never looked at, since now.
+      const seen = lookedBy(caller);
+      for (const [key, entry] of snapshot(userProjects())) {
+        if (!seen.has(key)) seen.set(key, entry);
+      }
       const deadline = now() + timeoutMs;
-      while (now() < deadline) {
+      for (;;) {
         if (signal?.aborted) return "Stopped waiting.";
-        await sleep(WAIT_POLL_MS);
-        const after = snapshot(userProjects());
-        const events = agentEvents(before, after).filter(inScope);
-        if (events.length) return formatEvents(events);
-        before = after;
+        const after = new Map([...snapshot(userProjects())].filter(([, entry]) => inScope(entry)));
+        const events = agentEvents(seen, after, lastReply);
+        if (events.length) {
+          for (const [key, entry] of after) seen.set(key, entry);
+          return formatEvents(events);
+        }
         if (startInput !== null && callerInput() !== startInput) {
           return "The user sent you a new message. Stop waiting and read it.";
         }
+        if (now() >= deadline) return `Nothing changed in ${Math.round(timeoutMs / 1000)}s.`;
+        await sleep(WAIT_POLL_MS);
       }
-      return `Nothing changed in ${Math.round(timeoutMs / 1000)}s.`;
     },
   };
 
@@ -321,31 +353,49 @@ export function snapshot(projectList) {
     if (project.status === "cloning") continue;
     for (const agent of project.agents()) {
       if (agent.pending) continue;
-      map.set(`${project.workspaceId}/${agent.id}`, {
-        workspaceId: project.workspaceId,
-        project: project.name,
-        id: agent.id,
-        title: agent.title,
-        status: agent.status,
-        lastMessage: agent.lastMessage ?? null,
-        asks: (agent.asks || []).map((q) => ({ id: q.id, text: askLine(q) })),
-      });
+      map.set(`${project.workspaceId}/${agent.id}`, snapshotEntry(project, agent));
     }
   }
   return map;
 }
 
-/** What changed between two snapshots that a coordinator reports. */
-export function agentEvents(before, after) {
+function snapshotEntry(project, agent) {
+  return {
+    workspaceId: project.workspaceId,
+    project: project.name,
+    id: agent.id,
+    title: agent.title,
+    status: agent.status,
+    // When the newest message went into its chat (home.mjs agentSummary).
+    inputAt: agent.inputAt ?? null,
+    asks: (agent.asks || []).map((q) => ({ id: q.id, text: askLine(q) })),
+  };
+}
+
+const idle = (status) => !LIVE.has(status) && status !== "waiting";
+const endKind = (status) => (status === "failed" ? "failed" : ["done", "review", "merged"].includes(status) ? "finished" : "stopped");
+
+/**
+ * What changed between two snapshots that a coordinator reports. `reply(entry)`
+ * is the agent's newest reply in its transcript ({ text, ts }) or null.
+ */
+export function agentEvents(before, after, reply) {
   const events = [];
   for (const [key, now] of after) {
     const was = before.get(key);
     const base = { workspaceId: now.workspaceId, project: now.project, id: now.id, title: now.title, status: now.status };
     if (!was) {
       if (LIVE.has(now.status)) events.push({ ...base, kind: "started" });
-    } else if ((LIVE.has(was.status) || was.status === "waiting") && !LIVE.has(now.status) && now.status !== "waiting") {
-      const kind = now.status === "failed" ? "failed" : ["done", "review", "merged"].includes(now.status) ? "finished" : "stopped";
-      events.push({ ...base, kind, detail: now.lastMessage });
+    } else if ((LIVE.has(was.status) || was.status === "waiting") && idle(now.status)) {
+      events.push({ ...base, kind: endKind(now.status), detail: reply(now)?.text ?? null });
+    } else if (idle(now.status) && now.inputAt !== null && now.inputAt !== was.inputAt) {
+      // A new message went in and the agent is idle: once it has replied
+      // after that message, a whole turn went by between two looks (a
+      // one-line reply is over in under a second); before, it has not begun.
+      const answer = reply(now);
+      if (answer && answer.ts >= now.inputAt) {
+        events.push({ ...base, kind: endKind(now.status), detail: answer.text });
+      }
     } else if (now.status === "waiting" && was.status !== "waiting" && !now.asks.length) {
       events.push({ ...base, kind: "needs you", detail: "waiting for you" });
     }

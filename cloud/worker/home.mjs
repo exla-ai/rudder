@@ -24,7 +24,7 @@ import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile } from "./transcripts.mjs";
-import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps } from "./asks.mjs";
+import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
 import { statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
@@ -813,7 +813,16 @@ async function handleRpc(method, params) {
     return await slashCommands.forRun(project.dir, String(params.runId || ""));
   }
   if (method === "send") {
-    return await steer(project, { kind: "steer", taskId: String(params.runId || ""), instruction: String(params.text || "") });
+    const runId = String(params.runId || "");
+    const text = String(params.text || "");
+    // An open Codex question holds the agent: the message is its answer
+    // (asks.mjs codexTypedAnswer), and the app drops the sent bubble.
+    const record = /^[A-Za-z0-9._-]+$/.test(runId) ? readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json")) : null;
+    const question = record?.backend === "codex" ? agentAsks(record).find((ask) => ask.kind === "question") : null;
+    if (question) {
+      return { ...(await answerCodexAsk(project, runId, question, codexTypedAnswer(question, text))), answered: true };
+    }
+    return await steer(project, { kind: "steer", taskId: runId, instruction: text });
   }
   if (method === "task") {
     return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });
@@ -1521,6 +1530,9 @@ function agentSummary(record, options = {}) {
     ...(record.pinned === true ? { pinned: true } : {}),
     createdAt: toMillis(record.createdAt),
     updatedAt,
+    // The newest message typed or sent into its chat: All agents tells a
+    // finished reply from one not yet started by it (coordinator.mjs).
+    inputAt: toMillis(record.lastUserInputAt),
     lastMessage,
     summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
     nodeId: record.nodeId ?? null,
@@ -1548,6 +1560,19 @@ function agentAsks(record) {
   return record.backend === "codex" ? codexAsks(record, transcriptFile(record, HOME)) : readAsks(asksDir(record.id));
 }
 
+// The keys go into the pane; the rollout moves on once they land, and the card
+// goes with it.
+async function answerCodexAsk(project, runId, ask, answer) {
+  let delivered = null;
+  for (const step of codexAskSteps(ask, answer)) {
+    delivered = await steer(project, { ...step, taskId: runId });
+    if (delivered.status !== "delivered") {
+      break;
+    }
+  }
+  return delivered;
+}
+
 async function answerAsk(project, params) {
   const runId = String(params.runId || "");
   const askId = String(params.askId || "");
@@ -1556,19 +1581,11 @@ async function answerAsk(project, params) {
   }
   const record = readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json"));
   if (record?.backend === "codex") {
-    // The rollout moves on once the keys land, and the card goes with it.
     const ask = agentAsks(record).find((candidate) => candidate.id === askId);
     if (!ask) {
       throw new Error("that prompt was already answered");
     }
-    let delivered = null;
-    for (const step of codexAskSteps(ask, params.answer)) {
-      delivered = await steer(project, { ...step, taskId: runId });
-      if (delivered.status !== "delivered") {
-        break;
-      }
-    }
-    return delivered;
+    return await answerCodexAsk(project, runId, ask, params.answer);
   }
   const dir = asksDir(runId);
   let request;

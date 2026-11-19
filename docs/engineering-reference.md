@@ -1403,8 +1403,10 @@ brain lives in the cloud, and the phone is a first-class client.
   still write it, and entries over a minute old are ignored as leftovers. The title
   call runs `claude -p` without the user's settings, hooks, plugins, MCP or tools
   (~2s faster), falling back to the plain call on an older CLI.
-- `/model` in the phone's task box opens a picker fed by `rudder __models` (the same
-  lists as the dashboard's) and sends `/model <agent> <model>`.
+- `/model` in the phone's task box opens a picker fed by `rudder __models` and sends
+  `/model <agent> <model> [effort]`. The supervisor builds the list at start, every
+  10 minutes and within a minute of a new claude or codex binary or a new model
+  list in Codex's cache; the app keeps the last list on the device and opens on it.
 - **Photos and files from the phone.** `POST /api/app/upload?workspace=&name=` takes
   the raw bytes (25 MB cap, refused on `Content-Length` before reading so the phone
   gets a 413 and not a reset), holds them in memory for at most 5 minutes, and asks
@@ -1794,13 +1796,17 @@ functional but less battle-tested than the local dashboard; treat it as beta.
 
 ## 10. Models and effort
 
-- `src/models.ts`: model discovery for the `/model` picker. Sources, each guarded
-  so a corrupt cache degrades to a fallback rather than throwing:
-  - `models.dev` cache (`readModelsDevCache`),
-  - local Codex cache `~/.codex/models_cache.json` (`discoverCodexModelsLocal`),
-  - Claude project models (`collectClaudeProjectModels`).
-  `discoverModelOptions(backend, default)` merges these; callers fall back to
-  `fallbackModelOptions`.
+- `src/models.ts`: model discovery for the phone's `/model` picker (`rudder __models`).
+  `discoverModelOptions(backend, default)` merges the catalog (models.dev cache,
+  provider APIs, Claude project models, all written to `models-dev.json` for the
+  dashboard) with the CLI's own list: Claude Code's headless `initialize` answer
+  (aliases, display names, `supportedEffortLevels`) or Codex's
+  `~/.codex/models_cache.json` (`supported_reasoning_levels`). Rows carry a
+  readable `label` (the CLI's display name, else read from the id: "Opus 5.5",
+  "GPT-6.1 Sol", "Opus 5.5 · 1M"), a generation `group` (newest first, families
+  by catalog price within one) and `efforts`: the CLI's levels that the dashboard
+  also passes (`effort_options_for`). Claude Code aliases close the list under
+  "Always the newest". No model names are hard-coded.
 - `native/src/models.rs` mirrors the same discovery for the dashboard picker. Codex
   rows read `~/.codex/models_cache.json` before models.dev so new account-specific
   families (for example GPT-5.6 Sol/Terra/Luna) appear immediately in Codex's own order.

@@ -10,43 +10,49 @@ const PROVIDERS = [
   { id: "codex", label: "Codex", account: "ChatGPT" },
 ];
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
-// The dashboard's effort list (models.rs effort_options_for): Claude adds max.
+// Effort names. Which ones a model takes comes with the list: each row's
+// `efforts` (src/models.ts modelEfforts), plus Auto when it takes any.
 const EFFORTS = [
   { id: "auto", label: "Auto", detail: "the agent decides" },
   { id: "low", label: "Low", detail: "fastest" },
   { id: "medium", label: "Medium", detail: "balanced" },
   { id: "high", label: "High", detail: "deeper reasoning" },
   { id: "xhigh", label: "Extra high", detail: "extended reasoning" },
-  { id: "max", label: "Max", detail: "maximum reasoning", only: "claude" },
+  { id: "max", label: "Max", detail: "maximum reasoning" },
 ];
-const effortsFor = (backend) => EFFORTS.filter((e) => !e.only || e.only === backend);
-// Mirrors model_supports_reasoning (native/src/models.rs): only models with
-// an effort dial get the effort chips.
-const reasons = (backend, model) => {
-  const m = String(model || "").toLowerCase();
-  if (backend === "claude") return /opus|sonnet|fable/.test(m) || (m.startsWith("claude-") && !m.includes("haiku") && !m.includes("3-"));
-  if (backend === "codex") return /^gpt|codex|^o\d/.test(m);
-  return false;
-};
+/** The effort choices of a list row: Auto and the levels it takes, or none. */
+const effortsOf = (row) => (row?.efforts?.length ? EFFORTS.filter((e) => e.id === "auto" || row.efforts.includes(e.id)) : []);
+/** `effort` when `row` takes it, else Auto. */
+const effortFor = (row, effort) => (effortsOf(row).some((e) => e.id === effort) ? effort : "auto");
 
-let modelsCache = null; // { at, data }
-async function loadModels(force = false) {
-  if (!force && modelsCache && Date.now() - modelsCache.at < 5 * 60_000) return modelsCache.data;
-  const data = (await api("/api/app/models")) || {};
-  modelsCache = { at: Date.now(), data };
-  return data;
+// The list (`rudder __models` on the cloud machine, built ahead of time) is
+// kept on this device, so the sheet opens on the last one at once and swaps
+// in the fresh one when it arrives.
+const MODELS_KEY = "rudder.models";
+let modelsCache = ls.get(MODELS_KEY); // { current, claude, codex } or null
+let modelsFresh = false; // fetched since this page loaded
+let modelsFetch = null;
+function loadModels() {
+  modelsFetch ??= api("/api/app/models").then((data) => {
+    modelsCache = data || {};
+    modelsFresh = true;
+    ls.set(MODELS_KEY, modelsCache);
+    return modelsCache;
+  }).finally(() => { modelsFetch = null; });
+  return modelsFetch;
 }
+const rowsOf = (data, backend) => (data?.[backend] || []).filter((o) => o && o.value);
+const rowFor = (backend, model) => rowsOf(modelsCache, backend).find((o) => o.value === model) || null;
+/** The readable name of a model id ("Opus 5.5"), or the id when the list does not have it. */
+const modelName = (backend, model) => rowFor(backend, model)?.label || model;
 
 const pickKey = (ws) => `rudder.model.${ws}`;
 /** What this device last chose for the project, or the dashboard's current model. */
 function currentChoice(ws) {
   const mine = ls.get(pickKey(ws));
-  if (mine?.backend && mine?.model) return mine;
-  const cur = modelsCache?.data?.current;
-  if (cur?.backend && cur?.model) {
-    const opt = (modelsCache.data[cur.backend] || []).find((o) => o.value === cur.model);
-    return { backend: cur.backend, model: cur.model, label: opt?.label || cur.model, effort: cur.effort || null };
-  }
+  if (mine?.backend && mine?.model) return { ...mine, label: rowFor(mine.backend, mine.model)?.label || mine.label || mine.model };
+  const cur = modelsCache?.current;
+  if (cur?.backend && cur?.model) return { backend: cur.backend, model: cur.model, label: modelName(cur.backend, cur.model), effort: cur.effort || null };
   return null;
 }
 const providerLabel = (b) => PROVIDERS.find((p) => p.id === b)?.label || b;
@@ -64,15 +70,28 @@ function accountLine(backend) {
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
 }
 
-/** The model rows of `opts`, `model` checked and `current` badged. */
-function paintModels(modelsEl, opts, { model, current, backend, onPick }) {
+/**
+ * The model rows of `opts` under their generation headings, `model` checked
+ * and `current` badged. Keeps the list's scroll; `reveal` scrolls the checked
+ * row into view.
+ */
+function paintModels(modelsEl, opts, { model, current, backend, onPick, reveal }) {
+  const top = modelsEl.scrollTop;
   modelsEl.replaceChildren();
+  let group;
   for (const o of opts) {
-    const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"></span><span class="mp-radio">${icon("check")}</span></button>`);
+    if (o.group && o.group !== group) {
+      group = o.group;
+      const head = h(`<div class="mp-group" role="presentation"></div>`);
+      head.textContent = group;
+      modelsEl.appendChild(head);
+    }
+    const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"><span class="mp-id"></span><span class="mp-desc"></span></span><span class="mp-radio">${icon("check")}</span></button>`);
     setText(b.querySelector(".mp-name"), o.label || o.value);
     b.querySelector(".mp-badge").hidden = o.value !== current;
-    const detail = [o.detail, o.value !== o.label ? o.value : null].filter(Boolean).join(" · ");
-    setText(b.querySelector(".mp-detail"), detail);
+    setText(b.querySelector(".mp-id"), o.value);
+    setText(b.querySelector(".mp-desc"), o.detail || "");
+    b.title = [o.value, o.detail].filter(Boolean).join(" · ");
     b.setAttribute("aria-checked", String(o.value === model));
     b.addEventListener("click", () => onPick(o.value));
     modelsEl.appendChild(b);
@@ -82,13 +101,15 @@ function paintModels(modelsEl, opts, { model, current, backend, onPick }) {
     note.textContent = `No ${providerLabel(backend)} models found on the cloud machine.`;
     modelsEl.appendChild(note);
   }
+  modelsEl.scrollTop = top;
+  if (reveal) modelsEl.querySelector('[aria-checked="true"]')?.scrollIntoView({ block: "nearest" });
 }
 
-/** The effort chips when `model` has an effort dial. Returns whether it has one. */
-function paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick }) {
-  const dial = !!model && reasons(backend, model);
-  effortWrap.hidden = !dial;
-  effortsEl.replaceChildren(...effortsFor(backend).map((e) => {
+/** The effort chips of `row`, `effort` checked. Returns whether it takes an effort. */
+function paintEfforts(effortWrap, effortsEl, { row, effort, onPick }) {
+  const choices = effortsOf(row);
+  effortWrap.hidden = !choices.length;
+  effortsEl.replaceChildren(...choices.map((e) => {
     const b = h(`<button type="button" role="radio" class="mp-effort"><span></span></button>`);
     setText(b.querySelector("span"), e.label);
     b.title = e.detail;
@@ -96,7 +117,19 @@ function paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick })
     b.addEventListener("click", () => onPick(e.id));
     return b;
   }));
-  return dial;
+  return choices.length > 0;
+}
+
+/** The list's error under the account line; the list shown stays usable. */
+function showListError(errEl, modelsEl, err, hasList) {
+  const message = err.status === 401 ? "Signed out." : err.message;
+  if (hasList) {
+    errEl.hidden = false;
+    errEl.textContent = `Could not refresh the list: ${message}`;
+  } else {
+    modelsEl.replaceChildren(h(`<div class="repo-note err"></div>`));
+    modelsEl.firstChild.textContent = message;
+  }
 }
 
 /**
@@ -113,7 +146,8 @@ export function modelChip(ws, { compact = false } = {}) {
   };
   el.addEventListener("click", () => openModelPicker(ws, { onPicked: refresh }));
   refresh();
-  if (!modelsCache) loadModels().then(refresh).catch(() => {});
+  // The label reads the list; a failed fetch shows when the sheet opens.
+  if (!modelsFresh) loadModels().then(refresh).catch(() => {});
   return { el, refresh };
 }
 
@@ -123,6 +157,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     <div class="add-head"><h3>Model for new agents</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="seg modes mp-providers" role="tablist" aria-label="Agent"></div>
     <div class="mp-account"></div>
+    <div class="repo-note err mp-error" hidden></div>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="mp-effort-l">Effort</div>
@@ -132,17 +167,19 @@ export function openModelPicker(ws, { onPicked } = {}) {
     <div class="create-note">Applies to agents you start next. Running agents keep theirs.</div>
   </div></dialog>`);
   const provEl = dlg.querySelector(".mp-providers");
+  const errEl = dlg.querySelector(".mp-error");
   const modelsEl = dlg.querySelector(".mp-models");
   const effortWrap = dlg.querySelector(".mp-effort-wrap");
   const effortsEl = dlg.querySelector(".mp-efforts");
   const useBtn = dlg.querySelector(".mp-use");
-  let data = modelsCache?.data || null;
+  let data = modelsCache;
   const start = currentChoice(ws);
   let backend = start?.backend === "codex" ? "codex" : "claude";
   let model = start?.model || null;
   let effort = start?.effort || "auto";
+  let revealed = false;
 
-  const options = () => (data?.[backend] || []).filter((o) => o && o.value);
+  const options = () => rowsOf(data, backend);
   function render() {
     provEl.replaceChildren(...PROVIDERS.map((p) => {
       const b = h(`<button type="button" role="tab"><span></span></button>`);
@@ -153,7 +190,6 @@ export function openModelPicker(ws, { onPicked } = {}) {
         backend = p.id;
         const cur = data?.current;
         model = cur?.backend === backend ? cur.model : options()[0]?.value || null;
-        if (!effortsFor(backend).some((e) => e.id === effort)) effort = "auto";
         render();
       });
       return b;
@@ -161,27 +197,27 @@ export function openModelPicker(ws, { onPicked } = {}) {
     setText(dlg.querySelector(".mp-account"), accountLine(backend));
     if (!data) return;
     const opts = options();
-    if (model && !opts.some((o) => o.value === model)) model = opts[0]?.value || null;
-    if (!model) model = opts[0]?.value || null;
+    if (!model || !opts.some((o) => o.value === model)) model = opts[0]?.value || null;
     const cur = data.current?.backend === backend ? data.current.model : null;
-    paintModels(modelsEl, opts, { model, current: cur, backend, onPick: (v) => { model = v; render(); } });
-    const dial = paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick: (v) => { effort = v; render(); } });
+    paintModels(modelsEl, opts, { model, current: cur, backend, onPick: (v) => { model = v; render(); }, reveal: !revealed });
+    revealed = true;
+    const row = opts.find((o) => o.value === model);
+    const eff = effortFor(row, effort);
+    const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     useBtn.disabled = !model;
-    const label = opts.find((o) => o.value === model)?.label || model;
-    setText(useBtn, model ? `Use ${providerLabel(backend)} · ${label}${dial && effort !== "auto" ? ` · ${effortLabel(effort).toLowerCase()}` : ""}` : "Use this model");
+    setText(useBtn, model ? `Use ${providerLabel(backend)} · ${row?.label || model}${dial && eff !== "auto" ? ` · ${effortLabel(eff).toLowerCase()}` : ""}` : "Use this model");
   }
 
   useBtn.addEventListener("click", async () => {
     if (!model) return;
-    const dial = reasons(backend, model);
-    const eff = dial ? effort : null;
+    const row = options().find((o) => o.value === model);
+    const eff = effortsOf(row).length ? effortFor(row, effort) : null;
     useBtn.disabled = true;
     try {
       // Exactly the dashboard grammar: /model <provider> <model> [effort].
       const text = `/model ${backend} ${model}${eff ? ` ${eff}` : ""}`;
       await api("/api/app/task", { method: "POST", body: { workspace: ws, text } });
-      const label = options().find((o) => o.value === model)?.label || model;
-      const choice = { backend, model, label, effort: eff };
+      const choice = { backend, model, label: row?.label || model, effort: eff };
       ls.set(pickKey(ws), choice);
       track("model_picked", { backend, model, effort: eff || "none" });
       dlg.close();
@@ -197,22 +233,20 @@ export function openModelPicker(ws, { onPicked } = {}) {
   document.body.appendChild(dlg);
   dlg.showModal();
   render();
-  loadModels(true).then((res) => {
+  loadModels().then((res) => {
     data = res;
+    errEl.hidden = true;
     if (!start) {
       const cur = data.current;
-      if (cur?.backend === "claude" || cur?.backend === "codex") { backend = cur.backend; model = cur.model; }
+      if (cur?.backend === "claude" || cur?.backend === "codex") { backend = cur.backend; model = cur.model; effort = cur.effort || effort; }
     }
     render();
-  }).catch((err) => {
-    modelsEl.replaceChildren(h(`<div class="repo-note err"></div>`));
-    modelsEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
-  });
+  }).catch((err) => showListError(errEl, modelsEl, err, !!data));
 }
 
 /* The model control in an agent's chat --------------------------------- */
 
-const chatLabel = (a) => [a.model, a.effort && reasons(a.backend, a.model) ? effortLabel(a.effort).toLowerCase() : null].filter(Boolean).join(" · ");
+const chatLabel = (a) => [modelName(a.backend, a.model), a.effort ? effortLabel(a.effort).toLowerCase() : null].filter(Boolean).join(" · ");
 
 /**
  * The model and effort one agent's chat runs on, next to its composer, and a
@@ -230,11 +264,13 @@ export function mountChatModelControl(container, { workspace, run, agent }) {
     if (el.hidden) return;
     setText(el.querySelector(".mc-l"), chatLabel(a));
     el.setAttribute("aria-label", `This chat runs on ${providerLabel(a.backend)} ${chatLabel(a)}. Change`);
-    el.title = `This chat runs on ${providerLabel(a.backend)} · ${chatLabel(a)}`;
+    el.title = `This chat runs on ${providerLabel(a.backend)} · ${chatLabel(a)} (${a.model})`;
   };
   el.addEventListener("click", () => openChatModelPicker({ workspace, run, agent, onSwitched: refresh }));
   container.appendChild(el);
   refresh();
+  // The label reads the list; a failed fetch shows when the sheet opens.
+  if (!modelsFresh) loadModels().then(refresh).catch(() => {});
   return { el, refresh };
 }
 
@@ -245,6 +281,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     <div class="sheet-grab"></div>
     <div class="add-head"><h3>Model for this chat</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="mp-account"></div>
+    <div class="repo-note err mp-error" hidden></div>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="cm-effort-l">Effort</div>
@@ -253,30 +290,24 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     <button type="button" class="btn accent block mp-use" disabled>Switch</button>
     <div class="create-note"></div>
   </div></dialog>`);
+  const errEl = dlg.querySelector(".mp-error");
   const modelsEl = dlg.querySelector(".mp-models");
   const effortWrap = dlg.querySelector(".mp-effort-wrap");
   const effortsEl = dlg.querySelector(".mp-efforts");
   const useBtn = dlg.querySelector(".mp-use");
   const note = dlg.querySelector(".create-note");
-  let data = modelsCache?.data || null;
+  let data = modelsCache;
   let model = null; // the picked row's value; until a pick, the row the agent runs on
   let effort = start.effort || "auto";
+  let revealed = false;
 
-  // The row of the list a model the agent runs on is: the same id, or for a
-  // family alias Claude Code resolves itself (`sonnet`), that family's first
-  // row (the list puts each family's newest first), the way native
-  // observed_model_update matches them. Null when no row is it.
-  const rowOf = (opts, m) => (opts.find((o) => o.value === m)
-    || (backend === "claude" && /^(fable|opus|sonnet|haiku)$/.test(m) ? opts.find((o) => o.value.startsWith("claude-") && o.value.includes(m)) : null))?.value ?? null;
-  // This backend's list, led by the model the agent runs on when no row is it
-  // (an id it was started with by hand).
+  // This backend's list, led by the model the agent runs on when the list
+  // does not have it (an id it was started with by hand).
   const options = () => {
-    const opts = (data?.[backend] || []).filter((o) => o && o.value);
-    return rowOf(opts, start.model) ? opts : [{ value: start.model, label: start.model }, ...opts];
+    const opts = rowsOf(data, backend);
+    return opts.some((o) => o.value === start.model) ? opts : [{ value: start.model, label: start.model }, ...opts];
   };
-  // What to send for the picked row: the agent's own name for its row (an
-  // alias stays an alias when only the effort changes).
-  const sendValue = () => (model === rowOf(options(), (agent() || start).model) ? (agent() || start).model : model);
+  const rowOf = (opts, m) => (opts.some((o) => o.value === m) ? m : null);
   function render() {
     const a = agent() || start;
     const busy = a.status === "working";
@@ -288,28 +319,29 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const opts = options();
     const current = rowOf(opts, a.model);
     model ??= rowOf(opts, start.model);
-    paintModels(modelsEl, opts, { model, current, backend, onPick: (v) => { model = v; render(); } });
-    const dial = paintEfforts(effortWrap, effortsEl, { backend, model, effort, onPick: (v) => { effort = v; render(); } });
-    const eff = dial ? effort : "auto";
-    const same = model === current && eff === (a.effort || "auto");
+    paintModels(modelsEl, opts, { model, current, backend, onPick: (v) => { model = v; render(); }, reveal: !revealed });
+    revealed = true;
+    const row = opts.find((o) => o.value === model);
+    const eff = effortFor(row, effort);
+    const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
+    const same = model === current && (!dial || eff === (a.effort || "auto"));
     useBtn.disabled = busy || same;
-    const label = opts.find((o) => o.value === model)?.label || model;
-    setText(useBtn, same ? "Current model" : `Switch to ${label}${eff !== "auto" ? ` · ${effortLabel(eff).toLowerCase()}` : ""}`);
+    setText(useBtn, same ? "Current model" : `Switch to ${row?.label || model}${eff !== "auto" ? ` · ${effortLabel(eff).toLowerCase()}` : ""}`);
   }
 
   useBtn.addEventListener("click", async () => {
-    const eff = reasons(backend, model) ? effort : "auto";
-    const value = sendValue();
+    const row = options().find((o) => o.value === model);
+    const eff = effortFor(row, effort);
     useBtn.disabled = true;
     try {
-      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model: value, effort: eff } });
-      track("chat_model_switched", { backend, model: value, effort: eff });
+      const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: eff } });
+      track("chat_model_switched", { backend, model, effort: eff });
       // The dashboard took it (or will within seconds): show it now, the next
       // state refresh carries the real row.
       const a = agent();
-      if (a) { a.model = value; a.effort = eff === "auto" ? null : eff; }
+      if (a) { a.model = model; a.effort = eff === "auto" ? null : eff; }
       dlg.close();
-      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${value}`);
+      toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${row?.label || model}`);
       onSwitched();
       app.refreshState();
     } catch (err) { showError(err); render(); }
@@ -322,8 +354,6 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   document.body.appendChild(dlg);
   dlg.showModal();
   render();
-  loadModels().then((res) => { data = res; render(); }).catch((err) => {
-    modelsEl.replaceChildren(h(`<div class="repo-note err"></div>`));
-    modelsEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
-  });
+  loadModels().then((res) => { data = res; errEl.hidden = true; render(); })
+    .catch((err) => showListError(errEl, modelsEl, err, !!data));
 }

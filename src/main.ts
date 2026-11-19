@@ -30,7 +30,7 @@ import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
 import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
 import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
-import { discoverModelOptions } from "./models.js";
+import { discoverModelOptions, refreshModelCatalog } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import { toolCacheEnv } from "./tool-cache.js";
 import { ensureEngineRunning, persistentProjectEngineRequested, runEngineCommand } from "./engine.js";
@@ -309,7 +309,10 @@ export async function main(): Promise<void> {
       const config = await loadConfig();
       // None chosen yet is an answer too: this picker is where one gets chosen.
       const backend = config.lastUsedBackend ?? config.defaultBackend;
-      const current = backend ? { backend, model: config.backends[backend]?.model ?? null } : null;
+      // The effort as the dashboard reads it (native config.rs config_effort).
+      const saved = backend ? config.backends[backend] : undefined;
+      const effort = (backend === "codex" ? saved?.reasoningEffort ?? saved?.effort : saved?.effort ?? saved?.reasoningEffort) ?? null;
+      const current = backend ? { backend, model: saved?.model ?? null, effort } : null;
       process.stdout.write(`${JSON.stringify({ current, claude, codex })}\n`);
       return;
     }
@@ -885,7 +888,7 @@ async function openDashboard(parsed: Parsed): Promise<void> {
 }
 
 async function refreshModelCache(): Promise<void> {
-  await Promise.all([discoverModelOptions("claude"), discoverModelOptions("codex")]);
+  await refreshModelCatalog();
 }
 
 async function runNativeDashboard(): Promise<boolean> {

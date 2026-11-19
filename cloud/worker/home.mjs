@@ -1111,31 +1111,99 @@ function captureAll(command, args, { env, cwd, timeoutMs }) {
   });
 }
 
-// `/model` on the phone: what the dashboard's own picker would offer (the
-// models.dev and Codex caches, read by `rudder __models`), plus the current
-// default. Discovery spawns the CLI, so it runs ahead of the picker: once at
-// start and every MODELS_REFRESH_MS after, and the RPC answers from the last
-// run. A served list is at most one interval old. A failed run is not served
-// around: the next request runs discovery again and returns that run's result
-// or its error.
+// `/model` on the phone: the list `rudder __models` builds (the models.dev
+// catalog and each CLI's own list: Claude Code's /model list and Codex's
+// model cache), plus the current choice. Discovery spawns the CLIs, so it
+// runs ahead of the picker: at start, every MODELS_REFRESH_MS, and within
+// MODELS_CHECK_MS of a CLI update (a new claude or codex binary, or a new
+// model list in Codex's cache). The RPC answers from the last run; a request
+// that comes after such an update waits for the new list. A failed run is not
+// served around: the next request runs discovery again and returns that run's
+// result or its error.
 const MODELS_REFRESH_MS = 10 * 60_000;
-let models = null; // { value } or { error } from the last finished run
+const MODELS_CHECK_MS = 60_000;
+let models = null; // { value } or { error } from the last finished run, with { stamp, at }
 let modelsRun = null;
 function refreshModels() {
-  modelsRun ??= discoverModels().then(
-    (value) => { models = { value }; },
-    (error) => { models = { error }; log(`models: ${error.message}`); },
-  ).finally(() => { modelsRun = null; });
+  modelsRun ??= (async () => {
+    const at = Date.now();
+    let stamp = null;
+    try {
+      stamp = modelSourcesStamp();
+      models = { value: await discoverModels(), stamp, at };
+    } catch (error) {
+      models = { error, stamp, at };
+      log(`models: ${error.message}`);
+    }
+  })().finally(() => { modelsRun = null; });
   return modelsRun;
 }
 async function listModels() {
-  if (!models || models.error) {
+  if (!models || models.error || models.stamp !== modelSourcesStamp()) {
     await refreshModels();
   }
   if (models.error) {
     throw models.error;
   }
   return models.value;
+}
+async function keepModelsFresh() {
+  if (modelsRun || (models && Date.now() - models.at < MODELS_REFRESH_MS && models.stamp === modelSourcesStamp())) {
+    return;
+  }
+  await refreshModels();
+}
+// What the CLIs' model lists come from, as one string: the claude and codex
+// binaries and the model list in Codex's cache.
+function modelSourcesStamp() {
+  const codexHome = baseChildEnv.CODEX_HOME?.trim() || path.join(HOME, ".codex");
+  return [
+    modelCliStamp(baseChildEnv.RUDDER_CLAUDE_BIN?.trim() || "claude"),
+    modelCliStamp(baseChildEnv.RUDDER_CODEX_BIN?.trim() || "codex"),
+    codexModelCacheStamp(path.join(codexHome, "models_cache.json")),
+  ].join("\n");
+}
+function modelCliStamp(name) {
+  const candidates = name.includes("/") ? [name] : String(baseChildEnv.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, name));
+  for (const candidate of candidates) {
+    let real;
+    try {
+      real = fs.realpathSync(candidate);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    const stat = fs.statSync(real);
+    return `${real}:${stat.mtimeMs}:${stat.size}`;
+  }
+  return `${name}:-`;
+}
+// Codex rewrites its cache each time it checks for models (every few minutes
+// while agents run), mostly with the same list: the stamp is the part the
+// picker shows, read once per write.
+let codexCacheStamp = null; // { key, value }
+function codexModelCacheStamp(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return `${file}:-`;
+    throw error;
+  }
+  const key = `${file}:${stat.mtimeMs}:${stat.size}`;
+  if (codexCacheStamp?.key !== key) {
+    let cache;
+    try {
+      cache = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (error) {
+      // Caught mid-write: this read's stamp stands until the next one.
+      if (error instanceof SyntaxError) return key;
+      throw error;
+    }
+    const rows = (cache.models ?? []).map((m) => [m.slug, m.display_name, m.description, m.visibility, m.supported_reasoning_levels?.map((level) => level.effort)]);
+    codexCacheStamp = { key, value: `${file}:${JSON.stringify(rows)}` };
+  }
+  return codexCacheStamp.value;
 }
 async function discoverModels() {
   const result = await captureAll("rudder", ["__models"], { env: { ...baseChildEnv }, cwd: HOME, timeoutMs: 30_000 });
@@ -1146,7 +1214,7 @@ async function discoverModels() {
   return JSON.parse(line);
 }
 void refreshModels();
-setInterval(() => void refreshModels(), MODELS_REFRESH_MS);
+setInterval(() => keepModelsFresh().catch((error) => log(`models: ${error.message}`)), MODELS_CHECK_MS);
 
 // "Add project" on the phone: the repos this GitHub login can open (its own,
 // collaborations and its orgs'), newest first, plus where a new one can go.

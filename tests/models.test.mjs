@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { discoverModelOptions, fallbackModelOptions } from "../dist/models.js";
+import { discoverModelOptions } from "../dist/models.js";
 
 async function withTempRudderHome(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-models-"));
@@ -120,14 +120,89 @@ test("Codex subscription OAuth stays off public API discovery and uses the selec
   assert.ok(!calls.includes("https://api.openai.com/v1/models"));
 });
 
-test("Claude fallback choices mirror Claude Code without synthetic 1m aliases", () => {
-  const options = fallbackModelOptions("claude");
-  assert.deepEqual(
-    options.map((option) => option.value),
-    [undefined, "opus", "fable", "sonnet", "haiku"],
-  );
-  assert.match(options.find((option) => option.value === "opus")?.detail ?? "", /1M context/);
-  assert.ok(!options.some((option) => option.value?.includes("[1m]")));
+test("the picker groups models by generation, names them and offers only efforts both the CLI and the dashboard take", async (t) => {
+  const root = await withTempRudderHome(t);
+  // Claude Code's own list: its headless initialize answer.
+  const all = ["low", "medium", "high", "xhigh", "max"];
+  const claudeModels = [
+    { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", supportsEffort: true, supportedEffortLevels: all },
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5", description: "For complex work", supportsEffort: true, supportedEffortLevels: all },
+    { value: "opus[1m]", resolvedModel: "claude-opus-5-5[1m]", displayName: "Opus 5.5 (1M context)", supportsEffort: true, supportedEffortLevels: all },
+    { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", supportsEffort: true, supportedEffortLevels: all },
+    { value: "claude-opus-4-6", resolvedModel: "claude-opus-4-6", displayName: "Opus 4.6", supportsEffort: true, supportedEffortLevels: ["low", "medium", "high", "max"] },
+    { value: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5" },
+  ];
+  const stub = path.join(root, "claude");
+  await fsp.writeFile(stub, `#!/usr/bin/env node
+process.stdin.once("data", (line) => {
+  const { request_id } = JSON.parse(String(line));
+  process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id, response: { models: ${JSON.stringify(claudeModels)} } } }) + "\\n");
+});
+`, { mode: 0o755 });
+  process.env.CODEX_HOME = path.join(root, "codex");
+  await fsp.mkdir(process.env.CODEX_HOME);
+  const levels = (...efforts) => efforts.map((effort) => ({ effort }));
+  await fsp.writeFile(path.join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({ models: [
+    { slug: "gpt-6.2-sol", display_name: "GPT-6.2-Sol", description: "Fast", supported_reasoning_levels: levels("low", "medium", "high", "xhigh", "max", "ultra") },
+    { slug: "gpt-6.2-astra", display_name: "GPT-6.2-Astra", supported_reasoning_levels: levels("low", "medium") },
+    { slug: "gpt-6.1-sol", display_name: "GPT-6.1 Sol", supported_reasoning_levels: levels("low", "high") },
+  ] }));
+  const oldBin = process.env.RUDDER_CLAUDE_BIN, oldFetch = globalThis.fetch, oldOpenAI = process.env.OPENAI_API_KEY, oldAnthropic = process.env.ANTHROPIC_API_KEY;
+  process.env.RUDDER_CLAUDE_BIN = stub;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  t.after(() => {
+    globalThis.fetch = oldFetch;
+    for (const [key, value] of [["RUDDER_CLAUDE_BIN", oldBin], ["OPENAI_API_KEY", oldOpenAI], ["ANTHROPIC_API_KEY", oldAnthropic]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const priced = (output, extra = {}) => ({ tool_call: true, cost: { output }, ...extra });
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), "https://models.dev/api.json");
+    return jsonResponse({
+      openai: { id: "openai", models: { "gpt-6.2-sol": priced(10), "gpt-6.2-astra": priced(40), "gpt-6.1-sol": priced(10), "gpt-5.5": priced(30, { limit: { context: 1050000 } }) } },
+      anthropic: { id: "anthropic", models: {
+        "claude-fable-5-2": priced(50), "claude-opus-5-5": priced(25), "claude-sonnet-5-5": priced(15), "claude-haiku-5-5": priced(5, { reasoning: false }),
+        "claude-haiku-4-5": priced(5), "claude-opus-4-5": priced(25), "claude-opus-4-5-20251101": priced(25),
+      } },
+    });
+  };
+
+  const claude = (await discoverModelOptions("claude")).slice(1);
+  const groups = (rows) => [...new Set(rows.map((row) => row.group))];
+  assert.deepEqual(groups(claude), ["Claude 5.5", "Claude 5.2", "Claude 4.6", "Claude 4.5", "Always the newest"]);
+  assert.deepEqual(claude.map((row) => [row.value, row.label]), [
+    ["claude-opus-5-5", "Opus 5.5"],
+    ["claude-opus-5-5[1m]", "Opus 5.5 · 1M"],
+    ["claude-sonnet-5-5", "Sonnet 5.5"],
+    ["claude-haiku-5-5", "Haiku 5.5"],
+    ["claude-fable-5-2", "Fable 5.2"],
+    ["claude-opus-4-6", "Opus 4.6"],
+    ["claude-opus-4-5", "Opus 4.5"],
+    ["claude-haiku-4-5", "Haiku 4.5"],
+    ["opus", "Opus"],
+    ["opus[1m]", "Opus · 1M"],
+    ["haiku", "Haiku"],
+  ]);
+  const efforts = (rows, value) => rows.find((row) => row.value === value).efforts;
+  assert.deepEqual(efforts(claude, "claude-opus-5-5"), all);
+  assert.deepEqual(efforts(claude, "claude-opus-4-6"), ["low", "medium", "high", "max"], "Claude Code's own levels");
+  assert.deepEqual(efforts(claude, "claude-haiku-4-5"), [], "Claude Code lists no effort for it");
+  assert.deepEqual(efforts(claude, "haiku"), [], "the dashboard passes no effort to Haiku");
+  assert.match(claude.find((row) => row.value === "opus").detail, /^Now Opus 5\.5 · For complex work$/);
+
+  const codex = (await discoverModelOptions("codex")).slice(1);
+  assert.deepEqual(codex.map((row) => [row.group, row.label]), [
+    ["GPT-6.2", "GPT-6.2 Astra"],
+    ["GPT-6.2", "GPT-6.2 Sol"],
+    ["GPT-6.1", "GPT-6.1 Sol"],
+    ["GPT-5.5", "GPT-5.5"],
+  ]);
+  assert.deepEqual(efforts(codex, "gpt-6.2-sol"), ["low", "medium", "high", "xhigh"], "no max or ultra: the dashboard passes neither to Codex");
+  assert.deepEqual(efforts(codex, "gpt-6.2-astra"), ["low", "medium"]);
+  assert.deepEqual(efforts(codex, "gpt-5.5"), ["low", "medium", "high", "xhigh"], "a catalog model takes the dashboard's levels");
+  assert.equal(codex.find((row) => row.value === "gpt-5.5").detail, "1.1M context");
 });
 
 test("an expired stored login is not sent, and a refused key fails discovery with the reason", async (t) => {

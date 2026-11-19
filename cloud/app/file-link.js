@@ -39,7 +39,8 @@ bodyEl.appendChild(view.el);
 const panel = { el, close: async () => { stop(); return true; } };
 const isOpen = () => sideOccupant() === panel;
 
-/** Make the file links in a chat's messages open here. `target`: { ws, run }. */
+/** Make the file links in a chat's messages and tool cards (tool-files.js),
+ * or in its subagent tray, open here. `target`: { ws, run }. */
 export function mountFileRefs(chat, target) {
   const activate = (e) => {
     const link = e.target.closest?.("a.file-ref");
@@ -51,7 +52,7 @@ export function mountFileRefs(chat, target) {
   chat.addEventListener("keydown", (e) => { if (e.key === "Enter") activate(e); });
 }
 
-/** Open `ref` ({ path, line, col }) as the chat `target` ({ ws, run }) names it. */
+/** Open `ref` ({ path, line, col, end }) as the chat `target` ({ ws, run }) names it. */
 export async function openFileRef(target, ref) {
   if (!isOpen() && !(await openSide(panel))) return;
   state.target = target;
@@ -63,7 +64,7 @@ export async function openFileRef(target, ref) {
     const doc = await read(target, ref.path);
     if (mine !== state.opening) return;
     showMessage(null);
-    await view.open(source(target, doc), doc.path, { line: ref.line, col: ref.col });
+    await view.open(source(target, doc), doc.path, { line: ref.line, col: ref.col, end: ref.end });
   } catch (e) {
     if (mine !== state.opening) return;
     const parts = [errorRow(e, "Unable to open this file")];

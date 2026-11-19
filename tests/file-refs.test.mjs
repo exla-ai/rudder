@@ -13,7 +13,7 @@ async function load(entry) {
 const { privateReason, readFileRef, PRIVATE_FILE, SYSTEM_FILE } = await load("../src/project-files/file-refs.ts");
 const { FileRefRoutes } = await load("../cloud/src/project-files/file-refs.ts");
 
-const ref = (path, line = 0, col = 0) => ({ path, line, col });
+const ref = (path, line = 0, col = 0) => ({ path, line, col, end: 0 });
 
 test("inline code is a file reference only when it is exactly a path", () => {
   for (const [code, want] of [

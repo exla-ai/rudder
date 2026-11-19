@@ -30386,24 +30386,70 @@ fn a_long_agent_list_does_not_hide_claudes_spinner() {
     assert!(terminal_at_idle_prompt(Backend::Claude, &idle));
 }
 
-#[test]
-fn claudes_compaction_spinner_marks_the_pane_compacting() {
-    let compacting: Vec<String> = [
-        "⏺ Updated the marker.",
+/// A pane mid `/compact` (2.1.328, captured): the spinner and Claude's tip
+/// above the composer.
+fn claude_2_1_328_compacting() -> Vec<String> {
+    [
+        " ▐▛███▛█   Claude Code v2.1.328",
+        "▝▜██████▀  Haiku 5.5 · Claude Ultra",
+        " ▝▝   ▝▝   /workspace/rudder-scratch/compact-ui/cc",
         "",
-        "✻ Compacting conversation… (41s · ↓ 1.2k tokens)",
         "",
-        "────────────────────────────────────────────────────────────────────────────────────────────────────",
-        "❯ ",
-        "────────────────────────────────────────────────────────────────────────────────────────────────────",
-        "  ⏵⏵ bypass permissions on · 1 monitor",
+        "❯ Reply with only the word ok.",
         "",
+        "● ok",
+        "",
+        "✻ Worked for 0s · done 9:23 AM",
+        "",
+        "❯ /compact",
+        "",
+        "* Compacting conversation… (3s · ↓ 454 tokens)",
+        "  ⎿  Tip: Size a workflow in your prompt: try \"use at most 5 agents\", or set a default with Dynamic workflow",
+        "     size in /config",
+        "",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ auto mode on · 1 monitor · esc to interrupt · ↓ to manage",
+        "        tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking",
     ]
     .iter()
     .map(|line| line.to_string())
-    .collect();
-    assert!(claude_compacting_from_lines(&compacting));
-    // A turn's spinner, or a pane at rest, is not compacting.
+    .collect()
+}
+
+/// The same pane once the compaction ended (captured): a past-tense line under
+/// a spinner glyph, which is not the spinner.
+fn claude_2_1_328_compacted() -> Vec<String> {
+    [
+        " ▐▛███▛█   Claude Code v2.1.328",
+        "▝▜██████▀  Haiku 5.5 · Claude Ultra",
+        " ▝▝   ▝▝   /workspace/rudder-scratch/compact-ui/cc",
+        "",
+        "",
+        "✻ Conversation compacted (ctrl+o for the summary)",
+        "  Earlier messages are saved in",
+        "  ~/.claude/projects/-workspace-rudder-scratch-compact-ui-cc/106af6fe-59c2-44d3-bf56-594a04a2fbe3.jsonl",
+        "",
+        "",
+        "❯ /compact",
+        "  ⎿  Compacted (ctrl+o to see full summary)",
+        "",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ auto mode on · 1 monitor · ↓ to manage",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+#[test]
+fn claudes_compaction_spinner_marks_the_pane_compacting() {
+    assert!(claude_compacting_from_lines(&claude_2_1_328_compacting()));
+    // Done compacting, a turn's spinner, or a pane at rest, is not compacting.
+    assert!(!claude_compacting_from_lines(&claude_2_1_328_compacted()));
     assert!(!claude_compacting_from_lines(&claude_2_1_328_busy_lead_with_agents()));
     assert!(!claude_compacting_from_lines(&claude_2_1_328_idle_lead_with_agents()));
 }

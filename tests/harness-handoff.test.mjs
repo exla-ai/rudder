@@ -22,7 +22,7 @@ test("a handoff keeps the newest messages that fit, the files changed and where 
   assert.match(text, /## Goal\nMake the tests pass/);
   assert.match(text, /## The user's instructions for this handoff\nFocus on the open bug/);
   assert.match(text, /in the middle of a turn[^\n]*Its last step: Bash npm test\./);
-  assert.match(text, /## Files it changed, newest first\n- src\/a\.ts\n- src\/old\.ts\n\n/, "Read is not a change, and paths are the workspace's");
+  assert.match(text, /## Files it changed, newest first\n- `src\/a\.ts`\n- `src\/old\.ts`\n\n/, "Read is not a change, and paths are the workspace's");
   assert.match(text, /\(Earlier messages left out\.\)/);
   assert.match(text, /User: fix the flaky test\n\n\(Claude ran: Edit src\/a\.ts; Bash npm test\)/);
   assert.doesNotMatch(text, /message 0 /, "the oldest messages are the ones left out");
@@ -34,7 +34,7 @@ test("Codex patches name their files, also from a code-mode script", () => {
   const patch = (body) => JSON.stringify({ type: "response_item", payload: { type: "custom_tool_call", name: "exec", input: `text(await tools.apply_patch("*** Begin Patch\\n${body}\\n*** End Patch"))` } });
   const lines = [patch(`*** Update File: ${cwd}/a.rs\\n@@`), patch(`*** Add File: ${cwd}/b.rs\\n+x\\n*** Delete File: ${cwd}/c.rs`)];
   const text = handoffPrompt({ goal: "g", messages: [], lines, backend: "codex", cwd, from: "Codex · Sol 6.1", to: "Claude · Opus 5.5", instructions: "", working: false });
-  assert.match(text, /## Files it changed, newest first\n- c\.rs\n- b\.rs\n- a\.rs\n/);
+  assert.match(text, /## Files it changed, newest first\n- `c\.rs`\n- `b\.rs`\n- `a\.rs`\n/);
   assert.doesNotMatch(text, /instructions for this handoff/);
   assert.match(text, /waiting for the user\./);
   assert.match(text, /Then wait for the user's next message\.$/);
@@ -76,5 +76,5 @@ test("OpenCode's edit, write and patch calls name the files it changed", () => {
     part("write", { filePath: `${cwd}/src/c.ts`, content: "z" }),
   ];
   const text = handoffPrompt({ goal: "g", messages: [], lines, backend: "opencode", cwd, from: "OpenCode · Big Pickle", to: "Claude · Opus 5.5", instructions: "", working: false });
-  assert.match(text, /## Files it changed, newest first\n- src\/c\.ts\n- b\.rs\n- src\/a\.ts\n\n/);
+  assert.match(text, /## Files it changed, newest first\n- `src\/c\.ts`\n- `b\.rs`\n- `src\/a\.ts`\n\n/);
 });

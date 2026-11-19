@@ -629,8 +629,10 @@ nodeTest("a compacted conversation shows one marker with its sizes, its duration
       { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
     ];
     fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-    // While a compaction runs, only the dashboard's reading of the pane says so.
-    const record = { id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd }, compactingSince: 1_790_000_000_000 };
+    // While a compaction runs, only the dashboard's reading of the pane says so:
+    // here a second one, started after the first one's marker.
+    const since = Date.parse("2026-10-16T11:40:00Z");
+    const record = { id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd }, compactingSince: since };
     const repo = fixtureRepo({ ...record, process: { pid: process.pid } });
     repos.push(repo);
     const transcript = readTranscript(repo, "run-4", { limit: 50, home });
@@ -642,11 +644,14 @@ nodeTest("a compacted conversation shows one marker with its sizes, its duration
     ]);
     assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, postTokens: 24989, durationMs: 63301, summary: "1. Fix the **webhook**." });
     assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));
-    assert.deepEqual(transcript.compacting, { since: 1_790_000_000_000 });
-    // A record left behind by a process that is gone is not compacting.
+    assert.deepEqual(transcript.compacting, { since });
+    // A record left behind by a process that is gone is not compacting, nor
+    // is one whose compaction's marker has landed.
     const gone = fixtureRepo({ ...record, process: { pid: 2 ** 22 + 1 } });
-    repos.push(gone);
+    const landed = fixtureRepo({ ...record, compactingSince: Date.parse("2026-10-16T11:20:00Z"), process: { pid: process.pid } });
+    repos.push(gone, landed);
     assert.equal(readTranscript(gone, "run-4", { limit: 50, home }).compacting, null);
+    assert.equal(readTranscript(landed, "run-4", { limit: 50, home }).compacting, null);
 
     // Codex 0.170: `compacted` (its summary encrypted, `message` empty), the
     // first token_count of the smaller context, then the ContextCompaction item.

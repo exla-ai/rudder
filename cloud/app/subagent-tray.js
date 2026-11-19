@@ -144,7 +144,8 @@ export function mountSubagentTray({ workspace, run }) {
     setText(openEl.querySelector(".sat-open-facts"), [f.who, f.time, f.calls].filter(Boolean).join(" · "));
     loading.hidden = !!opened;
     if (!opened) return;
-    paintSubagentActivity(openBody, opened);
+    // Only your own agents have a tray, so their files open (file-link.js, mounted on the tray by app.js).
+    paintSubagentActivity(openBody, opened, true);
     if (stickBottom) openBody.scrollTop = openBody.scrollHeight;
   }
 

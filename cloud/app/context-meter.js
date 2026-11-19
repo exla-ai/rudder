@@ -4,10 +4,12 @@
 // tokens used of the window and where the threshold comes from show on
 // hover, or on tap. A value the home does not know is left out. While the
 // agent compacts its context it says so, and when the context shrinks the bar
-// eases down to the new size, tinted for a moment.
+// eases down to the new size, tinted for a moment. When the agent can compact
+// now, the details offer it.
 import { h, setText } from "/app/render.js";
 import { coarse } from "/app/core.js";
 import { formatTokens } from "/app/agent-stats.js";
+import { FOLD_ICON } from "/app/compaction.js";
 
 const exact = (n) => n.toLocaleString();
 
@@ -50,23 +52,29 @@ const COMPACTING = {
   detail: ["Compacting the conversation into a summary so the agent can keep going."],
   level: "ok",
 };
-// How long the bar stays tinted after the context shrank.
+// How long the bar stays tinted after the context shrank, and how long the
+// percentage takes to count up to its new value.
 const DROP_MS = 1800;
+const COUNT_MS = 900;
+const still = matchMedia("(prefers-reduced-motion: reduce)");
 
 /**
  * Mount in the row above the composer (`slot`) and call
- * `update(t.context, !!t.compacting)` after each transcript load. Hidden while
- * there is nothing to show.
+ * `update(t.context, { compacting, compactable })` after each transcript load.
+ * Hidden while there is nothing to show. `compactable`: the details offer
+ * Compact now, which calls `onCompact` (the chat sends /compact).
  */
-export function ContextMeter(slot) {
+export function ContextMeter(slot, { onCompact }) {
   const el = h(`<button type="button" class="cm" hidden aria-expanded="false"><span class="cm-bar" aria-hidden="true"><i></i><b></b></span><span class="cm-text"><span class="cm-n"></span><span class="cm-w"></span><span class="cm-l"></span><span class="cm-at"></span></span></button>`);
   slot.appendChild(el);
   const [numEl, wordEl, leftEl, atEl] = el.querySelectorAll(".cm-text > span");
   const barEl = el.querySelector(".cm-bar");
   let shown = null;
+  let canCompact = false;
   let pop = null;
   let lastUsed = null;
   let dropTimer = 0;
+  let counting = 0;
 
   const close = () => {
     if (!pop) return;
@@ -79,37 +87,44 @@ export function ContextMeter(slot) {
   const onKey = (e) => { if (e.key === "Escape") { close(); el.focus(); } };
   const paintPop = () => {
     if (!pop || !shown) return;
-    pop.replaceChildren(...shown.detail.map((line, i) => { const p = h(`<p class="${i ? "cm-sub" : "cm-main"}"></p>`); setText(p, line); return p; }));
+    pop.querySelector(".cm-lines").replaceChildren(...shown.detail.map((line, i) => { const p = h(`<p class="${i ? "cm-sub" : "cm-main"}"></p>`); setText(p, line); return p; }));
+    pop.querySelector(".cm-compact").hidden = !canCompact;
     const a = el.getBoundingClientRect();
     const vw = document.documentElement.clientWidth;
     pop.style.left = `${Math.round(Math.max(8, Math.min(vw - pop.offsetWidth - 8, a.right - pop.offsetWidth)))}px`;
     pop.style.top = `${Math.round(Math.max(8, a.top - pop.offsetHeight - 6))}px`;
   };
-  el.addEventListener("click", () => {
+  el.addEventListener("click", (e) => {
     if (pop) return close();
-    pop = h(`<div class="cm-pop" role="dialog" aria-label="Context"></div>`);
+    pop = h(`<div class="cm-pop" role="dialog" aria-label="Context"><div class="cm-lines"></div><button type="button" class="cm-compact" hidden><span class="cm-c-ic">${FOLD_ICON}</span><span class="cm-c-t"><b>Compact now</b><span>Summarizes the conversation so far to free context.</span></span></button></div>`);
+    pop.querySelector(".cm-compact").addEventListener("click", () => { close(); onCompact(); });
     document.body.appendChild(pop);
     el.setAttribute("aria-expanded", "true");
     paintPop();
+    // Opened from the keyboard: into the details, where the action is.
+    if (e.detail === 0 && canCompact) pop.querySelector(".cm-compact").focus();
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", onKey, true);
   });
 
-  function update(context, compacting = false) {
+  function update(context, { compacting, compactable }) {
     const reading = context ? view(context) : null;
+    canCompact = compactable && !compacting;
     shown = compacting ? { ...COMPACTING, bar: reading?.bar ?? null } : reading;
     el.hidden = !shown;
     if (!shown) { close(); return; }
-    setText(numEl, shown.left[0]);
+    if (!counting) setText(numEl, shown.left[0]);
     setText(wordEl, shown.left[1]);
     setText(leftEl, shown.left[2]);
     setText(atEl, shown.at ? ` · ${shown.at}` : "");
     // The context shrank (a compaction, or a new conversation): the bar eases
-    // down and stays tinted for a moment.
+    // down, the percentage left counts up to its new value, and both stay
+    // tinted for a moment.
     const used = context && !context.error ? context.used : null;
-    if (Number.isFinite(used) && Number.isFinite(lastUsed) && used < lastUsed) {
+    if (!compacting && Number.isFinite(used) && Number.isFinite(lastUsed) && used < lastUsed) {
       clearTimeout(dropTimer);
       dropTimer = setTimeout(() => { dropTimer = 0; el.classList.remove("cm-drop"); }, DROP_MS);
+      if (context.window && !still.matches) countUp(left(lastUsed, context.window), left(used, context.window));
     }
     if (Number.isFinite(used)) lastUsed = used;
     el.className = `cm lv-${shown.level}${compacting ? " cm-busy" : ""}${dropTimer ? " cm-drop" : ""}`;
@@ -126,5 +141,17 @@ export function ContextMeter(slot) {
     paintPop();
   }
 
-  return { el, update, destroy() { clearTimeout(dropTimer); close(); } };
+  const left = (used, window) => Math.max(0, Math.round(100 - (used / window) * 100));
+  function countUp(from, to) {
+    cancelAnimationFrame(counting);
+    const start = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - start) / COUNT_MS);
+      setText(numEl, `${Math.round(from + (to - from) * (1 - (1 - k) ** 3))}%`);
+      counting = k < 1 ? requestAnimationFrame(step) : 0;
+    };
+    counting = requestAnimationFrame(step);
+  }
+
+  return { el, update, destroy() { clearTimeout(dropTimer); cancelAnimationFrame(counting); close(); } };
 }

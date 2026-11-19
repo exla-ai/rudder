@@ -10,13 +10,32 @@
 .cm:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cm.lv-hot { color: var(--failed); }
 
-/* A narrow row (a phone, a split pane) drops the word "context", then the bar. */
+/* A narrow row (a phone, a split pane) drops where it compacts, then the word
+   "context", then "left", leaving the bar and the percentage. Squeezed past
+   that, the meter gives way before the model's chip does: its bar narrows,
+   then its text ellipsizes. While compacting, the narrowest row keeps only
+   the shimmering bar (the chat's card says the rest). */
 .c-tools:has(> .cm:not([hidden])) { container-type: inline-size; }
-@container (max-width: 400px) { .cm .cm-w { display: none; } }
-@container (max-width: 320px) { .cm .cm-bar { display: none; } }
+.c-tools > .cm { flex-shrink: 50; min-width: 0; }
+/* The model's chip never shrinks for the meter; a name longer than the room
+   left beside the effort chip and the percentage ellipsizes. */
+.c-tools:has(> .cm:not([hidden])) > .model-chip:not(.effort-chip) { flex-shrink: 0; max-width: min(260px, 100% - 168px); }
+.cm-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@container (max-width: 489px) { .cm .cm-at { display: none; } }
+@container (max-width: 369px) { .cm .cm-w { display: none; } }
+@container (max-width: 319px) { .cm .cm-l, .cm.cm-busy .cm-text { display: none; } }
+/* A touch screen's Use suggestion chip (prompt-suggest.js) shares the row
+   while it shows: the meter shortens to its bar and "62% left", and on a row
+   too narrow for that it steps aside until the suggestion is used, leaving
+   the model's chip its usual room. */
+.c-tools:has(> .ps-chip:not([hidden])) > .cm :is(.cm-w, .cm-at) { display: none; }
+@container (max-width: 449px) {
+  .c-tools:has(> .ps-chip:not([hidden])) > .cm { display: none; }
+  .c-tools:has(> .ps-chip:not([hidden])) > .model-chip:not(.effort-chip) { flex-shrink: 1; max-width: min(100%, 260px); }
+}
 
 /* The window, filled to what is used, with a tick where compaction starts. */
-.cm-bar { position: relative; width: 34px; height: 5px; flex: none; border-radius: 3px; background: var(--line-strong); }
+.cm-bar { position: relative; width: 34px; flex: 0 1000 auto; min-width: 0; height: 5px; border-radius: 3px; background: var(--line-strong); }
 .cm-bar[hidden] { display: none; }
 .cm-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--muted); }
 .cm-bar b { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--ink-2); }
@@ -47,3 +66,18 @@
 .cm.cm-drop .cm-bar i { background: var(--accent); }
 .cm.cm-drop .cm-n { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .cm.cm-busy .cm-bar i { animation: none; background: var(--muted); } }
+
+/* Compact now, under the details while the agent is idle (context-meter.js). */
+.cm-compact {
+  display: flex; align-items: center; gap: 10px; width: calc(100% + 26px); margin: 10px -13px -10px; padding: 9px 13px 10px;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0 0 11px 11px; background: none; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.cm-compact[hidden] { display: none; }
+.cm-compact:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.cm-compact:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.cm-c-ic { flex: none; width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); }
+.cm-c-ic svg { width: 15px; height: 15px; }
+.cm-c-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cm-c-t b { font-weight: 600; font-size: 13.5px; }
+.cm-c-t span { color: var(--muted); font-size: 12.5px; }

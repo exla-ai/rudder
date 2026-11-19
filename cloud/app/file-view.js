@@ -180,11 +180,12 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
     onChange();
   }
 
-  /** Open `path` from `source`, at `line` (and `col`) when given. Markdown
-   * still opens rendered; the line is where its source opens. */
-  async function open(source, path, { line = 0, col = 0 } = {}) {
+  /** Open `path` from `source`, at `line` (and `col`) when given, its lines
+   * to `end` selected (a change a tool card names). Markdown still opens
+   * rendered; the line is where its source opens. */
+  async function open(source, path, { line = 0, col = 0, end = 0 } = {}) {
     close();
-    const mine = { source, path, doc: null, base: "", revision: "", mode: "view", line, col, editor: null, editable: false, readOnlyReason: "", latest: null, closed: false };
+    const mine = { source, path, doc: null, base: "", revision: "", mode: "view", line, col, end, editor: null, editable: false, readOnlyReason: "", latest: null, closed: false };
     file = mine;
     el.hidden = false;
     // Left to right inside the right-to-left box that ellipsizes its start:
@@ -274,7 +275,7 @@ export function FileView({ onBack = null, onLink, onChange = () => {} }) {
       const host = f.editor.view.dom.parentElement;
       if (host.parentElement !== contentEl) { contentEl.replaceChildren(host); f.editor.view.requestMeasure(); }
       // The line the file was opened at, the first time its text shows.
-      if (f.line) { f.editor.goto(f.line, f.col); f.line = 0; }
+      if (f.line) { f.editor.goto(f.line, f.col, f.end); f.line = 0; }
       paintControls();
       return;
     }

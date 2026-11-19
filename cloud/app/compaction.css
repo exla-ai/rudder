@@ -1,51 +1,84 @@
-/* A compaction in the chat (cloud/app/compaction.js): the marker's tokens and
-   card, and the row that stands in for it while one runs. The marker's line
-   itself is the shared .compact style in styles.css. */
-.compact-row .c-ic { width: 14px; height: 14px; flex: none; margin-right: 2px; }
-.compact-row .c-meta { color: var(--faint); font-variant-numeric: tabular-nums; }
-.compact-row .c-meta:not(:empty)::before { content: "·"; margin: 0 5px 0 3px; }
-.compact-row:not([disabled]):hover, .compact.open .compact-row { color: var(--ink-2); }
-.compact-row:not([disabled]):hover .c-meta, .compact.open .c-meta { color: var(--muted); }
-
-/* Opened: by how much the context shrank, then the summary. The bar is the
-   size before, filled to the size after, and it shrinks to that as it opens. */
-.c-card { margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
-.c-card[hidden], .c-card > [hidden] { display: none; }
-.c-squeeze { position: relative; height: 6px; margin: 2px 0 10px; border-radius: 3px; background: var(--line-strong); overflow: hidden; }
-.c-squeeze i { position: absolute; inset: 0 auto 0 0; width: calc(var(--kept, 1) * 100%); min-width: 6px; border-radius: 3px; background: var(--muted); }
-.compact.open .c-squeeze i { animation: c-squeeze 0.9s 0.08s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-@keyframes c-squeeze { from { width: 100%; } }
-.c-fig { margin: 0; font-size: 13.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.c-how { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
-.c-sum-label { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
-.c-sum-none { margin: 0; font-size: 13px; color: var(--muted); }
-.c-sum-label[hidden], .c-sum-body[hidden], .c-sum-none[hidden] { display: none; }
-
-/* Running: a highlight sweeps the words and the two rules draw in toward
-   them, the context being folded. */
-.compact.live .compact-row { cursor: default; }
-.compact.live .c-text {
-  background: linear-gradient(90deg, var(--muted) 0 38%, var(--ink) 50%, var(--muted) 62% 100%) 0 0 / 300% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: c-shimmer 2.4s linear infinite;
+/* A compaction in the chat (cloud/app/compaction.js): a small card folded over
+   the history it replaced, two layers of it showing underneath. Its bar is the
+   size the context was, filled to the size it is now; the hatched rest is what
+   the summary replaced. While one runs, the same card is live: its bar full
+   with a light passing over it, its arrows pressing in, its layers breathing. */
+.compact.cpt { position: relative; isolation: isolate; max-width: 440px; margin: 22px auto 30px; }
+.compact.cpt::before, .compact.cpt::after {
+  content: ""; position: absolute; z-index: -1; border-radius: 14px; background: var(--surface);
 }
-@keyframes c-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
-.compact.live .c-line {
-  background: linear-gradient(90deg, transparent, var(--muted) 50%, transparent) -70% 0 / 45% 100% no-repeat var(--line-strong);
-  animation: c-in-left 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+.compact.cpt::after { inset: 6px 9px -5px; border: 1px solid var(--line-strong); }
+.compact.cpt::before { inset: 12px 18px -10px; border: 1px solid var(--line); }
+.cpt-card { border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-1); overflow: hidden; }
+
+.cpt-head {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "ic title how caret" "bar bar fig fig";
+  align-items: center; column-gap: 10px; row-gap: 9px;
+  width: 100%; padding: 10px 12px 12px; border: 0; background: none; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
-.compact.live .c-line:last-child { animation-name: c-in-right; background-position: 170% 0; }
-@keyframes c-in-left { from { background-position: -70% 0; } to { background-position: 170% 0; } }
-@keyframes c-in-right { from { background-position: 170% 0; } to { background-position: -70% 0; } }
+.compact.cpt:not(.sized):not(.live) .cpt-head { grid-template-areas: "ic title how caret"; padding-bottom: 10px; }
+.compact.cpt:not(.sized):not(.live) .cpt-bar, .compact.cpt:not(.sized):not(.live) .cpt-fig { display: none; }
+.cpt-head[disabled], .compact.cpt.live .cpt-head { cursor: default; }
+.cpt-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 13px; }
+@media (hover: hover) { .cpt-head:not([disabled]):hover { background: color-mix(in srgb, var(--surface-2) 55%, transparent); } }
 
-/* The marker that replaces the running row opens out from its words. */
-.compact.c-new .c-line { animation: c-open 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-.compact.c-new .c-line:first-child { transform-origin: right; }
-.compact.c-new .c-line:last-child { transform-origin: left; }
-@keyframes c-open { from { transform: scaleX(0); } }
+.cpt-ic { grid-area: ic; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); }
+.cpt-ic svg { width: 15px; height: 15px; overflow: visible; }
+.cpt-title { grid-area: title; font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cpt-how { grid-area: how; font-size: 12.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cpt-head .t-caret { grid-area: caret; width: 16px; height: 16px; color: var(--faint); transition: transform 160ms; }
+.cpt-head[disabled] .t-caret { visibility: hidden; }
+.compact.cpt.live .cpt-how { grid-column: how / caret; justify-self: end; }
+.compact.cpt.open .cpt-head .t-caret { transform: rotate(90deg); }
 
-@media (prefers-reduced-motion: reduce), (forced-colors: active) {
-  .compact.live .c-text { animation: none; background: none; color: var(--muted); }
-  .compact.live .c-line { animation: none; background: var(--line-strong); }
-  .compact.c-new .c-line, .compact.open .c-squeeze i { animation: none; }
+/* Before, hatched where the summary replaced it, filled to what is left. */
+.cpt-bar {
+  grid-area: bar; position: relative; height: 6px; border-radius: 3px; overflow: hidden;
+  background: repeating-linear-gradient(-45deg, var(--line-strong) 0 1.5px, transparent 1.5px 4.5px), var(--line);
+}
+.cpt-bar i { position: absolute; inset: 0 auto 0 0; width: calc(var(--kept, 1) * 100%); min-width: 6px; border-radius: 3px; background: var(--muted); }
+.cpt-fig { grid-area: fig; justify-self: end; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Opened: the exact sizes, then the summary. */
+.cpt-sum { border-top: 1px solid var(--line); padding: 11px 14px 13px; max-height: 60vh; overflow: auto; overscroll-behavior: contain; font-size: 14px; }
+.cpt-sum[hidden], .cpt-sum > [hidden] { display: none; }
+.cpt-exact { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cpt-label { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.cpt-none { margin: 0; font-size: 13px; color: var(--muted); }
+
+/* Running. */
+.compact.cpt.live .cpt-title { color: var(--ink-2); }
+.compact.cpt.live .cpt-bar i {
+  width: 100%;
+  --dim: color-mix(in srgb, var(--muted) 45%, var(--surface));
+  background: linear-gradient(90deg, var(--dim) 0 32%, var(--muted) 50%, var(--dim) 68% 100%) 0 0 / 300% 100%;
+  animation: cpt-sweep 1.8s linear infinite;
+}
+.compact.cpt.live .c-up { animation: cpt-press-down 1.2s ease-in-out infinite alternate; }
+.compact.cpt.live .c-down { animation: cpt-press-up 1.2s ease-in-out infinite alternate; }
+.compact.cpt.live::after { animation: cpt-tuck 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.compact.cpt.live::before { animation: cpt-tuck-far 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+@keyframes cpt-sweep { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes cpt-press-down { to { transform: translateY(1.5px); } }
+@keyframes cpt-press-up { to { transform: translateY(-1.5px); } }
+@keyframes cpt-tuck { 50% { transform: translateY(-4px); } }
+@keyframes cpt-tuck-far { 50% { transform: translateY(-8px); } }
+
+/* The marker that replaces the running card: its bar shrinks from full to what
+   is left, and its layers settle. */
+.compact.cpt.c-new .cpt-bar i { animation: cpt-squeeze 1.1s 0.35s cubic-bezier(0.65, 0, 0.35, 1) both; }
+.compact.cpt.c-new .cpt-fig { animation: cpt-fade 0.5s 0.9s ease-out both; }
+.compact.cpt.c-new::after { animation: cpt-settle 0.8s ease-out both; }
+.compact.cpt.c-new::before { animation: cpt-settle-far 0.8s ease-out both; }
+@keyframes cpt-squeeze { from { width: 100%; } }
+@keyframes cpt-fade { from { opacity: 0; } }
+@keyframes cpt-settle { from { transform: translateY(-4px); } }
+@keyframes cpt-settle-far { from { transform: translateY(-8px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .compact.cpt.live .cpt-bar i { animation: none; background: var(--dim); }
+  .compact.cpt.live .c-up, .compact.cpt.live .c-down, .compact.cpt.live::before, .compact.cpt.live::after,
+  .compact.cpt.c-new .cpt-bar i, .compact.cpt.c-new .cpt-fig, .compact.cpt.c-new::before, .compact.cpt.c-new::after { animation: none; }
 }

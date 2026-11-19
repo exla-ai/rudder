@@ -13,6 +13,7 @@ import { contextUsage } from "./context-usage.mjs";
 import { activeGoal } from "./chat-goal.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
 import { handoffShown } from "./handoff.mjs";
+import { claudeCallFiles, claudeResultFiles, codexChangedFiles, opencodeFiles, setToolFiles, withFiles } from "./tool-files.mjs";
 import { isOpencodeSessionId, opencodeContextWindow, opencodeDb, opencodeLastText, opencodeMessages, opencodeSessionExists } from "./opencode.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
 
@@ -108,8 +109,11 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // A compaction under way. Its session gets nothing until it ends, so this
-  // is the dashboard's reading of the pane (run.json `compactingSince`, Unix ms).
-  base.compacting = live && Number.isFinite(record.compactingSince) ? { since: record.compactingSince } : null;
+  // is the dashboard's reading of the pane (run.json `compactingSince`, Unix
+  // ms). It is over once the process is gone or its marker has landed.
+  const since = record.compactingSince;
+  const landed = Number.isFinite(since) && base.messages.some((m) => m.kind === "compact" && m.ts >= since);
+  base.compacting = live && Number.isFinite(since) && !landed ? { since } : null;
   // The numbers are extra: a model catalog or settings file that cannot be
   // read says so in `stats.error` and the conversation still shows.
   try {
@@ -675,18 +679,14 @@ function opencodeChat(rows) {
       } else if (part.type === "tool") {
         const state = part.state ?? {};
         lines.push(JSON.stringify(part));
-        messages.push({
-          id: part.callID || id,
-          role: "tool",
-          ts: toMillis(state.time?.start) ?? ts,
-          text: "",
-          tool: {
-            name: String(part.tool || "tool"),
-            input: summarizeOpencodeInput(state.input),
-            output: state.status === "completed" ? clip(state.output) : state.status === "error" ? clip(state.error) : null,
-            isError: state.status === "error",
-          },
-        });
+        const tool = {
+          name: String(part.tool || "tool"),
+          input: summarizeOpencodeInput(state.input),
+          output: state.status === "completed" ? clip(state.output) : state.status === "error" ? clip(state.error) : null,
+          isError: state.status === "error",
+        };
+        setToolFiles(tool, opencodeFiles(part, { text: state.output, limit: TOOL_OUTPUT_LIMIT }));
+        messages.push({ id: part.callID || id, role: "tool", ts: toMillis(state.time?.start) ?? ts, text: "", tool });
       }
     });
   }
@@ -779,6 +779,7 @@ const CLAUDE_SUBAGENT_TOOL = "Agent";
 // with (`self`).
 function claudeReader({ stats = null, sub = false, self = null } = {}) {
   const tools = new Map(); // tool_use id -> message
+  const inputs = new Map(); // tool_use id -> the call's input, for the files its result names
   const outputLimit = sub ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
   const reader = {
     messages: [],
@@ -961,7 +962,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           text: "",
           tool: { name: block.name || "tool", input: summarizeClaudeInput(block.name, block.input), output: null, isError: false },
         };
+        setToolFiles(message.tool, { files: claudeCallFiles(block.name, block.input) });
         tools.set(block.id, message);
+        inputs.set(block.id, block.input);
         reader.toolCalls += 1;
         const reply = block.name === "SendMessage" ? block.input?.message : null;
         if (reply?.type === "shutdown_response" && reply.approve === true) {
@@ -982,11 +985,14 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         const target = tools.get(block.tool_use_id);
         reader.onResult?.(target ?? null);
         if (target) {
-          target.tool.output = clip(toolResultText(block.content), outputLimit);
+          const text = toolResultText(block.content);
+          target.tool.output = clip(text, outputLimit);
           target.tool.isError = Boolean(block.is_error);
+          setToolFiles(target.tool, claudeResultFiles(target.tool.name, inputs.get(block.tool_use_id), { isError: target.tool.isError, result: entry.toolUseResult, text, limit: outputLimit }));
           // A followed subagent's reader lives across polls: a call is let go
           // once its result is in, so a long subagent does not pile them up.
           tools.delete(block.tool_use_id);
+          inputs.delete(block.tool_use_id);
         }
         const spawn = reader.spawns.get(block.tool_use_id);
         if (spawn) {
@@ -1256,6 +1262,13 @@ function codexReader({ stats = null, child = false } = {}) {
         if (compaction && compaction.compact.durationMs === null && took > 0) {
           compaction.compact.durationMs = took;
         }
+        return;
+      }
+      // A patch's changed files, while the call that applied it (apply_patch,
+      // or a code-mode script) is open.
+      if (item?.type === "FileChange") {
+        const call = [...calls.values()].findLast((m) => m.tool.name === "exec" || m.tool.name === "apply_patch");
+        if (call) setToolFiles(call.tool, { files: withFiles(call.tool.files ?? [], codexChangedFiles(item)) });
         return;
       }
       // The thread a spawn_agent call started.

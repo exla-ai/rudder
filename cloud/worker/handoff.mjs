@@ -63,7 +63,8 @@ export function handoffPrompt({ goal, messages, lines, backend, cwd, from, to, i
   parts.push("", "## Where it stopped", stopped(shown, working, cwd));
   const files = changedFiles(lines, backend, cwd);
   if (files.length) {
-    parts.push("", "## Files it changed, newest first", ...files.map((file) => `- ${file}`));
+    // Inline code, so the chat's handoff marker opens each one (cloud/app/file-refs.js).
+    parts.push("", "## Files it changed, newest first", ...files.map((file) => `- \`${file}\``));
   }
   const conversation = recent(shown, fromHarness, cwd);
   if (conversation) {

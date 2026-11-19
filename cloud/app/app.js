@@ -24,7 +24,8 @@ import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
 import { mountQuoteReply, paintQuote } from "/app/quote-reply.js";
 import { duration, paintSubagent } from "/app/subagents.js";
-import { COMPACTING_HTML, FOLD_ICON, compactAria, compactHasDetail, compactMeta, paintCompactCard, paintCompacting } from "/app/compaction.js";
+import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.js";
+import { COMPACTING_HTML, compactHasDetail, compactHtml, paintCompacting, paintCompaction } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending, withAttachments } from "/app/pending.js";
@@ -77,7 +78,7 @@ const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1
 // Ones answered from this phone are hidden at once, before the state agrees.
 // A finished turn shorter than this shows no "Worked for" line.
 const SHORT_TURN_MS = 5000;
-// A compaction marker this soon after its running row left opens out from it.
+// A compaction marker this soon after the running card left settles in from it.
 const COMPACT_FRESH_MS = 15_000;
 // A message from another agent longer than this shows its first lines and Show more.
 const PEER_LONG_CHARS = 320;
@@ -3799,13 +3800,16 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const chatModel = ro ? null : mountChatModelControl(chatTools, { workspace: ws, run, agent: agentNow });
   // Claude Code's suggested next prompt: dim in the empty box, Tab or the chip fills it (prompt-suggest.js).
   const suggestion = ro ? null : mountPromptSuggestion(composer, { chipSlot: chatTools });
-  // Context left and where the backend compacts, at the row's end (context-meter.js).
-  const contextMeter = ContextMeter(chatTools);
+  // Context left and where the backend compacts, at the row's end
+  // (context-meter.js). Its Compact now sends /compact like the composer would.
+  const contextMeter = ContextMeter(chatTools, { onCompact: () => send("/compact") });
   // Edit on any prompt: rewinds the conversation to it, in place (chat-edit.js).
   // Highlight to reply: Reply on text selected in a message quotes it above the prompt (quote-reply.js).
   const quoteReply = ro ? null : mountQuoteReply({ chat: msgsEl, scroller, composer });
   // File paths in messages open beside the chat (file-link.js); not in a teammate's agent.
-  const chatMarkdown = { fileRefs: !ro };
+  // So do the files its tool cards name (tool-files.js).
+  const fileLinks = !ro;
+  const chatMarkdown = { fileRefs: fileLinks };
   if (!ro) mountFileRefs(msgsEl, { ws, run });
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript(), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
   // Read only: whose agent this is, where the composer would be.
@@ -3861,7 +3865,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   composer.el.before(askSlot);
   // Above it: every subagent and teammate the agent started (subagent-tray.js).
   const tray = ro ? null : mountSubagentTray({ workspace: ws, run });
-  if (tray) askSlot.before(tray.el);
+  if (tray) { askSlot.before(tray.el); mountFileRefs(tray.el, { ws, run }); }
   let askCard = null;
   function paintAsk() {
     if (ro) return;
@@ -3930,7 +3934,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let atBottom = true;
   let firstPaint = true;
   let lastCount = 0;
-  // When the running compaction's row last left (compaction.js).
+  // When the running compaction's card last left (compaction.js).
   let compactEndedAt = 0;
   // A paint that keeps what is on screen in place (paintKeepingView).
   let holdScroll = false;
@@ -3956,7 +3960,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       return;
     }
-    const compactRow = e.target.closest("button.compact-row");
+    const compactRow = e.target.closest("button.compact-row, button.cpt-head");
     if (compactRow) {
       const node = compactRow.closest(".compact");
       const k = `${key}|${node.dataset.key}`;
@@ -3980,6 +3984,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paintSteps(node, node._steps);
       return;
     }
+    // A file a tool row names opens (file-link.js); the card stays as it is.
+    if (e.target.closest("a.file-ref")) return;
     const row = e.target.closest(".tool-row");
     if (row) {
       const box = row.closest(".tool");
@@ -4221,7 +4227,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // The goal first: the speed's fit measures the line with it.
     goalChip.update(t?.goal);
     agentStats.update(t?.stats);
-    contextMeter.update(t?.context, !!t?.compacting);
+    // Compact now: your own Claude or Codex agent, idle, not compacting already.
+    contextMeter.update(t?.context, {
+      compacting: !!t?.compacting,
+      compactable: !ro && (t?.backend === "claude" || t?.backend === "codex") && !isRunning(status) && !pendingAsks(a).length,
+    });
     return status;
   }
 
@@ -4273,9 +4283,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         items[i] = { kind: "msg", id: m.id, m };
       }
     }
-    // A compaction under way stands where its marker will (compaction.js).
-    // The marker that replaces it opens out from it.
-    if (t.compacting) { items.push({ kind: "compacting", id: "compacting", since: t.compacting.since }); compactEndedAt = 0; }
+    // A compaction under way stands where its marker will (compaction.js),
+    // from the size the context meter last read. The marker that replaces it
+    // settles in from it.
+    if (t.compacting) { items.push({ kind: "compacting", id: "compacting", since: t.compacting.since, before: t.context?.used }); compactEndedAt = 0; }
     else if (msgsEl.querySelector(".compact.live")) compactEndedAt = Date.now();
     for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
@@ -4311,8 +4322,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
     const role = x.m.role;
     if (role === "tool") {
-      const box = h(`<div class="tool"><button type="button" class="tool-row" aria-expanded="false">
-        <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button></div>`);
+      // The toggle covers the row; the file links in it (tool-files.js) sit above it.
+      const box = h(`<div class="tool"><div class="tool-row"><button type="button" class="t-toggle" aria-expanded="false"></button>
+        <span class="t-icon" aria-hidden="true"></span><span class="t-name" aria-hidden="true"></span><span class="t-input" aria-hidden="true"></span><span class="t-files" hidden></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</div></div>`);
       return box;
     }
     if (role === "user") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div></div>`);
@@ -4323,7 +4335,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
     if (role === "system" && x.m.kind === "compact") {
       const fresh = compactEndedAt && Date.now() - compactEndedAt < COMPACT_FRESH_MS;
-      const node = h(`<div class="compact${fresh ? " c-new" : ""}"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label">${FOLD_ICON}<span class="c-text"></span><span class="c-meta"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum" hidden><div class="c-card"><div class="c-squeeze" aria-hidden="true"><i></i></div><p class="c-fig"></p><p class="c-how"></p></div><p class="c-sum-label">Summary the agent continued from</p><div class="c-sum-body md"></div><p class="c-sum-none"></p></div></div>`);
+      const node = h(compactHtml(fresh));
       if (fresh) node.addEventListener("animationend", () => node.classList.remove("c-new"), { once: true });
       return node;
     }
@@ -4356,7 +4368,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return;
     }
     if (x.kind === "steps") return paintSteps(node, x);
-    if (x.kind === "compacting") return paintCompacting(node, x.since);
+    if (x.kind === "compacting") return paintCompacting(node, x.since, x.before);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
     if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled") { node._msg = m; return paintCompact(node, m); }
@@ -4379,7 +4391,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // scheduled task's turn: one marker with what the agent continued from, or
   // the prompt it ran, behind it.
   function paintCompact(node, m) {
-    if (m.kind === "compact") return paintCompaction(node, m.compact || {});
+    if (m.kind === "compact") return paintCompactMarker(node, m.compact || {});
     const moved = m.kind === "handoff";
     const c = (moved ? m.handoff : { summary: m.scheduled.prompt }) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
@@ -4397,26 +4409,16 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary, chatMarkdown); sum.dataset.sig = sig; }
   }
 
-  // The context compacted: how far it shrank on the line, and opened, by how
-  // much, what set it off, how long it took and the summary.
-  function paintCompaction(node, c) {
-    const detail = compactHasDetail(c);
-    const open = store.expanded.has(`${key}|${node.dataset.key}`) && detail;
-    const row = node.querySelector(".compact-row");
-    node.classList.toggle("open", open);
-    node.classList.toggle("has-sum", !!c.summary);
-    row.disabled = !detail;
-    row.setAttribute("aria-expanded", String(open));
-    setText(row.querySelector(".c-text"), "Context compacted");
-    setText(row.querySelector(".c-meta"), compactMeta(c));
-    row.setAttribute("aria-label", `${compactAria(c)}.${detail ? ` ${open ? "Hide" : "Show"} ${c.summary ? "the summary the agent continued from" : "the details"}.` : ""}`);
-    const sum = node.querySelector(".compact-sum");
-    sum.hidden = !open;
-    if (!open) return;
-    paintCompactCard(sum, c, store.transcripts.get(key)?.backend);
-    const body = sum.querySelector(".c-sum-body");
-    const sig = `${c.summary}|${markdownReady()}`;
-    if (c.summary && body.dataset.sig !== sig) { renderMarkdown(body, c.summary, chatMarkdown); body.dataset.sig = sig; }
+  // The context compacted (compaction.js): opened, its summary.
+  function paintCompactMarker(node, c) {
+    paintCompaction(node, c, {
+      open: store.expanded.has(`${key}|${node.dataset.key}`) && compactHasDetail(c),
+      backend: store.transcripts.get(key)?.backend,
+      markdown: (el, text) => {
+        const sig = `${text}|${markdownReady()}`;
+        if (el.dataset.sig !== sig) { renderMarkdown(el, text, chatMarkdown); el.dataset.sig = sig; }
+      },
+    });
   }
 
   // A message another agent sent this one (worker/transcripts.mjs
@@ -4469,22 +4471,24 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   }
 
   function paintTool(box, m) {
-    if (m.subagent) return paintSubagent(box, m, store.expanded.has(`${key}|${box.dataset.key}`));
+    if (m.subagent) return paintSubagent(box, m, store.expanded.has(`${key}|${box.dataset.key}`), fileLinks);
     const tool = m.tool || {};
     const k = `${key}|${box.dataset.key}`;
     const open = store.expanded.has(k);
-    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${open}|${store.showMore.has(k)}`;
+    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.classList.toggle("error", !!tool.isError);
     box.classList.toggle("open", open);
     const row = box.querySelector(".tool-row");
-    row.setAttribute("aria-expanded", String(open));
+    const toggle = row.querySelector(".t-toggle");
+    toggle.setAttribute("aria-expanded", String(open));
     const shown = toolShown(tool);
     row.querySelector(".t-icon").innerHTML = icon(tool.isError ? "alert" : shown.icon);
     setText(row.querySelector(".t-name"), shown.name);
     setText(row.querySelector(".t-input"), shown.input);
-    row.setAttribute("aria-label", `${shown.name}${tool.isError ? " (error)" : ""}: ${shown.input}. ${open ? "Collapse" : "Expand"} output`);
+    row.querySelector(".t-input").hidden = paintToolFiles(row.querySelector(".t-files"), tool, fileLinks);
+    toggle.setAttribute("aria-label", `${shown.name}${tool.isError ? " (error)" : ""}: ${shown.input}. ${open ? "Collapse" : "Expand"} output`);
     let out = box.querySelector(".tool-out");
     if (!open) { out?.remove(); return; }
     if (!out) { out = h(`<div class="tool-out"></div>`); box.appendChild(out); }
@@ -4493,7 +4497,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const full = store.showMore.has(k);
     const long = text.length > OUT_LIMIT;
     out.innerHTML = `<pre></pre>${long ? `<div class="t-more"><span></span><button type="button" class="show-more"></button></div>` : ""}`;
-    out.querySelector("pre").textContent = long && !full ? text.slice(0, OUT_LIMIT) : text;
+    paintToolOutput(out.querySelector("pre"), long && !full ? text.slice(0, OUT_LIMIT) : text, tool, fileLinks);
     if (long) {
       const lines = text.split("\n").length;
       setText(out.querySelector(".t-more span"), full ? `${lines.toLocaleString()} lines` : `${Math.round((text.length - OUT_LIMIT) / 100) / 10}k more characters`);

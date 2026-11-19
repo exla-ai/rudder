@@ -87,7 +87,7 @@ test("OpenCode: the chat shows the user's words, the agent's text and tool calls
     ["system", "compact"],
   ], "reasoning, step markers and injected text are not the chat's");
   const [, , edit, bash] = page.messages;
-  assert.deepEqual(edit.tool, { name: "edit", input: "/repo/src/a.ts", output: "Edit applied successfully.", isError: false });
+  assert.deepEqual(edit.tool, { name: "edit", input: "/repo/src/a.ts", output: "Edit applied successfully.", isError: false, files: [{ path: "/repo/src/a.ts", line: 0, end: 0 }] });
   assert.deepEqual(bash.tool, { name: "bash", input: "npm test", output: "exit 1", isError: true });
   assert.equal(page.messages[5].durationMs, 4200, "from the prompt to the reply that ended the turn");
   assert.equal(page.messages[6].compact.trigger, "auto");

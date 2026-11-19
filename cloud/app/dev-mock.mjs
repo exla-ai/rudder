@@ -226,12 +226,16 @@ function baseTranscript(a) {
   const msgs = [
     { id: id(), role: "user", ts: t, text: a.task + ". Keep it phone-first and make transcripts render properly: markdown, code, tool calls." },
     { id: id(), role: "assistant", ts: t + 20_000, text: "I'll start by reading how the control plane exposes workspaces, then sketch the screens.\n\n**Plan**\n1. Read `cloud/src/server.ts` for the existing routes\n2. Define the `/api/app/*` contract\n3. Build the shell, then the three screens\n4. Verify on a 393px viewport in light and dark" },
-    { id: id(), role: "tool", ts: t + 30_000, text: "", tool: { name: "Read", input: "cloud/src/server.ts", output: "   1  import http from \"node:http\";\n   2  import { betterAuth } from \"better-auth\";\n   3  import Database from \"better-sqlite3\";\n   4  \n   5  const PORT = Number(process.env.PORT || 8080);\n   6  // ... 2,431 more lines", isError: false } },
-    { id: id(), role: "tool", ts: t + 34_000, text: "", tool: { name: "Grep", input: "\"/api/rudder/workspace\" in cloud/src", output: "cloud/src/server.ts:1180:  if (url.pathname === \"/api/rudder/workspace\" && req.method === \"POST\") {\ncloud/src/server.ts:1244:  if (url.pathname.startsWith(\"/api/rudder/workspace/\")) {", isError: false } },
+    // Tool cards name their files (worker/tool-files.mjs `files` and `found`), which open beside the chat (tool-files.js).
+    { id: id(), role: "tool", ts: t + 30_000, text: "", tool: { name: "Read", input: "cloud/app/render.js", output: "  48  /** Render markdown into `el`. Falls back to escaped text until libraries load.\n  49   * `fileRefs`: chat messages, where file paths open beside the chat (file-refs.js). */\n  50  export function renderMarkdown(el, text, { fileRefs = false } = {}) {\n  51    const src = String(text ?? \"\");", isError: false,
+      files: [{ path: "cloud/app/render.js", line: 48, end: 0 }] } },
+    { id: id(), role: "tool", ts: t + 34_000, text: "", tool: { name: "Grep", input: "\"/api/rudder/workspace\" in cloud/src", output: "cloud/src/server.ts:1180:  if (url.pathname === \"/api/rudder/workspace\" && req.method === \"POST\") {\ncloud/src/server.ts:1244:  if (url.pathname.startsWith(\"/api/rudder/workspace/\")) {", isError: false,
+      found: [{ row: 0, text: "cloud/src/server.ts:1180", path: "cloud/src/server.ts", line: 1180 }, { row: 1, text: "cloud/src/server.ts:1244", path: "cloud/src/server.ts", line: 1244 }] } },
     { id: id(), role: "assistant", ts: t + 60_000, text: "The workspace routes are keyed by `account_id`, so the app API can reuse the same session lookup. Here is the shape I'm going with:\n\n| Route | Method | Returns |\n|---|---|---|\n| `/api/app/state` | GET | home machine, projects, agents, ports |\n| `/api/app/transcript` | GET | messages for one run |\n| `/api/app/send` | POST | `{ ok: true }` |\n| `/api/app/action` | POST | stop or merge a run |\n\nThe keyed list reconcile keeps scroll and expanded tool rows stable across polls:\n\n```js\nexport function reconcile(container, items, keyOf, create, update) {\n  const existing = new Map();\n  for (const child of container.children) existing.set(child.dataset.key, child);\n  let cursor = container.firstElementChild;\n  for (const item of items) {\n    const key = String(keyOf(item));\n    let el = existing.get(key) ?? create(item);\n    update(el, item);\n    if (el !== cursor) container.insertBefore(el, cursor);\n    else cursor = cursor.nextElementSibling;\n  }\n}\n```\n\n> Note: tool output is collapsed by default and truncated past a few KB, so a 10k-line test log never stalls the phone." },
     { id: id(), role: "tool", ts: t + 90_000, text: "", tool: { name: "Bash", input: "npm run check", output: "> @exla/rudder@2.15.4 check\n> tsc --noEmit\n\nsrc/cloud.ts(418,7): error TS2322: Type 'string | undefined' is not assignable to type 'string'.\n  Type 'undefined' is not assignable to type 'string'.", isError: true } },
     { id: id(), role: "assistant", ts: t + 100_000, text: "Typecheck caught a missing fallback in `cloud.ts`. Fixing it:" },
-    { id: id(), role: "tool", ts: t + 110_000, text: "", tool: { name: "Edit", input: "src/cloud.ts  (+1 -1)", output: "-  const url: string = state.cloudUrl;\n+  const url: string = state.cloudUrl ?? DEFAULT_CLOUD_URL;", isError: false } },
+    { id: id(), role: "tool", ts: t + 110_000, text: "", tool: { name: "Edit", input: "cloud/src/home-host.ts", output: "     RUDDER_WORKER_TOKEN: input.workerToken,\n-    RUDDER_CLOUD_URL: input.cloudUrl,\n+    RUDDER_ACCOUNT_ID: input.accountId,\n+    RUDDER_CLOUD_URL: input.cloudUrl,\n     RUDDER_HOME: \"1\",", isError: false,
+      files: [{ path: "cloud/src/home-host.ts", line: 30, end: 31 }] } },
     { id: id(), role: "tool", ts: t + 150_000, text: "", tool: { name: "Bash", input: "cargo test --manifest-path native/Cargo.toml", output: LONG_OUTPUT, isError: false } },
     compactMarker(id(), t + 160_000),
     { id: id(), role: "user", ts: t + 30 * MIN, text: "Looks good. Can you make the composer stay above the keyboard on iPhone?" },
@@ -253,7 +257,7 @@ function compactMarker(id, ts, { pre = 367_082, post = 24_989, ms = 63_301 } = {
 // Subagents (worker/transcripts.mjs `subagent`, cloud/app/subagents.js): a
 // Claude agent (run_b1) and a Codex agent (run_a7) with subagents done, failed
 // and running. A running one gains a step every few seconds, as a live one would.
-const subTool = (id, ts, name, input, output, isError = false) => ({ id, role: "tool", ts, text: "", tool: { name, input, output, isError } });
+const subTool = (id, ts, name, input, output, isError = false, files = {}) => ({ id, role: "tool", ts, text: "", tool: { name, input, output, isError, ...files } });
 const subSay = (id, ts, text, role = "assistant") => ({ id, role, ts, text });
 function liveSubagent(fixed, steps, { every = 5_000, start }) {
   const shown = Math.min(steps.length, 2 + Math.floor((now() - T0) / every));
@@ -286,7 +290,8 @@ function subagentTranscript(a) {
       subSay("s2", t + 26_000, "Serve config is keyed by port, so each scanned port maps to one HTTPS entry."),
       subTool("s3", t + 35_000, "exec_command", "rg -n \"serve\" cloud/worker/tailscale-previews.mjs", "cloud/worker/tailscale-previews.mjs:88:  await runTailnetCommand([\"serve\", \"--bg\", `--https=${port}`, String(port)]);"),
       subTool("s4", t + 50_000, "exec_command", "node --test tests/tailscale-previews.test.mjs", "✔ maps a listening port to its serve URL (4.1ms)\n✔ drops a port that stopped listening (1.9ms)"),
-      subTool("s5", t + 61_000, "apply_patch", "cloud/worker/tailscale-previews.mjs", "Success. Updated cloud/worker/tailscale-previews.mjs"),
+      subTool("s5", t + 61_000, "apply_patch", "cloud/worker/tailscale-previews.mjs", "Success. Updated cloud/worker/tailscale-previews.mjs", false,
+        { files: [{ path: "/workspace/code/rudder/cloud/worker/tailscale-previews.mjs", line: 88, end: 91 }] }),
       subTool("s6", t + 70_000, "exec_command", "node --test tests/tailscale-previews.test.mjs", "✔ maps a listening port to its serve URL (3.8ms)\n✔ drops a port that stopped listening (2.0ms)\n✔ keeps HTTPS for a port that comes back (2.4ms)"),
     ];
     return [
@@ -300,6 +305,13 @@ function subagentTranscript(a) {
         subagent: { id: null, backend: "codex", kind: null, name: null, description: "docker ports", prompt: null, status: "failed", startedAt: t + 10_000, endedAt: null, toolCalls: 0, result: "agent limit reached: at most 2 subagents can run at once", messages: [], earlier: 0 } },
       subTool("x6", t + 62_000, "wait", "/root/proc_net_parsing", "{\n  \"status\": \"completed\"\n}"),
       subSay("x7", t + 70_000, "The parser is done. Waiting on the serve mapping before I wire them together."),
+      // A code-mode script's patch of three files (Codex FileChange items).
+      subTool("x8", t + 75_000, "exec", "apply_patch", "Script completed\nWall time 0.0 seconds\nOutput:\n{}", false,
+        { files: [
+          { path: "/workspace/code/rudder/cloud/worker/tailscale-previews.mjs", line: 88, end: 91 },
+          { path: "/workspace/code/rudder/cloud/app/render.js", line: 0, end: 0 },
+          { path: "/workspace/code/rudder/cloud/app/subagents.js", line: 21, end: 23 },
+        ] }),
     ];
   }
   const mapSteps = [

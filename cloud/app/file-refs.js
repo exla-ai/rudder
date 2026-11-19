@@ -6,9 +6,10 @@
 // Detection only, with no imports, so tests load this module in Node.
 
 /** A file reference: `path` as written (absolute, `~/...` or relative to the
- * agent's workspace), and the line and column to show, 0 when not given. */
-export function fileRef(path, line = 0, col = 0) {
-  return { path, line, col };
+ * agent's workspace), the line and column to show, 0 when not given, and the
+ * last line of a change to mark from `line` (a tool card's edit), 0 for none. */
+export function fileRef(path, line = 0, col = 0, end = 0) {
+  return { path, line, col, end };
 }
 
 const MAX_PATH = 4096;
@@ -133,17 +134,19 @@ export function markFileRefs(root) {
   }
 }
 
-function linkTo(a, ref) {
+/** Make `a` a file link to `ref`. */
+export function linkTo(a, ref) {
   a.classList.add("file-ref");
   a.setAttribute("role", "link");
   a.tabIndex = 0;
   a.dataset.filePath = ref.path;
   if (ref.line) a.dataset.fileLine = String(ref.line);
   if (ref.col) a.dataset.fileCol = String(ref.col);
-  a.title = `Open ${ref.path}${ref.line ? `:${ref.line}` : ""}`;
+  if (ref.end) a.dataset.fileEnd = String(ref.end);
+  a.title = `Open ${ref.path}${ref.line ? `:${ref.line}` : ""}${ref.end ? `-${ref.end}` : ""}`;
 }
 
 /** The reference a marked link holds. */
 export function fileRefOfLink(a) {
-  return fileRef(a.dataset.filePath, Number(a.dataset.fileLine) || 0, Number(a.dataset.fileCol) || 0);
+  return fileRef(a.dataset.filePath, Number(a.dataset.fileLine) || 0, Number(a.dataset.fileCol) || 0, Number(a.dataset.fileEnd) || 0);
 }

@@ -7,10 +7,13 @@
 // The top card's open state is the chat's (app.js toggles it from the
 // `.tool-row` click and repaints through paintTool). Cards inside a card keep
 // their own on the element, so they stay open across polls while their parent is.
+// Files its tool calls name open beside the chat (tool-files.js) unless
+// `links` is false: a teammate's agent.
 // The subagent tray (subagent-tray.js) says the same of each (subagentFacts)
 // and shows the same activity for the one it has open (paintSubagentActivity).
 
 import { icon, toolIcon, h, setText, reconcile, renderMarkdown, markdownReady } from "/app/render.js";
+import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.js";
 
 export const SUBAGENT_STATUS = {
   running: { label: "Running", cls: "s-working", live: true },
@@ -20,8 +23,9 @@ export const SUBAGENT_STATUS = {
 };
 
 /** Paint a chat tool box (`.tool`) whose message started a subagent. */
-export function paintSubagent(box, m, open) {
+export function paintSubagent(box, m, open, links) {
   if (!box.classList.contains("subagent")) build(box, true);
+  box._links = links;
   paint(box, m, open);
 }
 
@@ -29,9 +33,13 @@ function build(box, top) {
   box.classList.add("subagent");
   // A call shown as a plain tool row until its subagent's log turned up.
   box.querySelector(":scope > .tool-out")?.remove();
-  const row = box.querySelector(".sa-row") || box.querySelector(".tool-row");
-  // The top card's row stays the chat's `.tool-row` so the chat opens it.
-  row.className = top ? "tool-row sa-row" : "sa-row";
+  // The top card's row is a `.tool-row` so the chat opens it, a button in
+  // place of the plain tool row.
+  let row = box.querySelector(":scope > .sa-row");
+  if (top) {
+    row = h(`<button type="button" class="tool-row sa-row"></button>`);
+    box.querySelector(":scope > .tool-row").replaceWith(row);
+  }
   row.innerHTML = `<span class="t-icon">${icon("agents")}</span>
     <span class="sa-main">
       <span class="sa-title"></span>
@@ -61,7 +69,7 @@ function toggleNested(e) {
 }
 
 /** Paint a subagent's activity (its prompt, messages, tool calls and the subagents it started) into `container`. */
-export function paintSubagentActivity(container, s) {
+export function paintSubagentActivity(container, s, links) {
   let body = container.querySelector(":scope > .sa-body");
   if (!body) {
     body = h(BODY);
@@ -71,10 +79,10 @@ export function paintSubagentActivity(container, s) {
     container._saNested = true;
     container.addEventListener("click", toggleNested);
   }
-  const sig = activitySig(s);
+  const sig = `${activitySig(s)}|${links}`;
   if (body._saSig === sig) return;
   body._saSig = sig;
-  paintBody(body, s);
+  paintBody(body, s, links);
 }
 
 // What the activity shows changed. Subagents of this one change without its
@@ -83,7 +91,7 @@ function activitySig(s) {
   const msgs = s.messages || [];
   const last = msgs[msgs.length - 1];
   const nested = msgs.filter((x) => x.subagent).map((x) => `${x.subagent.status}.${x.subagent.toolCalls}.${x.subagent.messages?.length}`).join(",");
-  return [s.status, s.toolCalls, msgs.length, last?.id, last?.tool?.output?.length, last?.text?.length, s.result?.length, s.prompt?.length, s.earlier, nested, markdownReady()].join("|");
+  return [s.status, s.toolCalls, msgs.length, last?.id, last?.tool?.output?.length, last?.tool && toolFilesSig(last.tool), last?.text?.length, s.result?.length, s.prompt?.length, s.earlier, nested, markdownReady()].join("|");
 }
 
 /**
@@ -107,7 +115,7 @@ function paint(box, m, open) {
   box._msg = m;
   const { st, title, who, time, calls } = subagentFacts(s, Date.now());
   const facts = [who, time, calls].filter(Boolean);
-  const sig = [activitySig(s), time, open].join("|");
+  const sig = [activitySig(s), time, open, box._links].join("|");
   if (box._saSig === sig) return;
   box._saSig = sig;
 
@@ -130,10 +138,10 @@ function paint(box, m, open) {
 
   const body = box.querySelector(":scope > .sa-body");
   body.hidden = !open;
-  if (open) paintBody(body, s);
+  if (open) paintBody(body, s, box._links);
 }
 
-function paintBody(body, s) {
+function paintBody(body, s, links) {
   const msgs = s.messages || [];
   const prompt = body.querySelector(":scope > .sa-prompt");
   prompt.hidden = !s.prompt;
@@ -149,17 +157,18 @@ function paintBody(body, s) {
   empty.hidden = msgs.length > 0;
   setText(empty, msgs.length ? "" : s.status === "running" ? "Starting" : "Nothing recorded");
   // A call becomes a card once its subagent's log turns up: a new node.
-  reconcile(body.querySelector(":scope > .sa-msgs"), msgs, (x) => (x.subagent ? `sa:${x.id}` : x.id), createInner, updateInner);
+  reconcile(body.querySelector(":scope > .sa-msgs"), msgs, (x) => (x.subagent ? `sa:${x.id}` : x.id), (x) => createInner(x, links), (node, x) => updateInner(node, x, links));
 }
 
-function createInner(x) {
+function createInner(x, links) {
   if (x.role === "tool" && x.subagent) {
     const card = h(`<div class="tool subagent sa-nested"><button type="button" class="sa-row"></button></div>`);
     build(card, false);
+    card._links = links;
     return card;
   }
   if (x.role === "tool") {
-    return h(`<details class="sa-tool"><summary><span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</summary><pre></pre></details>`);
+    return h(`<details class="sa-tool"><summary><span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span><span class="t-files" hidden></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</summary><pre></pre></details>`);
   }
   if (x.kind === "compact") return h(`<div class="sa-compact"></div>`);
   // What another agent sent this one (worker/transcripts.mjs peerMessages): the lead, a teammate.
@@ -169,19 +178,20 @@ function createInner(x) {
   return h(`<div class="sa-text md"></div>`);
 }
 
-function updateInner(node, x) {
+function updateInner(node, x, links) {
   if (x.role === "tool" && x.subagent) return paint(node, x, !!node._open);
   if (x.role === "tool") {
     const tool = x.tool || {};
-    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}`;
+    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${toolFilesSig(tool)}|${links}`;
     if (node.dataset.sig === sig) return;
     node.dataset.sig = sig;
     node.classList.toggle("error", !!tool.isError);
     node.querySelector(".t-icon").innerHTML = icon(tool.isError ? "alert" : toolIcon(tool.name));
     setText(node.querySelector(".t-name"), tool.name || "Tool");
     setText(node.querySelector(".t-input"), (tool.input || "").replace(/\s+/g, " ").trim());
+    node.querySelector(".t-input").hidden = paintToolFiles(node.querySelector(".t-files"), tool, links);
     const pre = node.querySelector("pre");
-    pre.textContent = tool.output || "No output";
+    paintToolOutput(pre, tool.output || "No output", tool, links);
     pre.classList.toggle("sa-none", !tool.output);
     return;
   }

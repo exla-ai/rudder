@@ -242,9 +242,14 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // Signing Claude Code or Codex in from the phone: the CLI's own login runs
   // on the machine (cloud/worker/logins.mjs); these routes only carry it.
   const post = (route, body) => fetch(`${base}${route}`, { method: "POST", headers: auth, body: JSON.stringify(body) });
-  assert.deepEqual(await (await post("/api/app/login/start", { provider: "codex", device: true })).json(),
-    { ok: true, echo: "loginStart", params: { provider: "codex", device: true } });
-  assert.equal((await post("/api/app/login/start", { provider: "gemini" })).status, 400);
+  assert.deepEqual(await (await post("/api/app/login/start", { provider: "codex", account: "new", device: true })).json(),
+    { ok: true, echo: "loginStart", params: { provider: "codex", account: "new", device: true } });
+  assert.equal((await post("/api/app/login/start", { provider: "gemini", account: "main" })).status, 400);
+  assert.equal((await post("/api/app/login/start", { provider: "claude" })).status, 400, "a sign-in names its account");
+  assert.deepEqual((await (await post("/api/app/agent-account", { provider: "claude", account: "mi6x2k3a", action: "default" })).json()).params,
+    { provider: "claude", account: "mi6x2k3a", action: "default" });
+  assert.equal((await post("/api/app/agent-account", { provider: "claude", account: "../x", action: "remove" })).status, 400);
+  assert.equal((await post("/api/app/agent-account", { provider: "claude", account: "main", action: "wipe" })).status, 400);
   const finished = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", callback: "code=c&state=s" })).json();
   assert.deepEqual(finished.params, { provider: "claude", id: "l1", callback: "code=c&state=s" });
   const pasted = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", code: "abc#s" })).json();
@@ -855,7 +860,7 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
       const server = http.createServer((req, res) => {
         const url = new URL(req.url, "http://localhost");
         if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) { res.writeHead(400); res.end(); process.exit(1); }
-        fs.writeFileSync(path.join(process.env.HOME, ".claude-ok"), "1");
+        fs.writeFileSync(path.join(process.env.CLAUDE_CONFIG_DIR || process.env.HOME, ".claude-ok"), "1");
         res.writeHead(302, { location: "https://example.com/ok" }); res.end();
         console.log("Login successful."); setTimeout(() => process.exit(0), 20);
       });
@@ -866,11 +871,14 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
         process.stdout.write("Paste code here if prompted > ");
       });
     `);
+    // Each account's sign-in is in its own config dir (CLAUDE_CONFIG_DIR).
     fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
+dir="\${CLAUDE_CONFIG_DIR:-$HOME}"
 case "$1 $2" in
   "auth login") exec "${process.execPath}" "${fakeLogin}" ;;
-  "auth status") if [ -f "$HOME/.claude-ok" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
-  *) if [ -f "$HOME/.claude-ok" ]; then echo OK; exit 0; fi; echo "Not logged in"; exit 1 ;;
+  "auth logout") rm -f "$dir/.claude-ok" ;;
+  "auth status") if [ -f "$dir/.claude-ok" ]; then if [ -n "$CLAUDE_CONFIG_DIR" ]; then email=work@example.com; else email=me@example.com; fi; echo '{"loggedIn":true,"authMethod":"claude.ai","email":"'$email'","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
+  *) if [ -f "$dir/.claude-ok" ]; then echo OK; exit 0; fi; echo "Not logged in"; exit 1 ;;
 esac
 `, { mode: 0o755 });
     const home = path.join(scratch, "home");
@@ -908,7 +916,7 @@ esac
       const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
       return next.home?.connected && next.home?.credentials?.checkedAt ? next : null;
     }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
-    assert.equal(state.home.credentials.claude.ok, false);
+    assert.deepEqual(state.home.credentials.claude.map((row) => [row.id, row.default, row.ok]), [["main", true, false]]);
     assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
 
     // The supervisor reports the failed update: Cloud stops waiting on its
@@ -933,20 +941,38 @@ esac
       assert.equal(res.status, 200, `${route}: ${JSON.stringify(json)}\n${log}`);
       return json;
     };
-    const started = await post("/api/app/login/start", { provider: "claude" });
-    assert.equal(started.status, "waiting");
-    assert.equal(started.callback.path, "/callback");
-    assert.match(started.codeUrl, /code=true/);
-    const loginState = new URL(started.url).searchParams.get("state");
-    const finished = await post("/api/app/login/finish", { provider: "claude", id: started.id, callback: `code=abc&state=${loginState}` });
-    assert.equal(finished.status, "done", log);
-    const signedIn = await waitFor(async () => {
-      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
-      return next.home?.credentials?.claude?.ok ? next : null;
-    }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
-    assert.equal(signedIn.home.credentials.claude.account, "me@example.com");
-    assert.equal(signedIn.home.credentials.claude.plan, "max");
+    const signIn = async (account, done) => {
+      const started = await post("/api/app/login/start", { provider: "claude", account });
+      assert.equal(started.status, "waiting");
+      assert.equal(started.callback.path, "/callback");
+      assert.match(started.codeUrl, /code=true/);
+      const loginState = new URL(started.url).searchParams.get("state");
+      const finished = await post("/api/app/login/finish", { provider: "claude", id: started.id, callback: `code=abc&state=${loginState}` });
+      assert.equal(finished.status, "done", log);
+      return await waitFor(async () => {
+        const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+        return done(next.home?.credentials?.claude ?? []) ? next : null;
+      }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    };
+    const signedIn = await signIn("main", (rows) => rows[0]?.ok && !rows[0].checking);
+    assert.deepEqual(signedIn.home.credentials.claude.map((row) => [row.id, row.account, row.plan]), [["main", "me@example.com", "max"]]);
     assert.equal(signedIn.home.logins.claude.status, "done");
+
+    // Another Claude account: its own config dir under ~/.rudder/accounts,
+    // whose sign-in is checked on its own, made the default, then removed.
+    const added = await signIn("new", (rows) => rows.length === 2 && rows[1].ok && !rows[1].checking);
+    const [, extra] = added.home.credentials.claude;
+    assert.deepEqual([extra.account, extra.default], ["work@example.com", false]);
+    const extraDir = path.join(home, ".rudder", "accounts", "claude", extra.id);
+    assert.ok(fs.existsSync(path.join(extraDir, ".claude-ok")), "the new account's sign-in is in its own dir");
+    assert.equal(fs.readlinkSync(path.join(extraDir, "projects")), path.join(home, ".claude", "projects"), "its conversations are the main dir's");
+    const madeDefault = await post("/api/app/agent-account", { provider: "claude", account: extra.id, action: "default" });
+    assert.deepEqual(madeDefault.credentials.claude.map((row) => row.default), [false, true]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, ".rudder", "config.json"), "utf8")).backends.claude.account, extra.id);
+    const removed = await post("/api/app/agent-account", { provider: "claude", account: extra.id, action: "remove" });
+    assert.deepEqual(removed.credentials.claude.map((row) => [row.id, row.default]), [["main", true]]);
+    assert.ok(!fs.existsSync(extraDir));
+    assert.ok(fs.existsSync(path.join(home, ".claude", "projects")), "removing an account leaves what it linked to");
     await sleep(1500);
     assert.equal(exited, null, `the supervisor is still running:\n${log}`);
   },

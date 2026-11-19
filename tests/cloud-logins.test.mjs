@@ -14,6 +14,8 @@ import path from "node:path";
 import { createLoginRunner, localCallback, claudeCodeUrl, chatgptDeviceCode } from "../cloud/worker/logins.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The CLI's own config dir: no account env (src/accounts.ts).
+const MAIN = { account: "main", accountEnv: {} };
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "rudder-logins-"));
@@ -56,8 +58,10 @@ const which = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 const state = "st_" + Math.random().toString(36).slice(2);
 fs.writeFileSync(path.join(process.env.HOME, which + "-env.json"), JSON.stringify({ apiKey: process.env.ANTHROPIC_API_KEY || null, browser: process.env.BROWSER || null }));
+// Where the real CLIs keep a sign-in: the account's config dir when set.
+const store = process.env.CLAUDE_CONFIG_DIR || process.env.CODEX_HOME || process.env.HOME;
 const done = (code) => {
-  if (code === 0) fs.writeFileSync(path.join(process.env.HOME, which + "-login.json"), JSON.stringify({ ok: true }));
+  if (code === 0) fs.writeFileSync(path.join(store, which + "-login.json"), JSON.stringify({ ok: true }));
   process.exit(code);
 };
 if (which === "opencode") {
@@ -161,7 +165,7 @@ test("parsing what the real CLIs print", () => {
 
 test("Claude: the phone's callback is replayed against the CLI, and a stale one never reaches it", async (t) => {
   const { runner, home, terms, changes } = setup(t);
-  const started = await runner.start("claude");
+  const started = await runner.start("claude", MAIN);
   assert.equal(started.status, "waiting");
   assert.equal(started.callback.path, "/callback");
   assert.ok(started.callback.port > 0);
@@ -177,14 +181,29 @@ test("Claude: the phone's callback is replayed against the CLI, and a stale one 
   assert.equal(done.status, "done");
   assert.ok(fs.existsSync(path.join(home, "claude-login.json")), "the CLI finished its own login");
   assert.equal(runner.snapshot().claude.status, "done");
-  assert.deepEqual(Object.keys(runner.snapshot().claude).sort(), ["endedAt", "error", "id", "mode", "provider", "startedAt", "status"],
+  assert.deepEqual(Object.keys(runner.snapshot().claude).sort(), ["account", "endedAt", "error", "id", "mode", "provider", "startedAt", "status"],
     "no URLs or codes in what is broadcast");
   assert.deepEqual(changes, ["claude:waiting", "claude:finishing", "claude:done"]);
 });
 
+test("a sign-in for another account runs with that account's config dir", async (t) => {
+  const { runner, home } = setup(t);
+  const dir = path.join(home, "accounts", "claude", "abc123");
+  fs.mkdirSync(dir, { recursive: true });
+  await assert.rejects(runner.start("claude", {}), /needs its account/);
+  const started = await runner.start("claude", { account: "abc123", accountEnv: { CLAUDE_CONFIG_DIR: dir } });
+  assert.equal(started.account, "abc123");
+  const state = new URL(started.codeUrl).searchParams.get("state");
+  const done = await runner.finish("claude", started.id, { code: `good#${state}` });
+  assert.equal(done.status, "done");
+  assert.ok(fs.existsSync(path.join(dir, "claude-login.json")), "the sign-in is stored in the account's dir");
+  assert.ok(!fs.existsSync(path.join(home, "claude-login.json")), "not in the main one");
+  assert.equal(runner.snapshot().claude.account, "abc123");
+});
+
 test("Claude: the code from the sign-in page, pasted on the phone, finishes the same run", async (t) => {
   const { runner, home } = setup(t);
-  const started = await runner.start("claude");
+  const started = await runner.start("claude", MAIN);
   const state = new URL(started.codeUrl).searchParams.get("state");
   const done = await runner.finish("claude", started.id, { code: ` good#${state}\n` });
   assert.equal(done.status, "done");
@@ -193,19 +212,19 @@ test("Claude: the code from the sign-in page, pasted on the phone, finishes the 
 
 test("a sign-in the account refused, or a code that is wrong, ends failed with the CLI's reason", async (t) => {
   const { runner } = setup(t);
-  let started = await runner.start("claude");
+  let started = await runner.start("claude", MAIN);
   let state = new URL(started.url).searchParams.get("state");
   const denied = await runner.finish("claude", started.id, { callback: `error=access_denied&error_description=User+declined&state=${state}` });
   assert.equal(denied.status, "failed");
   assert.match(denied.error, /User declined/);
 
-  started = await runner.start("claude");
+  started = await runner.start("claude", MAIN);
   state = new URL(started.url).searchParams.get("state");
   const rejected = await runner.finish("claude", started.id, { callback: `code=reject&state=${state}` });
   assert.equal(rejected.status, "failed");
   assert.match(rejected.error, /invalid_grant/);
 
-  started = await runner.start("claude");
+  started = await runner.start("claude", MAIN);
   const wrong = await runner.finish("claude", started.id, { code: "nope#nope" });
   assert.equal(wrong.status, "failed");
   assert.match(wrong.error, /Invalid code/);
@@ -213,10 +232,10 @@ test("a sign-in the account refused, or a code that is wrong, ends failed with t
 
 test("Codex: browser callback, device code, and a new start replacing the old one", async (t) => {
   const { runner, home, terms } = setup(t);
-  const first = await runner.start("codex");
+  const first = await runner.start("codex", MAIN);
   assert.equal(first.callback.path, "/auth/callback");
   assert.equal(first.codeUrl, null);
-  const second = await runner.start("codex");
+  const second = await runner.start("codex", MAIN);
   assert.notEqual(second.id, first.id);
   await waitFor(() => !terms[0].alive());
   await assert.rejects(runner.finish("codex", first.id, { callback: "code=x&state=y" }), /no longer running/);
@@ -225,7 +244,7 @@ test("Codex: browser callback, device code, and a new start replacing the old on
   assert.equal((await runner.finish("codex", second.id, { callback: `code=c2&state=${state}` })).status, "done");
   fs.rmSync(path.join(home, "codex-login.json"));
 
-  const device = await runner.start("codex", { device: true });
+  const device = await runner.start("codex", { ...MAIN, device: true });
   assert.equal(device.mode, "device");
   assert.equal(device.userCode, "ABCD-EFGHI");
   assert.equal(device.url, "https://auth.openai.com/codex/device");
@@ -235,7 +254,7 @@ test("Codex: browser callback, device code, and a new start replacing the old on
 
 test("OpenCode: its OpenAI provider signs in with ChatGPT's device code, never a pasted one", async (t) => {
   const { runner, home } = setup(t);
-  const started = await runner.start("opencode");
+  const started = await runner.start("opencode", MAIN);
   assert.equal(started.mode, "device", "with or without the iOS app");
   assert.equal(started.userCode, "QQIC-FBUHM");
   assert.equal(started.url, "https://auth.openai.com/codex/device");
@@ -246,7 +265,7 @@ test("OpenCode: its OpenAI provider signs in with ChatGPT's device code, never a
 
 test("cancel ends the CLI, and an API key in the machine's env never decides the login", async (t) => {
   const { runner, home, terms } = setup(t);
-  const started = await runner.start("claude");
+  const started = await runner.start("claude", MAIN);
   const env = JSON.parse(fs.readFileSync(path.join(home, "claude-env.json"), "utf8"));
   assert.equal(env.apiKey, null);
   assert.match(env.browser, /browser\.sh$/);
@@ -304,7 +323,7 @@ test("Antigravity: the code from Google's page signs agy in, and its session is 
     runner.dispose();
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const started = await runner.start("antigravity");
+  const started = await runner.start("antigravity", MAIN);
   assert.equal(started.status, "waiting");
   assert.equal(started.callback, null);
   assert.match(started.codeUrl, /^https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?.*redirect_uri=https%3A%2F%2Fantigravity\.google/);
@@ -319,6 +338,6 @@ test("a CLI that never shows a link fails the start with what it printed", async
   const bin = path.join(dir, "claude");
   fs.writeFileSync(bin, "#!/bin/sh\necho 'Error: claude is updating, try again'\nexit 3\n", { mode: 0o755 });
   const runner = createLoginRunner({ spawnPty: pipePty, env: process.env, dir: path.join(dir, "l"), cwd: dir, commands: { claude: bin } });
-  await assert.rejects(runner.start("claude"), /claude is updating/);
+  await assert.rejects(runner.start("claude", MAIN), /claude is updating/);
   assert.equal(runner.snapshot().claude.status, "failed");
 });

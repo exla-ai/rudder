@@ -30,6 +30,11 @@
 // then carries on into its own session, so
 // the login is done when `signedIn("antigravity")` (agy lists its models)
 // says so, and the session is closed.
+//
+// Claude Code and Codex can hold several accounts (src/accounts.ts): a login
+// names the account it signs in and runs with that account's env, so the CLI
+// stores the sign-in in that account's config dir. One login per provider
+// runs at a time, whichever account it is for.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -133,6 +138,10 @@ export function lastLines(output, count = 3) {
  *   commands?: Partial<Record<string, string>>,
  *   signedIn?: (provider: string) => Promise<boolean>,
  * }} options
+ *
+ * `start` takes the account to sign in and the env it runs with
+ * (src/accounts.ts accountEnv); `env` here is the base it adds the login's own
+ * variables to.
  */
 export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onChange = () => {}, fetchImpl = fetch, commands = {}, signedIn = async () => false }) {
   const sessions = new Map(); // provider -> session
@@ -185,9 +194,12 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     });
   }
 
-  async function start(provider, { device = false } = {}) {
+  async function start(provider, { device = false, account, accountEnv }) {
     if (!LOGIN_PROVIDERS.includes(provider)) {
       throw new Error(`unknown provider ${provider}`);
+    }
+    if (typeof account !== "string" || !account || !accountEnv) {
+      throw new Error("a sign-in needs its account and that account's env");
     }
     const previous = sessions.get(provider);
     if (previous && !previous.endedAt) {
@@ -199,6 +211,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     const session = {
       id,
       provider,
+      account,
       mode,
       status: "starting",
       error: null,
@@ -226,7 +239,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       : provider === "opencode" ? OPENCODE_LOGIN
         : provider === "antigravity" ? []
           : mode === "device" ? ["login", "--device-auth"] : ["login"];
-    const childEnv = { ...env, BROWSER: browserScript, RUDDER_LOGIN_URL_FILE: urlFile, TERM: "xterm-256color" };
+    const childEnv = { ...env, ...accountEnv, BROWSER: browserScript, RUDDER_LOGIN_URL_FILE: urlFile, TERM: "xterm-256color" };
     // An API key in the environment would decide the login for the CLI.
     delete childEnv.ANTHROPIC_API_KEY;
     delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
@@ -432,6 +445,7 @@ function publicView(session) {
   return {
     id: session.id,
     provider: session.provider,
+    account: session.account,
     mode: session.mode,
     status: session.status,
     error: session.error,

@@ -7607,11 +7607,34 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   // (cloud/worker/logins.mjs): the CLI's own login runs there, the phone opens
   // its link and hands back the callback or code. Starting one wakes the
   // machine, or creates it for a new account.
+  // `account` is the agent account to sign in (src/accounts.ts): "main", an
+  // added one to sign in again, or "new" to add another.
   if (req.method === "POST" && url.pathname === "/api/app/login/start") {
     const body = await readJsonBody(req);
     const provider = loginProvider(body);
+    const agentAccount = stringField(body, "account") ?? "";
+    if (agentAccount !== "new" && !AGENT_ACCOUNT_ID.test(agentAccount)) {
+      throw badRequest("account must be main, new or an account id");
+    }
     const live = await homeWithControl(account.accountId);
-    sendJson(res, 200, await homeRpc(live.id, "loginStart", { provider, device: (body as JsonRecord)?.device === true }, 60_000));
+    sendJson(res, 200, await homeRpc(live.id, "loginStart", { provider, account: agentAccount, device: (body as JsonRecord)?.device === true }, 60_000));
+    return;
+  }
+  // An agent account's menu in Settings: make it the default for new agents,
+  // sign it out, or remove an added one.
+  if (req.method === "POST" && url.pathname === "/api/app/agent-account") {
+    const body = await readJsonBody(req);
+    const provider = loginProvider(body);
+    const agentAccount = stringField(body, "account") ?? "";
+    const action = stringField(body, "action") ?? "";
+    if (!AGENT_ACCOUNT_ID.test(agentAccount)) {
+      throw badRequest("account must be main or an account id");
+    }
+    if (action !== "default" && action !== "signOut" && action !== "remove") {
+      throw badRequest("action must be default, signOut or remove");
+    }
+    const live = await homeWithControl(account.accountId);
+    sendJson(res, 200, await homeRpc(live.id, "agentAccount", { provider, account: agentAccount, action }, 240_000));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/login/finish") {
@@ -7816,13 +7839,17 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const model = (stringField(body, "model") ?? "").trim();
     const effort = (stringField(body, "effort") ?? "").trim();
+    const agentAccount = stringField(body, "account") ?? "";
     if (!/^[A-Za-z0-9._:/[\]-]{1,120}$/.test(model)) {
       throw badRequest("model is required");
     }
     if (!["auto", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
       throw badRequest("effort must be auto, low, medium, high, xhigh or max");
     }
-    sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort }));
+    if (!AGENT_ACCOUNT_ID.test(agentAccount)) {
+      throw badRequest("account must be main or an account id");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "agentModel", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", model, effort, account: agentAccount }));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/agent-harness") {
@@ -7836,8 +7863,12 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const model = (stringField(body, "model") ?? "").trim();
     const effort = (stringField(body, "effort") ?? "").trim();
     const instructions = (stringField(body, "instructions") ?? "").trim();
+    const agentAccount = stringField(body, "account") ?? "";
     if (!/^[a-z][a-z0-9-]{0,31}$/.test(backend)) {
       throw badRequest("backend is required");
+    }
+    if (!AGENT_ACCOUNT_ID.test(agentAccount)) {
+      throw badRequest("account must be main or an account id");
     }
     if (!/^[A-Za-z0-9._:/[\]-]{1,120}$/.test(model)) {
       throw badRequest("model is required");
@@ -7848,7 +7879,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (instructions.length > 4000) {
       throw badRequest("summary instructions are at most 4000 characters");
     }
-    const moved = await homeRpc(home.id, "agentHarness", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", backend, model, effort, instructions });
+    const moved = await homeRpc(home.id, "agentHarness", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", backend, model, effort, account: agentAccount, instructions });
     captureProductEvent(account.accountId, "chat_harness_switched", { platform: requestPlatform(req), backend });
     sendJson(res, 200, moved);
     return;
@@ -8449,6 +8480,9 @@ function wakeHomeInBackground(accountId: string): void {
       homeWakeFailedAt.set(accountId, Date.now());
     });
 }
+
+/** An agent account (src/accounts.ts): "main", or an added account's id. */
+const AGENT_ACCOUNT_ID = /^[a-z0-9]{1,32}$/;
 
 function loginProvider(body: Json): "claude" | "codex" | "opencode" | "antigravity" {
   const provider = stringField(body, "provider");

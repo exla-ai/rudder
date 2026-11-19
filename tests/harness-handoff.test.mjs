@@ -57,14 +57,19 @@ test("a chat that moves again hands on what the last move handed over", () => {
   assert.match(text, /\(Earlier, Codex took this chat over from Claude · Opus 5\.5, which handed it this:\)\n### Goal\nShip it\n[\s\S]*User: go\n\nCodex: Summary: ready/);
 });
 
-test("a chat can't move to a harness the machine's sign-in check found signed out", () => {
+test("a chat can't move to an account the machine's sign-in check found signed out", () => {
   const credentials = {
-    claude: { ok: true, account: "a@example.com", plan: "max", detail: null },
-    codex: { ok: false, account: "a@example.com", plan: "pro", detail: "login expired" },
+    claude: [
+      { id: "main", default: true, ok: true, account: "a@example.com", plan: "max", detail: null },
+      { id: "mi6x2k3a", default: false, ok: false, account: "b@example.com", plan: "pro", detail: "login expired" },
+    ],
+    codex: [{ id: "main", default: true, ok: false, account: null, plan: null, detail: "not logged in" }],
   };
-  assert.equal(handoffRefusal(credentials, "codex", "Codex"), "Codex isn't signed in on your cloud machine.");
-  assert.equal(handoffRefusal(credentials, "claude", "Claude"), null);
-  assert.equal(handoffRefusal(null, "codex", "Codex"), null, "before the first check nothing is known");
+  assert.equal(handoffRefusal(credentials, "codex", "main", "Codex"), "Codex isn't signed in on your cloud machine.");
+  assert.equal(handoffRefusal(credentials, "claude", "main", "Claude"), null);
+  assert.equal(handoffRefusal(credentials, "claude", "mi6x2k3a", "Claude"), "Claude isn't signed in on your cloud machine as b@example.com.");
+  assert.equal(handoffRefusal(credentials, "claude", "gone1", "Claude"), "That Claude account is no longer on your cloud machine.");
+  assert.equal(handoffRefusal(null, "codex", "main", "Codex"), null, "before the first check nothing is known");
 });
 
 test("OpenCode's edit, write and patch calls name the files it changed", () => {

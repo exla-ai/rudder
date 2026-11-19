@@ -99,15 +99,19 @@ export function handoffShown(text) {
 }
 
 /**
- * Why a chat can't move to `backend` (named `label`) now, or null. A harness
- * the machine's last sign-in check found signed out would start an agent
- * that fails at once. `credentials` is that check (home.mjs
- * checkCredentials): before its first answer nothing is known, and the move
- * goes ahead. The app's model sheet refuses the same way (model-picker.js).
+ * Why a chat can't move to `account` of `backend` (named `label`) now, or
+ * null. An account the machine's last sign-in check found signed out would
+ * start an agent that fails at once. `credentials` is that check (home.mjs
+ * checkCredentials, a list of accounts per harness): before its first answer
+ * nothing is known, and the move goes ahead. The app's model sheet refuses
+ * the same way (model-picker.js).
  */
-export function handoffRefusal(credentials, backend, label) {
-  const cred = credentials?.[backend];
-  return cred && !cred.ok ? `${label} isn't signed in on your cloud machine.` : null;
+export function handoffRefusal(credentials, backend, account, label) {
+  const cred = credentials?.[backend]?.find((entry) => entry.id === account);
+  if (credentials?.[backend] && !cred) {
+    return `That ${label} account is no longer on your cloud machine.`;
+  }
+  return cred && !cred.ok ? `${label} isn't signed in on your cloud machine${cred.account ? ` as ${cred.account}` : ""}.` : null;
 }
 
 function stopped(messages, working, cwd) {

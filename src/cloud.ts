@@ -4326,6 +4326,17 @@ async function requestDashboardMove(repoRoot: string): Promise<"delivered" | "fa
 // ---------------------------------------------------------------------------
 
 type CredentialCheck = { ok?: boolean; account?: string | null; detail?: string | null };
+/** An agent CLI's accounts on the home, "main" (the CLI's own dir) first (src/accounts.ts). */
+type AccountCheck = CredentialCheck & { id: string; default: boolean };
+type HomeCredentials = {
+  github?: CredentialCheck;
+  aws?: CredentialCheck;
+  claude?: AccountCheck[];
+  codex?: AccountCheck[];
+  opencode?: AccountCheck[];
+  antigravity?: AccountCheck[];
+  checkedAt?: string;
+};
 type ParityRow = { tool: string; local: string | null; cloud: CredentialCheck | null; status: "match" | "missing" | "different" | "unknown"; fix?: string };
 
 async function localIdentities(): Promise<Record<string, string | null>> {
@@ -4395,11 +4406,13 @@ const CREDENTIAL_FIXES: Record<string, string> = {
 async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[]; checkedAt: string | null }> {
   const [local, home] = await Promise.all([
     localIdentities(),
-    client.request<{ home: { credentials?: Record<string, CredentialCheck> & { checkedAt?: string } } | null }>("/api/rudder/home", { method: "GET" }),
+    client.request<{ home: { credentials?: HomeCredentials } | null }>("/api/rudder/home", { method: "GET" }),
   ]);
   const cloud = home.home?.credentials ?? null;
   const rows: ParityRow[] = (["github", "claude", "codex", "opencode", "antigravity", "aws"] as const).map((tool) => {
-    const remote = (cloud?.[tool] as CredentialCheck | undefined) ?? null;
+    // An agent CLI is compared on its main account, the one this computer's
+    // own sign-in matches; accounts added on the home have no local twin.
+    const remote = (tool === "github" || tool === "aws" ? cloud?.[tool] : cloud?.[tool]?.find((account) => account.id === "main")) ?? null;
     const mine = local[tool];
     if (!remote) {
       return { tool, local: mine, cloud: null, status: "unknown" };

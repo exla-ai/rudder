@@ -53,6 +53,9 @@ if (!rudderDist) {
 }
 const fromDist = (file) => pathToFileURL(path.join(rudderDist, file)).href;
 const { modelName } = await import(fromDist("models.js"));
+// Several Claude Code and Codex accounts, each a config dir (src/accounts.ts).
+// Paths resolve from the agents' env: RUDDER_HOME here is a flag.
+const accounts = await import(fromDist("accounts.js"));
 
 let projectFiles;
 async function fileService() {
@@ -184,16 +187,26 @@ const logins = createLoginRunner({
   onChange: (provider, session) => {
     lastStateJson = "";
     scheduleStateSoon();
+    const fresh = `${provider}:${session.account}`;
     if (session.status === "done") {
+      freshAccounts.delete(fresh);
       // A new sign-in can change what its CLI lists (agy lists models only
       // when signed in): the next request reads the lists again.
       models = null;
-      void credentialsAfterLogin(provider);
+      void credentialsAfterLogin(provider, session.account);
+    } else if (session.endedAt && freshAccounts.delete(fresh)) {
+      // An added account that never signed in is not an account.
+      void accounts.removeAccount(provider, session.account, baseChildEnv)
+        .catch((error) => log(`account ${fresh}: ${error.message}`));
     }
   },
   // agy stays open after it signs in; its model list says when it has.
   signedIn: async (provider) => provider === "antigravity" && (await antigravityStatus({ ...baseChildEnv })).loggedIn,
 });
+
+// "<provider>:<id>" of accounts made for a sign-in still running: removed
+// again unless it finishes.
+const freshAccounts = new Set();
 
 /** @type {Map<string, Project>} */
 const projects = new Map();
@@ -733,7 +746,7 @@ async function handleRpc(method, params) {
     // Plan usage for the app's sidebar: the providers' own meters for this
     // machine's Claude and Codex sign-ins (src/usage.ts caches them).
     const { fetchQuota } = await import(fromDist("usage.js"));
-    return await fetchQuota({ force: params.refresh === true });
+    return await fetchQuota({ force: params.refresh === true, env: baseChildEnv });
   }
   if (method === "createRepo") {
     const created = await createGithubRepo(params);
@@ -787,7 +800,28 @@ async function handleRpc(method, params) {
     return { since, until, projects: list };
   }
   if (method === "loginStart") {
-    return await logins.start(String(params.provider || ""), { device: params.device === true });
+    // `account`: "main", an account to sign in again, or "new" for another
+    // Claude Code or Codex account (src/accounts.ts).
+    const provider = String(params.provider || "");
+    let account = String(params.account || "");
+    if (account === "new") {
+      if (!accounts.isAccountBackend(provider)) {
+        throw new Error(`${harnessLabel(provider)} has one account per machine`);
+      }
+      account = (await accounts.createAccount(provider, baseChildEnv)).id;
+      freshAccounts.add(`${provider}:${account}`);
+    }
+    try {
+      return await logins.start(provider, { device: params.device === true, account, accountEnv: loginEnv(provider, account) });
+    } catch (error) {
+      if (freshAccounts.delete(`${provider}:${account}`)) {
+        await accounts.removeAccount(provider, account, baseChildEnv);
+      }
+      throw error;
+    }
+  }
+  if (method === "agentAccount") {
+    return await changeAccount(String(params.provider || ""), String(params.account || ""), String(params.action || ""));
   }
   if (method === "loginFinish") {
     return await logins.finish(String(params.provider || ""), String(params.id || ""), {
@@ -864,8 +898,20 @@ async function handleRpc(method, params) {
     return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
   }
   if (method === "agentModel") {
-    // One chat's model and effort (native deliver_model_request).
-    return await steer(project, { kind: "model", taskId: String(params.runId || ""), instruction: `${params.model} ${params.effort}` });
+    // One chat's model, effort and account (native deliver_model_request). A
+    // switch to an account the last check found signed out is refused here.
+    const runId = String(params.runId || "");
+    const account = String(params.account || "");
+    const record = /^[A-Za-z0-9._-]+$/.test(runId) ? readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json")) : null;
+    if (!record) {
+      throw new Error(`no agent ${runId} in this project`);
+    }
+    const backend = record.backend ?? "claude";
+    const refusal = handoffRefusal(credentials, backend, account, harnessLabel(backend));
+    if (refusal) {
+      throw new Error(refusal);
+    }
+    return await steer(project, { kind: "model", taskId: runId, instruction: `${params.model} ${params.effort} ${account}` });
   }
   if (method === "agentHarness") {
     // Move one chat to another harness (native deliver_harness_request): the
@@ -873,7 +919,7 @@ async function handleRpc(method, params) {
     // (handoff.mjs). The instruction is `<harness> <model> <effort>`, then it.
     // A harness this machine is not signed in to is refused here as well as
     // in the app, so an old app or a stale screen can't start a broken agent.
-    const refusal = handoffRefusal(credentials, params.backend, harnessLabel(params.backend));
+    const refusal = handoffRefusal(credentials, params.backend, String(params.account || ""), harnessLabel(params.backend));
     if (refusal) {
       throw new Error(refusal);
     }
@@ -1324,7 +1370,7 @@ function modelWords(backend, model) {
 const HANDOFF_MESSAGES = 120;
 
 // `<harness> <model> <effort>`, then the handoff the new harness starts on.
-function harnessHandoff(project, runId, { backend, model, effort, instructions }) {
+function harnessHandoff(project, runId, { backend, model, effort, account, instructions }) {
   const { record, backend: from, lines, messages } = recentConversation(project.dir, runId, { home: HOME, limit: HANDOFF_MESSAGES });
   const handoff = handoffPrompt({
     goal: userTask(record.task),
@@ -1337,7 +1383,7 @@ function harnessHandoff(project, runId, { backend, model, effort, instructions }
     instructions,
     working: phoneStatus(record) === "working",
   });
-  return `${backend} ${model} ${effort}\n${handoff}`;
+  return `${backend} ${model} ${effort} ${account}\n${handoff}`;
 }
 function withModelName(row) {
   return { ...row, modelName: nameModel(row.backend, row.model) };
@@ -1635,6 +1681,9 @@ function agentSummary(record, options = {}) {
     modelName: nameModel(record.backend ?? "claude", record.model),
     // null: the agent decides (the dashboard's "auto").
     effort: record.effort ?? null,
+    // The sign-in it runs on (src/accounts.ts); a run.json without one ran on
+    // the CLI's own dir.
+    account: record.account ?? "main",
     mode: record.mode ?? null,
     // Pinned in the app or the dashboard: kept by the day-old cleanup.
     ...(record.pinned === true ? { pinned: true } : {}),
@@ -1751,15 +1800,25 @@ async function checkCredentials() {
   credentialsAgain = false;
   try {
     const env = { ...baseChildEnv };
-    const [github, claude, codex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkOpencode(env), checkAntigravity(env), checkAws(env)]);
+    const all = await accounts.listAccounts(env);
+    // Each agent harness is a list of accounts, main first: Claude Code and
+    // Codex can hold several (src/accounts.ts), OpenCode and Antigravity one.
+    const each = (backend, check) => Promise.all(all[backend].map(async (account) => ({
+      id: account.id,
+      default: account.default,
+      ...(await check(accounts.accountEnv(backend, account.id, env))),
+    })));
+    const only = async (check) => [{ id: accounts.MAIN_ACCOUNT, default: true, ...(await check(env)) }];
+    const [github, claude, codex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), each("claude", checkClaude), each("codex", checkCodex), only(checkOpencode), only(checkAntigravity), checkAws(env)]);
     credentials = { github, claude, codex, opencode, antigravity, aws, checkedAt: new Date().toISOString() };
     // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
     // look again shortly instead of reporting a broken login for 30 minutes.
-    if ([github, claude, codex, opencode, antigravity, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
+    if ([github, ...claude, ...codex, ...opencode, ...antigravity, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
     lastStateJson = "";
-    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"} opencode=${opencode.ok ? opencode.account : "no"} antigravity=${antigravity.ok ? "yes" : "no"}`);
+    const who = (list) => list.map((check) => (check.ok ? check.account || "yes" : "no")).join(",");
+    log(`credentials: github=${github.ok ? github.account : "no"} claude=${who(claude)} codex=${who(codex)} opencode=${who(opencode)} antigravity=${who(antigravity)}`);
   } catch (error) {
     log(`credential check: ${error.message}`);
   } finally {
@@ -1773,8 +1832,8 @@ async function checkCredentials() {
 // A sign-in from the phone just finished: say so at once (from the CLI's own
 // status, which needs no model call), then run the full check, which proves
 // the login works with one real request.
-async function credentialsAfterLogin(provider) {
-  const env = { ...baseChildEnv };
+async function credentialsAfterLogin(provider, account) {
+  const env = loginEnv(provider, account);
   const quick = provider === "claude"
     ? await claudeStatus(env)
     : provider === "opencode"
@@ -1783,15 +1842,65 @@ async function credentialsAfterLogin(provider) {
         ? await antigravityStatus(env)
         : await codexStatus(env);
   if (quick.loggedIn) {
+    const list = credentials?.[provider] ?? [];
+    const entry = { id: account, default: list.find((row) => row.id === account)?.default ?? false, ok: true, account: quick.account, plan: quick.plan, detail: null, checking: true };
     credentials = {
       ...(credentials ?? {}),
-      [provider]: { ok: true, account: quick.account, plan: quick.plan, detail: null, checking: true },
+      [provider]: list.some((row) => row.id === account) ? list.map((row) => (row.id === account ? entry : row)) : [...list, entry],
       checkedAt: new Date().toISOString(),
     };
     lastStateJson = "";
     scheduleStateSoon();
   }
   await checkCredentials();
+}
+
+// The env a sign-in or a check of one account runs with: Claude Code's and
+// Codex's accounts each have their own config dir, the others only main.
+function loginEnv(provider, account) {
+  if (accounts.isAccountBackend(provider)) {
+    return accounts.accountEnv(provider, account, baseChildEnv);
+  }
+  if (account !== accounts.MAIN_ACCOUNT) {
+    throw new Error(`${harnessLabel(provider)} has one account per machine`);
+  }
+  return { ...baseChildEnv };
+}
+
+// Settings' account menu: make an account the one new agents start on, sign
+// one out, or remove an added one (signed out first: on macOS the CLI's
+// keychain item outlives its dir).
+async function changeAccount(provider, account, action) {
+  if (!accounts.isAccountBackend(provider)) {
+    throw new Error(`${harnessLabel(provider)} has one account per machine`);
+  }
+  if (action === "default") {
+    await accounts.setDefaultAccount(provider, account, baseChildEnv);
+  } else if (action === "signOut" || action === "remove") {
+    if (action === "remove" && account === accounts.MAIN_ACCOUNT) {
+      throw new Error(`The main ${harnessLabel(provider)} account can be signed out, not removed.`);
+    }
+    await signOut(provider, loginEnv(provider, account));
+    if (action === "remove") {
+      await accounts.removeAccount(provider, account, baseChildEnv);
+    }
+  } else {
+    throw new Error(`unknown account action ${action}`);
+  }
+  await checkCredentials();
+  return { ok: true, credentials };
+}
+
+const SIGN_OUT = {
+  claude: ["claude", ["auth", "logout"]],
+  codex: ["codex", ["logout"]],
+};
+async function signOut(provider, env) {
+  const command = SIGN_OUT[provider];
+  const result = await capture(command[0], command[1], { env, cwd: HOME, timeoutMs: 30_000 });
+  if (result.code !== 0) {
+    throw new Error(`${command[0]} ${command[1].join(" ")} failed: ${firstLine(result.stderr || result.stdout) || `exit ${result.code}`}`);
+  }
 }
 
 async function claudeStatus(env) {
@@ -1806,7 +1915,7 @@ async function claudeStatus(env) {
 
 async function codexStatus(env) {
   const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
-  const { account, plan } = codexAccount();
+  const { account, plan } = codexAccount(env);
   return { loggedIn: status.code === 0, account, plan };
 }
 
@@ -1913,7 +2022,7 @@ async function checkClaude(env) {
 }
 
 async function checkCodex(env) {
-  const { account, plan } = codexAccount();
+  const { account, plan } = codexAccount(env);
   const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
   if (status.code !== 0) {
     return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
@@ -1946,10 +2055,10 @@ async function checkAntigravity(env) {
 }
 
 // The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API
-// key login has neither.
-function codexAccount() {
+// key login has neither. `env` names the account's dir (CODEX_HOME).
+function codexAccount(env) {
   try {
-    const auth = JSON.parse(fs.readFileSync(path.join(HOME, ".codex", "auth.json"), "utf8"));
+    const auth = JSON.parse(fs.readFileSync(path.join(env.CODEX_HOME?.trim() || path.join(HOME, ".codex"), "auth.json"), "utf8"));
     const payload = String(auth?.tokens?.id_token || "").split(".")[1];
     if (!payload) {
       return { account: null, plan: auth?.OPENAI_API_KEY ? "API" : null };

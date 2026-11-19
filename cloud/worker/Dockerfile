@@ -234,6 +234,7 @@ COPY cloud/worker/subagents.mjs ./subagents.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
 COPY cloud/worker/context-usage.mjs ./context-usage.mjs
 COPY cloud/worker/chat-goal.mjs ./chat-goal.mjs
+COPY cloud/worker/opencode.mjs ./opencode.mjs
 COPY cloud/worker/suggestion.mjs ./suggestion.mjs
 COPY cloud/worker/slash-commands.mjs ./slash-commands.mjs
 COPY cloud/worker/vibeprint-host.mjs ./vibeprint-host.mjs

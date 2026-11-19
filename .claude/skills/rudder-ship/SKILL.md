@@ -74,8 +74,10 @@ The tag starts two workflows:
 Watch with `gh run list --limit 4` and `gh run watch <id> --exit-status` in the
 background. Done when
 `curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/@exla%2frudder/X.Y.Z`
-prints 200. A new version can 404 for a minute or two after CI prints
-`+ @exla/rudder@X.Y.Z`.
+prints 200. npm processes a trusted publish before serving it: 5.0.5 took
+about 4 minutes after CI printed `+ @exla/rudder@X.Y.Z`, 5.0.7 more than 15.
+A 404 then is not a failure; npm emails "Successfully published" to the
+account when it is served. Check https://status.npmjs.org before digging.
 
 Release CI trusts only the first attempt of a tag run. `gh run rerun` stops
 at "Release qualification evidence rejected", so a failed tag run cannot
@@ -96,7 +98,10 @@ Only after npm serves the version.
 ```sh
 export FLY_NO_UPDATE_CHECK=1
 flyctl auth whoami          # must print an account
-node scripts/worker-image.mjs X.Y.Z
+# Both builds below use the checkout as their context, and the user's checkout
+# holds other agents' uncommitted edits. Build from a clean export instead.
+mkdir -p /workspace/rudder-scratch/release/src && git archive --format=tar "$(jj log -r main --no-graph -T commit_id)" | tar -x -C /workspace/rudder-scratch/release/src
+cd /workspace/rudder-scratch/release/src && node scripts/worker-image.mjs X.Y.Z
 ```
 
 This builds on Fly's builder from the published package. It pushes
@@ -115,12 +120,15 @@ Then pin the image and deploy the control plane:
 1. Set `RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:X.Y.Z"` in
    `cloud/fly.toml`.
 2. Commit it.
-3. Run `cd cloud && flyctl deploy --remote-only`.
+3. Export that commit as above and run `flyctl deploy --remote-only` in the
+   export's `cloud/`, never in the user's checkout.
 4. Push `main`.
 
 Verify:
 
-- `https://rudder.exla.ai/app` loads.
+- `https://rudder.exla.ai/app` loads. It redirects to
+  `rudder-cloud-control.fly.dev/app`; check a changed app file there
+  (rudder.exla.ai/app/<file> is the Vercel site, always 404).
 - `flyctl releases -a rudder-cloud-control | head -3` shows the new release with the expected
   image and a current UTC time.
 - A signed-in smoke check of the app passes (projects list, one agent's chat).

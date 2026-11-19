@@ -5,7 +5,7 @@ import {
 } from "/app/render.js";
 
 import {
-  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
+  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
@@ -1675,8 +1675,7 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   let files = []; // [{ file, name, url }]
   ta.value = store.drafts[draftKey] || "";
   const grow = () => {
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 168)}px`;
+    fitTextarea(ta);
     btn.disabled = !ta.value.trim() && !files.length;
   };
   const paintTray = () => {

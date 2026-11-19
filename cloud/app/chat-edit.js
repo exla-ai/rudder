@@ -10,7 +10,7 @@
 // changed stay as they are, and the old conversation stays on disk. Files
 // attached to the message go with the edited text.
 import { h, copyText } from "/app/render.js";
-import { app, api, coarse, toast } from "/app/core.js";
+import { app, api, coarse, fitTextarea, toast } from "/app/core.js";
 import { showAgentMenu } from "/app/agent-menu.js";
 import { withAttachments } from "/app/pending.js";
 
@@ -125,7 +125,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = nu
     textarea.value = text;
     let sending = false;
     const sync = () => { send.disabled = sending || !textarea.value.trim(); };
-    const grow = () => { textarea.style.height = "auto"; textarea.style.height = `${textarea.scrollHeight}px`; };
+    const grow = () => fitTextarea(textarea);
     const editor = {
       note(isBusy) {
         noteEl.textContent = isBusy ? "Stops the current turn first. Later messages will be dropped." : "Later messages will be dropped.";

@@ -7,7 +7,7 @@
 // cloud/worker/suggestion.mjs). Only Claude Code makes one, and not after
 // every turn; with none, the composer is unchanged.
 
-import { coarse } from "/app/core.js";
+import { coarse, fitTextarea } from "/app/core.js";
 
 let seq = 0;
 
@@ -44,10 +44,8 @@ export function mountPromptSuggestion(composer, { chipSlot }) {
   const fit = (text) => {
     const value = ta.value;
     if (text !== null) ta.value = text;
-    ta.style.height = "auto";
-    const height = ta.scrollHeight;
+    fitTextarea(ta);
     ta.value = value;
-    ta.style.height = `${height}px`;
   };
 
   const paint = () => {

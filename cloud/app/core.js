@@ -28,6 +28,18 @@ export const ls = {
   remove(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
 };
 export const coarse = matchMedia("(pointer: coarse)").matches;
+// Size a text box to its content. Measuring needs height:auto, and collapsing
+// the box for that read lays out the page around it: the chat above the
+// composer grows and its scroll clamps. WebKit has no scroll anchoring to undo
+// that, so the transcript jumped off the bottom on every keystroke. The box's
+// parent holds its height while the box collapses, so nothing outside moves.
+export function fitTextarea(ta) {
+  const box = ta.parentElement;
+  box.style.minHeight = `${box.offsetHeight}px`;
+  ta.style.height = "auto";
+  ta.style.height = `${ta.scrollHeight}px`;
+  box.style.minHeight = "";
+}
 export const toMs = (t) => (t == null ? null : typeof t === "number" ? t : Date.parse(t) || null);
 
 export function rel(t) {

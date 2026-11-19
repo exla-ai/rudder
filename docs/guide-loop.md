@@ -20,7 +20,7 @@ fleet is converging on a stated product goal, and steers it when it is not.
    transcripts ───┘                                        RAILS (targets, caps, cooldown, dedupe)
                                                                 │
                                                                 ▼
-                                              .rudder/steer/*.json ─► native TUI poll (~1s)
+                                              .rudder/steer/*.json ─► native TUI (file watch)
                                                                 │
                                                                 ▼
                                           instruction injected into the target agent's live PTY
@@ -48,8 +48,9 @@ Rows untouched for 24h are treated as an earlier session and dropped.
 
 ## 3. The control path
 
-`.rudder/steer/<ts>-<requestId>.json` is Rudder's browser→agent inbox, polled
-about once a second by the running native TUI (`poll_steer_inbox`). The guide
+`.rudder/steer/<ts>-<requestId>.json` is Rudder's browser→agent inbox. The
+running native TUI watches it and reads it as soon as a request lands
+(`steer_watch.rs`, `poll_steer_inbox`). The guide
 writes the same shape:
 
 ```json

@@ -36,12 +36,14 @@ use rudder_native::pty_terminal::{
     TerminalPane, TerminalPaneOptions, TerminalSize,
 };
 
-/// A single message the main event loop selects on. Either a terminal input
-/// event read off stdin by a dedicated reader thread, or a nudge from a PTY
-/// reader thread signalling that fresh child output is ready to drain.
+/// A single message the main event loop selects on: a terminal input event
+/// read off stdin by a dedicated reader thread, a nudge from a PTY reader
+/// thread signalling that fresh child output is ready to drain, or the steer
+/// inbox watch (steer_watch.rs) saying a request may have arrived.
 enum LoopSignal {
     Term(Event),
     PtyOutput,
+    SteerInbox,
 }
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -132,6 +134,7 @@ mod codex_rollout;
 mod chat_edit;
 mod agent_life;
 mod branch;
+mod steer_watch;
 use crate::chat_edit::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
@@ -2202,9 +2205,11 @@ struct App {
     last_publish_pr_state: Option<Instant>,
     /// Cadence gate for the merged-workspace GC sweep (gc_merged_workspaces).
     last_workspace_gc: Instant,
-    /// Throttle for the web-board steer inbox poll (.rudder/steer/*.json): checked
-    /// ~once/sec from poll_agents so a browser "steer" reaches the right agent's PTY.
-    last_steer_poll: Instant,
+    /// Cadence gate for the once-a-second housekeeping in poll_agents.
+    last_slow_poll: Instant,
+    /// When to read the steer inbox (.rudder/steer/*.json) next: now when its
+    /// watch wakes the loop, a second out when a request must be retried.
+    steer_inbox_due: Option<Instant>,
     /// `<rudder home>/terminal-colors.json`, written by the cloud supervisor
     /// from the attaching laptop's terminal; re-read when it changes.
     terminal_colors_watch: rudder_native::term_colors::ColorsFileWatch,
@@ -3697,7 +3702,8 @@ impl App {
             publish_pr_state_interval: PUBLISH_PR_STATE_BASE_INTERVAL,
             last_publish_pr_state: None,
             last_workspace_gc: Instant::now(),
-            last_steer_poll: Instant::now(),
+            last_slow_poll: Instant::now(),
+            steer_inbox_due: None,
             terminal_colors_watch: Default::default(),
             control_results: Vec::new(),
             last_heartbeat_emit: Instant::now(),
@@ -16115,8 +16121,9 @@ Address the objection directly. If you disagree, say why inside \
         self.append_activity_jsonl(&summary, "heartbeat");
     }
 
-    /// Poll the web board's steer inbox (`.rudder/steer/*.json`) and deliver each
-    /// instruction into the matching agent's live PTY, then consume the file. The
+    /// Read the steer inbox (`.rudder/steer/*.json`) when its watch
+    /// (steer_watch.rs) wakes the loop, deliver each instruction into the
+    /// matching agent's live PTY, then consume the file. The
     /// board writes one JSON file per steer request: `{"taskId": "<node-or-run-id
     /// or 'conductor'>", "instruction": "<text>"}`. This is the browser -> running
     /// agent control path; it mirrors `inject_agent_for_marker` but the source is a
@@ -16196,7 +16203,8 @@ Address the objection directly. If you disagree, say why inside \
             }
             if valid_request_id && self.write_steer_processing(&request_id).is_err() {
                 // Do not touch the PTY until the at-most-once tombstone is
-                // durable. A later poll can safely retry the filesystem write.
+                // durable. No file event will repeat, so retry in a second.
+                self.steer_inbox_due = Some(Instant::now() + Duration::from_secs(1));
                 continue;
             }
             let result = match kind.as_str() {
@@ -21557,13 +21565,18 @@ What to do\n\
         self.maybe_notify_workspace_idle();
         self.refresh_diff_panel();
 
-        // Browser control + narration heartbeat, throttled to ~1s so the render
+        // Phone and web actions: read the moment the inbox watch wakes the loop.
+        if self.steer_inbox_due.is_some_and(|due| due <= Instant::now()) {
+            self.steer_inbox_due = None;
+            self.poll_steer_inbox();
+        }
+
+        // Narration heartbeat and housekeeping, throttled to ~1s so the render
         // loop (11-33ms tick) is never stalled by the readdir/fs work.
-        if self.last_steer_poll.elapsed() >= Duration::from_secs(1) {
-            self.last_steer_poll = Instant::now();
+        if self.last_slow_poll.elapsed() >= Duration::from_secs(1) {
+            self.last_slow_poll = Instant::now();
             self.terminal_colors_watch.poll();
             self.drain_diff_summaries();
-            self.poll_steer_inbox();
             self.reconcile_cloud_moves();
             self.refresh_home_runs();
             self.write_watched_screens();
@@ -22856,6 +22869,11 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     }
 
     let result = (|| -> Result<()> {
+        // Phone and web actions arrive in the steer inbox; its watch wakes this
+        // loop the moment one lands. The first read picks up requests queued
+        // while no dashboard was running.
+        steer_watch::spawn(&app.cwd, signal_tx.clone(), app.bg_notice_tx.clone())?;
+        app.steer_inbox_due = Some(Instant::now());
         let ready = lifecycle.start(&mut app, &mut ownership)?;
         if ownership.is_fabric() {
             println!("{}", serde_json::to_string(&ready)?);
@@ -22975,6 +22993,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
                 // Fresh child output: nothing to do here — the loop wraps back to
                 // poll_agents, which drains it. The wake itself is the point.
                 Ok(LoopSignal::PtyOutput) => {}
+                Ok(LoopSignal::SteerInbox) => app.steer_inbox_due = Some(Instant::now()),
                 // Backstop tick elapsed with no signal.
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 // The term reader and every waker sender are gone AND our own sender
@@ -23027,6 +23046,10 @@ fn drain_ready_events(
             // poll_agents to drain it. Skip WITHOUT charging the input budget, so
             // MAX_EVENTS_PER_FRAME still bounds only real input events.
             Ok(LoopSignal::PtyOutput) => continue,
+            Ok(LoopSignal::SteerInbox) => {
+                app.steer_inbox_due = Some(Instant::now());
+                continue;
+            }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
     }

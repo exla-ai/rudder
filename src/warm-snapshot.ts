@@ -387,8 +387,10 @@ export async function buildWarmSnapshot(
     return snap;
   } catch (error) {
     ctx.say(`failed: ${error instanceof Error ? error.message : String(error)}`);
-    await removeSnapshotFiles(repoRoot, key, dir);
+    // Marked before the cleanup, which throws when jj cannot forget the
+    // snapshot's workspace: the build failed either way.
     await fsp.writeFile(marker("failed"), String(error)).catch(() => undefined);
+    await removeSnapshotFiles(repoRoot, key, dir);
     return null;
   } finally {
     fs.closeSync(log);
@@ -462,7 +464,7 @@ async function buildOnLayers(ctx: BuildContext, gitDir: string, previous: WarmSn
 async function buildFromClone(ctx: BuildContext, previous: WarmSnapshot): Promise<WarmSnapshot | null> {
   const { repoRoot, key, commit, dir, log, say } = ctx;
   const name = `${WARM_WORKSPACE_PREFIX}${key}`;
-  await runCommand("jj", ["workspace", "forget", name], { cwd: repoRoot, allowFailure: true });
+  await forgetJjWorkspace(repoRoot, name, dir);
   await removeTree(dir);
   const added = await runCommand(
     "jj",
@@ -491,7 +493,7 @@ async function buildFromClone(ctx: BuildContext, previous: WarmSnapshot): Promis
 async function buildFromScratch(ctx: BuildContext, previous: WarmSnapshot | null): Promise<WarmSnapshot> {
   const { repoRoot, key, commit, dir, log, say } = ctx;
   const name = `${WARM_WORKSPACE_PREFIX}${key}`;
-  await runCommand("jj", ["workspace", "forget", name], { cwd: repoRoot, allowFailure: true });
+  await forgetJjWorkspace(repoRoot, name, dir);
   await removeSnapshotFiles(repoRoot, key, dir);
   const added = await runCommand("jj", ["workspace", "add", dir, "--name", name, "-r", commit], { cwd: repoRoot, allowFailure: true });
   if (added.code !== 0) throw new Error(added.stderr.trim() || "jj workspace add failed");
@@ -520,7 +522,7 @@ async function removeWorkDir(work: string): Promise<void> {
 /** Removes a snapshot's directory and side files (not its markers or log). */
 async function removeSnapshotFiles(repoRoot: string, key: string, dir: string): Promise<void> {
   if (fs.existsSync(path.join(dir, ".jj", "repo"))) {
-    await runCommand("jj", ["workspace", "forget", `${WARM_WORKSPACE_PREFIX}${key}`], { cwd: repoRoot, allowFailure: true });
+    await forgetJjWorkspace(repoRoot, `${WARM_WORKSPACE_PREFIX}${key}`, dir);
   }
   await removeWorkDir(`${dir}.work`);
   await removeTree(dir);
@@ -970,10 +972,15 @@ export async function createForkWorkspace(params: {
     }
     return { snapshot };
   } catch (error) {
-    await runCommand("jj", ["workspace", "forget", params.workspaceName], { cwd: params.repoRoot, allowFailure: true });
+    const reason = error instanceof Error ? error.message : String(error);
+    try {
+      await forgetJjWorkspace(params.repoRoot, params.workspaceName, params.targetPath);
+    } catch (forgetError) {
+      throw new Error(`${reason}; ${forgetError instanceof Error ? forgetError.message : String(forgetError)}`);
+    }
     await removeForkState(params.targetPath);
     await fsp.rm(params.targetPath, { recursive: true, force: true });
-    return { reason: error instanceof Error ? error.message : String(error) };
+    return { reason };
   }
 }
 
@@ -1011,6 +1018,20 @@ async function createCloneWorkspace(
 }
 
 /** Removes `<workspace>.fork/` (OverlayFS leaves a mode-000 `work/work`). */
+/**
+ * Forget a jj workspace by name. jj reports a name it already dropped as a
+ * warning and exits 0, so that is success. Any failure throws and the caller
+ * keeps `keptPath`: a registered workspace must never point at a deleted
+ * checkout. Forgetting reads only the repo view, so it skips snapshotting the
+ * user's checkout, which could fail for its own reasons.
+ */
+export async function forgetJjWorkspace(repoRoot: string, name: string, keptPath: string): Promise<void> {
+  const forgot = await runCommand("jj", ["--ignore-working-copy", "workspace", "forget", name], { cwd: repoRoot, allowFailure: true });
+  if (forgot.code !== 0) {
+    throw new Error(`jj workspace forget ${name} failed, kept ${keptPath}: ${forgot.stderr.trim() || forgot.stdout.trim()}`);
+  }
+}
+
 export async function removeForkState(workspace: string): Promise<void> {
   const state = forkStateDir(workspace);
   await fsp.chmod(path.join(workspace, ".jj", "working_copy", "work", "work"), 0o700).catch(() => undefined);

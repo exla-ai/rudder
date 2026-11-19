@@ -1243,7 +1243,10 @@ export async function deleteRun(runId: string, options?: { mergeFirst?: boolean;
   }
   await interruptWorkerAttempt(repoRoot, latest);
   if (latest.workspace.enabled) {
-    await removeRunWorkspace(latest).catch(() => undefined);
+    await removeRunWorkspace(latest).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Removing the workspace for ${runId} failed; run was not deleted. ${message}`);
+    });
   }
   await fsp.rm(runDir(repoRoot, runId), { recursive: true, force: true });
   await writeAgentContext(repoRoot);
@@ -1284,6 +1287,9 @@ export async function cleanupRuns(force = false): Promise<void> {
   const repoRoot = findRepoRoot();
   assertLegacyWriterAllowed(repoRoot);
   const runs = await listRuns(repoRoot);
+  // One workspace that cannot be removed does not stop the rest; every failure
+  // is reported at the end.
+  const failures: string[] = [];
   for (const run of runs) {
     if (!canCleanupRun(run, force)) {
       continue;
@@ -1291,11 +1297,14 @@ export async function cleanupRuns(force = false): Promise<void> {
     try {
       await removeRunWorkspace(run);
       console.log(`Removed ${shortenHome(run.workspace.path)}`);
-    } catch {
-      // Best effort: one workspace that cannot be removed does not stop the rest.
+    } catch (error) {
+      failures.push(`${run.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   await writeAgentContext(repoRoot);
+  if (failures.length > 0) {
+    throw new Error(`Could not remove ${failures.length} workspace(s):\n${failures.join("\n")}`);
+  }
 }
 
 function canCleanupRun(run: RunRecord, force: boolean): boolean {

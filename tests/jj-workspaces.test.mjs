@@ -81,7 +81,18 @@ test("createRunJjWorkspace names the workspace with the rudder prefix", async (t
   assert.equal(await pathExists(workspace.path), false);
   const log = await readLog(env.log);
   assert.match(log, /workspace add .* --name rudder-20260102030405-/);
-  assert.match(log, /workspace forget rudder-20260102030405-/);
+  assert.match(log, /--ignore-working-copy workspace forget rudder-20260102030405-/);
+});
+
+test("forgetWorkspace keeps the directory when jj cannot forget the workspace", async (t) => {
+  const env = await setupFakeJj(t);
+  const workspace = await createRunJjWorkspace({ repoRoot: env.repo, runId: "20260102030405-kept", task: "fix tests" });
+  process.env.JJ_FORGET_FAIL = "1";
+  await assert.rejects(
+    forgetWorkspace({ repoRoot: env.repo, workspaceName: workspace.workspaceName, workspacePath: workspace.path }),
+    /jj workspace forget rudder-20260102030405-[a-f0-9]{6} failed, kept .*: Error: forget failed/,
+  );
+  assert.equal(await pathExists(workspace.path), true, "a failed forget removes nothing");
 });
 
 test("createNodeWorkspace parents the workspace on a change id when given", async (t) => {
@@ -272,6 +283,7 @@ async function setupFakeJj(t) {
     JJ_OP_FAIL: process.env.JJ_OP_FAIL,
     JJ_NEW_FAIL: process.env.JJ_NEW_FAIL,
     JJ_EXPORT_FAIL: process.env.JJ_EXPORT_FAIL,
+    JJ_FORGET_FAIL: process.env.JJ_FORGET_FAIL,
     RUDDER_JJ_BIN: process.env.RUDDER_JJ_BIN,
   };
 
@@ -296,6 +308,7 @@ async function setupFakeJj(t) {
   delete process.env.JJ_OP_FAIL;
   delete process.env.JJ_NEW_FAIL;
   delete process.env.JJ_EXPORT_FAIL;
+  delete process.env.JJ_FORGET_FAIL;
 
   t.after(async () => {
     for (const [key, value] of Object.entries(oldEnv)) {
@@ -320,6 +333,10 @@ if [ -n "\${JJ_LOG:-}" ]; then
 fi
 # Per-test scratch base for state markers (stale-once flags, merge-ran flag).
 MARK="\${JJ_LOG:-/tmp/rudder-fake-jj}"
+# jj takes global flags ahead of the subcommand.
+if [ "\${1:-}" = "--ignore-working-copy" ]; then
+  shift
+fi
 
 case "\${1:-}" in
   --version)
@@ -346,6 +363,10 @@ case "\${1:-}" in
         exit 0
         ;;
       forget)
+        if [ "\${JJ_FORGET_FAIL:-0}" = "1" ]; then
+          echo "Error: forget failed" >&2
+          exit 1
+        fi
         exit 0
         ;;
       update-stale)

@@ -157,7 +157,7 @@ async function runProbe(mode, directory) {
     }
     const rows = await commands();
     assert.equal(rows.filter((r) => r.tool === "git" && r.args[0] === "worktree").length, 0);
-    assert.equal(rows.filter((r) => r.tool === "jj" && r.args[0] === "workspace" && r.args[1] === "forget").length, 2);
+    assert.equal(rows.filter((r) => r.tool === "jj" && r.args.slice(0, 3).join(" ") === "--ignore-working-copy workspace forget").length, 2);
     const stoppable = await record("legacy-stop", { vcs: "git" });
     await manager.stopRun(stoppable.value.id, { silent: true });
     assert.equal(JSON.parse(await fsp.readFile(path.join(stoppable.owned, "run.json"))).status, "cancelled");

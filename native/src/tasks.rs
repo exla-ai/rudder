@@ -1696,7 +1696,9 @@ pub(crate) fn spawn_completion_summary_worker(
 
 fn generate_completion_summary(task: &str, diff: &str) -> Option<serde_json::Value> {
     let prompt = build_completion_summary_prompt(task, diff);
-    let output = Command::new("claude")
+    // claude_program(): RUDDER_CLAUDE_BIN covers this call too, so a test or the
+    // TUI harness that injects a fake `claude` never starts a real paid one.
+    let output = Command::new(claude_program())
         .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
         .env("CLAUDE_CODE_NO_FLICKER", "0")
         .stdin(Stdio::null())
@@ -1725,7 +1727,7 @@ Task:\n{task}"
     // task waits on before it exists. A Claude Code too old for these flags
     // fails at once, and the plain call below still names the workspace.
     let run = |extra: &[&str]| {
-        Command::new("claude")
+        Command::new(claude_program())
             .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
             .args(extra)
             .env("CLAUDE_CODE_NO_FLICKER", "0")

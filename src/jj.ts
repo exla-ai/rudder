@@ -17,7 +17,7 @@ import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./sta
 import { DECISIONS_HEADER } from "./surfaces.js";
 import { withIntegrationLock } from "./rudder-md.js";
 import { managedJjInstallError } from "./jj-binary.js";
-import { createForkWorkspace, removeForkState, startWarmBuild } from "./warm-snapshot.js";
+import { createForkWorkspace, forgetJjWorkspace, removeForkState, startWarmBuild } from "./warm-snapshot.js";
 
 // Minimum jj version we are confident in. Older releases may lack flags we use
 // (e.g. `jj workspace add -r`); we warn rather than throw so an older jj still
@@ -859,19 +859,15 @@ export async function pushBookmark(repoRoot: string, name: string): Promise<void
 }
 
 /**
- * Forget a jj workspace and remove its directory.
+ * Forget a jj workspace and remove its directory. A failed forget throws and
+ * keeps the directory.
  */
 export async function forgetWorkspace(params: {
   repoRoot: string;
   workspaceName: string;
   workspacePath: string;
 }): Promise<void> {
-  if (commandExists("jj")) {
-    await runCommand("jj", ["workspace", "forget", params.workspaceName], {
-      cwd: params.repoRoot,
-      allowFailure: true,
-    }).catch(() => undefined);
-  }
+  await forgetJjWorkspace(params.repoRoot, params.workspaceName, params.workspacePath);
   await removeForkState(params.workspacePath);
   await fsp.rm(params.workspacePath, { recursive: true, force: true });
 }

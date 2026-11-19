@@ -61,7 +61,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           for _ in $(seq 1 420); do
-            if [ "$(npm view "$PACKAGE@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            # npm lists a new version minutes before its tarball downloads
+            # (5.0.14's npm pack 404ed), so wait for the tarball itself.
+            tarball="$(npm view "$PACKAGE@$VERSION" dist.tarball 2>/dev/null)"
+            if [ -n "$tarball" ] && curl -fsIL -o /dev/null "$tarball"; then
               echo "$PACKAGE@$VERSION is on npm"
               exit 0
             fi

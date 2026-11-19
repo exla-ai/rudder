@@ -13,7 +13,7 @@ import { ContextMeter } from "/app/context-meter.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
-import { NotesScreen, notesLink } from "/app/notes.js";
+import { NotesScreen, notesLink, notesPath } from "/app/notes.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
@@ -2821,13 +2821,46 @@ async function setPinned(ws, pinned) {
   updateScreen();
 }
 
+// Saves a move of one order (the project list, or one project's agents). The
+// move shows at once (`show`) and stays until its save is through (`saved`,
+// then `drop`). Saves of one order go one at a time, and a move made meanwhile
+// saves instead, so quick moves (Alt+Down, Alt+Down) can't reach the server
+// out of order. A failed save says so and puts the server's order back (`drop`).
+const orderSeqs = new Map(); // order key -> its latest move
+const orderSaves = new Map(); // order key -> the save in flight
+async function saveOrder(key, { show, post, saved, drop }) {
+  const mine = (orderSeqs.get(key) || 0) + 1;
+  orderSeqs.set(key, mine);
+  show();
+  updateScreen();
+  const prev = orderSaves.get(key);
+  const save = (async () => {
+    if (prev) await prev;
+    if (mine !== orderSeqs.get(key)) return;
+    try {
+      await post();
+      // A poll sent before the save would bring the old order back for a moment.
+      await stateInflight;
+      if (mine !== orderSeqs.get(key)) return;
+      saved();
+      drop();
+    } catch (err) {
+      if (mine !== orderSeqs.get(key)) return;
+      drop();
+      if (err.status !== 401) toast(`Couldn't move it: ${err.message}`, { error: true });
+    }
+    updateScreen();
+  })();
+  orderSaves.set(key, save);
+  await save;
+  if (orderSaves.get(key) === save) orderSaves.delete(key);
+}
+
 // The project list: pinned ones first, then the rest. Each group is in the
 // order the account put it (the sidebar's drag, Alt+Up/Down, a card's menu),
 // and a project never moved sits at the top of its group: pinned ones in pin
-// order, the rest by last activity. A move shows at once and stays until the
-// save is through; a failed save puts the server's order back.
+// order, the rest by last activity. Moves save through saveOrder.
 let orderOverride = null; // workspace ids in the order last set here
-let orderSeq = 0;
 const placeIn = (ids, ws) => { const i = ids.indexOf(ws); return i < 0 ? null : i; };
 function sortProjects(list) {
   const placeOf = (p) => (orderOverride ? placeIn(orderOverride, p.workspaceId) : p.sortOrder);
@@ -2858,23 +2891,13 @@ function moveProject(ws, to) {
   setProjectOrder((pinned ? [...group, ...rest] : [...rest, ...group]).map((x) => x.workspaceId));
   return out;
 }
-async function setProjectOrder(ids) {
-  const mine = ++orderSeq;
-  orderOverride = ids;
-  updateScreen();
-  try {
-    await api("/api/app/project-order", { method: "POST", body: { workspaces: ids } });
-    // A poll sent before the save would bring the old order back for a moment.
-    await stateInflight;
-    if (mine !== orderSeq) return;
-    for (const p of store.state?.projects || []) p.sortOrder = placeIn(ids, p.workspaceId);
-    orderOverride = null;
-  } catch (err) {
-    if (mine !== orderSeq) return;
-    orderOverride = null;
-    if (err.status !== 401) toast(err.message, { error: true });
-  }
-  updateScreen();
+function setProjectOrder(ids) {
+  return saveOrder("projects", {
+    show: () => { orderOverride = ids; },
+    post: () => api("/api/app/project-order", { method: "POST", body: { workspaces: ids } }),
+    saved: () => { for (const p of store.state?.projects || []) p.sortOrder = placeIn(ids, p.workspaceId); },
+    drop: () => { orderOverride = null; },
+  });
 }
 
 // A project's agents in the order the account put them in the sidebar
@@ -2882,11 +2905,8 @@ async function setProjectOrder(ids) {
 // order, so every device shows it; a phone's project screen keeps it within
 // each group. An agent never moved (every agent until its project's first
 // move, and each new one after it) sits above the moved ones, newest
-// activity first, as before any move. A move shows at once and stays until
-// the save is through; a failed save puts the server's order back.
+// activity first, as before any move. Moves save through saveOrder.
 const agentOrderOverrides = new Map(); // workspace id -> run ids set here
-const agentOrderSeqs = new Map(); // workspace id -> its latest move
-const agentOrderSaves = new Map(); // workspace id -> the save in flight
 function orderAgents(p, list) {
   const order = agentOrderOverrides.get(p.workspaceId) || p.agentOrder;
   if (!order) return list.slice().sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0));
@@ -2898,35 +2918,13 @@ function orderAgents(p, list) {
     return (y.updatedAt || 0) - (x.updatedAt || 0);
   });
 }
-async function setAgentOrder(ws, runs) {
-  const mine = (agentOrderSeqs.get(ws) || 0) + 1;
-  agentOrderSeqs.set(ws, mine);
-  agentOrderOverrides.set(ws, runs);
-  updateScreen();
-  // One save at a time, and a move made meanwhile saves instead, so quick
-  // moves (Alt+Down, Alt+Down) can't reach the server out of order.
-  const prev = agentOrderSaves.get(ws);
-  const save = (async () => {
-    if (prev) await prev;
-    if (mine !== agentOrderSeqs.get(ws)) return;
-    try {
-      await api("/api/app/agent-order", { method: "POST", body: { workspace: ws, runs } });
-      // A poll sent before the save would bring the old order back for a moment.
-      await stateInflight;
-      if (mine !== agentOrderSeqs.get(ws)) return;
-      const p = findProject(ws);
-      if (p) p.agentOrder = runs;
-      agentOrderOverrides.delete(ws);
-    } catch (err) {
-      if (mine !== agentOrderSeqs.get(ws)) return;
-      agentOrderOverrides.delete(ws);
-      if (err.status !== 401) toast(`Couldn't move it: ${err.message}`, { error: true });
-    }
-    updateScreen();
-  })();
-  agentOrderSaves.set(ws, save);
-  await save;
-  if (agentOrderSaves.get(ws) === save) agentOrderSaves.delete(ws);
+function setAgentOrder(ws, runs) {
+  return saveOrder(`agents ${ws}`, {
+    show: () => { agentOrderOverrides.set(ws, runs); },
+    post: () => api("/api/app/agent-order", { method: "POST", body: { workspace: ws, runs } }),
+    saved: () => { const p = findProject(ws); if (p) p.agentOrder = runs; },
+    drop: () => { agentOrderOverrides.delete(ws); },
+  });
 }
 // What a screen reader hears after a move, which it would not otherwise notice.
 function moveSaid(m, up) {
@@ -4549,11 +4547,12 @@ function restoreLastRoute() {
   const last = ls.get("rudder.lastRoute");
   if (!last || Date.now() - last.at > 24 * 3600 * 1000) return;
   const r = parseRoute(last.path || "");
-  if (r.name !== "project" && r.name !== "agent") return;
+  if (r.name !== "project" && r.name !== "agent" && r.name !== "notes") return;
   history.replaceState({ depth: 0 }, "", "/app");
   depth = 1;
   history.pushState({ depth }, "", projectPath(r.ws));
   if (r.name === "agent") { depth = 2; history.pushState({ depth }, "", agentPath(r.ws, r.run)); }
+  if (r.name === "notes") { depth = 2; history.pushState({ depth }, "", notesPath(r.ws)); }
 }
 
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);

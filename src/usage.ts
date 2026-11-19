@@ -5,8 +5,9 @@
  *
  * - **Quota**: the providers' own usage endpoints, called with the sign-ins the
  *   CLIs already hold (Claude Code's OAuth token from the keychain or
- *   `.credentials.json`; Codex's `auth.json`). Rudder never sees a password and
- *   never stores a token; it reads what the CLI stored and forwards it once.
+ *   `.credentials.json`; Codex's `auth.json`), one report per account
+ *   (src/accounts.ts). Rudder never sees a password and never stores a token;
+ *   it reads what the CLI stored and forwards it once.
  * - **Token costs**: the CLIs' own session logs (`~/.claude/projects`,
  *   `~/.codex/sessions`), priced at API list rates. Subscription usage is not
  *   billed per token, so this is "what the same work would cost at API rates",
@@ -15,12 +16,14 @@
  *   system RAM split.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { promisify } from "node:util";
+import { ACCOUNT_ENV, listAccounts, MAIN_ACCOUNT, type AgentAccount } from "./accounts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -562,6 +565,10 @@ export type QuotaWindow = {
 
 export type AccountQuota = {
   provider: Provider;
+  /** Which of the provider's accounts: "main" or an extra account's id. */
+  account: string;
+  /** New agents on the provider start on this account. */
+  default: boolean;
   email: string | null;
   plan: string | null;
   windows: QuotaWindow[];
@@ -579,9 +586,20 @@ let quotaCache: { at: number; report: QuotaReport } | null = null;
 
 type ClaudeCredentials = { accessToken: string; expiresAt: number | null; subscriptionType: string | null };
 
-async function readClaudeCredentials(): Promise<ClaudeCredentials | null> {
+/**
+ * Claude Code's keychain item on macOS. With CLAUDE_CONFIG_DIR set it adds the
+ * first 8 hex of the dir's SHA-256 (read from Claude Code 2.1.328), so every
+ * config dir has its own sign-in.
+ */
+export function claudeKeychainService(configDir: string | null): string {
+  return configDir === null
+    ? "Claude Code-credentials"
+    : `Claude Code-credentials-${createHash("sha256").update(configDir.normalize("NFC")).digest("hex").slice(0, 8)}`;
+}
+
+async function readClaudeCredentials(account: AgentAccount, env: NodeJS.ProcessEnv): Promise<ClaudeCredentials | null> {
   let raw: string | null = null;
-  const file = path.join(claudeConfigDir(), ".credentials.json");
+  const file = path.join(account.dir, ".credentials.json");
   try {
     raw = await fsp.readFile(file, "utf8");
   } catch {
@@ -589,7 +607,9 @@ async function readClaudeCredentials(): Promise<ClaudeCredentials | null> {
   }
   if (raw === null && process.platform === "darwin") {
     try {
-      const { stdout } = await execFileAsync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], {
+      // The main account's dir counts only when the env names it.
+      const configured = account.id === MAIN_ACCOUNT ? env[ACCOUNT_ENV.claude]?.trim() || null : account.dir;
+      const { stdout } = await execFileAsync("security", ["find-generic-password", "-s", claudeKeychainService(configured), "-w"], {
         timeout: 5000,
       });
       raw = stdout;
@@ -638,7 +658,7 @@ function planLabel(tier: string | null | undefined, fallback: string | null): st
  * keyed by `scope.model.display_name` — e.g. a Fable-heavy week shows a
  * higher "Weekly · Fable" percent than the blended `seven_day` figure.
  */
-export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string | null): Omit<AccountQuota, "fetchedAt" | "provider"> {
+export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string | null): Omit<AccountQuota, "fetchedAt" | "provider" | "account" | "default"> {
   const windows: QuotaWindow[] = [];
   const push = (label: string, w: any) => {
     if (!w || typeof w !== "object" || typeof w.utilization !== "number") return;
@@ -669,10 +689,10 @@ export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string 
   return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
 }
 
-async function fetchClaudeQuota(): Promise<AccountQuota> {
+async function fetchClaudeQuota(account: AgentAccount, env: NodeJS.ProcessEnv): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
-  const base = { provider: "claude" as const, email: null, plan: null, windows: [], blocked: null, fetchedAt };
-  const creds = await readClaudeCredentials();
+  const base = { provider: "claude" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, fetchedAt };
+  const creds = await readClaudeCredentials(account, env);
   if (!creds) return { ...base, error: "not signed in: run `claude` and log in" };
   if (creds.expiresAt && creds.expiresAt < Date.now()) {
     return { ...base, plan: planLabel(null, creds.subscriptionType), error: "sign-in expired: run `claude` once to refresh it" };
@@ -701,9 +721,9 @@ async function fetchClaudeQuota(): Promise<AccountQuota> {
 
 type CodexCredentials = { accessToken: string; accountId: string | null };
 
-async function readCodexCredentials(): Promise<CodexCredentials | null> {
+async function readCodexCredentials(account: AgentAccount): Promise<CodexCredentials | null> {
   try {
-    const raw = await fsp.readFile(path.join(codexHomeDir(), "auth.json"), "utf8");
+    const raw = await fsp.readFile(path.join(account.dir, "auth.json"), "utf8");
     const parsed = JSON.parse(raw);
     const token = parsed?.tokens?.access_token;
     if (typeof token !== "string" || !token) return null;
@@ -763,7 +783,7 @@ const CODEX_BLOCK_REASONS: Record<string, string> = {
 };
 
 /** Pure: Codex's `/backend-api/wham/usage` body → meters. */
-export function parseCodexQuota(body: any): Omit<AccountQuota, "fetchedAt" | "provider"> {
+export function parseCodexQuota(body: any): Omit<AccountQuota, "fetchedAt" | "provider" | "account" | "default"> {
   const windows: QuotaWindow[] = [];
   const pushWindow = (prefix: string, w: any) => {
     if (!w || typeof w !== "object" || typeof w.used_percent !== "number") return;
@@ -790,10 +810,10 @@ export function parseCodexQuota(body: any): Omit<AccountQuota, "fetchedAt" | "pr
   return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
 }
 
-async function fetchCodexQuota(): Promise<AccountQuota> {
+async function fetchCodexQuota(account: AgentAccount): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
-  const base = { provider: "codex" as const, email: null, plan: null, windows: [], blocked: null, fetchedAt };
-  const creds = await readCodexCredentials();
+  const base = { provider: "codex" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, fetchedAt };
+  const creds = await readCodexCredentials(account);
   if (!creds) return { ...base, error: "not signed in: run `codex login`" };
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
@@ -813,12 +833,21 @@ async function fetchCodexQuota(): Promise<AccountQuota> {
 /** A failed lookup is retried soon, not cached for the full five minutes. */
 const QUOTA_ERROR_TTL_MS = 20 * 1000;
 
-export async function fetchQuota(opts: { force?: boolean } = {}): Promise<QuotaReport> {
+/**
+ * Every account's meters, main first within each provider. `env` is the one
+ * agents run with (src/accounts.ts says why the home passes its own).
+ */
+export async function fetchQuota(opts: { force?: boolean; env: NodeJS.ProcessEnv }): Promise<QuotaReport> {
   if (!opts.force && quotaCache) {
     const ttl = quotaCache.report.accounts.some((a) => a.error) ? QUOTA_ERROR_TTL_MS : QUOTA_TTL_MS;
     if (Date.now() - quotaCache.at < ttl) return quotaCache.report;
   }
-  const accounts = await Promise.all([fetchClaudeQuota(), fetchCodexQuota()]);
+  const env = opts.env;
+  const all = await listAccounts(env);
+  const accounts = await Promise.all([
+    ...all.claude.map((account) => fetchClaudeQuota(account, env)),
+    ...all.codex.map((account) => fetchCodexQuota(account)),
+  ]);
   const report: QuotaReport = { accounts, fetchedAt: new Date().toISOString(), ttlSeconds: QUOTA_TTL_MS / 1000 };
   quotaCache = { at: Date.now(), report };
   return report;

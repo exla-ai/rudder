@@ -160,7 +160,7 @@ function QuotaMeters() {
       {error && <div class="banner banner-error mono">quota failed: {error}</div>}
       <div class="quota-grid">
         {(report?.accounts ?? []).map((account) => (
-          <QuotaCard key={account.provider} account={account} now={now} />
+          <QuotaCard key={`${account.provider}:${account.account}`} account={account} now={now} />
         ))}
         {!report && !error && (
           <>

@@ -263,7 +263,7 @@ async function handleRequest(
   }
   if (method === "GET" && pathname === "/api/usage/quota") {
     try {
-      sendJson(res, 200, await fetchQuota({ force: url.searchParams.get("refresh") === "1" }));
+      sendJson(res, 200, await fetchQuota({ force: url.searchParams.get("refresh") === "1", env: process.env }));
     } catch (error) {
       sendJson(res, 500, { error: String((error as Error)?.message ?? error) });
     }

@@ -8,6 +8,7 @@ import "./board-source.mjs";
 const { startBoardDaemon } = await import("../src/board/daemon.ts");
 const { requestBoardBootstrap } = await import("../src/board/host-access.ts");
 const {
+  claudeKeychainService,
   classifyCommand,
   localDay,
   parseClaudeLog,
@@ -205,6 +206,13 @@ test("rangeSince starts at local midnight N-1 days back so a 7d range holds seve
   assert.equal(localDay(since), "2026-09-03");
   assert.equal(since.getHours(), 0);
   assert.equal(localDay(rangeSince("30d", now)), "2026-08-11");
+});
+
+// Claude Code names its macOS keychain entry after CLAUDE_CONFIG_DIR when that
+// is set (claude 2.1.328): each added account's sign-in is its own entry.
+test("each Claude account's keychain entry is named the way Claude Code names it", () => {
+  assert.equal(claudeKeychainService(null), "Claude Code-credentials");
+  assert.equal(claudeKeychainService("/Users/me/.rudder/accounts/claude/mi6x2k3a"), "Claude Code-credentials-56282c6c");
 });
 
 test("Claude quota meters come from the OAuth usage body and the plan from the profile tier", () => {

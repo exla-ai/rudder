@@ -162,6 +162,9 @@ export type TokenUsageReport = {
 export type QuotaWindow = { label: string; percent: number; resetsAt: string | null };
 export type AccountQuota = {
   provider: "claude" | "codex";
+  /** "main" or an extra account's id (src/accounts.ts). */
+  account: string;
+  default: boolean;
   email: string | null;
   plan: string | null;
   windows: QuotaWindow[];

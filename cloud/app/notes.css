@@ -1,0 +1,55 @@
+/* The Notes screen (notes.js): one plain editor for RUDDER_NOTES.md with a
+   quiet save status in the header and the file's Git state underneath. The
+   text keeps a readable measure on wide screens; its scrollbar stays at the
+   screen's edge. */
+
+.nt-screen { --nt-gutter: max(20px, calc((100% - 720px) / 2)); }
+.nt-status { flex: none; padding: 0 10px 0 4px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+
+.nt-text {
+  flex: 1 1 auto; min-height: 0; width: 100%; margin: 0;
+  border: 0; border-radius: 0; outline: none; resize: none; background: transparent; color: var(--ink);
+  font: 16px/1.6 var(--font);
+  padding: 10px calc(var(--sar) + var(--nt-gutter)) 32px calc(var(--sal) + var(--nt-gutter));
+  overflow-y: auto; overscroll-behavior: contain;
+}
+.nt-text::placeholder { color: var(--faint); }
+.nt-text:focus-visible { outline: none; }
+
+.nt-banner {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  margin: 4px var(--nt-gutter) 6px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--needs-soft);
+  font-size: 13.5px; line-height: 1.4;
+}
+.nt-banner-text { flex: 1 1 220px; min-width: 0; }
+.nt-banner .btn.small { min-height: 32px; font-size: 13px; }
+
+.nt-msg { flex: 1 1 auto; padding: 20px var(--nt-gutter); }
+.nt-loading { margin: 0; color: var(--muted); font-size: 14px; }
+.nt-msg-box {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start;
+  padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+}
+.nt-msg-box > svg { width: 18px; height: 18px; margin-top: 1px; color: var(--needs); }
+.nt-msg-title { margin: 0; font-weight: 600; font-size: 14.5px; }
+.nt-msg-detail { margin: 2px 0 10px; color: var(--muted); font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+
+/* The file name and the switch on one line, what that means under them. */
+.nt-foot {
+  flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px;
+  padding: 4px calc(var(--sar) + var(--nt-gutter)) calc(var(--sab) + 10px) calc(var(--sal) + var(--nt-gutter));
+  border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted);
+}
+.nt-file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.nt-note { grid-column: 1 / -1; margin: 2px 0 0; line-height: 1.4; }
+.nt-git {
+  grid-column: 2; display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 4px 0 10px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--ink); font-size: 13.5px; font-weight: 550;
+}
+.nt-git:hover { background: var(--surface-2); }
+.nt-git[disabled] { opacity: 0.6; }
+.nt-switch { position: relative; flex: none; width: 38px; height: 22px; border-radius: 11px; background: color-mix(in srgb, var(--ink) 20%, transparent); transition: background 150ms; }
+.nt-knob { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); transition: transform 150ms; }
+.nt-git[aria-checked="true"] .nt-switch { background: var(--accent); }
+.nt-git[aria-checked="true"] .nt-knob { transform: translateX(16px); }

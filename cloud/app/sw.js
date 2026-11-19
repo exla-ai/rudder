@@ -8,10 +8,10 @@ const SHELL = [
   "/app", "/app/theme.js", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js",
   "/app/org.js", "/app/select.js", "/app/team.js", "/app/onboarding.js", "/app/mac-local.js", "/app/prompt-suggest.js",
   "/app/agent-stats.js", "/app/context-meter.js", "/app/agent-menu.js", "/app/all-agents.js", "/app/canvas-panel.js", "/app/chat-edit.js",
-  "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/pending.js",
+  "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/notes.js", "/app/pending.js",
   "/app/project-file-render.js", "/app/slash-menu.js", "/app/slash-rank.js", "/app/subagents.js", "/app/terminal-client.js", "/app/terminal-recovery.js",
   "/app/styles.css", "/app/desktop.css", "/app/files-panel.css", "/app/canvas-panel.css", "/app/files-hub.css",
-  "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/context-meter.css",
+  "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/context-meter.css", "/app/notes.css",
   "/app/manifest.webmanifest", "/app/icon.svg", "/app/favicon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",
 ];
 const CDN = "https://cdn.jsdelivr.net/npm/";

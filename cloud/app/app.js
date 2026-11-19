@@ -13,6 +13,7 @@ import { ContextMeter } from "/app/context-meter.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
+import { NotesScreen, notesLink } from "/app/notes.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
@@ -559,6 +560,7 @@ function parseRoute(path) {
   if (parts[1] === "p" && parts[2]) {
     const ws = decodeURIComponent(parts[2]);
     if (parts[3] === "a" && parts[4]) return { name: "agent", ws, run: decodeURIComponent(parts[4]), path };
+    if (parts[3] === "notes") return { name: "notes", ws, path };
     return { name: "project", ws, path };
   }
   return { name: "home", path: "/app" };
@@ -641,6 +643,7 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
   if (route.name === "files") return FilesHubScreen({ projects: () => store.state?.projects || [] });
+  if (route.name === "notes") return NotesScreen(route.ws);
   if (route.name === "team") return TeamScreen();
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
   if (route.name === "all") return AllAgentsScreen({ fresh: route.fresh, store, createComposer, navigate, goBack, refreshState });
@@ -1434,7 +1437,7 @@ function DesktopShell() {
         setText(pc, n ? String(n) : live ? String(live) : "");
         pc.className = `ds-pc ${n ? "s-needs" : live ? "s-working" : ""}`;
         pc.title = n ? `${n} need you` : live ? `${live} working` : "";
-        const onProject = route?.name === "project" && route.ws === ws;
+        const onProject = (route?.name === "project" || route?.name === "notes") && route.ws === ws;
         pEl.classList.toggle("on", onProject);
         if (onProject) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
         const list = pEl.querySelector(".ds-agents");
@@ -3337,6 +3340,7 @@ function ProjectScreen(ws) {
   bar.appendChild(headModel.el);
   bar.appendChild(refreshButton(refreshState));
   bar.appendChild(canvasButton({ ws, findAgent }));
+  bar.appendChild(notesLink(ws));
   bar.appendChild(filesButton({ ws, findAgent }));
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);

@@ -793,6 +793,14 @@ async function handleRpc(method, params) {
   if (method === "projectGuide") {
     return (await agentSetupService()).projectGuide(project.dir);
   }
+  if (method === "projectNotes") {
+    // RUDDER_NOTES.md in the checkout, which only the user writes (src/project-files/notes.ts).
+    if (project.status === "cloning") {
+      throw new Error("This project is still cloning");
+    }
+    const { projectNotes } = await import("/opt/rudder/dist/project-files/notes.js");
+    return await projectNotes(project.dir, params.request);
+  }
   if (method === "transcript") {
     return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });
   }

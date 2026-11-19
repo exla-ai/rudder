@@ -4164,8 +4164,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       item.sentText = withAttachments(item.text, (item.files || []).map((f) => f.path));
       item.state = "sending";
       paint();
-      await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: item.sentText } });
+      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: item.sentText } });
       item.state = "sent";
+      // It answered the agent's open question; the transcript shows the answer.
+      if (res?.answered) store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
       setTimeout(loadTranscript, 1200);
     } catch (err) {
       item.state = "failed";

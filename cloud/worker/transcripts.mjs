@@ -707,7 +707,7 @@ function codexReader({ stats = null, child = false } = {}) {
       }
       if (payload.role === "user") {
         if (codexTypedText(text)) {
-          messages.push({ id: payload.id || id, role: "user", ts, text });
+          messages.push({ id: payload.id || id, role: "user", ts, text: codexQuestionReply(text) });
         }
       } else if (payload.role === "assistant") {
         messages.push({ id, role: "assistant", ts, text });
@@ -759,6 +759,18 @@ function codexReader({ stats = null, child = false } = {}) {
     }
   }
   return reader;
+}
+
+// An answer to a `request_user_input_async` question comes back as a user
+// message, `<send_user_message_question_reply>[{answer, question,
+// questionItemId}]</…>`. The chat shows the answers as they were given.
+function codexQuestionReply(text) {
+  const match = /^<send_user_message_question_reply>([\s\S]*)<\/send_user_message_question_reply>$/.exec(text);
+  if (!match) {
+    return text;
+  }
+  const items = JSON.parse(match[1]);
+  return items.map((item) => String(item.answer).trim()).join("\n");
 }
 
 function codexArguments(payload) {

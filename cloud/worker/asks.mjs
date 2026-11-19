@@ -346,6 +346,28 @@ export function codexAsks(record, rollout, { isAlive = alive } = {}) {
   return asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true);
 }
 
+/**
+ * The answer a message typed into the chat gives an open Codex question. Typed
+ * into the pane, it never reached the agent as said: a waiting
+ * `request_user_input` took it as a note on whichever option was highlighted
+ * (so "Same account" went back as "Separate account" plus that note), and
+ * during an async question it went in as a separate message while the question
+ * stayed open. So the text answers every question of the card, as the option it
+ * names or as text of your own, the way the card's "Other" does.
+ */
+export function codexTypedAnswer(ask, text) {
+  const said = String(text || "").trim();
+  if (!said) {
+    throw new Error("message is empty");
+  }
+  const answers = {};
+  for (const question of ask.input.questions) {
+    const named = question.options.find((option) => option.label.trim().toLowerCase() === said.toLowerCase());
+    answers[question.question] = named ? named.label : said;
+  }
+  return { answers };
+}
+
 // Text for the pane goes as a paste (native `remote_input_bytes`), hex so
 // commas and newlines survive the comma-separated key list.
 function pasteKey(text) {

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { readAsks, askDecision, codexAsks, codexAskSteps } from "../cloud/worker/asks.mjs";
+import { readAsks, askDecision, codexAsks, codexAskSteps, codexTypedAnswer } from "../cloud/worker/asks.mjs";
 
 const HOOK = path.resolve("native/src/permission_hook.mjs");
 
@@ -260,4 +260,22 @@ test("a Codex prompt is answered with keys in its pane", () => {
     ...keys("shift-right,shift-right,shift-right,shift-left"),
     ...keys(`down,enter,paste:${motto},enter`),
   ]);
+});
+
+test("a message typed into the chat answers an open Codex question", () => {
+  const dir = tmpdir();
+  const rollout = path.join(dir, "rollout.jsonl");
+  // Plan mode: typed into the pane it became a note on the highlighted option
+  // (Codex 0.170 sent "Separate account" plus the text), so it goes as the
+  // card's own text on "None of the above", or as the option it names.
+  fs.writeFileSync(rollout, turnStarted("t1") + askCall("call_1", [{ id: "account", header: "Account", question: "Is it a separate Apple Account?", options: [{ label: "Separate account", description: "" }, { label: "Same account", description: "" }] }]));
+  const [ask] = codexAsks(live, rollout);
+  const said = "same one, let me sign in again";
+  assert.deepEqual(codexAskSteps(ask, codexTypedAnswer(ask, said)), [{ kind: "keys", instruction: `down,down,paste:${Buffer.from(said, "utf8").toString("hex")},enter` }]);
+  assert.deepEqual(codexAskSteps(ask, codexTypedAnswer(ask, " same ACCOUNT ")), [{ kind: "keys", instruction: "down,enter" }]);
+  assert.throws(() => codexTypedAnswer(ask, "  "), /empty/);
+  // Async: "Other" on every question of the card.
+  fs.appendFileSync(rollout, callOutput("call_1") + asyncCall("call_2", [{ title: "Editor?", options: ["Vim", "Emacs"] }, { title: "Motto?" }]) + asyncAccepted("call_2"));
+  const [later] = codexAsks(live, rollout);
+  assert.deepEqual(codexTypedAnswer(later, "vim"), { answers: { "Editor?": "Vim", "Motto?": "vim" } });
 });

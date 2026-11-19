@@ -25048,6 +25048,77 @@ fn the_idle_composer_detector_needs_the_composer_and_no_spinner() {
     assert_eq!(terminal_composer_blocked(Backend::Codex, &resumed), None);
 }
 
+/// Codex 0.170 after a turn that asked with `request_user_input_async`, edited a
+/// doc and ended on the same question in plain text (captured from a real pane;
+/// the iMessage agent whose reply was refused showed this shape). The diff's
+/// "permission ... requested ... No" read as a permission prompt above an idle
+/// composer: the row said "permission" and the reply was refused.
+#[test]
+fn a_codex_diff_about_permission_above_its_composer_is_not_a_prompt() {
+    let lines: Vec<String> = [
+        "? Apple authenticated the new sign-in as the first address, so the second receiver correctly stopped on an identity mismatch. Is the second",
+        "  address an additional iMessage address on that same Apple Account, or a separate Apple Account?",
+        "",
+        "  • Separate Apple Account",
+        "  • Additional address on the same Apple Account",
+        "",
+        "• Edited docs/STATUS.md (+11 -0)",
+        "     5",
+        "     6 +The owner subsequently completed the second private authentication. Its",
+        "     7 +persisted canonical login matched the already-enrolled first identity rather",
+        "     8 +than the requested reverse-direction identity. The separate receiver stopped",
+        "     9 +with `account_handle_mismatch` before opening its APS socket or registering a",
+        "    10 +new sending handle. No new verification message was sent. Whether the",
+        "    11 +requested address belongs to a separate Apple Account or is another address",
+        "    12 +on the same account requires owner clarification; authentication success",
+        "    13 +alone does not prove permission to send as that address. Both connection",
+        "    14 +credentials were denied access to the other connection (HTTP 404) in the",
+        "    15 +scoped API check.",
+        "    16 +",
+        "    17  ## Permission and source",
+        "",
+        "• Authentication succeeded, but Apple returned the first address, so the second receiver stopped before sending anything. Is the second",
+        "  address a separate Apple Account, or another iMessage address on the same Apple Account?",
+        "",
+        "  Worked for 9s • 2:08 AM",
+        "",
+        "",
+        "› Ask Codex to do anything",
+        "",
+        "  GPT-6-Luna low · /workspace/rudder-scratch/codex-ask/proj · Resolve Apple account mismatch",
+        "  ← for agents · ? for shortcuts                                                                                   ⚠ 1 warning · f2 to view",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(!terminal_needs_permission_from_lines(Backend::Codex, &lines));
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &lines), None);
+    assert!(terminal_needs_user_input_from_lines(Backend::Codex, &lines), "it ends on a question");
+
+    // A real Codex 0.170 approval prompt (approvals on) still keeps a message out.
+    let approval: Vec<String> = [
+        "• Running touch approved.txt",
+        "",
+        "  Would you like to run the following command?",
+        "",
+        "  Environment: local",
+        "",
+        "  Reason: May I create approved.txt in the workspace as requested?",
+        "",
+        "  $ touch approved.txt",
+        "",
+        "› 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `touch approved.txt` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "",
+        "  Press enter to confirm or esc to cancel",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_composer_blocked(Backend::Codex, &approval).is_some());
+}
+
 /// A live worker whose turn ends on an API error reports it, the tab shows a
 /// failure, and the next prompt clears it — without the run ever being Failed.
 #[cfg(not(windows))]

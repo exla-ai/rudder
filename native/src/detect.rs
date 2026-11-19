@@ -236,12 +236,14 @@ pub(crate) fn looks_like_idle_chrome(backend: Backend, line: &str) -> bool {
             //   "/stop to close"           - same hint, separate token
             //   "/ for commands"           - slash-help hint
             //   "ctrl+j newline"           - input-area hint
+            //   "← for agents · ? for shortcuts"  - 0.170 hint row under the bar
             //   "<model> <effort> ... · <cwd>"  - bottom status bar
             if lower.contains("worked for ")
                 || lower.contains("/ps to view")
                 || lower.contains("/stop to close")
                 || lower.contains("/ for commands")
                 || lower.contains("ctrl+j newline")
+                || lower.contains("? for shortcuts")
             {
                 return true;
             }
@@ -409,6 +411,17 @@ pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[St
     // agent at "needs permission" for its whole turn, since this is re-read
     // every tick.
     if backend == Backend::Claude && recent_lines_look_busy(lines) {
+        return false;
+    }
+    // A permission prompt REPLACES the composer, so a pane parked at its
+    // composer is not on one, whatever its recent output says. The footer
+    // ("bypass permissions on", Codex's status bar) is drawn under the composer
+    // only; a menu's "❯ 1. Yes" looks like a composer line, so the footer is the
+    // test. Claude explaining that "Apple has to grant the CarPlay permission,
+    // which you request", and a Codex diff about "permission to send as the
+    // requested address" above its composer, each read as a prompt: the row
+    // said so and the phone's reply was refused.
+    if idle_footer_showing(backend, lines) {
         return false;
     }
     // Chrome-filtered for the same reason as above: Codex's status bar and
@@ -697,6 +710,18 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
             || lower == "interrupted")
 }
 
+/// True when the bottom rows show the footer a backend draws under its composer
+/// only, so nothing (no permission prompt, no question) has replaced it.
+fn idle_footer_showing(backend: Backend, lines: &[String]) -> bool {
+    lines
+        .iter()
+        .rev()
+        .map(|line| normalize_terminal_line(line))
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .any(|line| looks_like_idle_chrome(backend, &line))
+}
+
 /// Why text typed into this pane would NOT reach the agent as a message, if it
 /// would not: a permission prompt or a menu (Claude's `/config`, `/model`, a
 /// picker, Codex's selection lists) owns the keyboard, and typing into it
@@ -705,21 +730,7 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
 /// running turn's "esc to interrupt" never match. Used before a remote message
 /// (the phone, the web board) is typed into a pane.
 pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
-    // A permission prompt REPLACES the composer, so a pane parked at its
-    // composer is not on one, whatever its last reply said: an agent explaining
-    // that "Apple has to grant the CarPlay permission, which you request" read
-    // as a prompt and the phone's messages were refused.
-    // The footer ("bypass permissions on", "shift+tab to cycle") is drawn under
-    // the composer only; a menu's "❯ 1. Yes" looks like a composer line, so the
-    // footer is the test.
-    let footer_showing = lines
-        .iter()
-        .rev()
-        .map(|line| normalize_terminal_line(line))
-        .filter(|line| !line.is_empty())
-        .take(3)
-        .any(|line| looks_like_idle_chrome(backend, &line));
-    if !footer_showing && terminal_needs_permission_from_lines(backend, lines) {
+    if terminal_needs_permission_from_lines(backend, lines) {
         return Some("it is waiting on a permission prompt; answer that first");
     }
     const MENU_HINTS: [&str; 10] = [

@@ -541,6 +541,8 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
     item({ type: "function_call", name: "shell", call_id: "c2", arguments: JSON.stringify({ command: ["bash", "-lc", "npm test"] }) }),
     item({ type: "function_call_output", call_id: "c2", output: JSON.stringify({ output: "boom", metadata: { exit_code: 1 } }) }),
     item({ type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] }),
+    // An answer to an async question reads as what was answered.
+    item({ type: "message", role: "user", content: [{ type: "input_text", text: `<send_user_message_question_reply>\n${JSON.stringify([{ answer: "Ship it", question: "Ship now?", questionItemId: JSON.stringify(["request_user_input_async", "call_9", 0]) }])}\n</send_user_message_question_reply>` }] }),
   ];
   fs.writeFileSync(path.join(day, `rollout-2026-10-14T17-06-07-${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
   const repo = fixtureRepo({ id: "run-2", backend: "codex", task: "add billing", session: { nativeSessionId: sessionId } });
@@ -548,7 +550,7 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
   const transcript = readTranscript(repo, "run-2", { limit: 50, home });
   assert.deepEqual(
     transcript.messages.map((m) => [m.role, m.text || m.tool?.input]),
-    [["user", "add billing"], ["tool", "rg billing src"], ["tool", "npm test"], ["assistant", "Billing is in."]],
+    [["user", "add billing"], ["tool", "rg billing src"], ["tool", "npm test"], ["assistant", "Billing is in."], ["user", "Ship it"]],
   );
   assert.equal(transcript.messages[1].tool.output, "src/billing.ts");
   assert.deepEqual([transcript.messages[2].tool.output, transcript.messages[2].tool.isError], ["boom", true]);

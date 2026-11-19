@@ -41,11 +41,13 @@ targets:
       - path: App
       - path: Core
     dependencies:
-      # A package's framework is embedded only when asked. Code Sign on Copy
+      # Linked only: Xcode embeds a package's binary framework
+      # (Sparkle.xcframework) in Contents/Frameworks by itself. `embed: true`
+      # would also put the package product in Embed Frameworks, which Xcode
+      # copies as a file named Sparkle-product that never exists. The embed
       # signs the framework but not the helpers inside it: an export
       # (scripts/ci.sh) re-signs them, scripts/package.sh signs them itself.
       - package: Sparkle
-        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder.mac

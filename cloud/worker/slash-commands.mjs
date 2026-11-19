@@ -1,6 +1,7 @@
 // What "/" offers in an agent's own CLI, for the "/" menu in the app's chat
 // composer. Each list is built on the home ahead of time, per agent working
-// directory, so the menu opens at once.
+// directory, kept on disk across restarts, and kept on each device too
+// (cloud/app/slash-menu.js), so the menu opens at once.
 //
 // Claude Code. The menu comes from Claude Code itself: an interactive session
 // in the agent's directory, started off-screen in a private tmux with hooks
@@ -12,7 +13,9 @@
 // no model is called and no transcript is written. The popup has no argument
 // hints and no aliases: the headless `initialize` answer (no hooks, no MCP)
 // and the command objects in the installed binary give those, and the binary
-// says which built-ins open a picker or a panel in the TUI.
+// says which built-ins open a picker or a panel in the TUI. That answer alone
+// is not the menu: on 2.1.327 it lacks 53 of the TUI's built-ins (/resume,
+// /plan, /status...), every MCP prompt and some skills, and lists hidden ones.
 //
 // Codex. Its "/" popup lists built-ins in a fixed order, gated by features,
 // the sign-in type, the platform and the install (voice), plus one row per
@@ -315,11 +318,15 @@ const clip = (text) => {
 // enough that the whole popup shows at once.
 const MENU_COLUMNS = 1000;
 const MENU_ROWS = 1000;
-// MCP servers connect after the prompt shows; their prompts join the popup
-// as they do. The popup is read once it has not changed for MENU_STILL_MS,
+// The popup fills in over about 300 ms (skills, plugins, account-gated rows),
+// then MCP servers' prompts join it as the servers connect, remote ones a
+// second or more later. Its first reading is taken once it has held still for
+// MENU_FIRST_MS; the list is read once it has not changed for MENU_STILL_MS,
 // no sooner than MENU_SETTLE_MS after "/".
+const MENU_FIRST_MS = 300;
 const MENU_SETTLE_MS = 3000;
 const MENU_STILL_MS = 2000;
+const MENU_POLL_MS = 100;
 let menuSeq = 0;
 
 /** The popup rows on a Claude Code screen: [{ display, description }], or null when none show. */
@@ -355,16 +362,18 @@ export function parseClaudeMenu(screen) {
 /**
  * Claude Code's "/" popup in `cwd`: an interactive session started in a
  * private tmux server with the agent's environment and model and hooks off,
- * sent "/". Returns [{ display, description }] in Claude's order.
+ * sent "/". Returns [{ display, description }] in Claude's order. `onFirst`
+ * is awaited with the popup's first reading, before MCP servers' prompts
+ * have all joined it.
  */
-export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 45_000 }) {
+export async function readClaudeMenu({ bin, cwd, env, model = null, onFirst = null, timeoutMs = 45_000 }) {
   const tmux = which("tmux", env);
   // tmux leaves its socket behind when the server is killed.
   const socket = path.join(os.tmpdir(), `rudder-slash-${process.pid}-${menuSeq++}`);
   const t = (...args) => run(tmux, ["-S", socket, "-f", "/dev/null", ...args], { cwd, env });
   const screen = async () => (await t("capture-pane", "-p", "-t", "menu")).stdout;
   const deadline = Date.now() + timeoutMs;
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 250));
+  const pause = () => new Promise((resolve) => setTimeout(resolve, MENU_POLL_MS));
   // The pane's process leads its own process group (tmux starts it in a new
   // session); Claude's MCP servers run in it too.
   let group = null;
@@ -396,6 +405,7 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 
     const sent = Date.now();
     let last = null;
     let since = 0;
+    let first = !onFirst;
     for (;;) {
       await pause();
       const rows = parseClaudeMenu(await screen());
@@ -405,6 +415,9 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, timeoutMs = 
         since = Date.now();
       } else if (rows && Date.now() - since >= MENU_STILL_MS && Date.now() - sent >= MENU_SETTLE_MS) {
         return rows;
+      } else if (rows && !first && Date.now() - since >= MENU_FIRST_MS) {
+        first = true;
+        await onFirst(rows);
       }
       if (Date.now() > deadline) {
         throw new Error(rows ? "Claude Code's menu kept changing" : "Claude Code showed no menu for /");
@@ -578,8 +591,8 @@ const isDaybreak = (program) => String(program).startsWith("daybreak_");
 // has not turned Daybreak on; null hides the command. An API-key sign-in
 // needs one more feature (daybreak_account_eligible).
 function daybreakDescription({ features, chatgpt, apiKey, models }) {
-  if (!features.get("cli_daybreak")) return null;
-  if (!chatgpt && !(apiKey && features.get("api_key_cyber_access_programs"))) return null;
+  if (!features.cli_daybreak) return null;
+  if (!chatgpt && !(apiKey && features.api_key_cyber_access_programs)) return null;
   if (models.some((m) => (m.available_access_programs?.cyber ?? []).some(isDaybreak))) return "Enable broader access for cybersecurity work";
   if (!models.length) return "Manage broader access for cybersecurity work";
   if (models.every((m) => (m.available_access_programs?.cyber ?? []).length > 0)) return "Learn about broader access for cybersecurity work";
@@ -592,8 +605,8 @@ function codexGate(gate, state) {
     case "never": return false;
     case "windows": return state.platform === "win32";
     case "desktop": return state.platform === "darwin" || state.platform === "win32";
-    case "goals": return state.features.get("goals") === true;
-    case "plugins": return state.features.get("plugins") === true;
+    case "goals": return state.features.goals === true;
+    case "plugins": return state.features.plugins === true;
     case "chatgpt": return state.chatgpt;
     case "daybreak": return daybreakDescription(state) !== null;
     case "voice": return state.voice;
@@ -651,7 +664,7 @@ export function codexHasVoice(packageDir, platform = process.platform) {
 }
 
 /**
- * Codex's "/" popup for one agent. `features`: name -> enabled, as
+ * Codex's "/" popup for one agent. `features`: { name: enabled }, as
  * `codex features list` prints them with Rudder's launch flags; `chatgpt` and
  * `apiKey`: the sign-in; `voice`: the install has the voice runtime;
  * `models`: the model catalog; `model`: the agent's model.
@@ -677,7 +690,7 @@ export function buildCodexCommands({ version, features, chatgpt, apiKey, voice, 
     if (name === "model") {
       const preset = models.find((m) => m.slug === model);
       for (const tier of preset?.service_tiers ?? []) {
-        const enabled = tier.id === "flex" ? true : tier.id === "ultrafast" ? features.get("ultrafast_mode") === true : features.get("fast_mode") === true;
+        const enabled = tier.id === "flex" ? true : tier.id === "ultrafast" ? features.ultrafast_mode === true : features.fast_mode === true;
         if (!enabled) continue;
         commands.push({ name: String(tier.name).toLowerCase(), description: clip(tier.description), hint: null, args: null, opens: "terminal", when: "always", aliases: [] });
       }
@@ -686,14 +699,14 @@ export function buildCodexCommands({ version, features, chatgpt, apiKey, voice, 
   return commands;
 }
 
-/** `codex features list` output -> Map(name -> enabled). */
+/** `codex features list` output -> { name: enabled } (plain, so a saved list keeps it). */
 export function parseCodexFeatures(text) {
-  const features = new Map();
+  const features = {};
   for (const line of text.split("\n")) {
     const m = /^([a-z0-9_]+)\s+.+\s(true|false)\s*$/.exec(line.trim());
-    if (m) features.set(m[1], m[2] === "true");
+    if (m) features[m[1]] = m[2] === "true";
   }
-  if (!features.size) {
+  if (!Object.keys(features).length) {
     throw new Error("codex features list printed no features");
   }
   return features;
@@ -758,7 +771,9 @@ export async function readCodexState({ bin, cwd, env, plugins }) {
 
 const CHECK_MS = 60_000; // how often known lists check their inputs
 const FULL_MS = 30 * 60_000; // rebuilt anyway (claude.ai skills, feature flags)
+const WARM_MS = 5_000; // how soon a new agent's list starts building
 const WARM_AGE_MS = 24 * 3600_000; // agents active this recently get a list at start
+const SAVE_MS = 2_000; // built lists reach the disk this soon after a build
 
 function which(name, env) {
   if (name.includes("/")) return name;
@@ -973,12 +988,67 @@ export function buildQueue() {
   };
 }
 
+// Promise.all that waits for every promise before it rejects.
+async function settled(promises) {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+  return results.map((result) => result.value);
+}
+
+const newEntry = (backend, input) => ({
+  backend, input, stamp: null, value: null, error: null, builtAt: 0, checkedAt: 0, building: null, ready: null, hurry: null, settling: false,
+});
+
+// The lists `file` holds (saveLists), for folders that still exist. Each is
+// checked against its inputs when first asked for, and served meanwhile.
+export function loadLists(file, log) {
+  const lists = new Map();
+  let saved;
+  try {
+    saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") log(`slash commands: starting without saved lists: ${file}: ${error.message}`);
+    return lists;
+  }
+  for (const [key, { backend, input, stamp, value, builtAt }] of Object.entries(saved)) {
+    if (!fs.existsSync(input.cwd)) continue;
+    lists.set(key, { ...newEntry(backend, input), stamp, value, builtAt });
+  }
+  return lists;
+}
+
+// Finished lists only: a first reading still settling is not saved.
+export function saveLists(file, lists) {
+  const out = {};
+  for (const [key, { backend, input, stamp, value, builtAt, settling }] of lists) {
+    if (value && !settling) out[key] = { backend, input, stamp, value, builtAt };
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(out));
+  fs.renameSync(tmp, file);
+}
+
 /**
- * The home's "/" lists. `projectDirs()` names the open projects; their recent
- * agents get a list at start. `forRun(repoDir, runId)` answers the app.
+ * The home's "/" lists, kept in `file` across restarts. `projectDirs()` names
+ * the open projects; their recent agents get a list at start, and a new agent
+ * within WARM_MS. `forRun(repoDir, runId)` answers the app.
  */
-export function createSlashCommands({ env, log, projectDirs }) {
-  const lists = new Map(); // key -> { stamp, value, error, builtAt, checkedAt, building, hurry }
+export function createSlashCommands({ env, log, projectDirs, file }) {
+  const lists = loadLists(file, log);
+  let saveTimer = null;
+  const save = () => {
+    saveTimer ??= setTimeout(() => {
+      saveTimer = null;
+      try {
+        saveLists(file, lists);
+      } catch (error) {
+        log(`slash commands: could not save ${file}: ${error.message}`);
+      }
+    }, SAVE_MS);
+    saveTimer.unref?.();
+  };
   const binaryCache = new Map(); // claude realpath -> Promise<Map>
   // Codex reads its state in milliseconds; it does not wait behind Claude.
   const queues = { claude: buildQueue(), codex: buildQueue() };
@@ -998,12 +1068,18 @@ export function createSlashCommands({ env, log, projectDirs }) {
       // The menu names the agent's model ("Switch model (currently …)").
       key: ({ cwd, model }) => `claude\n${cwd}\n${model ?? ""}`,
       stamp: ({ cwd }) => claudeStamp({ bin: which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env), cwd, env }),
-      build: async ({ cwd, model }) => {
+      // The popup's first reading is published about a second in; the list
+      // replaces it once MCP servers' prompts have joined.
+      build: async ({ cwd, model }, publish) => {
         const bin = which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env);
-        const [menu, answer, binary] = await Promise.all([
-          readClaudeMenu({ bin, cwd, env, model }), claudeInitialize({ bin, cwd, env }), claudeBinary(bin),
-        ]);
-        return { version: answer.version, commands: buildClaudeCommands({ menu, headless: answer.commands, binary }) };
+        const info = Promise.all([claudeInitialize({ bin, cwd, env }), claudeBinary(bin)]);
+        const shape = async (menu) => {
+          const [answer, binary] = await info;
+          return { version: answer.version, commands: buildClaudeCommands({ menu, headless: answer.commands, binary }) };
+        };
+        // Both settle before the build ends, so no probe outlives its build.
+        const [menu] = await settled([readClaudeMenu({ bin, cwd, env, model, onFirst: async (rows) => publish(await shape(rows)) }), info]);
+        return shape(menu);
       },
     },
     codex: {
@@ -1024,7 +1100,7 @@ export function createSlashCommands({ env, log, projectDirs }) {
     if (entry?.building) {
       if (wait && !entry.value) {
         entry.hurry();
-        await entry.building;
+        await entry.ready;
       }
       return entry;
     }
@@ -1037,20 +1113,33 @@ export function createSlashCommands({ env, log, projectDirs }) {
       entry.checkedAt = now;
       return entry;
     }
-    entry = entry ?? { stamp: null, value: null, error: null, builtAt: 0, checkedAt: 0, building: null, hurry: null };
+    entry = entry ?? newEntry(backend, input);
     lists.set(key, entry);
+    // A list not served yet is served from a build's first reading (Claude's
+    // popup before its MCP prompts are all in) until the build ends.
+    let firstReading;
+    const first = new Promise((resolve) => { firstReading = resolve; });
+    const publish = (value) => {
+      if (entry.value) return;
+      Object.assign(entry, { value, error: null, settling: true });
+      firstReading();
+    };
     // A rebuild of a list already served is not urgent: it keeps serving.
-    const job = queues[backend].add(() => source.build(input), wait && !entry.value);
+    const job = queues[backend].add(() => source.build(input, publish), wait && !entry.value);
     entry.hurry = job.hurry;
     entry.building = job.promise.then(
-      (value) => Object.assign(entry, { value, error: null, stamp, builtAt: Date.now(), checkedAt: Date.now() }),
+      (value) => Object.assign(entry, { value, error: null, settling: false, stamp, builtAt: Date.now(), checkedAt: Date.now() }),
       (error) => {
         log(`slash commands (${backend}, ${input.cwd}): ${error.message}`);
-        Object.assign(entry, { value: null, error, stamp, builtAt: Date.now(), checkedAt: Date.now() });
+        Object.assign(entry, { value: null, error, settling: false, stamp, builtAt: Date.now(), checkedAt: Date.now() });
       },
-    ).finally(() => { entry.building = null; });
+    ).finally(() => {
+      entry.building = null;
+      save();
+    });
+    entry.ready = Promise.race([entry.building, first]);
     // A list already served keeps serving while its rebuild runs.
-    if (wait && !entry.value) await entry.building;
+    if (wait && !entry.value) await entry.ready;
     return entry;
   }
 
@@ -1073,7 +1162,8 @@ export function createSlashCommands({ env, log, projectDirs }) {
       throw entry.error ?? new Error("the list is still being built");
     }
     if (backend === "claude") {
-      return { backend, ...entry.value };
+      // settling: a first reading; the app asks again for the finished list.
+      return { backend, ...entry.value, ...(entry.settling ? { settling: true } : {}) };
     }
     const { models, configModel } = readCodexModels(env);
     const model = record.model || configModel;
@@ -1081,7 +1171,8 @@ export function createSlashCommands({ env, log, projectDirs }) {
     return { backend, version: entry.value.version, model, commands };
   }
 
-  // At start and every CHECK_MS: lists for the open projects' recent agents.
+  // At start and every WARM_MS: lists for the open projects' recent agents. A
+  // list built or checked within CHECK_MS is left alone.
   function warm() {
     for (const dir of projectDirs()) {
       let ids;
@@ -1106,7 +1197,7 @@ export function createSlashCommands({ env, log, projectDirs }) {
     }
   }
   setTimeout(warm, 5_000).unref?.();
-  setInterval(warm, CHECK_MS).unref?.();
+  setInterval(warm, WARM_MS).unref?.();
 
   return { forRun };
 }

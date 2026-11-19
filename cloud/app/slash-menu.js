@@ -1,7 +1,10 @@
 // The "/" menu in a chat's composer: what "/" offers in the agent's own CLI,
 // Claude Code's or Codex's, with their names and descriptions. The home
-// builds each list ahead of time (cloud/worker/slash-commands.mjs); the chat
-// loads it once when it opens, so the menu shows the moment "/" is typed.
+// builds each list ahead of time (cloud/worker/slash-commands.mjs). This
+// device keeps the lists it has had, so the menu shows the moment "/" is
+// typed: the agent's own last list, or for an agent not opened here yet, the
+// newest list of its CLI. The chat asks the home for the current list when it
+// opens and when the menu opens, and swaps it in when it arrives.
 //
 // A message is typed into the agent's terminal, so a picked command runs
 // there. Commands that open a picker or a panel in the TUI open the agent's
@@ -9,25 +12,66 @@
 // chat's model sheet instead: that is the app's control for them.
 
 import { h, setText } from "/app/render.js";
-import { api, coarse } from "/app/core.js";
+import { api, coarse, ls } from "/app/core.js";
 import { labelOf, rank } from "/app/slash-rank.js";
 
-const lists = new Map(); // `${workspace}|${run}` -> { model, at, promise, data, error }
+// Saved on this device: an index of the last SAVED_LISTS agents' lists,
+// newest first ([{ key, backend }]), and each list under its own key.
+const SAVED_INDEX = "rudder.slash";
+const SAVED_LISTS = 10;
+const savedKey = (key) => `rudder.slash.${key}`;
+function savedList(key, backend) {
+  const index = ls.get(SAVED_INDEX, []);
+  const hit = index.find((e) => e.key === key) ?? index.find((e) => e.backend === backend);
+  return hit ? ls.get(savedKey(hit.key)) : null;
+}
+function saveList(key, data) {
+  const index = [{ key, backend: data.backend }, ...ls.get(SAVED_INDEX, []).filter((e) => e.key !== key)];
+  for (const old of index.splice(SAVED_LISTS)) ls.remove(savedKey(old.key));
+  ls.set(savedKey(key), data);
+  ls.set(SAVED_INDEX, index);
+}
+
+// Asked again when the menu opens, at most this often (a failed ask, after
+// RETRY_MS); a first reading (`settling`: Claude's MCP prompts may still
+// join) is asked again after SETTLING_MS.
+const REFRESH_MS = 10_000;
+const RETRY_MS = 4_000;
+const SETTLING_MS = 4_000;
+const lists = new Map(); // `${workspace}|${run}` -> { data, model, at, promise, error, version }
 let seq = 0;
 
-function load(workspace, run, model, { force = false } = {}) {
+function listFor(workspace, run) {
   const key = `${workspace}|${run}`;
-  const have = lists.get(key);
-  // Codex's list has a row per service tier of the agent's model.
-  if (have && !force && have.model === model) return have;
-  if (have?.promise) return have;
-  const entry = { model, at: Date.now(), promise: null, data: have?.data ?? null, error: null };
-  entry.promise = api(`/api/app/slash-commands?workspace=${encodeURIComponent(workspace)}&run=${encodeURIComponent(run)}`)
-    .then((data) => { entry.data = data; entry.error = null; })
-    .catch((err) => { entry.data = null; entry.error = err; })
-    .finally(() => { entry.promise = null; entry.at = Date.now(); });
-  lists.set(key, entry);
+  let entry = lists.get(key);
+  if (!entry) {
+    entry = { data: null, model: undefined, at: 0, promise: null, error: null, version: 0 };
+    lists.set(key, entry);
+  }
   return entry;
+}
+
+/** Asks the home for the agent's list unless just asked for this model; `done()` runs when the answer is in. */
+function refresh(workspace, run, entry, model, done, { force = false } = {}) {
+  if (entry.promise) return;
+  // Codex's list has a row per service tier of the agent's model.
+  if (!force && entry.model === model && Date.now() - entry.at < (entry.error ? RETRY_MS : REFRESH_MS)) return;
+  entry.model = model;
+  entry.promise = api(`/api/app/slash-commands?workspace=${encodeURIComponent(workspace)}&run=${encodeURIComponent(run)}`)
+    .then((data) => {
+      entry.data = data;
+      entry.error = null;
+      saveList(`${workspace}|${run}`, data);
+      if (data.settling) setTimeout(() => refresh(workspace, run, entry, model, done, { force: true }), SETTLING_MS);
+    })
+    // A saved list keeps showing; the menu says it could not be refreshed.
+    .catch((err) => { entry.error = err; })
+    .finally(() => {
+      entry.promise = null;
+      entry.at = Date.now();
+      entry.version += 1;
+      done();
+    });
 }
 
 /**
@@ -51,8 +95,12 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   let dismissed = null; // the text Esc closed the menu on
   let painted = null;
 
-  const entry = () => load(workspace, run, agent()?.model ?? null);
-  entry().promise?.then(() => paint());
+  const list = listFor(workspace, run);
+  const ask = () => refresh(workspace, run, list, agent()?.model ?? null, paint);
+  ask();
+  // Until the home answers: the list this device saved (the agent's row may
+  // load after the chat, so its CLI is looked up when the list is wanted).
+  const data = () => (list.data ??= savedList(`${workspace}|${run}`, agent()?.backend ?? null));
 
   // "/name" with nothing after it, on the first line: the menu's query.
   const query = () => {
@@ -62,9 +110,8 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   const chipWorks = () => !!modelControl && !modelControl.el.hidden;
   const opensTerminal = (c) => c.opens === "terminal" || (c.opens === "model" && !chipWorks());
   const find = (name) => {
-    const data = lists.get(`${workspace}|${run}`)?.data;
     const n = name.toLowerCase();
-    return data?.commands.find((c) => c.name.toLowerCase() === n || (c.aliases || []).some((a) => a.toLowerCase() === n)) ?? null;
+    return data()?.commands.find((c) => c.name.toLowerCase() === n || (c.aliases || []).some((a) => a.toLowerCase() === n)) ?? null;
   };
 
   const setValue = (value) => {
@@ -116,32 +163,29 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   function paint() {
     const q = query();
     if (q === null || ta.value === dismissed || document.activeElement !== ta) { close(); return; }
-    let e = entry();
-    // A failed load is tried again when the menu is wanted, a few seconds on.
-    if (e.error && !e.promise && Date.now() - e.at > 4000) {
-      e = load(workspace, run, agent()?.model ?? null, { force: true });
-    }
-    if (e.promise && !e.data) e.promise.then(() => paint());
-    const sig = `${q}|${!!e.data}|${e.error?.message ?? ""}|${chipWorks()}`;
+    // Opening, the menu asks for the current list; it shows the one it has meanwhile.
+    if (menu.hidden) ask();
+    const d = data();
+    const sig = `${q}|${list.version}|${!!d}|${chipWorks()}`;
     if (sig === painted && !menu.hidden) return;
+    // A list swapped in under the same query keeps the row the user was on.
+    const keep = !menu.hidden && painted?.startsWith(`${q}|`) ? shown[active]?.command.name : null;
     painted = sig;
-    if (e.error) {
-      shown = [];
-      const why = e.error.status === 401 ? "Signed out." : e.error.waking ? "Waking the cloud machine…" : e.error.message;
-      menu.replaceChildren(message("Commands unavailable", why));
-    } else if (!e.data) {
-      shown = [];
-      menu.replaceChildren(message("Loading commands…", ""));
-    } else {
-      shown = rank(e.data.commands, q, e.data.backend);
+    const e = list.error;
+    const why = e && (e.status === 401 ? "Signed out." : e.waking ? "Waking the cloud machine…" : e.message);
+    if (d) {
+      shown = rank(d.commands, q, d.backend);
       if (!shown.length) { close(); return; }
-      menu.replaceChildren(...shown.map(row));
+      menu.replaceChildren(...shown.map(row), ...(why ? [message("Could not refresh commands", why)] : []));
+    } else {
+      shown = [];
+      menu.replaceChildren(why ? message("Commands unavailable", why) : message("Loading commands…", ""));
     }
-    active = 0;
+    active = keep ? Math.max(0, shown.findIndex((s) => s.command.name === keep)) : 0;
     menu.hidden = false;
     ta.setAttribute("aria-expanded", "true");
     markActive();
-    menu.scrollTop = 0;
+    if (!keep) menu.scrollTop = 0;
   }
 
   // As in both CLIs, Enter runs the command at once, except one that waits

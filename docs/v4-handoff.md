@@ -213,6 +213,14 @@ changes the menu). Matched the real popup row for row on Claude 2.1.327 (198
 rows) and Codex 0.169/0.170 (56). Each build starts the user's MCP servers,
 as an agent start does. Not run on macOS yet. opencode agents still get
 "Commands unavailable" (the app starts only Claude and Codex agents).
+On main since: the menu never waits on a build. Each device keeps the last
+10 agents' lists (an agent not opened there yet shows the newest list of its
+CLI) and swaps in the home's answer; the home saves its lists to
+`<volume>/home/.rudder/slash-commands.json`, builds a new agent's list within
+5s, and answers a first build with the popup's first reading (~1s, MCP
+prompts may still be joining, `settling: true`) before the full list (~4s).
+Claude's headless `initialize` list (what t3code uses) is not enough on its
+own: it lacks 53 TUI built-ins, every MCP prompt and 7 bundled skills.
 
 5.0.4 is published as npm latest (2026-11-18 13:56Z) and deployed to Cloud
 (Fly release 209, 14:01Z, worker image `rudder-workers-exla:5.0.4`, also in

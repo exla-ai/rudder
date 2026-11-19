@@ -181,7 +181,12 @@ const logins = createLoginRunner({
 /** @type {Map<string, Project>} */
 const projects = new Map();
 // The "/" menu of each agent's CLI for the app's chat (slash-commands.mjs).
-const slashCommands = createSlashCommands({ env: baseChildEnv, log, projectDirs: () => [...projects.values()].filter((p) => p.status !== "cloning").map((p) => p.dir) });
+const slashCommands = createSlashCommands({
+  env: baseChildEnv,
+  log,
+  projectDirs: () => [...projects.values()].filter((p) => p.status !== "cloning").map((p) => p.dir),
+  file: path.join(PERSIST_HOME, ".rudder", "slash-commands.json"),
+});
 // Each project's vibeprint canvas, beside its agents (vibeprint-host.mjs).
 const vibeprint = createVibeprintHosts({ stateRoot: path.join(PERSIST_HOME, ".rudder", "vibeprint"), embedOrigin: cloudUrl, env: () => baseChildEnv, log });
 let controlSocket = null;

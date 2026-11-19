@@ -160,12 +160,12 @@ test("Claude rows get the inserted name, argument rule and what they open", () =
 test("Codex gates /daybreak on the sign-in and /voice on the install", () => {
   const base = { version: CODEX_VERSION, models: [], model: null, platform: "linux", chatgpt: false, apiKey: true, voice: false };
   const names = (state) => buildCodexCommands({ ...base, ...state }).map((c) => c.name);
-  const daybreak = new Map([["cli_daybreak", true]]);
+  const daybreak = { cli_daybreak: true };
   assert.equal(names({ features: daybreak }).includes("daybreak"), false, "an API key needs the access-program feature too");
-  assert.equal(names({ features: new Map([...daybreak, ["api_key_cyber_access_programs", true]]) }).includes("daybreak"), true);
+  assert.equal(names({ features: { ...daybreak, api_key_cyber_access_programs: true } }).includes("daybreak"), true);
   assert.equal(names({ features: daybreak, apiKey: false, chatgpt: true }).includes("daybreak"), true);
-  assert.equal(names({ features: new Map() }).includes("voice"), false);
-  assert.equal(names({ features: new Map(), voice: true }).includes("voice"), true);
+  assert.equal(names({ features: {} }).includes("voice"), false);
+  assert.equal(names({ features: {}, voice: true }).includes("voice"), true);
 
   const pkg = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-pkg-"));
   try {
@@ -223,11 +223,20 @@ test("Claude and Codex '/' lists from the installed CLIs", async () => {
 
     const claudeBin = onPath("claude");
     onPath("tmux");
+    const started = Date.now();
+    let first = null;
     const [menu, answer, binary] = await Promise.all([
-      readClaudeMenu({ bin: claudeBin, cwd, env }),
+      readClaudeMenu({ bin: claudeBin, cwd, env, onFirst: async (rows) => { first = { rows, at: Date.now() - started }; } }),
       claudeInitialize({ bin: claudeBin, cwd, env }),
       readClaudeBinaryCommands(fs.realpathSync(claudeBin)),
     ]);
+    // The app is served the popup's first reading while MCP servers' prompts
+    // may still be joining it; the list itself waits for them to settle.
+    assert.ok(first, "the popup's first reading is handed over");
+    assert.ok(first.at + 1500 < Date.now() - started, `the first reading (${first.at} ms) comes well before the settled list`);
+    const settledRows = new Set(menu.map((r) => r.display));
+    assert.ok(first.rows.some((r) => r.display === "compact"), "the first reading has the built-ins");
+    assert.deepEqual(first.rows.filter((r) => !settledRows.has(r.display)), [], "no row of the first reading leaves the menu");
     const commands = buildClaudeCommands({ menu, headless: answer.commands, binary });
     const names = commands.map((c) => c.name);
     const byName = new Map(commands.map((c) => [c.name, c]));

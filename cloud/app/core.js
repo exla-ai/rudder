@@ -25,6 +25,7 @@ export function openExternal(url) {
 export const ls = {
   get(k, d = null) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+  remove(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
 };
 export const coarse = matchMedia("(pointer: coarse)").matches;
 export const toMs = (t) => (t == null ? null : typeof t === "number" ? t : Date.parse(t) || null);

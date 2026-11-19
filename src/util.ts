@@ -90,6 +90,46 @@ export async function readJson<T>(filePath: string): Promise<T | null> {
   }
 }
 
+/** `read()`'s first non-null answer, checked now and each time `name` changes
+ * in `dir` (created if missing), so a writer's rename is answered the moment it
+ * lands. Null after `timeoutMs`, or once `signal` aborts. */
+export async function waitForFile<T>(
+  dir: string,
+  name: string,
+  timeoutMs: number,
+  read: () => Promise<T | null>,
+  signal?: AbortSignal,
+): Promise<T | null> {
+  await ensureDir(dir);
+  return new Promise<T | null>((resolve, reject) => {
+    let settled = false;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      watcher.close();
+      signal?.removeEventListener("abort", aborted);
+      finish();
+    };
+    const check = () => {
+      read().then(
+        (value) => { if (value !== null) settle(() => resolve(value)); },
+        (error: unknown) => settle(() => reject(error)),
+      );
+    };
+    const aborted = () => settle(() => resolve(null));
+    const watcher = fs.watch(dir, (_event, changed) => {
+      if (!changed || changed === name) check();
+    });
+    watcher.on("error", (error) => settle(() => reject(error)));
+    const timer = setTimeout(() => settle(() => resolve(null)), timeoutMs);
+    signal?.addEventListener("abort", aborted, { once: true });
+    if (signal?.aborted) aborted();
+    // The file may have landed before the watch started.
+    check();
+  });
+}
+
 /** Serializes JSON read/modify/write work both inside this process and across
  * the detached board/worker processes. The directory lock is required for
  * compare-and-swap writes such as worker-attempt ownership; atomic rename alone

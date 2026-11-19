@@ -24,7 +24,7 @@ import { continueRun, stopRun } from "../run-manager.js";
 import type { RudderBus } from "../bus.js";
 import { createLogger } from "../logger.js";
 import { mergeNodeIntoIntegration, reconcileInjection, withSchedulerLock } from "../scheduler.js";
-import { nowIso } from "../util.js";
+import { nowIso, waitForFile } from "../util.js";
 import { fetchQuota, machineResources, scanTokenUsage, type UsageRange } from "../usage.js";
 import type {
   BoardColumn,
@@ -360,7 +360,12 @@ async function handleProjectApi(
   const steerReceiptMatch = rest.match(/^\/steer-receipts\/([A-Za-z0-9-]+)$/);
   if (steerReceiptMatch && method === "GET") {
     const requestId = steerReceiptMatch[1] ?? "";
-    const receipt = await readSteerReceipt(project.repoRoot, requestId);
+    // Held open until the dashboard answers, so the browser hears the moment
+    // the receipt lands; still queued after the wait, it asks again.
+    const left = new AbortController();
+    res.once("close", () => left.abort());
+    const receipt = await waitForSteerAnswer(project.repoRoot, requestId, left.signal)
+      ?? await readSteerReceipt(project.repoRoot, requestId);
     if (receipt) {
       sendJson(res, receipt.status === "queued" ? 202 : 200, receipt);
     } else {
@@ -782,6 +787,23 @@ async function pruneSteerReceipts(repoRoot: string): Promise<void> {
       ).catch(() => undefined);
     }
   }
+}
+
+const STEER_RECEIPT_WAIT_MS = 10_000;
+
+/** The dashboard's delivered or failed receipt the moment it lands, or null
+ * after STEER_RECEIPT_WAIT_MS. */
+async function waitForSteerAnswer(
+  repoRoot: string,
+  requestId: string,
+  signal: AbortSignal,
+): Promise<SteerReceiptPayload | null> {
+  if (!/^[A-Za-z0-9-]{8,128}$/.test(requestId)) return null;
+  const dir = path.join(projectStateDir(repoRoot), "steer-receipts");
+  return waitForFile(dir, `${requestId}.json`, STEER_RECEIPT_WAIT_MS, async () => {
+    const receipt = await readSteerReceipt(repoRoot, requestId);
+    return receipt?.status === "delivered" || receipt?.status === "failed" ? receipt : null;
+  }, signal);
 }
 
 async function readSteerReceipt(

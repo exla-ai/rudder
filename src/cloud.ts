@@ -47,6 +47,7 @@ import {
   runCommand,
   shortenHome,
   shellQuote,
+  waitForFile,
   writeJson,
 } from "./util.js";
 
@@ -4309,16 +4310,12 @@ async function requestDashboardMove(repoRoot: string): Promise<"delivered" | "fa
   const temp = `${file}.${process.pid}.tmp`;
   await fsp.writeFile(temp, JSON.stringify({ requestId, kind: "move-home", taskId: "", instruction: "move-home", ts: nowIso() }));
   await fsp.rename(temp, file);
-  const receiptPath = path.join(repoRoot, ".rudder", "steer-receipts", `${requestId}.json`);
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    const receipt = await readJson<{ status?: string }>(receiptPath);
-    if (receipt?.status === "delivered" || receipt?.status === "failed") {
-      return receipt.status;
-    }
-  }
-  return "queued";
+  const receipts = path.join(repoRoot, ".rudder", "steer-receipts");
+  const status = await waitForFile(receipts, `${requestId}.json`, 10_000, async () => {
+    const receipt = await readJson<{ status?: string }>(path.join(receipts, `${requestId}.json`));
+    return receipt?.status === "delivered" || receipt?.status === "failed" ? receipt.status : null;
+  });
+  return status ?? "queued";
 }
 
 // ---------------------------------------------------------------------------

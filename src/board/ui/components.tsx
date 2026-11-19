@@ -470,7 +470,10 @@ function Composer({ slug, onClose }: { slug: string; onClose: () => void }) {
     if (queued?.state !== "queued" || !queued.requestId) return;
     let cancelled = false;
     let timer: number | undefined;
+    // The board holds each read until the dashboard answers, so a still-queued
+    // answer is asked again at once; only a failed read waits before retrying.
     const check = async () => {
+      let retryMs = 0;
       try {
         const receipt = await fetchSteerReceipt(slug, queued.requestId!);
         if (cancelled) return;
@@ -485,10 +488,11 @@ function Composer({ slug, onClose }: { slug: string; onClose: () => void }) {
         }
       } catch {
         // Keep the durable queued state visible and retry a transient read.
+        retryMs = 500;
       }
-      if (!cancelled) timer = window.setTimeout(check, 500);
+      if (!cancelled) timer = window.setTimeout(check, retryMs);
     };
-    timer = window.setTimeout(check, 250);
+    void check();
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
@@ -1333,7 +1337,9 @@ function SteerComposer({
     ) return;
     let cancelled = false;
     let timer: number | undefined;
+    // Held open by the board until the dashboard answers (see above).
     const check = async () => {
+      let retryMs = 0;
       try {
         const receipt = await fetchSteerReceipt(slug, feedback.requestId!);
         if (cancelled) return;
@@ -1345,10 +1351,11 @@ function SteerComposer({
         }
       } catch {
         // A transient read failure does not change the durable queued state.
+        retryMs = 500;
       }
-      if (!cancelled) timer = window.setTimeout(check, 500);
+      if (!cancelled) timer = window.setTimeout(check, retryMs);
     };
-    timer = window.setTimeout(check, 250);
+    void check();
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);

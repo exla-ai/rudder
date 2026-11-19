@@ -21902,8 +21902,9 @@ What to do\n\
                         run.last_worker_input_at,
                         run.completed_at,
                     );
-                    // A Claude, Codex or OpenCode worker has a turn-start hook wired
-                    // (Codex's with the trust bypass, OpenCode's session.status busy;
+                    // A Claude, Codex, OpenCode or Antigravity worker has a turn-start
+                    // hook wired (Codex's with the trust bypass, OpenCode's
+                    // session.status busy, Antigravity's first PreInvocation;
                     // signals.rs), and THAT is what a new turn is. "Typed something and the pane repainted" is not: a
                     // draft being typed, `/model`, `/help`, Esc, F2, any local command
                     // repaints without starting a turn (measured: `/model` fires no
@@ -21912,7 +21913,10 @@ What to do\n\
                     // prompt starts (a goal continuing, an approved plan) reopens the
                     // row from its rollout instead (`poll_codex_rollouts`).
                     // Orchestrators and plain panes keep the typed-input reading.
-                    let hooks_say_new_turn = matches!(run.backend, Backend::Claude | Backend::Codex | Backend::Opencode)
+                    let hooks_say_new_turn = matches!(
+                        run.backend,
+                        Backend::Claude | Backend::Codex | Backend::Opencode | Backend::Antigravity
+                    )
                         && !is_orchestrator
                         && !run.plain_process;
                     let user_started_new_turn = if hooks_say_new_turn {
@@ -22106,9 +22110,16 @@ What to do\n\
                         // signal is one-shot (cleared on consume) so a later turn of the
                         // same live agent re-fires cleanly; an "input" signal marks the
                         // waiting state.
+                        // Antigravity also reports a wait on its terminal (OSC
+                        // 7501), which its hooks cannot: a permission prompt or
+                        // a question. Its hooks own turn start and end.
+                        let agy_status = (run.backend == Backend::Antigravity)
+                            .then(|| terminal.take_agent_status())
+                            .flatten();
                         let signal = (!is_orchestrator)
                             .then(|| signals::read_signal(&run.id))
-                            .flatten();
+                            .flatten()
+                            .or_else(|| agy_status.as_ref().and_then(signals::antigravity_status_signal));
                         match signal {
                             Some(signals::SignalState::Done) => {
                                 signals::clear_signal(&run.id);

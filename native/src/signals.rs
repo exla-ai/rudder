@@ -834,6 +834,19 @@ printf '{{}}'
     )
 }
 
+/// The wait an Antigravity OSC 7501 status describes. `blocked` on a
+/// permission prompt is `Permission`; blocked on anything else (a question,
+/// a sign-in) waits for an answer. `working` lifts a wait. `done` and `failed`
+/// are left to the `Stop` hook, which also carries the error text.
+pub(crate) fn antigravity_status_signal(status: &rudder_native::pty_terminal::AgentTerminalStatus) -> Option<SignalState> {
+    match (status.state.as_str(), status.kind.as_str()) {
+        ("blocked", "permission") => Some(SignalState::Permission),
+        ("blocked", _) => Some(SignalState::Input),
+        ("working", _) => Some(SignalState::Working),
+        _ => None,
+    }
+}
+
 /// Whether this backend+mode is an INTERACTIVE worker that idles between turns
 /// (so it needs a hook to signal completion). Headless planner modes run
 /// `claude -p` / `codex exec` and complete via process exit, so they are excluded.
@@ -1069,6 +1082,9 @@ pub(crate) fn augment_worker_command(
                     .env
                     .push(("RUDDER_AGY_HOOK".to_string(), path.display().to_string()));
             }
+            // The pane answers no OSC 7501 support query, so status
+            // reporting is turned on outright (antigravity_status_signal).
+            command.env.push(("AGY_CLI_OSC7501".to_string(), "on".to_string()));
             // Antigravity's Remote Control: the session in the Antigravity app
             // and on the web, like Claude's. It takes no name, so the app lists
             // it under the machine.

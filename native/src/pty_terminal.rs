@@ -707,6 +707,59 @@ pub fn parse_osc_notification(payload: &str) -> Option<TerminalNotification> {
     })
 }
 
+/// The status Antigravity's CLI reports over OSC 7501 (`AGY_CLI_OSC7501=on`):
+/// `ESC ] 7501 ; state=blocked:kind=auth:app=antigravity:msg=<base64> ST`.
+/// `state` is what the agent is doing (`working`, `blocked` when it waits for
+/// you, `done`, `failed`), `kind` what a block waits on, and `message` the
+/// decoded detail (the pending command or question).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTerminalStatus {
+    pub state: String,
+    pub kind: String,
+    pub message: String,
+}
+
+/// Parse one OSC payload as an OSC 7501 status. `None` for every other OSC,
+/// including agy's support query (`7501;?`).
+pub fn parse_osc_agent_status(payload: &str) -> Option<AgentTerminalStatus> {
+    let fields = payload.strip_prefix("7501;")?;
+    let mut status = AgentTerminalStatus { state: String::new(), kind: String::new(), message: String::new() };
+    for field in fields.split(':') {
+        match field.split_once('=') {
+            Some(("state", value)) => status.state = value.to_string(),
+            Some(("kind", value)) => status.kind = value.to_string(),
+            Some(("msg", value)) => status.message = decode_base64(value).unwrap_or_default(),
+            _ => {}
+        }
+    }
+    (!status.state.is_empty()).then_some(status)
+}
+
+/// Standard base64 (padding optional) to UTF-8 text.
+fn decode_base64(text: &str) -> Option<String> {
+    let mut bits: u32 = 0;
+    let mut count = 0;
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    for byte in text.bytes().filter(|byte| *byte != b'=') {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Longest OSC payload the scanner accumulates. Anything larger (an OSC 52
 /// clipboard blob, a runaway unterminated sequence) is truncated in place; the
 /// scanner still tracks the sequence to its terminator so stream state stays
@@ -738,6 +791,9 @@ pub struct OscNotificationScanner {
     /// The OSC 8 hyperlink edge completed by the most recent byte, handed back
     /// by `scan` so the pane can read the cursor at exactly that point.
     hyperlink: Option<OscHyperlink>,
+    /// The newest OSC 7501 status not yet taken. Only the latest matters: it
+    /// replaces whatever the agent reported before.
+    status: Option<AgentTerminalStatus>,
 }
 
 /// One edge of an OSC 8 hyperlink (`ESC ] 8 ; params ; uri ST`): a non-empty
@@ -809,6 +865,10 @@ impl OscNotificationScanner {
             self.hyperlink = Some(edge);
             return;
         }
+        if let Some(status) = parse_osc_agent_status(&payload) {
+            self.status = Some(status);
+            return;
+        }
         if let Some(note) = parse_osc_notification(&payload) {
             if self.pending.len() >= MAX_PENDING_NOTIFICATIONS {
                 self.pending.remove(0);
@@ -819,6 +879,10 @@ impl OscNotificationScanner {
 
     pub fn take(&mut self) -> Vec<TerminalNotification> {
         std::mem::take(&mut self.pending)
+    }
+
+    pub fn take_status(&mut self) -> Option<AgentTerminalStatus> {
+        self.status.take()
     }
 }
 
@@ -1987,6 +2051,12 @@ impl TerminalPane {
         self.notification_scanner.take()
     }
 
+    /// The newest OSC 7501 status the agent reported since the last call
+    /// (Antigravity; see `AgentTerminalStatus`).
+    pub fn take_agent_status(&mut self) -> Option<AgentTerminalStatus> {
+        self.notification_scanner.take_status()
+    }
+
     fn capture_top_origin_scroll_region_line_before(&mut self, byte: u8) {
         if byte != b'\n' {
             return;
@@ -2975,6 +3045,28 @@ mod tests {
         assert_eq!(notes[0].body, "needs you");
         assert_eq!(notes[1].body, "done");
         assert!(scanner.take().is_empty(), "take drains");
+    }
+
+    #[test]
+    fn antigravity_osc_7501_status_is_captured_latest_first() {
+        // agy 1.5.0 at its sign-in screen, captured from a real pane.
+        assert_eq!(
+            parse_osc_agent_status("7501;state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA=="),
+            Some(AgentTerminalStatus {
+                state: "blocked".into(),
+                kind: "auth".into(),
+                message: "Sign in required".into(),
+            })
+        );
+        assert_eq!(parse_osc_agent_status("7501;?"), None, "the support query is not a status");
+        let mut scanner = OscNotificationScanner::default();
+        let stream = b"x\x1b]7501;state=working:app=antigravity\x07y\x1b]7501;state=done:app=antigravity\x1b\\z";
+        for byte in stream.iter() {
+            scanner.scan(*byte);
+        }
+        assert_eq!(scanner.take_status().map(|status| status.state), Some("done".into()));
+        assert_eq!(scanner.take_status(), None, "taken once");
+        assert!(scanner.take().is_empty(), "a status is not a desktop notification");
     }
 
     #[test]

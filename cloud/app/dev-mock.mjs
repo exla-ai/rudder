@@ -5,6 +5,8 @@
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
+// /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
+// /app/__mock/all/<ok|old|stuck|lost|codex> (the All agents chat and the ways it fails to start),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
@@ -28,6 +30,7 @@ const iso = (ms) => new Date(ms).toISOString();
 let signedOut = process.env.MOCK_SIGNED_OUT === "1";
 let homeMode = "running";
 let usageMode = "ok";
+let closeMode = "ok";
 // Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
 const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
 const CREDS = {
@@ -46,6 +49,15 @@ const computers = new Map();
 let freshProjects = null;
 // The "All agents" chat's hidden project: null until the app opens it.
 let coordinator = null;
+// /app/__mock/all/<ok|old|stuck|lost|codex>: old, a home too old for it (Cloud
+// fails the project); stuck, its dashboard never starts; lost, the state never
+// carries it (Cloud 5.0.5); codex, the chat runs on Codex, which calls the
+// tools from its code tool. Switching keeps the chats already started.
+let allMode = "ok";
+const coordinatorHealth = () => ({
+  dashboard: { old: "failed", stuck: "starting" }[allMode] ?? "running",
+  failureReason: allMode === "old" ? "Your cloud machine runs an older Rudder without All agents. Update it: press Alt+r in its dashboard." : null,
+});
 const T0 = now();
 
 const home = () => homeMode === "none" ? null : ({
@@ -160,6 +172,10 @@ const digestStore = [0, 1, 2].map((k) => {
 const digestPreviewOf = (d) => d && ({ id: d.id, readAt: d.readAt, createdAt: d.createdAt, since: d.body.since, until: d.body.until, ...digestLib.digestPreview(d.body) });
 
 const LONG_OUTPUT = Array.from({ length: 140 }, (_, i) => `test app_tests::case_${String(i).padStart(3, "0")}_${["scroll", "merge", "leader", "render", "signals"][i % 5]} ... ok`).join("\n") + "\n\ntest result: ok. 528 passed; 0 failed; 1 ignored; finished in 41.82s";
+
+// The prompts a transcript offers to edit (worker/session-lineage.mjs
+// editablePrompts): here every user message.
+const mockEdits = (msgs) => msgs.filter((m) => m.role === "user").map((m) => ({ messageId: m.id, entry: m.id, text: m.text }));
 
 function baseTranscript(a) {
   const t = a.createdAt;
@@ -278,8 +294,10 @@ const SUBAGENT_DEMO = new Set(["run_b1", "run_a7"]);
 const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
 // MOCK_SLASH_CLAUDE=<file>, MOCK_SLASH_CODEX=<file>: real /api/app/slash-commands
 // responses (worker/slash-commands.mjs forRun) for the chat's "/" menu.
+// MOCK_SLASH_DELAY_MS: how long each answer takes, as a home building the list would.
 const slashLists = Object.fromEntries(["claude", "codex"].filter((b) => process.env[`MOCK_SLASH_${b.toUpperCase()}`])
   .map((b) => [b, JSON.parse(fs.readFileSync(process.env[`MOCK_SLASH_${b.toUpperCase()}`], "utf8"))]));
+const slashDelayMs = Number(process.env.MOCK_SLASH_DELAY_MS || 0);
 const transcripts = new Map();
 // The agent page's speed and context line (worker/transcripts.mjs `stats`).
 function mockStats(a) {
@@ -751,6 +769,13 @@ const server = http.createServer(async (req, res) => {
   if (p === "/app/__mock/signout") { signedOut = true; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/home/")) { homeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/usage/")) { usageMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/all/")) {
+    allMode = p.split("/").pop();
+    if (coordinator) Object.assign(coordinator, coordinatorHealth());
+    res.writeHead(302, { Location: "/app/all/new" });
+    return res.end();
+  }
   if (p.startsWith("/app/__mock/creds/")) {
     creds = (CREDS[p.split("/").pop()] || CREDS.out)();
     for (const key of Object.keys(logins)) delete logins[key];
@@ -817,7 +842,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         email: "viraat@example.com", home: home(),
         projects: homeMode === "none" ? [] : freshProjects ?? projects,
-        coordinator,
+        coordinator: allMode === "lost" ? null : coordinator,
         github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
         digest: digestPreviewOf(digestStore[0]) ?? null,
         onboarding: { ...onboarding },
@@ -865,13 +890,15 @@ const server = http.createServer(async (req, res) => {
       if (!t) return json(res, 404, { error: "Agent not found" });
       const list = slashLists[t.a.backend];
       if (!list) return json(res, 500, { error: `no "/" list for ${t.a.backend} agents in the mock (MOCK_SLASH_${t.a.backend.toUpperCase()})` });
+      if (homeMode !== "running") return json(res, 503, { error: "the cloud machine is not connected yet; it may still be starting" });
+      if (slashDelayMs) await new Promise((resolve) => setTimeout(resolve, slashDelayMs));
       return json(res, 200, list);
     }
     if (p === "/api/app/transcript" && req.method === "GET") {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
       if (!t) return json(res, 404, { error: "Agent not found" });
       const limit = Number(url.searchParams.get("limit") || 300);
-      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
+      return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit), edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
@@ -917,21 +944,44 @@ const server = http.createServer(async (req, res) => {
       }, 8000);
       return json(res, 200, { ok: true });
     }
+    // Edit a sent prompt (chat-edit.js; native chat_edit.rs on a real home):
+    // the chat goes back to just before it and the new text runs instead.
+    // "fail" in the text answers with an error.
+    if (p === "/api/app/agent-edit") {
+      const t = transcriptFor(body.workspace, body.run);
+      if (!t) return json(res, 404, { error: "Agent not found" });
+      const edits = mockEdits(t.msgs);
+      if (edits[edits.length - 1]?.entry !== body.latest) return json(res, 502, { error: "This chat has new messages since it was shown. Reload the chat and try again" });
+      const at = t.msgs.findIndex((m) => m.id === body.entry);
+      if (at < 0) return json(res, 502, { error: "That message is no longer in this chat. Reload the chat and try again" });
+      if (/fail/i.test(body.text || "")) return json(res, 502, { error: "could not relaunch run_a1: the agent's terminal is gone" });
+      await delay(t.a.status === "working" ? 1200 : 400);
+      t.msgs.splice(at, t.msgs.length - at, { id: `u${now()}`, role: "user", ts: now(), text: body.text });
+      t.a.status = "working"; t.a.updatedAt = now();
+      setTimeout(() => {
+        t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: "Starting from your edited message." });
+        t.a.status = "review"; t.a.updatedAt = now(); t.a.lastMessage = "Starting from your edited message.";
+      }, 5000);
+      return json(res, 200, { ok: true, status: "delivered" });
+    }
     if (p === "/api/app/coordinator") {
-      coordinator ??= { workspaceId: "wsp_all_agents", name: "rudder-all-agents", repo: "", status: "running", dashboard: "running", agents: [], lastActivityAt: iso(now()) };
+      coordinator ??= { workspaceId: "wsp_all_agents", name: "rudder-all-agents", repo: "", status: "running", agents: [], lastActivityAt: iso(now()), ...coordinatorHealth() };
       return json(res, 200, { workspace: coordinator.workspaceId });
     }
     if (p === "/api/app/task" && body.workspace === coordinator?.workspaceId) {
       const main = /^\/main\s+([\s\S]+)/.exec(String(body.text || ""));
       if (!main) return json(res, 200, { ok: true, status: "delivered" }); // /model
       const id = `run_all_${Math.random().toString(36).slice(2, 6)}`;
-      const a = agent({ id, title: main[1].slice(0, 60), task: main[1], status: "working", backend: "claude", model: "claude-sonnet-5-5", mode: "main", createdAt: now(), updatedAt: now(), fresh: true });
+      const codex = allMode === "codex";
+      // Codex's transcript names a scripted call by the tool it ran (worker/transcripts.mjs).
+      const call = (tool, input) => (codex ? { name: "exec", input: `mcp__all_agents__${tool}` } : { name: `mcp__all_agents__${tool}`, input });
+      const a = agent({ id, title: main[1].slice(0, 60), task: main[1], status: "working", backend: codex ? "codex" : "claude", model: codex ? "gpt-5.5" : "claude-sonnet-5-5", mode: "main", createdAt: now(), updatedAt: now(), fresh: true });
       setTimeout(() => coordinator.agents.unshift(a), 900);
       setTimeout(() => {
-        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `t${now()}`, role: "tool", ts: now(), text: "", tool: { name: "mcp__all_agents__list_agents", input: "{}", output: "rudder [wsp_rudder]\n- run_a1 · working · claude opus · 1m ago · Phone app for agent control\n- run_a2 · waiting · codex gpt-6.1-sol · 4m ago · Fix flaky Ctrl+W chord test\n  needs you: permission for Bash: cargo test --release (prompt ask_1)", isError: false } });
+        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `t${now()}`, role: "tool", ts: now(), text: "", tool: { ...call("list_agents", "{}"), output: "rudder [wsp_rudder]\n- run_a1 · working · claude opus · 1m ago · Phone app for agent control\n- run_a2 · waiting · codex gpt-6.1-sol · 4m ago · Fix flaky Ctrl+W chord test\n  needs you: permission for Bash: cargo test --release (prompt ask_1)", isError: false } });
       }, 2500);
       setTimeout(() => {
-        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `u${now()}`, role: "tool", ts: now(), text: "", tool: { name: "mcp__all_agents__read_agent", input: "{\"agent\":\"run_a2\",\"project\":\"rudder\"}", output: "rudder / Fix flaky Ctrl+W chord test (run_a2)\nstatus: waiting · codex gpt-6.1-sol · updated 4m ago\nneeds you: permission for Bash: cargo test --release (prompt ask_1)\n\n[agent] The chord test passes alone and fails in the full run. Running the release suite to confirm.", isError: false } });
+        transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `u${now()}`, role: "tool", ts: now(), text: "", tool: { ...call("read_agent", "{\"agent\":\"run_a2\",\"project\":\"rudder\"}"), output: "rudder / Fix flaky Ctrl+W chord test (run_a2)\nstatus: waiting · codex gpt-6.1-sol · updated 4m ago\nneeds you: permission for Bash: cargo test --release (prompt ask_1)\n\n[agent] The chord test passes alone and fails in the full run. Running the release suite to confirm.", isError: false } });
       }, 3500);
       setTimeout(() => {
         transcriptFor(coordinator.workspaceId, id)?.msgs.push({ id: `r${now()}`, role: "assistant", ts: now(), text: "Here is where things stand:\n\n**rudder**\n- *Phone app for agent control* is working: wiring the transcript poll.\n- *Fix flaky Ctrl+W chord test* needs you: it wants to run `cargo test --release` with network access.\n- *Tailnet HTTPS for previews* is done and ready to merge.\n\nWant me to approve the test run, or keep an eye on the working agents and tell you when they finish?" });
@@ -964,8 +1014,15 @@ const server = http.createServer(async (req, res) => {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (body.action === "delete") {
-        const proj = projects.find((x) => x.agents.includes(t.a));
-        if (proj) proj.agents = proj.agents.filter((x) => x !== t.a);
+        // Like a home: the dashboard reads its steer inbox about once a second,
+        // and the state stops listing the agent on the home's next publish,
+        // after the answer. /app/__mock/close/fail: the dashboard refuses.
+        await delay(900);
+        if (closeMode === "fail") return json(res, 400, { error: "could not stop it, so it was not deleted" });
+        setTimeout(() => {
+          const proj = projects.find((x) => x.agents.includes(t.a));
+          if (proj) proj.agents = proj.agents.filter((x) => x !== t.a);
+        }, 1000);
         return json(res, 200, { ok: true, status: "delivered" });
       }
       if (body.action === "pin" || body.action === "unpin") {

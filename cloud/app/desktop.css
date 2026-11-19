@@ -77,11 +77,10 @@
 
 /* ---------- Model picker ---------- */
 .mp-models { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 0 1 auto; min-height: 80px; margin: 10px -2px 0; padding: 0 2px 2px; overscroll-behavior: contain; }
-/* One section per harness: its name and sign-in stay on top while its models scroll. */
-.mp-harness { position: sticky; top: 0; z-index: 1; display: flex; align-items: baseline; gap: 8px; padding: 12px 2px 2px; background: var(--surface); }
-.mp-harness:first-child { padding-top: 2px; }
-.mp-hn { font-weight: 700; font-size: 15px; flex: none; }
-.mp-ha { font-size: 12.5px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* One harness at a time: its tab in the Add project control (.seg.modes), then its sign-in. */
+.seg.mp-tabs { grid-auto-columns: minmax(0, 1fr); margin-bottom: 0; }
+.seg.mp-tabs button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-account { flex: none; margin: 10px 2px 0; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mp-model {
   display: grid; grid-template-columns: 1fr auto; grid-template-areas: "t r" "d r"; align-items: center; column-gap: 12px; row-gap: 2px;
   width: 100%; text-align: left; padding: 11px 12px 11px 14px; border-radius: 14px; border: 1.5px solid var(--line-strong);

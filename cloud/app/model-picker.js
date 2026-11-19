@@ -140,45 +140,74 @@ function accountLine(harness) {
 }
 
 /**
- * One section per harness: its name and sign-in, then its models, the
- * aliases last under "Always the newest". `selected` is checked and `current`
- * badged ({ backend, model } each). Keeps the list's scroll; `reveal` scrolls
+ * The harness tabs over a model sheet's list, the Add project sheet's
+ * segmented control (`.seg.modes`): each harness's logo and name, `tab`
+ * selected. The buttons stay put while the list and labels do, so a tab keeps
+ * focus when it is picked from the keyboard.
+ */
+function paintTabs(tabsEl, harnesses, { tab, onTab }) {
+  const key = harnesses.map((x) => `${x.id}:${x.label}`).join(" ");
+  if (tabsEl.dataset.key !== key) {
+    tabsEl.dataset.key = key;
+    tabsEl.replaceChildren(...harnesses.map((x) => {
+      const b = h(`<button type="button" role="tab">${harnessLogo(x.id)}<span></span></button>`);
+      setText(b.querySelector("span"), x.label);
+      b.dataset.harness = x.id;
+      b.addEventListener("click", () => onTab(x.id));
+      return b;
+    }));
+  }
+  for (const b of tabsEl.children) b.setAttribute("aria-selected", String(b.dataset.harness === tab));
+}
+
+/**
+ * One harness's models, the aliases last under "Always the newest", and its
+ * sign-in in `accountEl`. `selected` is checked and `current` badged
+ * ({ backend, model } each), whichever tab they are on. Keeps the list's
+ * scroll while the tab stays; a new tab starts at the top. `reveal` scrolls
  * the checked row into view.
  */
-function paintModels(modelsEl, sections, { selected, current, onPick, reveal }) {
-  const top = modelsEl.scrollTop;
+function paintModels(modelsEl, accountEl, section, { selected, current, onPick, reveal }) {
+  const { harness, models } = section;
+  const top = modelsEl.dataset.harness === harness.id ? modelsEl.scrollTop : 0;
+  modelsEl.dataset.harness = harness.id;
+  modelsEl.setAttribute("aria-label", `${harness.label} models`);
+  setText(accountEl, accountLine(harness));
+  accountEl.hidden = false;
   modelsEl.replaceChildren();
-  for (const { harness, models } of sections) {
-    const head = h(`<div class="mp-harness" role="presentation"><span class="mp-hn"></span><span class="mp-ha"></span></div>`);
-    setText(head.querySelector(".mp-hn"), harness.label);
-    setText(head.querySelector(".mp-ha"), accountLine(harness));
-    modelsEl.appendChild(head);
-    let aliases = false;
-    for (const o of models) {
-      if (o.alias && !aliases) {
-        aliases = true;
-        modelsEl.appendChild(h(`<div class="mp-group" role="presentation">Always the newest</div>`));
-      }
-      const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"><span class="mp-id"></span><span class="mp-desc"></span></span><span class="mp-radio">${icon("check")}</span></button>`);
-      setText(b.querySelector(".mp-name"), o.label);
-      b.querySelector(".mp-badge").hidden = !(current?.backend === harness.id && current.model === o.value);
-      setText(b.querySelector(".mp-id"), o.value);
-      setText(b.querySelector(".mp-desc"), o.detail || "");
-      b.title = [o.value, o.detail].filter(Boolean).join(" · ");
-      b.setAttribute("aria-label", `${harness.label} ${o.label}`);
-      b.setAttribute("aria-checked", String(selected?.backend === harness.id && selected.model === o.value));
-      b.addEventListener("click", () => onPick(harness.id, o.value));
-      modelsEl.appendChild(b);
+  let aliases = false;
+  for (const o of models) {
+    if (o.alias && !aliases) {
+      aliases = true;
+      modelsEl.appendChild(h(`<div class="mp-group" role="presentation">Always the newest</div>`));
     }
-    if (!models.length) {
-      const note = h(`<div class="repo-note"></div>`);
-      note.textContent = `No ${harness.label} models found on the cloud machine.`;
-      modelsEl.appendChild(note);
-    }
+    const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"><span class="mp-id"></span><span class="mp-desc"></span></span><span class="mp-radio">${icon("check")}</span></button>`);
+    setText(b.querySelector(".mp-name"), o.label);
+    b.querySelector(".mp-badge").hidden = !(current?.backend === harness.id && current.model === o.value);
+    setText(b.querySelector(".mp-id"), o.value);
+    setText(b.querySelector(".mp-desc"), o.detail || "");
+    b.title = [o.value, o.detail].filter(Boolean).join(" · ");
+    b.setAttribute("aria-label", `${harness.label} ${o.label}`);
+    b.setAttribute("aria-checked", String(selected?.backend === harness.id && selected.model === o.value));
+    b.addEventListener("click", () => onPick(harness.id, o.value));
+    modelsEl.appendChild(b);
   }
-  if (!sections.length) modelsEl.appendChild(h(`<div class="repo-note">No models found on the cloud machine.</div>`));
+  if (!models.length) {
+    const note = h(`<div class="repo-note"></div>`);
+    note.textContent = `No ${harness.label} models found on the cloud machine.`;
+    modelsEl.appendChild(note);
+  }
   modelsEl.scrollTop = top;
   if (reveal) modelsEl.querySelector('[aria-checked="true"]')?.scrollIntoView({ block: "nearest" });
+}
+
+/** The list with no harness in it: no tabs, a note. */
+function paintNoModels(tabsEl, accountEl, modelsEl) {
+  tabsEl.replaceChildren();
+  tabsEl.dataset.key = "";
+  accountEl.hidden = true;
+  delete modelsEl.dataset.harness;
+  modelsEl.replaceChildren(h(`<div class="repo-note">No models found on the cloud machine.</div>`));
 }
 
 /** The effort chips of `row`, `effort` checked. Returns whether it takes an effort. */
@@ -233,6 +262,8 @@ export function openModelPicker(ws, { onPicked } = {}) {
     <div class="sheet-grab"></div>
     <div class="add-head"><h3>Model for new agents</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="repo-note err mp-error" hidden></div>
+    <div class="seg modes mp-tabs" role="tablist" aria-label="Harness"></div>
+    <div class="mp-account" hidden></div>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="mp-effort-l">Effort</div>
@@ -242,6 +273,8 @@ export function openModelPicker(ws, { onPicked } = {}) {
     <div class="create-note">Applies to agents you start next. Running agents keep theirs.</div>
   </div></dialog>`);
   const errEl = dlg.querySelector(".mp-error");
+  const tabsEl = dlg.querySelector(".mp-tabs");
+  const accountEl = dlg.querySelector(".mp-account");
   const modelsEl = dlg.querySelector(".mp-models");
   const effortWrap = dlg.querySelector(".mp-effort-wrap");
   const effortsEl = dlg.querySelector(".mp-efforts");
@@ -250,7 +283,10 @@ export function openModelPicker(ws, { onPicked } = {}) {
   const start = currentChoice(ws);
   let pick = start && { backend: start.backend, model: start.model };
   let effort = start?.effort || "auto";
+  // The harness tab shown: the picked model's until another is chosen.
+  let tab = pick?.backend ?? null;
   let revealed = false;
+  const showTab = (id) => { tab = id; revealed = false; render(); };
 
   const pickedRow = () => (pick ? rowsOf(data, pick.backend).find((o) => o.value === pick.model) || null : null);
   function render() {
@@ -261,8 +297,14 @@ export function openModelPicker(ws, { onPicked } = {}) {
       pick = harness?.models.length ? { backend: harness.id, model: harness.models[0].value } : null;
     }
     const current = data.current?.backend && data.current?.model ? data.current : null;
-    const sections = harnessesOf(data).map((harness) => ({ harness, models: harness.models }));
-    paintModels(modelsEl, sections, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed });
+    const harnesses = harnessesOf(data);
+    // A tab the list no longer has opens on the picked model's harness.
+    if (!harnessOf(data, tab)) tab = pick?.backend ?? harnesses[0]?.id ?? null;
+    if (harnesses.length) {
+      paintTabs(tabsEl, harnesses, { tab, onTab: showTab });
+      const harness = harnessOf(data, tab);
+      paintModels(modelsEl, accountEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed });
+    } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const row = pickedRow();
     const eff = effortFor(row, effort);
@@ -303,6 +345,8 @@ export function openModelPicker(ws, { onPicked } = {}) {
     if (!start && data.current?.backend && data.current?.model) {
       pick = { backend: data.current.backend, model: data.current.model };
       effort = data.current.effort || effort;
+      tab = pick.backend;
+      revealed = false;
     }
     render();
   }).catch((err) => showListError(errEl, modelsEl, err, !!data));
@@ -349,6 +393,8 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     <div class="sheet-grab"></div>
     <div class="add-head"><h3>Model for this chat</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="repo-note err mp-error" hidden></div>
+    <div class="seg modes mp-tabs" role="tablist" aria-label="Harness"></div>
+    <div class="mp-account" hidden></div>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="cm-effort-l">Effort</div>
@@ -358,6 +404,8 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     <div class="create-note"></div>
   </div></dialog>`);
   const errEl = dlg.querySelector(".mp-error");
+  const tabsEl = dlg.querySelector(".mp-tabs");
+  const accountEl = dlg.querySelector(".mp-account");
   const modelsEl = dlg.querySelector(".mp-models");
   const effortWrap = dlg.querySelector(".mp-effort-wrap");
   const effortsEl = dlg.querySelector(".mp-efforts");
@@ -367,21 +415,19 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   // The picked row; until a pick, the row the agent runs on.
   let pick = { backend, model: start.model };
   let effort = start.effort || "auto";
+  // The harness tab shown: the chat's own until another is chosen.
+  let tab = backend;
   let revealed = false;
+  const showTab = (id) => { tab = id; revealed = false; render(); };
 
-  // Its own harness first, led by the model the agent runs on when the list
-  // does not have it (an id it was started with by hand, or one its CLI no
-  // longer lists), under the name the cloud machine gave it. Then every
-  // other harness: picking one of those moves the chat.
-  const sections = () => {
-    const own = rowsOf(data, backend);
-    const listed = !start.model || own.some((o) => o.value === start.model);
-    const harness = harnessOf(data, backend);
-    return [
-      ...(harness ? [{ harness, models: listed ? own : [{ value: start.model, label: start.modelName, detail: "", efforts: [] }, ...own] }] : []),
-      ...harnessesOf(data).filter((x) => x.id !== backend).map((x) => ({ harness: x, models: x.models })),
-    ];
-  };
+  // Every harness in the list's order. Its own is led by the model the agent
+  // runs on when the list does not have it (an id it was started with by
+  // hand, or one its CLI no longer lists), under the name the cloud machine
+  // gave it. Picking a model of another harness moves the chat.
+  const sections = () => harnessesOf(data).map((harness) => {
+    if (harness.id !== backend || !start.model || harness.models.some((o) => o.value === start.model)) return { harness, models: harness.models };
+    return { harness, models: [{ value: start.model, label: start.modelName, detail: "", efforts: [] }, ...harness.models] };
+  });
   const rowOf = (p) => sections().find((x) => x.harness.id === p.backend)?.models.find((o) => o.value === p.model) || null;
   function render() {
     if (!data) return;
@@ -390,10 +436,17 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const moving = pick.backend !== backend;
     const row = rowOf(pick);
     const eff = effortFor(row, effort);
-    paintModels(modelsEl, sections(), {
-      selected: pick, current: { backend, model: a.model },
-      onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed,
-    });
+    const all = sections();
+    // A tab the list no longer has opens on the first harness it does.
+    const section = all.find((x) => x.harness.id === tab) || all[0];
+    if (section) {
+      tab = section.harness.id;
+      paintTabs(tabsEl, all.map((x) => x.harness), { tab, onTab: showTab });
+      paintModels(modelsEl, accountEl, section, {
+        selected: pick, current: { backend, model: a.model },
+        onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed,
+      });
+    } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     const to = harnessLabel(pick.backend);

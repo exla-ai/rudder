@@ -67,6 +67,8 @@ const STATUS = {
 const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1) : "Unknown", cls: "s-idle" };
 // Prompts the agent is blocked on (permission, question, plan), newest last.
 // Ones answered from this phone are hidden at once, before the state agrees.
+// A finished turn shorter than this shows no "Worked for" line.
+const SHORT_TURN_MS = 5000;
 const answeredAsks = new Set();
 const pendingAsks = (a) => (Array.isArray(a?.asks) ? a.asks : []).filter((q) => q && !answeredAsks.has(q.id));
 const ASK_LABEL = { permission: "Needs approval", question: "Has a question", plan: "Plan ready" };
@@ -3982,6 +3984,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // with the actual replies lost between them.
     let steps = null;
     for (const m of withCompactMarkers(t.messages || [])) {
+      // Short turns (a subagent reporting in) would each add "Worked for 1s".
+      if (m.kind === "turn" && !(m.durationMs >= SHORT_TURN_MS)) continue;
       // A turn's time belongs to the turn above it, even past midnight.
       if (m.ts && m.kind !== "turn") {
         const d = new Date(m.ts).toDateString();

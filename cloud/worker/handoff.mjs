@@ -57,7 +57,7 @@ export function handoffPrompt({ goal, messages, lines, codex, cwd, from, to, ins
   if (asks) {
     parts.push("", "## The user's instructions for this handoff", clip(asks, 4_000));
   }
-  const shown = messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool" || m.kind === "compact" || m.kind === "handoff");
+  const shown = messages.filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool" || m.kind === "compact" || m.kind === "handoff" || (m.kind === "peer" && m.text));
   parts.push("", "## Where it stopped", stopped(shown, working, cwd));
   const files = changedFiles(lines, codex, cwd);
   if (files.length) {
@@ -142,6 +142,9 @@ function recent(messages, fromHarness, cwd) {
       // Its headings one level down, under this handoff's own.
       const handed = clip(m.handoff.summary, SUMMARY_MAX).replace(/^## /gm, "### ");
       blocks.push(`(Earlier, ${fromHarness} took this chat over from ${m.handoff.from}, which handed it this:)\n${handed}`);
+    } else if (m.kind === "peer") {
+      // What another agent (a teammate, a subagent) sent it.
+      blocks.push(`From ${m.peer.from}, another agent: ${clip(m.text, MESSAGE_MAX)}`);
     } else if (m.role === "user") {
       if (CODEX_INJECTED.test(m.text || "")) continue;
       const files = m.attachments?.length ? `\n(Attached: ${m.attachments.join(", ")})` : "";

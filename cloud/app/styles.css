@@ -570,6 +570,17 @@ a { color: var(--accent); }
 .msg.system { text-align: center; }
 .msg.system .sys { display: inline-block; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border-radius: 10px; padding: 6px 12px; max-width: 92%; text-align: left; }
 .msg.system .sys p { margin: 0; }
+/* A message another agent sent this one (app.js paintPeer): its own card on
+   the agent's side, never the user's bubble. Long text shows its first lines. */
+.peer-card { max-width: 86%; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: 14px; padding: 9px 13px 10px; font-size: 14px; line-height: 1.5; color: var(--ink); }
+.peer-from, .peer-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.peer-from svg, .peer-line svg { width: 14px; height: 14px; flex: none; }
+.peer-from b { font-weight: 600; color: var(--ink); }
+.peer-title { margin-top: 4px; font-weight: 600; }
+.peer-title[hidden], .peer-more[hidden] { display: none; }
+.peer-body { margin-top: 4px; }
+.peer.clamped .peer-body { max-height: 6em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.peer-more { border: 0; background: none; padding: 6px 0 0; color: var(--accent); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 /* The compaction marker in a transcript (the model chip also has a compact class). */
 div.compact { margin: 18px 0; }
 .compact-row { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; padding: 8px 0; color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; -webkit-tap-highlight-color: transparent; }

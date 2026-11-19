@@ -473,7 +473,7 @@ function messageLine(m, limit) {
   // Files the user sent from the app (transcripts.mjs showAttachments).
   const files = m.attachments ? ` (attached: ${m.attachments.join(", ")})` : "";
   if (!text && !files) return null;
-  const who = m.role === "user" ? "user" : m.role === "assistant" ? "agent" : m.role;
+  const who = m.role === "user" ? "user" : m.role === "assistant" ? "agent" : m.kind === "peer" ? `from ${m.peer.from}` : m.role;
   return `[${who}] ${clip(text, limit)}${files}`;
 }
 

@@ -24,7 +24,10 @@ import path from "node:path";
 
 // Harness-injected turns (command output, reminders, caveats) are not the user.
 // The chat (transcripts.mjs) and the edit list read user text the same way, so
-// an editable prompt is always a message the chat shows.
+// an editable prompt is always a message the chat shows. A teammate's message
+// starts a turn and counts as a prompt here, as in native chat_edit.rs, so the
+// latest prompt an edit names agrees with native; the chat shows it as a card
+// from that agent (transcripts.mjs peerMessages), which has no Edit.
 export const CLAUDE_HARNESS_TEXT = /^<(local-command|command-|system-reminder|bash-|user-memory|task-notification)/;
 
 // The note Claude records when a turn is interrupted ("[Request interrupted

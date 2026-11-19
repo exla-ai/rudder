@@ -162,6 +162,8 @@ function createInner(x) {
     return h(`<details class="sa-tool"><summary><span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</summary><pre></pre></details>`);
   }
   if (x.kind === "compact") return h(`<div class="sa-compact"></div>`);
+  // What another agent sent this one (worker/transcripts.mjs peerMessages): the lead, a teammate.
+  if (x.kind === "peer") return h(`<div class="sa-user"><div class="sa-label"></div><div class="md"></div></div>`);
   if (x.role === "user") return h(`<div class="sa-user"><div class="sa-label">Message</div><div class="md"></div></div>`);
   if (x.role === "system") return h(`<div class="sa-note md"></div>`);
   return h(`<div class="sa-text md"></div>`);
@@ -184,9 +186,11 @@ function updateInner(node, x) {
     return;
   }
   if (x.kind === "compact") return setText(node, "Context compacted");
+  if (x.kind === "peer") setText(node.querySelector(".sa-label"), `From ${x.peer.from}`);
+  const text = x.kind === "peer" && !x.text ? (x.peer.failure ? `Stopped: ${x.peer.failure}` : "Idle") : x.text || "";
   const md = node.classList.contains("md") ? node : node.querySelector(".md");
-  const sig = `${x.text}|${markdownReady()}`;
-  if (md.dataset.sig !== sig) { renderMarkdown(md, x.text || ""); md.dataset.sig = sig; }
+  const sig = `${text}|${markdownReady()}`;
+  if (md.dataset.sig !== sig) { renderMarkdown(md, text); md.dataset.sig = sig; }
 }
 
 function oneLine(text) {

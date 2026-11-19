@@ -608,6 +608,15 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       }
       return;
     }
+    // A scheduled task (a cron or /loop prompt) fired. Claude Code runs its
+    // prompt as a hidden (isMeta) user turn: the chat marks the turn, with
+    // the prompt behind the marker, instead of showing it as the user's words.
+    if (entry.type === "system" && entry.subtype === "scheduled_task_fire") {
+      if (own) {
+        push({ id: entry.uuid || `scheduled-${offset}`, role: "system", kind: "scheduled", ts: toMillis(entry.timestamp), text: "Scheduled check", scheduled: { prompt: String(entry.prompt || "") } });
+      }
+      return;
+    }
     // Claude Code saves a session's cost-state as its process exits.
     if (sub && entry.type === "cost-state") {
       reader.exited = true;
@@ -621,7 +630,10 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         ? queued.prompt.filter((part) => part?.type === "text").map((part) => part.text).join("\n")
         : queued.prompt;
       noteTaskNotification(prompt);
-      if (queued.commandMode === "prompt" && queued.origin?.kind === "human") {
+      const peers = peerMessages(prompt, queued.origin);
+      if (peers) {
+        pushPeers(entry.uuid, toMillis(entry.timestamp), peers);
+      } else if (queued.commandMode === "prompt" && queued.origin?.kind === "human") {
         const text = cleanUserText(prompt);
         if (text) {
           push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text });
@@ -629,7 +641,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       }
       return;
     }
-    if ((entry.type !== "user" && entry.type !== "assistant") || !own || entry.isMeta) {
+    // Claude Code's own (isMeta) turns stay out of the chat, but for what
+    // other agents send (peerMessages).
+    if ((entry.type !== "user" && entry.type !== "assistant") || !own || (entry.isMeta && !PEER_ORIGINS.has(entry.origin?.kind))) {
       return;
     }
     const ts = toMillis(entry.timestamp);
@@ -658,16 +672,22 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       const clean = cleanUserText(text);
       if (clean && sub && !promptSeen) {
         promptSeen = true;
-        reader.prompt = teammateMessage(clean)?.body ?? clean;
+        reader.prompt = peerMessages(clean, entry.origin)?.[0].body ?? clean;
         return "";
       }
-      return sub ? teammateMessage(clean)?.body ?? clean : clean;
+      return clean;
+    };
+    // A user turn is the user's words, or what other agents sent.
+    const say = (id, text) => {
+      const peers = entry.type === "user" && text ? peerMessages(text, entry.origin) : null;
+      if (peers) {
+        pushPeers(id, ts, peers);
+      } else if (text) {
+        push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
+      }
     };
     if (typeof content === "string") {
-      const text = entry.type === "user" ? userText(content) : cleanUserText(content);
-      if (text) {
-        push({ id: uuid, role: entry.type === "user" ? "user" : "assistant", ts, text });
-      }
+      say(uuid, entry.type === "user" ? userText(content) : cleanUserText(content));
       return;
     }
     if (!Array.isArray(content)) {
@@ -676,10 +696,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     content.forEach((block, index) => {
       const id = `${uuid}:${index}`;
       if (block?.type === "text") {
-        const text = entry.type === "user" ? userText(block.text) : String(block.text || "").trim();
-        if (text) {
-          push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
-        }
+        say(id, entry.type === "user" ? userText(block.text) : String(block.text || "").trim());
       } else if (block?.type === "thinking" && entry.type === "assistant" && entry.thinkingDisplay === "updates") {
         // Claude Code's "updates" display stores the notes the agent writes
         // to the user between tool calls as thinking; its terminal shows them.
@@ -748,6 +765,12 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       reader.notifications.set(id, status);
     }
   }
+  // What other agents sent (peerMessages): a card each in the chat, never the user's bubble.
+  function pushPeers(id, ts, peers) {
+    peers.forEach(({ body, ...peer }, index) => {
+      push({ id: peers.length > 1 ? `${id}:peer${index}` : id, role: "system", kind: "peer", ts, text: body, peer });
+    });
+  }
   return reader;
 }
 
@@ -756,11 +779,59 @@ function xmlTag(text, tag) {
   return match ? match[1].trim() : null;
 }
 
-// What a teammate is told arrives wrapped as
-// <teammate-message teammate_id="team-lead">\n<body>\n</teammate-message>.
-function teammateMessage(text) {
-  const match = /^<teammate-message teammate_id="[^"]*"[^>]*>\n([\s\S]*)\n<\/teammate-message>$/.exec(text);
-  return match ? { body: match[1] } : null;
+// What other agents send this one, as Claude Code hands it over: null for
+// anything else, or one { from, summary, idle, failure, body } per message.
+//  - A teammate's (agent teams), or the lead's to a teammate: a user entry of
+//    <teammate-message teammate_id="<name>" color="green" summary="...">
+//    blocks, one or more. A lead's session gets them after "Another Claude
+//    session sent a message:" and before a note that a peer is not the user.
+//    A teammate whose turn ended sends an idle_notification as JSON, with its
+//    result or why it failed.
+//  - A subagent's or another session's (<agent-message>,
+//    <cross-session-message>): an isMeta entry or a queued_command whose
+//    origin (kind "peer") names the sender and holds the body. A subagent's
+//    final report comes without the hand-back preface Claude Code adds.
+//  - The lead's to a subagent: origin kind "coordinator", the body between a
+//    line saying the coordinator sent it and a closing instruction.
+const PEER_ORIGINS = new Set(["peer", "coordinator"]);
+const TEAMMATE_INTRO = /^Another Claude session sent a message(?: while you were working)?:\n/;
+const TEAMMATE_BLOCK = /^<teammate-message teammate_id="([^"]*)"((?: [\w-]+="[^"]*")*)>\n?([\s\S]*?)\n?<\/teammate-message>(?:\n\n|$)/;
+const TEAMMATE_NOTE = /^This came from another Claude session/;
+const TEAMMATE_IDLE = /^\{"type":"idle_notification",/;
+const COORDINATOR_INTRO = /^The coordinator sent a message while you were working:\n/;
+const COORDINATOR_OUTRO = /\n+Address this before completing your current task\.$/;
+
+function peerMessages(text, origin) {
+  if (origin?.kind === "peer") {
+    const body = origin.handback ? origin.handbackReportText : origin.body;
+    return typeof origin.name === "string" && typeof body === "string" ? [{ from: origin.name, summary: null, idle: false, failure: null, body }] : null;
+  }
+  if (origin?.kind === "coordinator") {
+    return [{ from: "the lead", summary: null, idle: false, failure: null, body: text.replace(COORDINATOR_INTRO, "").replace(COORDINATOR_OUTRO, "") }];
+  }
+  return origin ? null : teammateMessages(text);
+}
+
+function teammateMessages(text) {
+  let rest = text.replace(TEAMMATE_INTRO, "");
+  const wrapped = rest.length < text.length;
+  const found = [];
+  for (let match; (match = TEAMMATE_BLOCK.exec(rest)); rest = rest.slice(match[0].length)) {
+    const summary = /(?:^| )summary="([^"]*)"/.exec(match[2]);
+    const message = { from: xmlUnescape(match[1]), summary: summary ? xmlUnescape(summary[1]) : null, idle: false, failure: null, body: match[3] };
+    if (TEAMMATE_IDLE.test(message.body)) {
+      const note = JSON.parse(message.body);
+      message.idle = true;
+      message.failure = typeof note.failureReason === "string" ? note.failureReason : null;
+      message.body = typeof note.result === "string" ? note.result : "";
+    }
+    found.push(message);
+  }
+  return found.length && (!rest || (wrapped && TEAMMATE_NOTE.test(rest))) ? found : null;
+}
+
+function xmlUnescape(value) {
+  return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 
 // When an agent's context fills up, Claude Code and Codex summarize the
@@ -1333,9 +1404,9 @@ function claudeSessionHead(file, size) {
       if (entry.type !== "user") {
         continue;
       }
-      const message = typeof entry.message?.content === "string" ? teammateMessage(entry.message.content) : null;
-      const head = typeof entry.teamName === "string" && typeof entry.agentName === "string" && message
-        ? { team: entry.teamName, agent: entry.agentName, prompt: message.body, ts: toMillis(entry.timestamp) }
+      const message = typeof entry.message?.content === "string" ? peerMessages(entry.message.content, entry.origin) : null;
+      const head = typeof entry.teamName === "string" && typeof entry.agentName === "string" && message?.length === 1
+        ? { team: entry.teamName, agent: entry.agentName, prompt: message[0].body, ts: toMillis(entry.timestamp) }
         : null;
       claudeHeads.set(file, head);
       return head;

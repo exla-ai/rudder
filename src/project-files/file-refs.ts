@@ -50,13 +50,17 @@ const PRIVATE_FOLDERS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".kube", ".
   ".password-store", "keyrings", ".terraform.d", ".git", ".jj", ".rudder", ".rudder-workspaces", ".rudder-worktrees"]);
 /** Files, at any depth, that hold keys or tokens. */
 const PRIVATE_NAMES = new Set([".npmrc", ".netrc", ".pypirc", ".git-credentials", ".credentials.json", "credentials",
-  "credentials.json", "credentials.toml", "auth.json", ".claude.json", "RUDDER_SHARED.md", ".vault-token", ".htpasswd", ".pgpass"]);
+  "credentials.json", "credentials.toml", "auth.json", ".claude.json", "RUDDER_SHARED.md", ".vault-token", ".htpasswd", ".pgpass",
+  // Claude Code's local settings, in a project or a home folder, can hold API keys in `env`.
+  "settings.local.json"]);
 // .env files, key files, SSH keys and shell or REPL histories (commands typed with tokens in them).
 const PRIVATE_NAME = /^\.env(?:\.|$)|\.(?:pem|key|p12|pfx|jks|keystore|kdbx|ppk|gpg)$|^id_(?:rsa|dsa|ecdsa|ed25519)|^\.[\w.-]*history$|_history$/i;
 /** The hidden folders of a home folder that open: agents keep plans, memory
  * and instructions there. Every other hidden file or folder directly in a
  * home folder (.config, .local, .bashrc, a token file) stays private. */
 const OPEN_HOME_FOLDERS = new Set([".claude", ".codex"]);
+/** Their settings, which can hold API keys (an `env` block, an MCP server's key). */
+const HOME_SETTINGS = new Set([".claude/settings.json", ".codex/config.toml"]);
 /** Inside those, anything named like a secret. */
 const SECRET_LIKE = /(?:^|[._-])(?:auth|oauth|credentials?|secrets?|tokens?|passwords?|api[._-]?keys?|private[._-]?keys?)(?:[._-]|$)/i;
 
@@ -77,6 +81,7 @@ export function privateReason(file: string, homes: readonly string[]): string | 
     if (!rest) continue;
     const [top, ...below] = rest.split("/");
     if (top.startsWith(".") && !OPEN_HOME_FOLDERS.has(top)) return PRIVATE_FILE;
+    if (HOME_SETTINGS.has(rest)) return PRIVATE_FILE;
     if (OPEN_HOME_FOLDERS.has(top) && below.some((part) => SECRET_LIKE.test(part))) return PRIVATE_FILE;
   }
   return null;

@@ -67,12 +67,16 @@ test("the deny list keeps keys, tokens and system files out of the viewer", () =
     "/workspace/code/app/.env", "/workspace/code/app/.env.local", "/workspace/code/app/certs/server.pem", "/workspace/code/app/tls.key",
     "/workspace/code/app/.git/config", "/workspace/code/app/.jj/repo/store", "/workspace/code/app/.rudder/runs/r1/run.json",
     "/workspace/code/app/RUDDER_SHARED.md", "/workspace/code/app/deploy/credentials.json", "/tmp/x/.docker/config.json",
+    "/home/rudder/.claude/settings.json", "/workspace/home/.claude/settings.json", "/home/rudder/.claude/settings.local.json",
+    "/workspace/code/app/.claude/settings.local.json", "/home/rudder/.codex/config.toml", "/workspace/home/.codex/config.toml",
   ]) assert.equal(privateReason(file, homes), PRIVATE_FILE, file);
   for (const file of ["/proc/self/environ", "/sys/kernel/notes", "/dev/sda", "/run/secrets/token"]) assert.equal(privateReason(file, homes), SYSTEM_FILE, file);
   for (const file of [
     "/home/rudder/.claude/plans/dreamy-launching-firefly.md", "/workspace/home/.claude/projects/p/memory/MEMORY.md",
     "/home/rudder/.codex/AGENTS.md", "/home/rudder/projects/a/README.md", "/workspace/rudder-scratch/file-links/notes.md",
     "/workspace/code/app/src/keyboard.ts", "/workspace/code/app/.github/workflows/ci.yml",
+    // Only the home folders' own settings are private: a project's are not.
+    "/workspace/code/app/.claude/settings.json", "/workspace/code/app/.vscode/settings.json", "/workspace/code/app/.cargo/config.toml",
   ]) assert.equal(privateReason(file, homes), null, file);
 });
 

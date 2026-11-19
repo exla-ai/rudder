@@ -30,7 +30,8 @@ export function commandHelp(family?: string): string {
     ...families.map((entry) => line(entry.usage, entry.summary)),
     ...subcommands,
     ...(family ? [] : [line("--version", "print the version"), "",
-      "Task flags: --cloud runs it on your Cloud home, --backend claude|codex|opencode|antigravity,",
+      "Task flags: --cloud runs it on your Cloud home,",
+      "--backend claude|codex|opencode|antigravity picks the agent,",
       "--continue hands this chat to the dashboard, --cwd <project> picks the project."]),
     "",
   ].join("\n");

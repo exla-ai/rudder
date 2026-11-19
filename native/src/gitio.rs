@@ -333,6 +333,7 @@ pub(crate) fn create_main_agent(
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -897,6 +898,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        compacting_since: None,
         wait_signal: None,
         worker_exit_note: parked.as_ref().map(ParkedNote::card_note),
         parked,
@@ -1428,6 +1430,9 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // The phone shows a Codex plan's card only while this is true: Esc on
         // the menu writes nothing to the rollout (`App::poll_codex_rollouts`).
         "codexPlanMenu": run.codex_plan_menu,
+        // Claude's compaction spinner is on the pane (`App::poll_agents`): the
+        // phone's "Compacting context" row, from this moment (Unix ms).
+        "compactingSince": run.compacting_since,
         "mode": run.mode.as_str(),
         // Whether this RudderPlan row is a TRANSIENT reconcile planner (vs the pinned
         // orchestrator). Persisted so an orphan left by a crash mid-reconcile is

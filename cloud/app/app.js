@@ -24,6 +24,7 @@ import { mountSlashMenu } from "/app/slash-menu.js";
 import { chatEdit } from "/app/chat-edit.js";
 import { mountQuoteReply, paintQuote } from "/app/quote-reply.js";
 import { duration, paintSubagent } from "/app/subagents.js";
+import { COMPACTING_HTML, FOLD_ICON, compactAria, compactHasDetail, compactMeta, paintCompactCard, paintCompacting } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending, withAttachments } from "/app/pending.js";
@@ -76,6 +77,8 @@ const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1
 // Ones answered from this phone are hidden at once, before the state agrees.
 // A finished turn shorter than this shows no "Worked for" line.
 const SHORT_TURN_MS = 5000;
+// A compaction marker this soon after its running row left opens out from it.
+const COMPACT_FRESH_MS = 15_000;
 // A message from another agent longer than this shows its first lines and Show more.
 const PEER_LONG_CHARS = 320;
 const PEER_LONG_LINES = 5;
@@ -1550,16 +1553,6 @@ function refreshButton(onRefresh) {
     }
   });
   return b;
-}
-
-// A home machine running an older worker sends a compacted conversation's
-// summary as a message from the user. Show it as the marker newer workers send.
-const COMPACT_SUMMARY_RE = /^This session is being continued from a previous conversation that ran out of context\.[^\n]*\n+(?:Summary:\s*\n)?/;
-function withCompactMarkers(messages) {
-  if (!messages.some((m) => m.role === "user" && COMPACT_SUMMARY_RE.test(m.text || ""))) return messages;
-  return messages.map((m) => (m.role === "user" && COMPACT_SUMMARY_RE.test(m.text || "")
-    ? { id: m.id, role: "system", kind: "compact", ts: m.ts, text: "Context compacted", compact: { summary: m.text.replace(COMPACT_SUMMARY_RE, "").replace(/\n+(?:If you need specific details from before compaction|Continue the conversation from where it left off)[\s\S]*$/, "").trim() } }
-    : m));
 }
 
 // Photos and files from the phone. Each one is uploaded to the project on the
@@ -3937,6 +3930,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let atBottom = true;
   let firstPaint = true;
   let lastCount = 0;
+  // When the running compaction's row last left (compaction.js).
+  let compactEndedAt = 0;
   // A paint that keeps what is on screen in place (paintKeepingView).
   let holdScroll = false;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
@@ -3961,7 +3956,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       return;
     }
-    const compactRow = e.target.closest(".compact-row");
+    const compactRow = e.target.closest("button.compact-row");
     if (compactRow) {
       const node = compactRow.closest(".compact");
       const k = `${key}|${node.dataset.key}`;
@@ -4226,7 +4221,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // The goal first: the speed's fit measures the line with it.
     goalChip.update(t?.goal);
     agentStats.update(t?.stats);
-    contextMeter.update(t?.context);
+    contextMeter.update(t?.context, !!t?.compacting);
     return status;
   }
 
@@ -4256,7 +4251,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // "Worked · N steps" line: a long turn was otherwise a wall of tool rows
     // with the actual replies lost between them.
     let steps = null;
-    for (const m of withCompactMarkers([...(earlier?.messages || []), ...(t.messages || [])])) {
+    for (const m of [...(earlier?.messages || []), ...(t.messages || [])]) {
       // Short turns (a subagent reporting in) would each add "Worked for 1s".
       if (m.kind === "turn" && !(m.durationMs >= SHORT_TURN_MS)) continue;
       // A turn's time belongs to the turn above it, even past midnight.
@@ -4278,6 +4273,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         items[i] = { kind: "msg", id: m.id, m };
       }
     }
+    // A compaction under way stands where its marker will (compaction.js).
+    // The marker that replaces it opens out from it.
+    if (t.compacting) { items.push({ kind: "compacting", id: "compacting", since: t.compacting.since }); compactEndedAt = 0; }
+    else if (msgsEl.querySelector(".compact.live")) compactEndedAt = Date.now();
     for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
     if (!items.length && t.waking) {
@@ -4290,7 +4289,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
 
     paintEarlier(t, earlier);
     reconcile(msgsEl, items, (x) => x.id, createItem, updateItem);
-    typing.hidden = status !== "working";
+    typing.hidden = status !== "working" || !!t.compacting;
 
     const count = (t.messages || []).length;
     if (wasBottom) { toBottom(false); requestAnimationFrame(() => toBottom(false)); }
@@ -4305,6 +4304,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "empty") return emptyState({ ic: "inbox", title: "No messages yet", body: "This agent has not said anything yet. Its conversation shows up here as it works." });
     if (x.kind === "error") return emptyState({ ic: x.ic || "alert", title: x.title || "Couldn't load the conversation", body: escapeHtml(x.text) });
     if (x.kind === "pending") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div><div class="m-foot"></div></div>`);
+    if (x.kind === "compacting") return h(COMPACTING_HTML);
     if (x.kind === "steps") {
       return h(`<div class="steps"><button type="button" class="tool-row steps-row" aria-expanded="false">
         <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button><div class="steps-list" hidden></div></div>`);
@@ -4321,7 +4321,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       if (x.m.peer.idle && !x.m.text) return h(`<div class="msg peer"><div class="peer-line">${icon("agents")}<span></span></div></div>`);
       return h(`<div class="msg peer"><div class="peer-card"><div class="peer-from">${icon("agents")}<span>From <b></b></span></div><div class="peer-title" hidden></div><div class="peer-body md"></div><button type="button" class="peer-more" hidden></button></div></div>`);
     }
-    if (role === "system" && (x.m.kind === "compact" || x.m.kind === "handoff" || x.m.kind === "scheduled")) {
+    if (role === "system" && x.m.kind === "compact") {
+      const fresh = compactEndedAt && Date.now() - compactEndedAt < COMPACT_FRESH_MS;
+      const node = h(`<div class="compact${fresh ? " c-new" : ""}"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label">${FOLD_ICON}<span class="c-text"></span><span class="c-meta"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum" hidden><div class="c-card"><div class="c-squeeze" aria-hidden="true"><i></i></div><p class="c-fig"></p><p class="c-how"></p></div><p class="c-sum-label">Summary the agent continued from</p><div class="c-sum-body md"></div><p class="c-sum-none"></p></div></div>`);
+      if (fresh) node.addEventListener("animationend", () => node.classList.remove("c-new"), { once: true });
+      return node;
+    }
+    if (role === "system" && (x.m.kind === "handoff" || x.m.kind === "scheduled")) {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
     if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
@@ -4350,6 +4356,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return;
     }
     if (x.kind === "steps") return paintSteps(node, x);
+    if (x.kind === "compacting") return paintCompacting(node, x.since);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
     if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled") { node._msg = m; return paintCompact(node, m); }
@@ -4367,29 +4374,49 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (md.dataset.sig !== sig) { renderMarkdown(md, text, chatMarkdown); md.dataset.sig = sig; }
   }
 
-  // A compacted context, a chat moved here from another harness ("Moved
-  // from Claude · Opus 5.5", cloud/worker/handoff.mjs) or a scheduled
-  // task's turn: one marker with the summary the agent continued from, or
+  // A compacted context (compaction.js), a chat moved here from another
+  // harness ("Moved from Claude · Opus 5.5", cloud/worker/handoff.mjs) or a
+  // scheduled task's turn: one marker with what the agent continued from, or
   // the prompt it ran, behind it.
   function paintCompact(node, m) {
+    if (m.kind === "compact") return paintCompaction(node, m.compact || {});
     const moved = m.kind === "handoff";
-    const scheduled = m.kind === "scheduled";
-    const c = (moved ? m.handoff : scheduled ? { summary: m.scheduled.prompt } : m.compact) || {};
+    const c = (moved ? m.handoff : { summary: m.scheduled.prompt }) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
     const row = node.querySelector(".compact-row");
     node.classList.toggle("open", open);
     node.classList.toggle("has-sum", !!c.summary);
     row.disabled = !c.summary;
     row.setAttribute("aria-expanded", String(open));
-    const tokens = c.preTokens ? ` · ${c.preTokens >= 1000 ? `${Math.round(c.preTokens / 1000)}k` : c.preTokens} tokens summarized` : "";
-    const label = moved || scheduled ? m.text : `Context compacted${tokens}`;
-    setText(row.querySelector(".c-text"), label);
-    row.setAttribute("aria-label", `${label}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : scheduled ? "the prompt it ran" : "the summary the agent continued from"}.` : ""}`);
+    setText(row.querySelector(".c-text"), m.text);
+    row.setAttribute("aria-label", `${m.text}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : "the prompt it ran"}.` : ""}`);
     const sum = node.querySelector(".compact-sum");
     sum.hidden = !open;
     if (!open) return;
     const sig = `${c.summary}|${markdownReady()}`;
     if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary, chatMarkdown); sum.dataset.sig = sig; }
+  }
+
+  // The context compacted: how far it shrank on the line, and opened, by how
+  // much, what set it off, how long it took and the summary.
+  function paintCompaction(node, c) {
+    const detail = compactHasDetail(c);
+    const open = store.expanded.has(`${key}|${node.dataset.key}`) && detail;
+    const row = node.querySelector(".compact-row");
+    node.classList.toggle("open", open);
+    node.classList.toggle("has-sum", !!c.summary);
+    row.disabled = !detail;
+    row.setAttribute("aria-expanded", String(open));
+    setText(row.querySelector(".c-text"), "Context compacted");
+    setText(row.querySelector(".c-meta"), compactMeta(c));
+    row.setAttribute("aria-label", `${compactAria(c)}.${detail ? ` ${open ? "Hide" : "Show"} ${c.summary ? "the summary the agent continued from" : "the details"}.` : ""}`);
+    const sum = node.querySelector(".compact-sum");
+    sum.hidden = !open;
+    if (!open) return;
+    paintCompactCard(sum, c, store.transcripts.get(key)?.backend);
+    const body = sum.querySelector(".c-sum-body");
+    const sig = `${c.summary}|${markdownReady()}`;
+    if (c.summary && body.dataset.sig !== sig) { renderMarkdown(body, c.summary, chatMarkdown); body.dataset.sig = sig; }
   }
 
   // A message another agent sent this one (worker/transcripts.mjs

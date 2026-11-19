@@ -1,0 +1,51 @@
+/* A compaction in the chat (cloud/app/compaction.js): the marker's tokens and
+   card, and the row that stands in for it while one runs. The marker's line
+   itself is the shared .compact style in styles.css. */
+.compact-row .c-ic { width: 14px; height: 14px; flex: none; margin-right: 2px; }
+.compact-row .c-meta { color: var(--faint); font-variant-numeric: tabular-nums; }
+.compact-row .c-meta:not(:empty)::before { content: "·"; margin: 0 5px 0 3px; }
+.compact-row:not([disabled]):hover, .compact.open .compact-row { color: var(--ink-2); }
+.compact-row:not([disabled]):hover .c-meta, .compact.open .c-meta { color: var(--muted); }
+
+/* Opened: by how much the context shrank, then the summary. The bar is the
+   size before, filled to the size after, and it shrinks to that as it opens. */
+.c-card { margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.c-card[hidden], .c-card > [hidden] { display: none; }
+.c-squeeze { position: relative; height: 6px; margin: 2px 0 10px; border-radius: 3px; background: var(--line-strong); overflow: hidden; }
+.c-squeeze i { position: absolute; inset: 0 auto 0 0; width: calc(var(--kept, 1) * 100%); min-width: 6px; border-radius: 3px; background: var(--muted); }
+.compact.open .c-squeeze i { animation: c-squeeze 0.9s 0.08s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes c-squeeze { from { width: 100%; } }
+.c-fig { margin: 0; font-size: 13.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.c-how { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+.c-sum-label { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.c-sum-none { margin: 0; font-size: 13px; color: var(--muted); }
+.c-sum-label[hidden], .c-sum-body[hidden], .c-sum-none[hidden] { display: none; }
+
+/* Running: a highlight sweeps the words and the two rules draw in toward
+   them, the context being folded. */
+.compact.live .compact-row { cursor: default; }
+.compact.live .c-text {
+  background: linear-gradient(90deg, var(--muted) 0 38%, var(--ink) 50%, var(--muted) 62% 100%) 0 0 / 300% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: c-shimmer 2.4s linear infinite;
+}
+@keyframes c-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.compact.live .c-line {
+  background: linear-gradient(90deg, transparent, var(--muted) 50%, transparent) -70% 0 / 45% 100% no-repeat var(--line-strong);
+  animation: c-in-left 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+.compact.live .c-line:last-child { animation-name: c-in-right; background-position: 170% 0; }
+@keyframes c-in-left { from { background-position: -70% 0; } to { background-position: 170% 0; } }
+@keyframes c-in-right { from { background-position: 170% 0; } to { background-position: -70% 0; } }
+
+/* The marker that replaces the running row opens out from its words. */
+.compact.c-new .c-line { animation: c-open 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.compact.c-new .c-line:first-child { transform-origin: right; }
+.compact.c-new .c-line:last-child { transform-origin: left; }
+@keyframes c-open { from { transform: scaleX(0); } }
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .compact.live .c-text { animation: none; background: none; color: var(--muted); }
+  .compact.live .c-line { animation: none; background: var(--line-strong); }
+  .compact.c-new .c-line, .compact.open .c-squeeze i { animation: none; }
+}

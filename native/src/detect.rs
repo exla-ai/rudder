@@ -67,6 +67,23 @@ fn looks_like_claude_compaction(line: &str) -> bool {
     .any(|phase| label.starts_with(phase))
 }
 
+/// Claude Code is compacting the conversation right now: its live spinner
+/// above the composer reads `Compacting conversation…`. The hook phases around
+/// it (`looks_like_claude_compaction`) are left out, since `SessionStart` hooks
+/// also run when a session starts.
+pub(crate) fn claude_compacting_from_lines(lines: &[String]) -> bool {
+    rows_above_composer(Backend::Claude, lines)
+        .iter()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(14)
+        .any(|line| {
+            let mut chars = line.trim_start().chars();
+            chars.next().is_some_and(is_claude_spinner_glyph)
+                && chars.as_str().trim_start().starts_with("Compacting conversation")
+        })
+}
+
 pub(crate) fn mark_run_done(run: &mut AgentRun) {
     finish_turn(run, true);
 }

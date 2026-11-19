@@ -611,44 +611,68 @@ nodeTest("a discussion's, main agent's or All agents chat's first message shows 
   }
 });
 
-nodeTest("a compacted conversation shows one marker holding the summary, not a message from the user", () => {
+nodeTest("a compacted conversation shows one marker with its sizes, its duration and the summary, not a message from the user", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
-  const cwd = "/workspace/code/libra";
-  const sessionId = "22222222-2222-3333-4444-555555555555";
-  const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
-  fs.mkdirSync(projectDir, { recursive: true });
-  const lines = [
-    { type: "user", uuid: "u1", message: { role: "user", content: "fix the webhook" } },
-    { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "On it." }] } },
-    { type: "system", subtype: "compact_boundary", uuid: "cb1", timestamp: "2026-10-16T11:21:00.799Z", content: "Conversation compacted", compactMetadata: { trigger: "auto", preTokens: 367082 } },
-    { type: "user", uuid: "s1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Fix the **webhook**.\n\nIf you need specific details from before compaction (like exact code snippets), read the full transcript at: /x.jsonl\nContinue the conversation from where it left off without asking the user any further questions." } },
-    { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
-  ];
-  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-  const repo = fixtureRepo({ id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
-  const transcript = readTranscript(repo, "run-4", { limit: 50, home });
-  assert.deepEqual(transcript.messages.map((m) => [m.role, m.kind ?? null, m.text]), [
-    ["user", null, "fix the webhook"],
-    ["assistant", null, "On it."],
-    ["system", "compact", "Context compacted"],
-    ["assistant", null, "Picking up the webhook fix."],
-  ]);
-  assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, summary: "1. Fix the **webhook**." });
-  assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));
+  const repos = [];
+  try {
+    const cwd = "/workspace/code/libra";
+    const sessionId = "22222222-2222-3333-4444-555555555555";
+    const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+    fs.mkdirSync(projectDir, { recursive: true });
+    // Claude Code 2.1.328 writes the boundary and the summary once the compaction ends.
+    const lines = [
+      { type: "user", uuid: "u1", message: { role: "user", content: "fix the webhook" } },
+      { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "On it." }] } },
+      { type: "system", subtype: "compact_boundary", uuid: "cb1", timestamp: "2026-10-16T11:21:00.799Z", content: "Conversation compacted", level: "info", version: "2.1.328",
+        compactMetadata: { trigger: "auto", preTokens: 367082, postTokens: 24989, cumulativeDroppedTokens: 342093, durationMs: 63301, preservedSegment: { headUuid: "h", anchorUuid: "s1", tailUuid: "t" } } },
+      { type: "user", uuid: "s1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Fix the **webhook**.\n\nIf you need specific details from before compaction (like exact code snippets), read the full transcript at: /x.jsonl\nContinue the conversation from where it left off without asking the user any further questions." } },
+      { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    // While a compaction runs, only the dashboard's reading of the pane says so.
+    const record = { id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd }, compactingSince: 1_790_000_000_000 };
+    const repo = fixtureRepo({ ...record, process: { pid: process.pid } });
+    repos.push(repo);
+    const transcript = readTranscript(repo, "run-4", { limit: 50, home });
+    assert.deepEqual(transcript.messages.map((m) => [m.role, m.kind ?? null, m.text]), [
+      ["user", null, "fix the webhook"],
+      ["assistant", null, "On it."],
+      ["system", "compact", "Context compacted"],
+      ["assistant", null, "Picking up the webhook fix."],
+    ]);
+    assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, postTokens: 24989, durationMs: 63301, summary: "1. Fix the **webhook**." });
+    assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));
+    assert.deepEqual(transcript.compacting, { since: 1_790_000_000_000 });
+    // A record left behind by a process that is gone is not compacting.
+    const gone = fixtureRepo({ ...record, process: { pid: 2 ** 22 + 1 } });
+    repos.push(gone);
+    assert.equal(readTranscript(gone, "run-4", { limit: 50, home }).compacting, null);
 
-  // Codex records its compaction as one `compacted` line.
-  const codexId = "01a13ce1-6861-7893-b4a0-9fb8e889dd58";
-  const day = path.join(home, ".codex", "sessions", "2026", "10", "16");
-  fs.mkdirSync(day, { recursive: true });
-  const codexLines = [
-    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] } },
-    { type: "compacted", timestamp: "2026-10-16T12:00:00Z", payload: { message: "", replacement_history: [{ type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }] } },
-    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] } },
-  ];
-  fs.writeFileSync(path.join(day, `rollout-2026-10-16T12-00-00-${codexId}.jsonl`), `${codexLines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-  const codexRepo = fixtureRepo({ id: "run-5", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
-  const codex = readTranscript(codexRepo, "run-5", { limit: 50, home });
-  assert.deepEqual(codex.messages.map((m) => [m.role, m.kind ?? null]), [["user", null], ["system", "compact"], ["assistant", null]]);
+    // Codex 0.170: `compacted` (its summary encrypted, `message` empty), the
+    // first token_count of the smaller context, then the ContextCompaction item.
+    const codexId = "01a13ce1-6861-7893-b4a0-9fb8e889dd58";
+    const day = path.join(home, ".codex", "sessions", "2026", "10", "16");
+    fs.mkdirSync(day, { recursive: true });
+    const tokens = (total) => ({ type: "event_msg", timestamp: "2026-10-16T11:59:00Z", payload: { type: "token_count", info: { last_token_usage: { total_tokens: total }, total_token_usage: { total_tokens: 8_536_053 }, model_context_window: 258_400 } } });
+    const codexLines = [
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] } },
+      tokens(150_629),
+      { type: "compacted", timestamp: "2026-10-16T12:00:00Z", payload: { message: "", window_number: 1, replacement_history: [{ type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }, { type: "compaction", encrypted_content: "x" }] } },
+      tokens(32_710),
+      { type: "event_msg", timestamp: "2026-10-16T12:00:00Z", payload: { type: "item_completed", started_at_ms: 1_795_078_966_325, completed_at_ms: 1_795_079_016_200, item: { id: "c1", type: "ContextCompaction" } } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] } },
+      tokens(33_100),
+    ];
+    fs.writeFileSync(path.join(day, `rollout-2026-10-16T12-00-00-${codexId}.jsonl`), `${codexLines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    const codexRepo = fixtureRepo({ id: "run-5", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
+    repos.push(codexRepo);
+    const codex = readTranscript(codexRepo, "run-5", { limit: 50, home });
+    assert.deepEqual(codex.messages.map((m) => [m.role, m.kind ?? null]), [["user", null], ["system", "compact"], ["assistant", null]]);
+    assert.deepEqual(codex.messages[1].compact, { trigger: null, preTokens: 150_629, postTokens: 32_710, durationMs: 49_875, summary: "" });
+    assert.equal(codex.compacting, null);
+  } finally {
+    for (const dir of [home, ...repos]) fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 nodeTest("agent stats: output speed over the last five responses and context left, through a compaction", () => {

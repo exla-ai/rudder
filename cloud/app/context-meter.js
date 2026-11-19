@@ -2,7 +2,9 @@
 // one line above the composer: "62% context left · compacts at 160K". The
 // numbers are the transcript's `context` (cloud/worker/context-usage.mjs);
 // tokens used of the window and where the threshold comes from show on
-// hover, or on tap. A value the home does not know is left out.
+// hover, or on tap. A value the home does not know is left out. While the
+// agent compacts its context it says so, and when the context shrinks the bar
+// eases down to the new size, tinted for a moment.
 import { h, setText } from "/app/render.js";
 import { coarse } from "/app/core.js";
 import { formatTokens } from "/app/agent-stats.js";
@@ -41,9 +43,20 @@ function view(c) {
   };
 }
 
+// While a compaction runs (transcript `compacting`, compaction.js).
+const COMPACTING = {
+  left: ["Compacting", " context", ""],
+  at: "",
+  detail: ["Compacting the conversation into a summary so the agent can keep going."],
+  level: "ok",
+};
+// How long the bar stays tinted after the context shrank.
+const DROP_MS = 1800;
+
 /**
- * Mount in the row above the composer (`slot`) and call `update(t.context)`
- * after each transcript load. Hidden while there is nothing to show.
+ * Mount in the row above the composer (`slot`) and call
+ * `update(t.context, !!t.compacting)` after each transcript load. Hidden while
+ * there is nothing to show.
  */
 export function ContextMeter(slot) {
   const el = h(`<button type="button" class="cm" hidden aria-expanded="false"><span class="cm-bar" aria-hidden="true"><i></i><b></b></span><span class="cm-text"><span class="cm-n"></span><span class="cm-w"></span><span class="cm-l"></span><span class="cm-at"></span></span></button>`);
@@ -52,6 +65,8 @@ export function ContextMeter(slot) {
   const barEl = el.querySelector(".cm-bar");
   let shown = null;
   let pop = null;
+  let lastUsed = null;
+  let dropTimer = 0;
 
   const close = () => {
     if (!pop) return;
@@ -80,15 +95,24 @@ export function ContextMeter(slot) {
     document.addEventListener("keydown", onKey, true);
   });
 
-  function update(context) {
-    shown = context ? view(context) : null;
+  function update(context, compacting = false) {
+    const reading = context ? view(context) : null;
+    shown = compacting ? { ...COMPACTING, bar: reading?.bar ?? null } : reading;
     el.hidden = !shown;
     if (!shown) { close(); return; }
     setText(numEl, shown.left[0]);
     setText(wordEl, shown.left[1]);
     setText(leftEl, shown.left[2]);
     setText(atEl, shown.at ? ` · ${shown.at}` : "");
-    el.className = `cm lv-${shown.level}`;
+    // The context shrank (a compaction, or a new conversation): the bar eases
+    // down and stays tinted for a moment.
+    const used = context && !context.error ? context.used : null;
+    if (Number.isFinite(used) && Number.isFinite(lastUsed) && used < lastUsed) {
+      clearTimeout(dropTimer);
+      dropTimer = setTimeout(() => { dropTimer = 0; el.classList.remove("cm-drop"); }, DROP_MS);
+    }
+    if (Number.isFinite(used)) lastUsed = used;
+    el.className = `cm lv-${shown.level}${compacting ? " cm-busy" : ""}${dropTimer ? " cm-drop" : ""}`;
     barEl.hidden = !shown.bar;
     if (shown.bar) {
       barEl.querySelector("i").style.width = `${shown.bar.fill * 100}%`;
@@ -102,5 +126,5 @@ export function ContextMeter(slot) {
     paintPop();
   }
 
-  return { el, update, destroy: close };
+  return { el, update, destroy() { clearTimeout(dropTimer); close(); } };
 }

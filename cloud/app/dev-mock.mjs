@@ -6,6 +6,7 @@
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
+// /app/__mock/compact/<live|done|off> (run_a1 compacting its context now, then the marker it leaves),
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
 // /app/__mock/harness/<ok|old> (move a chat to another harness, or a home too old to),
 // /app/__mock/notes/<ok|old> (a chat's notes, or a home too old to keep them),
@@ -37,6 +38,11 @@ let signedOut = process.env.MOCK_SIGNED_OUT === "1";
 let homeMode = "running";
 let usageMode = "ok";
 let trayMode = "ok";
+// /app/__mock/compact/live: run_a1 is compacting (transcript `compacting`,
+// which a home reads off the pane), its context near the threshold; done: the
+// marker it left and the context after it (compaction.js).
+let compactMode = "off";
+let compactSince = 0;
 let closeMode = "ok";
 let harnessMode = "ok";
 let notesMode = "ok";
@@ -227,7 +233,7 @@ function baseTranscript(a) {
     { id: id(), role: "assistant", ts: t + 100_000, text: "Typecheck caught a missing fallback in `cloud.ts`. Fixing it:" },
     { id: id(), role: "tool", ts: t + 110_000, text: "", tool: { name: "Edit", input: "src/cloud.ts  (+1 -1)", output: "-  const url: string = state.cloudUrl;\n+  const url: string = state.cloudUrl ?? DEFAULT_CLOUD_URL;", isError: false } },
     { id: id(), role: "tool", ts: t + 150_000, text: "", tool: { name: "Bash", input: "cargo test --manifest-path native/Cargo.toml", output: LONG_OUTPUT, isError: false } },
-    { id: id(), role: "system", ts: t + 160_000, text: "Context compacted. Earlier tool output was summarized." },
+    compactMarker(id(), t + 160_000),
     { id: id(), role: "user", ts: t + 30 * MIN, text: "Looks good. Can you make the composer stay above the keyboard on iPhone?" },
     { id: id(), role: "assistant", ts: t + 31 * MIN, text: "Yes. The shell now sizes itself to `visualViewport.height`, so the composer rides above the keyboard instead of being covered:\n\n```css\n.shell {\n  position: fixed;\n  top: var(--vvtop);\n  height: var(--vvh);\n}\n```\n\n```swift\n// The native shell injects the token before the page runs.\nlet script = WKUserScript(\n    source: \"window.RUDDER_NATIVE = { token: \\\"\\(token)\\\", platform: \\\"ios\\\" }\",\n    injectionTime: .atDocumentStart,\n    forMainFrameOnly: true\n)\n```\n\nI also check `window.innerHeight - visualViewport.height` to drop the bottom safe-area padding while the keyboard is open. See the [visualViewport docs](https://developer.mozilla.org/en-US/docs/Web/API/VisualViewport) for the event model.\n\n- [x] Composer above keyboard\n- [x] Cmd+Enter sends\n- [ ] Haptics on send (needs the native shell)" },
     { id: id(), role: "tool", ts: t + 33 * MIN, text: "", tool: { name: "WebFetch", input: "https://rudder-home.tail4c2e1.ts.net:3000/health", output: null, isError: false } },
@@ -236,6 +242,12 @@ function baseTranscript(a) {
   if (a.status === "waiting") msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
   else if (a.lastMessage) msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
   return msgs;
+}
+
+// A compaction as worker/transcripts.mjs reads Claude Code's (compactMessage).
+function compactMarker(id, ts, { pre = 367_082, post = 24_989, ms = 63_301 } = {}) {
+  return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger: "auto", preTokens: pre, postTokens: post, durationMs: ms,
+    summary: "## Primary request\nBuild the phone-first web app under `cloud/app`: transcripts render markdown, code and tool calls, and scroll stays pinned at the bottom.\n\n## Done so far\n1. Read the workspace routes in `cloud/src/server.ts` and settled the `/api/app/*` contract\n2. Built the shell and the three screens\n3. Fixed the `cloud.ts` typecheck error (`state.cloudUrl` can be undefined)\n\n## Next\n- Keep the composer above the keyboard on iPhone\n- Verify on a 393px viewport in light and dark" } };
 }
 
 // Subagents (worker/transcripts.mjs `subagent`, cloud/app/subagents.js): a
@@ -434,6 +446,13 @@ function mockStats(a) {
     : { model: "claude-opus-5-5", speed, context: { used: 153_502, window: 400_000, modelWindow: 1_000_000, autoCompactWindow: 400_000, at: end, compactedAt: null } };
 }
 const toMsMock = (t) => (typeof t === "number" ? t : Date.parse(t));
+// The composer's context meter (worker/context-usage.mjs). run_a1 nears its
+// threshold while it compacts and drops after (/app/__mock/compact).
+function mockContext(a) {
+  if (a.fresh || a.backend !== "claude") return null;
+  const used = a.id !== "run_a1" ? 153_502 : compactMode === "live" ? 366_812 : compactMode === "done" ? 26_140 : 241_930;
+  return { used, window: 400_000, autoCompactAt: 367_000, source: "autoCompactWindow 400000 in ~/.claude/settings.json", at: toMsMock(a.updatedAt) };
+}
 // Claude Code's suggested next prompt (worker/suggestion.mjs) for the idle
 // Claude agent; its plugin clears it when the next turn starts.
 const suggestions = new Map([["run_a3", { text: "Merge it, then add the preview links to the README", at: T0 - 17 * MIN }]]);
@@ -936,6 +955,16 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { Location: "/app" });
     return res.end();
   }
+  if (p.startsWith("/app/__mock/compact/")) {
+    compactMode = p.split("/").pop();
+    const t = transcriptFor("wsp_rudder", "run_a1");
+    const msgs = t.msgs.filter((m) => m.id !== "compact-live");
+    if (compactMode === "live") compactSince = now() - 41_000;
+    if (compactMode === "done") msgs.push(compactMarker("compact-live", now(), { pre: 367_412, post: 26_140, ms: 58_200 }));
+    transcripts.set("run_a1", msgs);
+    res.writeHead(302, { Location: "/app/p/wsp_rudder/a/run_a1" });
+    return res.end();
+  }
   if (p.startsWith("/app/__mock/update/")) { updateMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/all/new" }); return res.end(); }
   if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p === "/app/__mock/file-ref/ok" || p === "/app/__mock/file-ref/old") {
@@ -1114,7 +1143,8 @@ const server = http.createServer(async (req, res) => {
       const start = at("after") ?? Math.max(0, end - limit);
       const page = { runId: t.a.id, conversation: t.a.id, earlier: start > 0 ? `${t.a.id}:${start}:` : null, messages: t.msgs.slice(start, end) };
       if (url.searchParams.has("before")) return json(res, 200, page);
-      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null });
+      const compacting = t.a.id === "run_a1" && compactMode === "live" ? { since: compactSince } : null;
+      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), context: mockContext(t.a), compacting, suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {

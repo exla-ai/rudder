@@ -8329,6 +8329,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -10596,6 +10597,7 @@ fn delete_agent_requires_second_d() {
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -30382,6 +30384,28 @@ fn a_long_agent_list_does_not_hide_claudes_spinner() {
     let idle = claude_2_1_328_idle_lead_with_agents();
     assert!(!recent_lines_look_busy(Backend::Claude, &idle));
     assert!(terminal_at_idle_prompt(Backend::Claude, &idle));
+}
+
+#[test]
+fn claudes_compaction_spinner_marks_the_pane_compacting() {
+    let compacting: Vec<String> = [
+        "⏺ Updated the marker.",
+        "",
+        "✻ Compacting conversation… (41s · ↓ 1.2k tokens)",
+        "",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(claude_compacting_from_lines(&compacting));
+    // A turn's spinner, or a pane at rest, is not compacting.
+    assert!(!claude_compacting_from_lines(&claude_2_1_328_busy_lead_with_agents()));
+    assert!(!claude_compacting_from_lines(&claude_2_1_328_idle_lead_with_agents()));
 }
 
 /// Claude 2.1.328 after Esc, with eight teammates listed under its footer

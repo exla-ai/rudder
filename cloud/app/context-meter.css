@@ -34,3 +34,16 @@
 .cm-pop p { margin: 0; }
 .cm-pop .cm-main { font-variant-numeric: tabular-nums; }
 .cm-pop .cm-sub { margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+
+/* Compacting: the bar's fill shimmers. After the context shrank: the bar eases
+   down to its new size, tinted for a moment (context-meter.js). */
+.cm-bar i { transition: width 0.8s cubic-bezier(0.2, 0.7, 0.2, 1), background-color 0.4s; }
+.cm.cm-busy .cm-bar i {
+  background: linear-gradient(90deg, var(--muted) 0 30%, var(--ink-2) 50%, var(--muted) 70% 100%) 0 0 / 300% 100%;
+  animation: cm-busy 1.6s linear infinite;
+}
+@keyframes cm-busy { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.cm .cm-n { transition: color 0.4s; }
+.cm.cm-drop .cm-bar i { background: var(--accent); }
+.cm.cm-drop .cm-n { color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { .cm.cm-busy .cm-bar i { animation: none; background: var(--muted); } }

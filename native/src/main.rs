@@ -2731,6 +2731,12 @@ struct AgentRun {
     /// screen decides. Persisted as run.json `codexPlanMenu`: the phone shows the
     /// plan's card only while it is set.
     codex_plan_menu: bool,
+    /// When this pane first showed Claude's compaction spinner, in Unix ms,
+    /// while it still shows it (`claude_compacting_from_lines`). Nothing reaches
+    /// the session file until a compaction ends, so the screen is the only live
+    /// sign. Persisted as run.json `compactingSince` for the phone's
+    /// "Compacting context" row.
+    compacting_since: Option<u64>,
     /// A wait the BACKEND reported through its own hook, latched until something
     /// deterministic lifts it: the human answering, the agent visibly resuming,
     /// or the turn ending.
@@ -3118,6 +3124,7 @@ fn fork_row(
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -9480,6 +9487,7 @@ impl App {
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -9640,6 +9648,7 @@ impl App {
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10138,6 +10147,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10237,6 +10247,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -11454,6 +11465,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -14623,6 +14635,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -21775,6 +21788,20 @@ What to do\n\
             // status-bar repaint into a full dashboard draw.
             if had_output && !headless_planner {
                 any_dirty = true;
+            }
+            // Claude's compaction spinner came or went: run.json `compactingSince`
+            // for the phone. The spinner redraws while it runs and the pane
+            // changes when it ends, so only a pane with new output is read.
+            if had_output && !headless_planner && run.backend == Backend::Claude {
+                let compacting = claude_compacting_from_lines(&terminal.live_lines_snapshot());
+                if compacting != run.compacting_since.is_some() {
+                    run.compacting_since = compacting.then(|| {
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_millis() as u64)
+                    });
+                    changed = true;
+                }
             }
             // Feed the orchestrator's JSON event stream into its live transcript +
             // reconstructed plan text, and capture the backend session id so a refine

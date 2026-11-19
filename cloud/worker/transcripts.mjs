@@ -107,6 +107,9 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   base.edits = editablePrompts(page.lines, codex ? "codex" : "claude");
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
+  // A compaction under way. Its session gets nothing until it ends, so this
+  // is the dashboard's reading of the pane (run.json `compactingSince`, Unix ms).
+  base.compacting = live && Number.isFinite(record.compactingSince) ? { since: record.compactingSince } : null;
   // The numbers are extra: a model catalog or settings file that cannot be
   // read says so in `stats.error` and the conversation still shows.
   try {
@@ -828,11 +831,16 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
   let promptSeen = false;
   function add(entry, offset) {
     stats?.add(entry);
+    // Claude Code writes a compaction once it ends (2.1.328): this boundary
+    // with what set it off and the context's size before and after, then the
+    // summary it carries on from.
     if (entry.type === "system" && entry.subtype === "compact_boundary") {
       const meta = entry.compactMetadata || {};
       push(compactMessage(entry.uuid || `compact-${offset}`, toMillis(entry.timestamp), {
         trigger: typeof meta.trigger === "string" ? meta.trigger : null,
         preTokens: Number(meta.preTokens) || null,
+        postTokens: Number(meta.postTokens) || null,
+        durationMs: Number(meta.durationMs) || null,
       }));
       return;
     }
@@ -1078,8 +1086,11 @@ function xmlUnescape(value) {
 // When an agent's context fills up, Claude Code and Codex summarize the
 // conversation and carry on from the summary. The chat shows that as one
 // marker (with the summary behind it), not as a wall of text from the user.
-function compactMessage(id, ts, { trigger = null, preTokens = null, summary = "" } = {}) {
-  return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger, preTokens, summary } };
+// `trigger` is "auto" or "manual", the token counts are the context's size
+// before and after, and `durationMs` how long it took; each is null when the
+// backend does not say.
+function compactMessage(id, ts, { trigger = null, preTokens = null, postTokens = null, durationMs = null, summary = "" } = {}) {
+  return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger, preTokens, postTokens, durationMs, summary } };
 }
 
 // A finished turn and how long it took, which the chat shows under the turn's
@@ -1198,6 +1209,10 @@ function codexReader({ stats = null, child = false } = {}) {
     },
   };
   const messages = reader.messages;
+  // Context in use after the newest response (`token_count`), and the newest
+  // compaction's marker while its size after and its duration are still to come.
+  let contextTokens = null;
+  let compaction = null;
   function add(entry, offset) {
     if (child) {
       if (entry.type === "session_meta") {
@@ -1214,13 +1229,36 @@ function codexReader({ stats = null, child = false } = {}) {
     stats?.add(entry);
     const id = `c${offset}`;
     const ts = toMillis(entry.timestamp);
+    // A compaction (0.170): `compacted` with the history it kept (its summary
+    // is encrypted, so `message` is empty; older versions wrote the summary
+    // there), then the first `token_count` of the smaller context, then the
+    // ContextCompaction item with when it started and ended. The size before
+    // is the `token_count` that came before it.
     if (entry.type === "compacted") {
-      messages.push(compactMessage(id, ts, { summary: String(entry.payload?.message || "").trim() }));
+      compaction = compactMessage(id, ts, { preTokens: contextTokens, summary: String(entry.payload?.message || "").trim() });
+      messages.push(compaction);
+      return;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
+      const used = Number(entry.payload.info?.last_token_usage?.total_tokens);
+      if (Number.isFinite(used) && used > 0) {
+        contextTokens = used;
+        if (compaction && compaction.compact.postTokens === null) {
+          compaction.compact.postTokens = used;
+        }
+      }
       return;
     }
     if (entry.type === "event_msg" && entry.payload?.type === "item_completed") {
-      // The thread a spawn_agent call started.
       const item = entry.payload.item;
+      if (item?.type === "ContextCompaction") {
+        const took = Number(entry.payload.completed_at_ms) - Number(entry.payload.started_at_ms);
+        if (compaction && compaction.compact.durationMs === null && took > 0) {
+          compaction.compact.durationMs = took;
+        }
+        return;
+      }
+      // The thread a spawn_agent call started.
       const spawn = item?.type === "SubAgentActivity" && item.kind === "started" ? reader.spawns.get(item.id) : null;
       if (spawn && typeof item.agent_thread_id === "string" && /^[A-Za-z0-9-]+$/.test(item.agent_thread_id)) {
         spawn.threadId = item.agent_thread_id;

@@ -18,6 +18,7 @@ import { NOTES_ICON, followNotes, notesButton, openNotes } from "/app/notes.js";
 import { followTerminal, setTerminal, terminalOpen } from "/app/terminal-panel.js";
 import { followFileLink, mountFileRefs } from "/app/file-link.js";
 import { mountCommandPalette } from "/app/command-palette.js";
+import { Tabs } from "/app/tabs.js";
 import { agentModelLabel, openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
 import { mountSlashMenu } from "/app/slash-menu.js";
@@ -806,13 +807,25 @@ function DesktopShell() {
   // the main area, or use "Open beside" in its menu. At most two panes;
   // the URL follows the focused one. Remembered per viewer until closed.
   const panes = [...main.querySelectorAll(".dsk-pane")].map((paneEl) => ({ el: paneEl, route: null, screen: null }));
+  // Tabs (tabs.js), each with its own page and split, above the main area.
+  // A tab left keeps its screens: parking takes them off the panes.
+  const tabs = Tabs({
+    main, navigate, parseRoute, projectPath, findAgent, findProject, agentStatus,
+    park: () => panes.map((p) => {
+      const kept = p.screen ? { route: p.route, screen: p.screen } : null;
+      p.route = null; p.screen = null;
+      return kept;
+    }),
+    loadSplit: (s) => { split = s; },
+  });
+  main.before(tabs.el);
   const divider = main.querySelector(".pane-div");
   const dropEl = main.querySelector(".split-drop");
   const zones = [...dropEl.querySelectorAll(".sd-zone")];
-  let split = ls.get("rudder.split"); // { panes: [{ ws, run }, { ws, run }], ratio } or null
+  let split = tabs.split(); // { panes: [{ ws, run }, { ws, run }], ratio } or null
   let splitShown = false;
   let focused = 0;
-  const saveSplit = () => ls.set("rudder.split", split);
+  const saveSplit = () => tabs.saveSplit(split);
   const agentOf = (r) => (r?.name === "agent" ? { ws: r.ws, run: r.run } : null);
   const sameAgent = (x, y) => !!x && !!y && x.ws === y.ws && x.run === y.run;
   const shownAgents = () => (splitShown ? split.panes : [agentOf(route)]);
@@ -837,10 +850,10 @@ function DesktopShell() {
       const w = want[i];
       if (p.screen && p.route?.path === w?.path) return;
       p.screen?.destroy?.();
-      p.el.textContent = "";
+      p.screen?.el.remove();
       p.route = w;
-      p.screen = w ? buildScreen(w, i === 1 ? { onClose: closeSide } : {}) : null;
-      if (p.screen) p.el.appendChild(p.screen.el);
+      p.screen = w ? tabs.revive(i, w.path) || buildScreen(w, i === 1 ? { onClose: closeSide } : {}) : null;
+      if (p.screen && p.screen.el.parentElement !== p.el) p.el.appendChild(p.screen.el);
     });
     paintSplit();
     return panes[focused].screen;
@@ -871,7 +884,7 @@ function DesktopShell() {
     split = null; saveSplit();
     splitShown = false;
     panes[1].screen?.destroy?.();
-    panes[1].el.textContent = "";
+    panes[1].screen?.el.remove();
     panes[1].route = null; panes[1].screen = null;
     takeFocus(0);
   }
@@ -1401,6 +1414,7 @@ function DesktopShell() {
   function update(r) {
     if (r) route = r;
     const s = store.state;
+    tabs.update(route);
     planUsage.update(s);
     setText(el.querySelector(".avatar"), (s?.email || "?").slice(0, 1));
     setText(el.querySelector(".ds-email"), s?.email || "Settings");
@@ -1504,6 +1518,7 @@ function DesktopShell() {
       // A row lifted as the layout changes: its stand-in lives on the body.
       if (drag) { clearTimeout(drag.timer); drag.stop.abort(); drag.ghost?.remove(); drag = null; }
       planUsage.destroy();
+      tabs.destroy();
       for (const p of panes) p.screen?.destroy?.();
       el.remove();
       document.body.classList.remove("desktop", "side-closed", "ds-moving");

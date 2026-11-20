@@ -1,0 +1,57 @@
+/* Tabs in the desktop shell (tabs.js): a strip across the top of the main
+   area and its side column, the sidebar beside it at full height. */
+.dsk { grid-template-rows: auto minmax(0, 1fr); }
+.dsk-side { grid-row: 1 / -1; grid-column: 1; }
+.tab-strip { grid-row: 1; grid-column: 2 / -1; }
+.dsk-main { grid-row: 2; grid-column: 2; }
+.dsk-plan, .dsk-files { grid-row: 2; grid-column: 3; }
+
+.tab-strip {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+  height: calc(var(--sat) + 42px); padding: var(--sat) calc(var(--sar) + 10px) 0 10px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.tab-list { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 3px; overflow-x: auto; scrollbar-width: none; padding: 2px; }
+.tab-list::-webkit-scrollbar { display: none; }
+.tab {
+  position: relative; flex: 0 1 auto; width: 200px; min-width: 96px; height: 30px; display: flex; align-items: center;
+  border-radius: 8px; color: var(--muted); transition: background 120ms, color 120ms;
+}
+.tab:hover { background: color-mix(in srgb, var(--surface-2) 55%, transparent); color: var(--ink-2); }
+.tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-1); }
+.tab-b {
+  flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px;
+  border: 0; border-radius: inherit; background: none; color: inherit; font: 500 13px/1 var(--font); text-align: left; cursor: default;
+}
+.tab-b:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-ic { flex: none; display: grid; place-items: center; width: 14px; height: 14px; }
+.tab-ic svg { width: 14px; height: 14px; }
+.tab-ic .dot { width: 7px; height: 7px; }
+.tab-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Close shows on the tab on screen and the one under the pointer. */
+.tab-x {
+  flex: none; width: 22px; height: 22px; margin-right: 4px; display: grid; place-items: center;
+  border: 0; border-radius: 6px; background: none; color: var(--muted); opacity: 0;
+}
+.tab:hover .tab-x, .tab.on .tab-x, .tab-x:focus-visible { opacity: 1; }
+.tab-x:hover { background: var(--surface-3); color: var(--ink); }
+.tab-x svg { width: 12px; height: 12px; stroke-width: 2.2; }
+.tab-new {
+  flex: none; width: 30px; height: 30px; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: none; color: var(--muted);
+}
+.tab-new:hover { background: var(--surface-2); color: var(--ink); }
+.tab-new svg { width: 17px; height: 17px; }
+
+/* With the sidebar hidden, its show button sits at the strip's left end,
+   so the topbar below needs no room for it. */
+body.side-closed .tab-strip { padding-left: calc(var(--sal) + 52px); }
+.dsk > .ds-show { top: calc(var(--sat) + 4px); }
+body.desktop.side-closed .dsk .dsk-pane.p0 .topbar { padding-left: 16px; }
+
+/* A tab's screens while another tab is on screen: the size they had, out of
+   sight and out of reach (inert). */
+.dsk-pane > .screen.tab-off { position: absolute; top: 0; left: 0; visibility: hidden; opacity: 0; pointer-events: none; }
+/* The right pane, empty in a tab without a split, still holds the parked
+   screens of tabs that have one: it keeps a box, of no size, so they keep theirs. */
+.dsk-main:not(.split) > .dsk-pane.p1:has(> .screen.tab-off) { display: flex !important; position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: visible; }

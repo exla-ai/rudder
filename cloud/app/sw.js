@@ -10,6 +10,7 @@ const SHELL = [
   "/app/agent-stats.js", "/app/context-meter.js", "/app/compaction.js", "/app/goal-chip.js", "/app/agent-menu.js", "/app/command-palette.js", "/app/command-rank.js", "/app/closing.js", "/app/all-agents.js", "/app/home-update.js", "/app/canvas-panel.js", "/app/chat-edit.js",
   "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/side-panel.js", "/app/notes.js", "/app/file-link.js", "/app/file-refs.js", "/app/tool-files.js", "/app/pending.js", "/app/tailscale-step.js",
   "/app/project-file-render.js", "/app/slash-menu.js", "/app/slash-rank.js", "/app/subagents.js", "/app/subagent-tray.js", "/app/terminal-client.js", "/app/terminal-panel.js", "/app/terminal-recovery.js",
+  "/app/tabs.js", "/app/tabs.css",
   "/app/styles.css", "/app/desktop.css", "/app/side-panel.css", "/app/files-panel.css", "/app/canvas-panel.css", "/app/terminal-panel.css", "/app/files-hub.css",
   "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/home-update.css", "/app/context-meter.css", "/app/compaction.css", "/app/notes.css", "/app/file-link.css", "/app/subagent-tray.css", "/app/command-palette.css", "/app/quote-reply.css", "/app/tailscale-step.css",
   "/app/manifest.webmanifest", "/app/icon.svg", "/app/favicon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",

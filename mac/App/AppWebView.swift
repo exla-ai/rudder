@@ -9,7 +9,7 @@ import WebKit
 /// talks back through `window.webkit.messageHandlers.rudder.postMessage`:
 ///
 /// - `signIn` / `signOut`: the token was rejected, or the user signed out.
-/// - `openExternal {url}`: the default browser.
+/// - `openExternal {url}`: the system URL handler.
 /// - `badge {count}`: the Dock badge.
 /// - `notify {title, body, path}`: a macOS notification; a click opens `path`.
 /// - `localStatus {id?}`: answered with `window.rudderLocalStatus({id, rudder,
@@ -179,8 +179,7 @@ struct AppWebView: NSViewRepresentable {
 
         // MARK: Navigation
 
-        // Pages of the app stay in the window; everything else (previews,
-        // GitHub, docs) opens in the default browser.
+        // Pages of the app stay in the window. External links use the system URL handler.
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
@@ -293,7 +292,8 @@ struct AppWebView: NSViewRepresentable {
         }
 
         private func openExternally(_ url: URL) {
-            guard let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return }
+            guard let scheme = url.scheme?.lowercased(), ["http", "https", "mailto", "vnc"].contains(scheme) else { return }
+            if scheme == "vnc", url.host?.isEmpty != false || url.password != nil { return }
             NSWorkspace.shared.open(url)
         }
     }

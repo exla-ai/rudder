@@ -24,10 +24,20 @@ export function loadMarkdown() {
   ]).then(([m, p, h]) => {
     const marked = new m.Marked({ gfm: true, breaks: false });
     const purify = p.default;
+    purify.addHook("uponSanitizeAttribute", (node, attr) => {
+      if (node.tagName !== "A" || attr.attrName !== "href" || !/^vnc:\/\//i.test(attr.attrValue)) return;
+      try {
+        const url = new URL(attr.attrValue);
+        if (url.hostname && !url.password) attr.forceKeepAttr = true;
+      } catch { /* Let the sanitizer drop malformed links. */ }
+    });
     purify.addHook("afterSanitizeAttributes", (node) => {
-      if (node.tagName === "A" && node.getAttribute("href")) {
+      if (node.tagName !== "A") return;
+      const href = node.getAttribute("href");
+      if (href) {
         node.setAttribute("target", "_blank");
         node.setAttribute("rel", "noopener noreferrer");
+        if (/^vnc:/i.test(href)) node.setAttribute("title", href);
       }
     });
     libs = { marked, purify, hljs: h.default };

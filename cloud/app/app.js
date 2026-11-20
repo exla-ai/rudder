@@ -6,6 +6,7 @@ import {
 
 import {
   app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
+  noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
@@ -198,6 +199,7 @@ async function refreshState() {
       applyAgentEdits(store.state);
       store.stateError = null;
       store.signedOut = false;
+      noteSignedIn();
       // An invite or Slack link opened while signed out reopens once signed in.
       if (!store.pendingChecked) {
         store.pendingChecked = true;
@@ -2682,11 +2684,13 @@ function SignInScreen() {
       <p class="pair-error" role="alert" hidden></p></form>`);
   pair.addEventListener("submit", (event) => {
     event.preventDefault();
+    noteSignInClicked("pair");
     redeemPairCode(pair.querySelector("input").value, pair.querySelector(".pair-error"));
   });
+  noteSignInViewed();
   if (NATIVE) {
     const b = h(`<button type="button" class="btn primary block">Sign in</button>`);
-    b.addEventListener("click", () => postNative({ type: "signIn" }));
+    b.addEventListener("click", () => { noteSignInClicked("native"); postNative({ type: "signIn" }); });
     actions.appendChild(b);
   } else {
     const g = h(`<button type="button" class="btn primary block">${icon("google")}<span>Continue with Google</span></button>`);
@@ -2694,9 +2698,9 @@ function SignInScreen() {
     // localStorage copy for servers that ignore it).
     const next = parseRoute(location.pathname).needsAccount ? location.pathname : "";
     const loginUrl = (q) => { const u = new URLSearchParams(q); if (next) u.set("next", next); const s = u.toString(); return `/app/login${s ? `?${s}` : ""}`; };
-    g.addEventListener("click", () => { location.href = loginUrl({}); });
+    g.addEventListener("click", () => { noteSignInClicked("google"); location.href = loginUrl({}); });
     const gh = h(`<div class="alt"><button type="button">Use GitHub instead</button></div>`);
-    gh.querySelector("button").addEventListener("click", () => { location.href = loginUrl({ provider: "github" }); });
+    gh.querySelector("button").addEventListener("click", () => { noteSignInClicked("github"); location.href = loginUrl({ provider: "github" }); });
     // Signing in needs only Google or GitHub; a code from `rudder cloud app`
     // is the optional shortcut, so it waits behind a link.
     const have = h(`<div class="alt"><button type="button">Have a code from <code>rudder cloud app</code>?</button></div>`);
@@ -4857,6 +4861,7 @@ function restoreLastRoute() {
   if (r.name === "agent") { depth = 2; history.pushState({ depth }, "", agentPath(r.ws, r.run)); }
 }
 
+noteAppOpened();
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);
 // /app/join/<token> and /app/link/slack/<code> need an account: if signing in
 // comes first, the link is waiting afterwards.

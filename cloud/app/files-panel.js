@@ -5,7 +5,7 @@
 // Every read and save goes through the home's file service with an observed
 // workspace scope: the project checkout or a live agent's own workspace (its
 // fork mount on Linux). The browser never names a host path.
-import { api } from "/app/core.js";
+import { api, track } from "/app/core.js";
 import { h, icon } from "/app/render.js";
 import { FileTree, FileView, iconButton, errorRow } from "/app/file-view.js";
 import { dropdown } from "/app/select.js";
@@ -124,6 +124,7 @@ async function togglePanel(target) {
   if (state.open && sameTarget(state.target, target)) { await closePanel(); return; }
   if (!(await openSide(panel))) return;
   state.open = true;
+  track("feature_used", { feature: "files" });
   if (!sameTarget(state.target, target)) {
     if (!(await view.discardOk())) return;
     await retarget(target);

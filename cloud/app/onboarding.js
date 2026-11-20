@@ -5,7 +5,7 @@
 import { h, icon, setText, copyText } from "/app/render.js";
 import { app, api, ls, PLATFORM, openExternal, showError, toast, track } from "/app/core.js";
 
-export const DOWNLOAD_MAC_URL = "https://rudder.exla.ai/download/mac";
+export const DOWNLOAD_MAC_URL = "https://rudder.exla.ai/download/mac?from=app";
 export const PHONE_APP_URL = "https://rudder.exla.ai/download/ios";
 export const INSTALL_LINE = "npm i -g @exla/rudder && rudder login";
 

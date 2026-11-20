@@ -37,6 +37,27 @@ final class AppModel {
 
     static let pollInterval: Duration = .seconds(30)
     static let lastURLKey = "lastURL"
+    static let deviceKey = "analyticsDevice"
+
+    // MARK: First open
+
+    /// Counts this Mac's first launch, which comes before sign-in (native
+    /// here, so the web app never sees it): a random id kept in UserDefaults,
+    /// which the control plane hashes, and nothing else about the Mac. A Mac
+    /// that is already signed in (an update) only gets its id.
+    func noteFirstOpen() {
+        guard UserDefaults.standard.string(forKey: Self.deviceKey) == nil else { return }
+        let device = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(device, forKey: Self.deviceKey)
+        guard session.token == nil else { return }
+        var request = URLRequest(url: RudderLinks.anonEventURL(session.server))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["name": "app_first_opened", "device": device, "props": ["platform": "mac"]]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let ping = request
+        Task { _ = try? await URLSession.shared.data(for: ping) }
+    }
 
     // MARK: Window and navigation
 

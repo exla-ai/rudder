@@ -125,6 +125,58 @@ export function track(name, props) {
   } catch { /* never throws */ }
 }
 
+/*
+ * Before sign-in there is no account, so the first steps (first open, the
+ * sign-in screen, a sign-in button, signed in) are keyed by a random id this
+ * device keeps. The server hashes it; nothing else about the device goes with
+ * it (cloud/src/product-analytics.ts DEVICE_EVENTS).
+ */
+const DEVICE_KEY = "rudder.device";
+const SIGNIN_KEY = "rudder.signinPending";
+function trackDevice(name, props) {
+  const device = ls.get(DEVICE_KEY);
+  if (typeof device !== "string") return;
+  try {
+    fetch("/api/app/anon-event", {
+      method: "POST", headers: { "Content-Type": "application/json" }, credentials: "omit", cache: "no-store", keepalive: true,
+      body: JSON.stringify({ name, device, props: { platform: PLATFORM || "browser", ...(props || {}) } }),
+    }).catch(() => {});
+  } catch { /* never throws */ }
+}
+
+/** Gives this device its id on its first open, and counts that open. A device
+ * that used the app before (a rudder.* key in storage) gets its id quietly, so
+ * a release is not a wave of first opens. The Mac app counts its own first
+ * open in the native shell, where it signs in. */
+export function noteAppOpened() {
+  if (typeof ls.get(DEVICE_KEY) === "string") return;
+  let used;
+  try { used = Object.keys(localStorage).some((k) => k.startsWith("rudder.")); } catch { return; }
+  ls.set(DEVICE_KEY, crypto.randomUUID());
+  if (!used && PLATFORM !== "mac") trackDevice("app_first_opened");
+}
+
+let signInViewed = false;
+export function noteSignInViewed() {
+  if (signInViewed) return;
+  signInViewed = true;
+  trackDevice("signin_viewed");
+}
+
+/** provider: google, github, pair or native. */
+export function noteSignInClicked(provider) {
+  ls.set(SIGNIN_KEY, provider);
+  trackDevice("signin_clicked", { provider });
+}
+
+/** The first signed-in load after a sign-in button on this device. */
+export function noteSignedIn() {
+  const provider = ls.get(SIGNIN_KEY);
+  if (typeof provider !== "string") return;
+  ls.remove(SIGNIN_KEY);
+  trackDevice("signin_completed", { provider });
+}
+
 /* Toasts + dialogs --------------------------------------------------- */
 
 let lastToast = { text: "", at: 0 };

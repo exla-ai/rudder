@@ -12,7 +12,7 @@
 // Update now in the tray's place (home-update.js).
 
 import { h, icon, reconcile, setText } from "/app/render.js";
-import { api } from "/app/core.js";
+import { api, track } from "/app/core.js";
 import { UpdateNow } from "/app/home-update.js";
 import { paintSubagentActivity, subagentFacts } from "/app/subagents.js";
 
@@ -63,6 +63,7 @@ export function mountSubagentTray({ workspace, run }) {
 
   button.addEventListener("click", () => {
     shown = !shown;
+    if (shown) track("feature_used", { feature: "subagent_tray" });
     paint();
   });
   strip.addEventListener("click", (e) => {

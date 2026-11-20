@@ -8,6 +8,7 @@
 // screen: { label, detail?, icon (svg html), keywords?, searchOnly?, run }.
 import { h, icon, setText } from "/app/render.js";
 import { rankCommands } from "/app/command-rank.js";
+import { track } from "/app/core.js";
 
 const MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
@@ -101,5 +102,6 @@ function openPalette(rows) {
   document.body.appendChild(dlg);
   dlg.showModal();
   input.focus();
+  track("feature_used", { feature: "command_palette" });
   return { dlg, close };
 }

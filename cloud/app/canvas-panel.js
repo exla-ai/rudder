@@ -11,7 +11,7 @@
 // after its turns (cloud/worker/vibeprint-track.mjs). The frame is vibeprint's
 // own page through its relay, signed in with the token in the link's fragment
 // (frames get no cookies).
-import { api, confirmDialog, toast, ls } from "/app/core.js";
+import { api, confirmDialog, toast, ls, track } from "/app/core.js";
 import { h, icon, copyText, escapeHtml } from "/app/render.js";
 import { openSide, closeSide, placeSide, dragColumn } from "/app/side-panel.js";
 
@@ -92,6 +92,7 @@ async function togglePanel(target) {
   if (state.open && state.target?.ws === target.ws && state.target?.run === target.run) { closePanel(); return; }
   if (!(await openSide(panel))) return;
   state.open = true;
+  track("feature_used", { feature: "canvas" });
   retarget(target);
 }
 

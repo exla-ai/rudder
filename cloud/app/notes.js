@@ -9,7 +9,7 @@
 // you type; a save is taken only while the file still holds the text it was
 // loaded with, so an edit from another device is shown, never overwritten
 // silently. The home side is src/project-files/agent-notes.ts.
-import { api } from "/app/core.js";
+import { api, track } from "/app/core.js";
 import { h, icon } from "/app/render.js";
 import { iconButton } from "/app/file-view.js";
 import { UpdateNow } from "/app/home-update.js";
@@ -50,6 +50,7 @@ export function notesButton({ ws, run, findAgent }) {
 export async function openNotes(target) {
   if (open() && same(state.target, target)) return;
   if (!open() && !(await openSide(panel))) return;
+  track("feature_used", { feature: "notes" });
   retarget(target);
 }
 

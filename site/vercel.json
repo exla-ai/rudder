@@ -30,17 +30,22 @@
       "permanent": false
     },
     {
-      "source": "/download/mac",
-      "destination": "https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg",
-      "permanent": false
-    },
-    {
       "source": "/setup",
       "destination": "/docs/setup",
       "permanent": false
     }
   ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [{ "key": "Accept-CH", "value": "Sec-CH-UA-Arch" }]
+    }
+  ],
   "rewrites": [
+    {
+      "source": "/download/mac",
+      "destination": "/api/download-mac"
+    },
     {
       "source": "/health",
       "destination": "https://rudder-cloud-control.fly.dev/health"

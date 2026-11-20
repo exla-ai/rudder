@@ -29,7 +29,7 @@ import {
 import { createOrgStore, handleOrgApi } from "./orgs.js";
 import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } from "./team.js";
 import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
-import { createProductAnalytics } from "./product-analytics.js";
+import { createHomeWatch, createProductAnalytics, isInternalEmail } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
 import { sendStaticFile } from "./app-static.js";
@@ -396,10 +396,29 @@ const orgStore = createOrgStore(database);
 // workspace and run id, never in the dashboard's run.json.
 const visibilityStore = createVisibilityStore(database);
 const onboardingStore = createOnboardingStore(database);
-const productAnalytics = createProductAnalytics();
+// The team's own accounts are marked `internal` on every event (an exla.ai
+// address or an admin), so dashboards can leave them out. Only accounts with
+// a known address are cached: one without stays not internal until it has one.
+const internalAccounts = new Map<string, boolean>();
+function accountIsInternal(accountId: string): boolean {
+  const cached = internalAccounts.get(accountId);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const email = orgStore.profile(accountId).email;
+  const internal = isInternalEmail(email, adminEmails);
+  if (email) {
+    internalAccounts.set(accountId, internal);
+  }
+  return internal;
+}
+const productAnalytics = createProductAnalytics({ internal: accountIsInternal });
 const captureProductEvent = (accountId: string, name: string, props?: Record<string, unknown>): void => {
   void productAnalytics.capture(accountId, name, props);
 };
+// Agents started and agent CLIs signed in on each cloud machine, from the
+// state it publishes (product-analytics.ts createHomeWatch).
+const noteHomeState = createHomeWatch(captureProductEvent);
 // The client an app request came from (core.js sends it), for event props.
 const requestPlatform = (req: IncomingMessage): string => {
   const raw = String(req.headers["x-rudder-platform"] ?? "").toLowerCase();
@@ -407,8 +426,9 @@ const requestPlatform = (req: IncomingMessage): string => {
 };
 // app_active once per account per UTC day per platform: a daily-active count
 // without an event for every 3s poll. In memory, so a restart may count twice.
+// It carries how much the account runs: projects, agents and their harnesses.
 const appActiveSeen = new Map<string, string>();
-function noteAppActive(accountId: string, platform: string): void {
+function noteAppActive(accountId: string, platform: string, home: Workspace | null): void {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${accountId}|${platform}`;
   if (appActiveSeen.get(key) === day) {
@@ -418,7 +438,46 @@ function noteAppActive(accountId: string, platform: string): void {
     appActiveSeen.clear();
   }
   appActiveSeen.set(key, day);
-  captureProductEvent(accountId, "app_active", { platform });
+  const projects = home ? homeStates.get(home.id)?.projects ?? [] : [];
+  const agents = projects.flatMap((project) => (Array.isArray(project.agents) ? project.agents : []));
+  const harnesses = [...new Set(agents.map((agent) => (typeof agent?.backend === "string" ? agent.backend : "claude")))].sort();
+  captureProductEvent(accountId, "app_active", {
+    platform,
+    has_home: Boolean(home),
+    projects: projects.filter((project) => project.coordinator !== true).length,
+    agents: agents.length,
+    harnesses: harnesses.join(",") || "none",
+  });
+}
+// A browser that just signed in with Google or GitHub: its session is minutes
+// old the first time the app calls with it. In memory, so a restart in those
+// minutes may count one sign-in twice.
+const webSignInsSeen = new Set<string>();
+function noteWebSignIn(req: IncomingMessage, accountId: string, session: unknown): void {
+  const record = (session as { session?: { id?: unknown; createdAt?: unknown } } | null)?.session;
+  const createdAt = record?.createdAt instanceof Date ? record.createdAt.getTime() : Date.parse(String(record?.createdAt ?? ""));
+  if (typeof record?.id !== "string" || webSignInsSeen.has(record.id) || !(Date.now() - createdAt < 10 * 60 * 1000)) {
+    return;
+  }
+  if (webSignInsSeen.size > 50_000) {
+    webSignInsSeen.clear();
+  }
+  webSignInsSeen.add(record.id);
+  captureProductEvent(accountId, "signed_in", { platform: requestPlatform(req), via: "web", new_account: !findHomeRow(accountId) });
+}
+// A cloud machine's first connection after it was created: the funnel's
+// "machine ready" step, with how long it took. Wakes and reconnects are not it.
+const homeReadySeen = new Set<string>();
+function noteHomeReady(homeId: string): void {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  const accountId = optionalString(row?.account_id);
+  const createdAt = Date.parse(String(row?.created_at ?? ""));
+  const age = Date.now() - createdAt;
+  if (!row || !accountId || homeReadySeen.has(homeId) || !(age < 60 * 60 * 1000)) {
+    return;
+  }
+  homeReadySeen.add(homeId);
+  captureProductEvent(accountId, "home_ready", { ready_s: Math.round(age / 1000), host: homeHostKind(row.host_kind) });
 }
 // Slack, per org or per person. Its dependencies are functions
 // declared further down (hoisted), so the module never imports server.ts.
@@ -847,6 +906,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (url.pathname === "/api/app/sign-out") {
       handleAppSignOut(req, res);
+      return;
+    }
+    // The app's first open and sign-in screen, before there is an account.
+    if (await productAnalytics.handleAnonEventApi(req, res, url, { sendJson, readJsonBody })) {
       return;
     }
     if (url.pathname.startsWith("/api/app/")) {
@@ -1836,6 +1899,9 @@ async function handleCliLoginStart(req: IncomingMessage, res: ServerResponse): P
     client: stringField(body, "client") === "mac" ? "mac" : "cli",
   });
   cliUserCodes.set(userCode, deviceCode);
+  // The Mac app's sign-in screen is native, so this is the first the server
+  // hears of a new Mac: the sign-in it starts.
+  void productAnalytics.captureAnonymous(deviceCode, "signin_started", { platform: deviceLogins.get(deviceCode)!.client });
   const loginBase = publicLoginUrl || `${baseURL}/cli/login`;
   const separator = loginBase.includes("?") ? "&" : "?";
   sendJson(res, 200, {
@@ -1869,6 +1935,13 @@ async function handleCliLoginPoll(req: IncomingMessage, res: ServerResponse): Pr
     return;
   }
   forgetDeviceLogin(login);
+  if (login.accountId) {
+    captureProductEvent(login.accountId, "signed_in", {
+      platform: login.client,
+      via: login.approvedOnPhone ? "phone" : "browser",
+      new_account: !findHomeRow(login.accountId),
+    });
+  }
   const responseBody: JsonRecord = {
     pending: false,
     token: login.token,
@@ -5587,6 +5660,7 @@ async function createHome(accountId: string, region: string | null): Promise<Wor
     recordStartFailure("workspace", id, error);
     throw error;
   }
+  captureProductEvent(accountId, "home_created", { region: regionToUse });
   return rowToWorkspace(findWorkspaceById.get(id));
 }
 
@@ -6480,6 +6554,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
   };
   attach();
   enableSocketLiveness(ws);
+  noteHomeReady(homeId);
   markExternalHomeRunning(homeId);
   pushHomeRepos(homeId);
   flushPendingHomeDeletes(homeId);
@@ -6526,6 +6601,11 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
       const homeAccount = optionalString(homeRow?.account_id);
       if (homeRow && homeAccount) {
         void integrations.onHomeState(homeAccount, homeProjects(rowToWorkspace(homeRow)) as never);
+        noteHomeState(homeId, homeAccount, {
+          projects: homeStates.get(homeId)!.projects,
+          credentials: homeStates.get(homeId)!.credentials,
+          homeCreatedAt: Date.parse(String(homeRow.created_at ?? "")),
+        });
       }
       for (const project of homeStates.get(homeId)!.projects) {
         if (typeof project?.workspaceId === "string") {
@@ -7323,6 +7403,7 @@ async function requireAccount(req: IncomingMessage): Promise<{ accountId: string
   if (!id) {
     throw unauthorized();
   }
+  noteWebSignIn(req, String(id), session);
   return { accountId: String(id), email: typeof session?.user?.email === "string" ? session.user.email : undefined };
 }
 
@@ -7509,7 +7590,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     // idle stop (and with it the idle image update).
     const passive = url.searchParams.get("passive") === "1" || req.headers["x-rudder-passive"] === "1";
     if (!passive) {
-      noteAppActive(account.accountId, requestPlatform(req));
+      noteAppActive(account.accountId, requestPlatform(req), home);
     }
     if (home && !passive) {
       touchHome(home.id);
@@ -7584,6 +7665,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   if (req.method === "POST" && (url.pathname === "/api/app/tailscale/connect" || url.pathname === "/api/app/tailscale/disconnect")) {
     const live = await homeWithControl(account.accountId);
     const method = url.pathname.endsWith("/connect") ? "tailscaleConnect" : "tailscaleDisconnect";
+    captureProductEvent(account.accountId, "feature_used", { feature: method === "tailscaleConnect" ? "tailscale_connect" : "tailscale_disconnect", platform: requestPlatform(req) });
     sendJson(res, 200, await homeRpc(live.id, method, {}, 90_000));
     return;
   }
@@ -7635,6 +7717,8 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw badRequest("account must be main, new or an account id");
     }
     const live = await homeWithControl(account.accountId);
+    // `add`: the "+ Add account" button. Whether it worked is agent_signed_in.
+    captureProductEvent(account.accountId, "agent_login_started", { harness: provider, add: agentAccount === "new", platform: requestPlatform(req) });
     sendJson(res, 200, await homeRpc(live.id, "loginStart", { provider, account: agentAccount, device: (body as JsonRecord)?.device === true }, 60_000));
     return;
   }
@@ -7898,7 +7982,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw badRequest("summary instructions are at most 4000 characters");
     }
     const moved = await homeRpc(home.id, "agentHarness", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", backend, model, effort, account: agentAccount, instructions });
-    captureProductEvent(account.accountId, "chat_harness_switched", { platform: requestPlatform(req), backend });
+    captureProductEvent(account.accountId, "chat_harness_switched", { platform: requestPlatform(req), backend, model, effort });
     sendJson(res, 200, moved);
     return;
   }
@@ -8093,6 +8177,8 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
       ? session.user.email
       : undefined;
   const issued = issueRudderToken(String(session.user.id), verifiedEmail);
+  // Only the iOS app signs in this way (the Mac uses the device login).
+  captureProductEvent(String(session.user.id), "signed_in", { platform: "ios", via: "browser", new_account: !findHomeRow(String(session.user.id)) });
   res.statusCode = 302;
   res.setHeader("Location", `rudder://auth?token=${encodeURIComponent(issued.token)}`);
   res.end();
@@ -8203,6 +8289,7 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
   }
   pairings.delete(code);
   const issued = issueRudderToken(pairing.accountId, pairing.email);
+  captureProductEvent(pairing.accountId, "signed_in", { platform: requestPlatform(req), via: "pair", new_account: !findHomeRow(pairing.accountId) });
   schedulePersistDatabase();
   sendJson(res, 200, { token: issued.token, email: pairing.email ?? null });
 }

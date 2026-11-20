@@ -59,6 +59,11 @@ enum RudderLinks {
         server.appendingPathComponent("api/app/pair/finish")
     }
 
+    /// Product events from before sign-in (cloud/src/product-analytics.ts).
+    static func anonEventURL(_ server: URL) -> URL {
+        server.appendingPathComponent("api/app/anon-event")
+    }
+
     /// A page of the app from a path like `/app/p/<ws>/a/<run>`. Anything that
     /// is not under /app (a full url, `//host`, `/api`) is refused.
     static func pageURL(_ server: URL, path: String) -> URL? {

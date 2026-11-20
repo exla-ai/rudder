@@ -106,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppModel.shared.noteFirstOpen()
         AppModel.shared.startPolling()
         Updates.shared.start()
     }

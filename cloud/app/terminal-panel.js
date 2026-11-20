@@ -9,7 +9,7 @@
 // frame is a complete ANSI repaint of the agent's PTY, so the panel shows its
 // geometry, colors and cursor exactly, read only. Saved and legacy agents
 // keep the HTTP text screen and the key strip.
-import { api, coarse, openExternal, postNative, toast, PLATFORM } from "/app/core.js";
+import { api, coarse, openExternal, postNative, toast, track, PLATFORM } from "/app/core.js";
 import { h, icon, copyText, setText } from "/app/render.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openSide, closeSide, placeSide, dragColumn } from "/app/side-panel.js";
@@ -321,6 +321,7 @@ export async function setTerminal(target, on) {
   const wasOpen = state.open;
   if (!(await place())) return;
   state.open = true;
+  if (!wasOpen) track("feature_used", { feature: "terminal" });
   if (term) term.options.theme = readTheme();
   if (!sameTarget(state.target, target) || !state.view) await retarget(target);
   else if (!wasOpen) startStream();

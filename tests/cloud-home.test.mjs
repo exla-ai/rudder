@@ -197,7 +197,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   control.send(JSON.stringify({
     type: "state",
     tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail1.ts.net", online: true, https: true },
-    credentials: { github: { ok: true, account: "me" }, claude: { ok: false, account: "me@example.com", detail: "login expired" }, checkedAt: "2026-10-16T00:00:00.000Z" },
+    credentials: { github: { ok: true, account: "me" }, claude: [{ id: "main", default: true, ok: false, account: "me@example.com", detail: "login expired" }], checkedAt: "2026-10-16T00:00:00.000Z" },
     logins: { claude: { id: "l1", provider: "claude", mode: "browser", status: "waiting", error: null } },
     projects: [{
       workspaceId: "libra-test",
@@ -215,7 +215,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal(state.email, "me@example.com");
   assert.equal(state.home.connected, true);
   assert.equal(state.home.tailnet.dnsName, "rudder-home.tail1.ts.net");
-  assert.deepEqual(state.home.credentials.claude, { ok: false, account: "me@example.com", detail: "login expired" }, "the phone sees which login is broken");
+  assert.deepEqual(state.home.credentials.claude, [{ id: "main", default: true, ok: false, account: "me@example.com", detail: "login expired" }], "the phone sees which login is broken");
   assert.equal(state.home.logins.claude.status, "waiting", "and a sign-in in progress");
   assert.equal(state.projects[0].dashboard, "running");
   assert.equal(state.projects[0].agents[0].attention, "permission");

@@ -83,6 +83,18 @@ function refresh(workspace, run, entry, model, done, { force = false } = {}) {
 export function mountSlashMenu(composer, { workspace, run, agent, modelControl, openTerminal }) {
   const ta = composer.textarea;
   const form = composer.el.querySelector("form");
+  const input = h(`<div class="slash-input"><span class="slash-goal" aria-hidden="true" hidden>/goal</span></div>`);
+  const goal = input.firstElementChild;
+  ta.before(input);
+  input.append(ta);
+  // Keep the native text, caret and selection. Only the tint follows scroll.
+  const scrollGoal = () => { goal.style.translate = `0 ${-ta.scrollTop}px`; };
+  const paintGoal = () => {
+    goal.hidden = !/^\/goal(?=\s|$)/.test(ta.value);
+    if (!goal.hidden) scrollGoal();
+  };
+  paintGoal();
+  ta.addEventListener("scroll", scrollGoal);
   const menu = h(`<div class="slash-menu" role="listbox" aria-label="Commands" hidden></div>`);
   menu.id = `slash-menu-${seq++}`;
   composer.el.appendChild(menu);
@@ -131,6 +143,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   const row = ({ command: c, alias }, i) => {
     const el = h(`<div class="sm-row" role="option"><div class="sm-line"><span class="sm-name"></span><span class="sm-hint"></span><span class="sm-note"></span></div><div class="sm-desc"></div></div>`);
     el.id = `${menu.id}-${i}`;
+    el.classList.toggle("sm-goal", c.name === "goal");
     setText(el.querySelector(".sm-name"), `/${labelOf(c)}${alias && alias !== labelOf(c) ? ` (${alias})` : ""}`);
     const hint = el.querySelector(".sm-hint");
     if (c.hint) setText(hint, c.hint); else hint.remove();
@@ -270,7 +283,11 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
     if (e.key === "Enter" && menu.hidden && (e.metaKey || e.ctrlKey || (!coarse && !e.shiftKey))) beforeSend(e);
   }, true);
   composer.el.addEventListener("submit", beforeSend, true);
-  ta.addEventListener("input", () => { if (ta.value !== dismissed) dismissed = null; paint(); });
+  ta.addEventListener("input", () => {
+    paintGoal();
+    if (ta.value !== dismissed) dismissed = null;
+    paint();
+  });
   ta.addEventListener("focus", paint);
   ta.addEventListener("blur", close);
 }

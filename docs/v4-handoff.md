@@ -478,6 +478,7 @@ second tab. Control+Tab and Control+Shift+Tab cycle through the open tabs.
 
 Chat links open supported images and PDFs in the read-only file viewer. Bare
 image filenames in inline code also link to the viewer.
+The chat composer highlights `/goal` as you type it.
 Questions with no choices open directly to an answer field, and Enter submits
 an answer from that field. Codex question answers stay visible as queued until
 all terminal writes have delivery receipts. If the worker restarts mid-answer,

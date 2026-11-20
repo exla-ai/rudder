@@ -1,4 +1,13 @@
 /* The "/" menu above a chat's composer (slash-menu.js). */
+.slash-input { position: relative; display: flex; flex: 1; min-width: 0; overflow: hidden; }
+.slash-input textarea { position: relative; }
+.slash-goal {
+  position: absolute; inset-block-start: 7px; inset-inline-start: 0;
+  font-size: 16px; line-height: 22px; border-radius: 4px;
+  background: var(--accent-soft); color: transparent; pointer-events: none;
+  user-select: none;
+}
+.slash-input:has(textarea:placeholder-shown) .slash-goal { display: none; }
 .slash-menu {
   position: absolute;
   left: calc(var(--sal) + 10px);
@@ -24,6 +33,7 @@
 .sm-row.sm-msg { cursor: default; background: transparent; }
 .sm-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .sm-name { font: 600 13.5px/1.35 var(--mono); color: var(--ink); white-space: nowrap; flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; }
+.sm-goal .sm-name { color: var(--accent); }
 .sm-msg .sm-name { font: 600 14px/1.35 var(--font); }
 .sm-hint { font: 12.5px/1.35 var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .sm-note {

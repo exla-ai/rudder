@@ -3669,7 +3669,8 @@ function createAskCard(ask, { onAnswer }) {
   const el = h(`<section class="ask-card" role="region" aria-live="polite">
     <div class="ask-head"><span class="ask-icon"></span><span class="ask-title"></span><span class="ask-count"></span></div>
     <div class="ask-body"></div>
-    <div class="ask-actions"></div></section>`);
+    <div class="ask-actions"></div>
+    <div class="ask-desc ask-submit-status" hidden></div></section>`);
   el.setAttribute("aria-label", kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
   el.querySelector(".ask-icon").innerHTML = icon(kind === "question" ? "inbox" : kind === "plan" ? "task" : toolIcon(tool));
   setText(el.querySelector(".ask-title"), title);
@@ -3678,6 +3679,7 @@ function createAskCard(ask, { onAnswer }) {
 
   let busy = false;
   const setBusy = (on) => {
+    if (busy === on) return;
     busy = on;
     el.classList.toggle("busy", on);
     for (const b of el.querySelectorAll("button, input, textarea")) {
@@ -3689,9 +3691,15 @@ function createAskCard(ask, { onAnswer }) {
     if (busy) return;
     setBusy(true);
     const ok = await onAnswer(value);
-    if (!ok) { setBusy(false); refreshValidity(); }
+    if (!ok && status.hidden) { setBusy(false); refreshValidity(); }
   };
   let refreshValidity = () => {};
+  const status = el.querySelector(".ask-submit-status");
+  el._setSubmission = (message) => {
+    status.hidden = !message;
+    setText(status, message);
+    if (message) setBusy(true);
+  };
 
   const btn = (label, cls, fn, aria) => {
     const b = h(`<button type="button" class="btn small ${cls}"></button>`);
@@ -4063,12 +4071,35 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.append(tray.button, form);
   }
   let askCard = null;
+  let localAnswerSubmission = null;
+  let lastAnswerSubmission = null;
   function paintAsk() {
     if (ro) return;
     const agent = agentNow();
+    const confirmed = agent?.answerSubmission;
+    if (localAnswerSubmission && confirmed?.askId === localAnswerSubmission.askId) localAnswerSubmission = null;
+    const submission = localAnswerSubmission || confirmed;
+    if (submission?.status === "delivered") {
+      answeredAsks.add(submission.askId);
+      if (lastAnswerSubmission?.askId === submission.askId && lastAnswerSubmission?.status === "queued") toast("Answer submitted");
+    }
+    lastAnswerSubmission = submission;
     const asks = pendingAsks(agent);
     const ask = asks[0];
+    const tracksSubmission = submission && (!ask || submission.askId === ask.id);
+    const message = tracksSubmission && (submission.status === "queued" ? "Answer queued" : submission.error);
     if (!ask) {
+      if (message) {
+        const id = `answer:${submission.askId}`;
+        if (askCard?._askId !== id) {
+          askCard?.remove();
+          askCard = h(`<div class="ask-card ask-desc" role="status"></div>`);
+          askCard._askId = id;
+          askSlot.appendChild(askCard);
+        }
+        setText(askCard, message);
+        return;
+      }
       if (agent?.backend === "antigravity" && agent.reason === "permission" && !agent.stale) {
         const id = `antigravity-permission:${agent.remoteUrl || ""}`;
         if (askCard?._askId === id) return;
@@ -4095,12 +4126,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       askSlot.appendChild(askCard);
     }
     askCard._repaintMarkdown?.();
+    askCard._setSubmission(message || "");
     setText(askCard.querySelector(".ask-count"), asks.length > 1 ? `1 of ${asks.length}` : "");
   }
   async function answerAsk(ask, answer) {
     try {
-      await api("/api/app/answer", { method: "POST", body: { workspace: ws, run, ask: ask.id, answer } });
-      answeredAsks.add(ask.id);
+      const submission = await api("/api/app/answer", { method: "POST", body: { workspace: ws, run, ask: ask.id, answer } });
+      if (submission?.askId === ask.id) localAnswerSubmission = submission;
+      else answeredAsks.add(ask.id);
       postNative({ type: "haptic" });
       paint();
       refreshState();
@@ -4338,8 +4371,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)) } });
       item.state = res.status === "queued" ? "queued" : wasWorking ? "waiting" : "sent";
       item.requestId = res.requestId;
-      // It answered the agent's open question; the transcript shows the answer.
-      if (res?.answered) store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
+      // The question card tracks a typed answer through the same receipts.
+      if (res?.answered) {
+        localAnswerSubmission = res;
+        store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
+        void refreshState();
+      }
       setTimeout(loadTranscript, 1200);
     } catch (err) {
       item.state = "failed";

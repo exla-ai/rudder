@@ -1012,6 +1012,7 @@ dialog.sheet.antigravity-login { max-width: 476px; max-height: var(--vvh); }
 .ask-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .ask-body { display: flex; flex-direction: column; gap: 8px; }
 .ask-desc { font-size: 14px; color: var(--ink-2); }
+.ask-submit-status { margin-top: 8px; }
 .ask-path { font-family: var(--mono); font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .ask-more { font-size: 12px; color: var(--faint); }
 .ask-pre {

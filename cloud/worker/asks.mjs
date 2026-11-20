@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
 
 const ASK_ID = /^[0-9]+-[0-9a-f]{8}$/;
 
@@ -428,4 +429,81 @@ export function codexAskSteps(ask, answer) {
   }
   const open = [...Array(Math.max(1, ask.paneQuestions || 0)).fill("shift-right"), "shift-left"];
   return [{ kind: "keys", instruction: open.join(",") }, answers];
+}
+
+const UNCONFIRMED = "Delivery could not be confirmed. Check the agent’s terminal before responding.";
+
+// Store the final answer receipt beside the dashboard's individual steer
+// receipts. A supervisor restart leaves a lock for an unconfirmed answer,
+// since replaying its first write can change which question receives the keys.
+export function createCodexAnswerQueue({ changed, queue = queueSteer, wait = waitSteerReceipt }) {
+  const submissions = new Map();
+  const receiptFile = (repoDir, runId) => path.join(repoDir, ".rudder", "steer-receipts", `codex-answer-${runId}.json`);
+
+  function status(repoDir, runId) {
+    const file = receiptFile(repoDir, runId);
+    if (submissions.has(file)) return submissions.get(file);
+    let saved = null;
+    try {
+      saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const result = saved?.status === "queued"
+      ? { askId: saved.askId, status: "unknown", error: UNCONFIRMED }
+      : saved;
+    submissions.set(file, result);
+    return result;
+  }
+
+  function submit(project, runId, askId, steps, isCurrent) {
+    const file = receiptFile(project.dir, runId);
+    const prior = status(project.dir, runId);
+    if (prior?.askId === askId) return prior;
+    if (prior?.status === "queued") throw new Error("An answer is already queued for this chat.");
+
+    const result = { askId, status: "queued" };
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const save = () => {
+      const temp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify(result), { mode: 0o600 });
+      fs.renameSync(temp, file);
+    };
+    save();
+    submissions.set(file, result);
+    changed();
+
+    void (async () => {
+      let waitingForReceipt = false;
+      try {
+        for (const step of steps) {
+          if (!isCurrent()) throw new Error("The agent’s terminal changed while sending the answer.");
+          const requestId = queue(project.dir, { ...step, taskId: runId });
+          waitingForReceipt = true;
+          const receipt = await wait(project.dir, requestId, 120_000);
+          if (!receipt) {
+            Object.assign(result, { status: "unknown", error: UNCONFIRMED });
+            return;
+          }
+          waitingForReceipt = false;
+          if (receipt.status === "failed") throw new Error(receipt.error || "The dashboard could not deliver the answer.");
+        }
+        result.status = "delivered";
+      } catch (error) {
+        const failed = waitingForReceipt ? { status: "unknown", error: UNCONFIRMED } : { status: "failed", error: error.message };
+        Object.assign(result, failed);
+      } finally {
+        try {
+          save();
+        } catch {
+          // The on-disk queued receipt still blocks replay after a restart.
+          Object.assign(result, { status: "unknown", error: UNCONFIRMED });
+        }
+        changed();
+      }
+    })();
+    return { ...result };
+  }
+
+  return { submit, status };
 }

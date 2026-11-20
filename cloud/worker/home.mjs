@@ -27,7 +27,7 @@ import { writeTerminalColors } from "./theme.mjs";
 import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { listSubagents } from "./subagents.mjs";
-import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
+import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
@@ -54,6 +54,7 @@ if (!rudderDist) {
   throw new Error("RUDDER_DIST is not set: it names the Rudder dist/ directory the home loads (the worker image sets /opt/rudder/dist)");
 }
 const fromDist = (file) => pathToFileURL(path.join(rudderDist, file)).href;
+const codexAnswerQueue = createCodexAnswerQueue({ changed: scheduleStateSoon });
 const { modelName } = await import(fromDist("models.js"));
 // Several Claude Code and Codex accounts, each a config dir (src/accounts.ts).
 // Paths resolve from the agents' env: RUDDER_HOME here is a flag.
@@ -906,7 +907,7 @@ async function handleRpc(method, params) {
     const record = /^[A-Za-z0-9._-]+$/.test(runId) ? readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json")) : null;
     const question = record?.backend === "codex" ? agentAsks(record).find((ask) => ask.kind === "question") : null;
     if (question) {
-      return { ...(await answerCodexAsk(project, runId, question, codexTypedAnswer(question, text))), answered: true };
+      return { ...answerCodexAsk(project, runId, question, codexTypedAnswer(question, text)), answered: true };
     }
     let kind = "steer";
     const command = record?.backend === "opencode" && /^\/([^\s/]+)$/.exec(text.trim());
@@ -1611,7 +1612,7 @@ function readAgents(repoDir, options = {}) {
     if (!record || typeof record !== "object" || record.id !== id) {
       continue;
     }
-    agents.push(agentSummary(record, options));
+    agents.push(agentSummary(record, options, repoDir));
   }
   // A task typed a moment ago has no run record until its workspace is named;
   // dashboards before 3.9.6 list those here so the phone shows them at once.
@@ -1674,7 +1675,7 @@ function readRunJson(file) {
   return record;
 }
 
-function agentSummary(record, options = {}) {
+function agentSummary(record, options, repoDir) {
   const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
   let lastMessage = null;
   let remoteUrl = null;
@@ -1733,6 +1734,7 @@ function agentSummary(record, options = {}) {
     planId: record.planId ?? null,
     remoteUrl,
     asks: agentAsks(record),
+    ...(record.backend === "codex" && { answerSubmission: codexAnswerQueue.status(repoDir, record.id) }),
   };
 }
 
@@ -1754,17 +1756,16 @@ function agentAsks(record) {
   return record.backend === "codex" ? codexAsks(record, transcriptFile(record, HOME)) : readAsks(asksDir(record.id));
 }
 
-// The keys go into the pane; the rollout moves on once they land, and the card
-// goes with it.
-async function answerCodexAsk(project, runId, ask, answer) {
-  let delivered = null;
-  for (const step of codexAskSteps(ask, answer)) {
-    delivered = await steer(project, { ...step, taskId: runId });
-    if (delivered.status !== "delivered") {
-      break;
-    }
-  }
-  return delivered;
+// Each write waits for its receipt before the next one can enter the inbox.
+function answerCodexAsk(project, runId, ask, answer) {
+  const steps = codexAskSteps(ask, answer);
+  const dashboard = project.term;
+  if (!dashboard) throw new Error(`the ${project.name} dashboard is ${project.status}`);
+  const runFile = path.join(project.dir, ".rudder", "runs", runId, "run.json");
+  const pid = readRunJson(runFile)?.process?.pid;
+  const isCurrent = () => !project.stopped && project.term === dashboard && Number.isInteger(pid) && pid > 0 &&
+    readRunJson(runFile)?.process?.pid === pid && pidAlive(pid);
+  return codexAnswerQueue.submit(project, runId, ask.id, steps, isCurrent);
 }
 
 async function answerAsk(project, params) {
@@ -1779,7 +1780,7 @@ async function answerAsk(project, params) {
     if (!ask) {
       throw new Error("that prompt was already answered");
     }
-    return await answerCodexAsk(project, runId, ask, params.answer);
+    return answerCodexAsk(project, runId, ask, params.answer);
   }
   const dir = asksDir(runId);
   let request;

@@ -482,10 +482,12 @@ an answer from that field. Codex question answers stay visible as queued until
 all terminal writes have delivery receipts. If the worker restarts mid-answer,
 Rudder marks delivery unconfirmed and the terminal can be checked.
 
-Mac local tool discovery runs when opening a local copy. iPhone foreground
-and pull-to-refresh retry the original page after an offline navigation.
-The shared app pauses state and chat polling in the background, compresses
-both responses, and loads Markdown and syntax coloring where they are used.
+Mac local tool discovery runs when opening a local copy and refreshes the
+login shell path on retry. iPhone recovery preserves the requested page or
+digest notification link through an offline load or WebKit restart. The
+shared app pauses state and chat polling in the background, compresses both
+responses, and loads Markdown and syntax coloring where they are used. A
+send refreshes its receipt even when an earlier chat poll is still running.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

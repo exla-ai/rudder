@@ -423,6 +423,20 @@ account (agy has no config dir setting). Open: a real sign-in into an added
 account on a Cloud home and on macOS, a Codex chat resumed on another account,
 and adding accounts from the Mac dashboard.
 
+Mac release CI imports the existing Developer ID Application identity from
+`MAC_DEVELOPER_ID_P12` and `MAC_DEVELOPER_ID_PASSWORD`. It archives with Xcode
+signing disabled, signs Rudder and Sparkle with the same `sign-app.sh` used by
+local packaging, and uses the App Store Connect key for notarization. The
+current certificate expires on 2027-02-01. Renew it through the Apple Account
+Holder and replace both signing secrets. The team API key cannot issue it.
+CI published Mac 5.0.18 (5000018) on 2026-11-20 at 01:28 UTC. The public DMG
+and the copied app passed Gatekeeper and stapler validation on macOS, and
+the public Sparkle feed verified against the shipped key.
+
+Chat and subagent Markdown preserve `vnc://` link destinations and show the
+address on hover. The macOS shell opens these links in Screen Sharing.
+This change landed after the Mac 5.0.18 build.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

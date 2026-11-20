@@ -49,7 +49,10 @@ const commandOf = (text) => /^\/[^\s/]+(?=\s|$)/.exec(sentKey(text))?.[0] ?? nul
  * command instead of recording what was typed: a note names it
  * (worker/transcripts.mjs `command`), and /compact leaves a compaction.
  */
-const recorded = (m) => (m.kind === "compact" ? "/compact" : m.command ?? null);
+const recorded = (m) => {
+  if (m.kind === "compact" && m.compact?.trigger !== "auto") return "/compact";
+  return m.command ?? null;
+};
 
 /** The bubbles of `list` the transcript `messages` does not show yet. */
 export function settlePending(list, messages, now) {
@@ -57,13 +60,20 @@ export function settlePending(list, messages, now) {
   const taken = new Set();
   return list.filter((p) => {
     if (p.state === "failed") return true;
-    if (now - p.ts > KEEP_MS) return false;
     const key = matchKey(p.text, (p.files || []).map((f) => f.path));
     const command = commandOf(p.text);
-    const hit = shown.find((m) => !taken.has(m) && m.ts > p.after
-      && (m.role === "user" ? matchKey(m.text, m.attachments || []) === key : command !== null && recorded(m) === command));
-    if (!hit) return true;
-    taken.add(hit);
+    const hit = shown.find((m) => {
+      if (m.ts <= p.after || p.usedIds?.has(m.id)) return false;
+      const matches = (m.role === "user" && matchKey(m.text, m.attachments || []) === key)
+        || (command !== null && recorded(m) === command);
+      if (!matches) return false;
+      if (!taken.has(m.id)) return true;
+      // Keep this entry consumed on later polls after the earlier bubble leaves.
+      (p.usedIds ??= new Set()).add(m.id);
+      return false;
+    });
+    if (!hit) return p.state !== "sent" || now - p.ts <= KEEP_MS;
+    taken.add(hit.id);
     return false;
   });
 }

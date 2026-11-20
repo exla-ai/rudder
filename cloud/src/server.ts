@@ -7861,6 +7861,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       // Page cursors (worker/transcripts.mjs readTranscript): the messages before one, or from one on.
       before: url.searchParams.get("before"),
       after: url.searchParams.get("after"),
+      pending: url.searchParams.getAll("pending").slice(0, 40),
     });
     sendJson(res, 200, result);
     return;

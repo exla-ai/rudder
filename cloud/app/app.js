@@ -4032,9 +4032,28 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let askCard = null;
   function paintAsk() {
     if (ro) return;
-    const asks = pendingAsks(agentNow());
+    const agent = agentNow();
+    const asks = pendingAsks(agent);
     const ask = asks[0];
-    if (!ask) { if (askCard) { askCard.remove(); askCard = null; } return; }
+    if (!ask) {
+      if (agent?.backend === "antigravity" && agent.reason === "permission" && !agent.stale) {
+        const id = `antigravity-permission:${agent.remoteUrl || ""}`;
+        if (askCard?._askId === id) return;
+        askCard?.remove();
+        askCard = h(`<section class="ask-card"><div class="ask-head"><strong>Antigravity needs approval</strong></div><div class="ask-desc"></div><div class="ask-actions"><button type="button" class="btn accent"></button></div></section>`);
+        askCard._askId = id;
+        const remote = agent.remoteUrl;
+        setText(askCard.querySelector(".ask-desc"), remote ? "Review the request in Antigravity Remote Control." : "Respond in the Antigravity CLI on the machine running this agent.");
+        const review = askCard.querySelector("button");
+        setText(review, remote ? "Review in Antigravity" : "View terminal");
+        review.addEventListener("click", () => remote ? openExternal(remote) : setTerm(true));
+        askSlot.appendChild(askCard);
+      } else if (askCard) {
+        askCard.remove();
+        askCard = null;
+      }
+      return;
+    }
     if (askCard?._askId !== ask.id) {
       askCard?.remove();
       askCard = createAskCard(ask, { onAnswer: (answer) => answerAsk(ask, answer) });
@@ -4232,7 +4251,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     for (const [b, label, ic] of tucked) add(`<button type="button" role="menuitem">${ic || b.innerHTML}<span>${escapeHtml(label)}</span></button>`, () => b.click());
     menu.appendChild(h("<hr>"));
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
-    if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>Open in Claude</span></button>`, () => openExternal(a.remoteUrl));
+    if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>${a.backend === "antigravity" ? "Open in Antigravity" : "Open in Claude"}</span></button>`, () => openExternal(a.remoteUrl));
     if (canOpenOnMac() && findProject(ws)?.repo) add(`<button type="button" role="menuitem">${MAC_ICON}<span>Open a copy on this Mac</span></button>`, copyHere);
     add(`<button type="button" role="menuitem">${icon("refresh")}<span>Refresh</span></button>`, () => { loadTranscript(); refreshState(); });
     menu.appendChild(h("<hr>"));
@@ -4267,6 +4286,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })) };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
+    item.ts = Date.now();
     // Only a user message the transcript adds after this point can be this one (pending.js).
     item.after = sentAfter(store.transcripts.get(key)?.messages);
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
@@ -4280,8 +4300,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       item.state = "sending";
       paint();
+      const wasWorking = isRunning(agentNow()?.status || store.transcripts.get(key)?.status);
       const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)) } });
-      item.state = "sent";
+      item.state = res.status === "queued" ? "queued" : wasWorking ? "waiting" : "sent";
+      item.requestId = res.requestId;
       // It answered the agent's open question; the transcript shows the answer.
       if (res?.answered) store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
       setTimeout(loadTranscript, 1200);
@@ -4302,7 +4324,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // `after` cursor), so messages that scroll out of its last 300 stay shown.
     const pin = store.earlier.get(key)?.pin ?? null;
     try {
-      const t = await api(transcriptUrl(pin ? `&after=${encodeURIComponent(pin)}` : ""));
+      const page = new URLSearchParams();
+      if (pin) page.set("after", pin);
+      for (const p of store.pending.get(key) || []) {
+        if (p.state === "queued" && p.requestId) page.append("pending", p.requestId);
+      }
+      const query = page.toString();
+      const t = await api(transcriptUrl(query ? `&${query}` : ""));
       // Asked for before the first earlier page pinned it: the next poll asks again.
       if ((store.earlier.get(key)?.pin ?? null) !== pin) return;
       // An edit started a new conversation: the pages loaded above were the old one's.
@@ -4340,6 +4368,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   function reconcilePending(t) {
     const list = store.pending.get(key);
     if (!list?.length) return;
+    for (const receipt of t.receipts || []) {
+      const item = list.find((p) => p.state === "queued" && p.requestId === receipt.requestId);
+      if (!item) continue;
+      if (receipt.status === "delivered") item.state = "waiting";
+      if (receipt.status === "failed") {
+        item.state = "failed";
+        if (receipt.error) toast(receipt.error, { error: true });
+      }
+    }
     store.pending.set(key, settlePending(list, t.messages, Date.now()));
   }
 
@@ -4503,7 +4540,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "day") return h(`<div class="day"></div>`);
     if (x.kind === "empty") return emptyState({ ic: "inbox", title: "No messages yet", body: "This agent has not said anything yet. Its conversation shows up here as it works." });
     if (x.kind === "error") return emptyState({ ic: x.ic || "alert", title: x.title || "Couldn't load the conversation", body: escapeHtml(x.text) });
-    if (x.kind === "pending") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div><div class="m-foot"></div></div>`);
+    if (x.kind === "pending") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div><div class="m-foot" role="status"></div></div>`);
     if (x.kind === "compacting") return h(COMPACTING_HTML);
     if (x.kind === "steps") {
       return h(`<div class="steps"><button type="button" class="tool-row steps-row" aria-expanded="false">
@@ -4542,6 +4579,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "pending") {
       const p = x.p;
       node.className = `msg user ${p.state === "failed" ? "failed" : "pending"}`;
+      node.classList.toggle("queued", p.state === "queued" || p.state === "waiting");
       const md = node.querySelector(".md");
       // A reply's quote goes above the bubble (quote-reply.js).
       const body = paintQuote(node, p.text);
@@ -4550,7 +4588,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       md.hidden = !body;
       paintAttachments(node.querySelector(".atts"), p.files || []);
       const uploading = (p.files || []).filter((f) => !f.path).length;
-      const label = p.state === "sent" ? "Delivered" : p.state === "uploading" && uploading ? `Uploading ${p.files.length - uploading + 1} of ${p.files.length}` : "Sending";
+      let label = "Sending…";
+      if (p.state === "queued") label = "Queued";
+      else if (p.state === "waiting") label = "Waiting for agent";
+      else if (p.state === "sent") label = "Sent";
+      else if (p.state === "uploading" && uploading) label = `Uploading ${p.files.length - uploading + 1} of ${p.files.length}`;
       const foot = node.querySelector(".m-foot");
       const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button>` : `<span>${label}</span>`;
       if (foot.dataset.h !== html) { foot.innerHTML = html; foot.dataset.h = html; }

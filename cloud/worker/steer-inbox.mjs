@@ -56,6 +56,12 @@ export function waitSteerReceipt(repoDir, requestId, timeoutMs) {
   });
 }
 
+/** Read a completed receipt for a send that previously timed out. */
+export function readSteerReceipt(repoDir, requestId) {
+  if (typeof requestId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId)) return null;
+  return readReceipt(path.join(repoDir, ".rudder", "steer-receipts", `${requestId}.json`));
+}
+
 function readReceipt(file) {
   try {
     const receipt = JSON.parse(fs.readFileSync(file, "utf8"));

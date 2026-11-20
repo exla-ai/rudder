@@ -16304,10 +16304,25 @@ Address the objection directly. If you disagree, say why inside \
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
+            if matches!(kind.as_str(), "steer" | "task" | "opencode-prompt") {
+                if let Some(due) = self.agent_index_for_token(&task_id).and_then(|index| {
+                    self.pending_enters
+                        .iter()
+                        .filter(|pending| pending.run_id == self.agents[index].id)
+                        .map(|pending| pending.due)
+                        .max()
+                }) {
+                    // Leave this request in the inbox until the earlier paste's
+                    // Enter is written. Two pastes before one Enter are one prompt.
+                    self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
+                    continue;
+                }
+            }
             if valid_request_id && self.write_steer_processing(&request_id).is_err() {
                 // Do not touch the PTY until the at-most-once tombstone is
                 // durable. No file event will repeat, so retry in a second.
-                self.steer_inbox_due = Some(Instant::now() + Duration::from_secs(1));
+                let due = Instant::now() + Duration::from_secs(1);
+                self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
                 continue;
             }
             let result = match kind.as_str() {
@@ -16361,7 +16376,11 @@ Address the objection directly. If you disagree, say why inside \
                         continue;
                     }
                 },
-                "steer" | "task" => self.deliver_steer_request(&task_id, &instruction),
+                "steer" | "task" | "opencode-prompt" => self.deliver_steer_request(
+                    &task_id,
+                    &instruction,
+                    kind == "opencode-prompt",
+                ),
                 // A kind from a newer sender must not reach an agent as typed
                 // text ("park"'s reason once would have been a prompt).
                 other => SteerDelivery::Failed(format!("unknown request kind: {other}")),
@@ -16421,7 +16440,12 @@ Address the objection directly. If you disagree, say why inside \
     /// `start_task_from_input`: that is the same decision path as the task pane, so
     /// it can converse with a live conductor, refine/rebase an active plan, or start
     /// fresh work even when no conductor PTY currently exists.
-    fn deliver_steer_request(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
+    fn deliver_steer_request(
+        &mut self,
+        task_id: &str,
+        instruction: &str,
+        opencode_prompt: bool,
+    ) -> SteerDelivery {
         // The web board is now token-gated, but treat steer text as untrusted in depth:
         // Strip terminal escape/control characters while preserving intentional
         // newlines. live_inject_at wraps multiline text in bracketed paste, so
@@ -16436,6 +16460,9 @@ Address the objection directly. If you disagree, say why inside \
             || task_id.eq_ignore_ascii_case("conductor")
             || task_id.eq_ignore_ascii_case("orchestrator");
         if conductor_target {
+            if opencode_prompt {
+                return SteerDelivery::Failed("OpenCode commands need an OpenCode agent".to_string());
+            }
             self.start_task_from_input(&instruction);
             // Do not replace the notice produced by the task-input path (for
             // example a command result or a planner error); the activity stream is
@@ -16449,6 +16476,13 @@ Address the objection directly. If you disagree, say why inside \
             self.push_activity(format!("steer: target not found ({task_id})"));
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
+        if opencode_prompt && self.agents[index].backend != Backend::Opencode {
+            return SteerDelivery::Failed("the agent is no longer running OpenCode".to_string());
+        }
+        // OpenCode uses the first Enter to complete a bare prompt command.
+        // A space after the name closes autocomplete so that Enter submits it.
+        let opencode_paste = opencode_prompt.then(|| format!("{instruction} "));
+        let paste = opencode_paste.as_deref().unwrap_or(&instruction);
         let label = task_id.to_string();
         // A message for an agent sitting at its own prompt (an interactive
         // turn that finished, or a row paused with its PTY still up) is a new
@@ -16472,7 +16506,7 @@ Address the objection directly. If you disagree, say why inside \
                     self.push_activity(format!("steer: {label} not typed, {reason}"));
                     return SteerDelivery::Failed(format!("not sent: {reason}"));
                 }
-                if self.live_inject_at(index, &instruction) {
+                if self.live_inject_at(index, paste) {
                     // A browser steer is a real user turn, not an ephemeral PTY
                     // keystroke. Persist the same conversation metadata as direct
                     // worker/orchestrator input so restart/context views retain it.
@@ -16512,7 +16546,7 @@ Address the objection directly. If you disagree, say why inside \
                 // isolated workers); bring its session back the way Enter does,
                 // then type the message into it. This is the phone case: after the
                 // cloud machine restarts every row is Paused with no process.
-                if self.steer_resume_main(index, &instruction) {
+                if self.steer_resume_main(index, paste) {
                     self.push_activity(format!(
                         "resumed {label} with: \"{}\"",
                         steer_preview(&instruction)

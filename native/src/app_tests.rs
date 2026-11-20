@@ -700,6 +700,40 @@ fn poll_steer_inbox_consumes_files_and_records_unknown_target() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(not(windows))]
+#[test]
+fn steer_inbox_submits_each_message_before_pasting_the_next() {
+    let repo = unique_test_repo("steer-ordered-submit");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let mut run = test_agent_run_with_terminal(&app, fleet_note_terminal(&repo, "live"));
+    run.id = "live".to_string();
+    app.agents.push(run);
+    let inbox = repo.join(".rudder/steer");
+    fs::create_dir_all(&inbox).unwrap();
+    for (i, instruction) in ["first message", "second message"].into_iter().enumerate() {
+        let request = serde_json::json!({"requestId": format!("message-{i}"), "taskId": "live", "instruction": instruction});
+        fs::write(inbox.join(format!("request-{i}.json")), request.to_string()).unwrap();
+    }
+
+    app.poll_steer_inbox();
+    assert!(!inbox.join("request-0.json").exists());
+    assert!(inbox.join("request-1.json").exists());
+    assert!(!repo.join(".rudder/steer-receipts/message-1.json").exists());
+    assert_eq!(app.pending_enters.len(), 1);
+    assert_eq!(app.steer_inbox_due, Some(app.pending_enters[0].due));
+
+    app.pending_enters[0].due = Instant::now();
+    app.flush_pending_enters();
+    app.poll_steer_inbox();
+    assert!(!inbox.join("request-1.json").exists());
+    assert_eq!(app.agents[0].current_prompt, "second message");
+    let first = wait_for_log(&repo, "live-input", "first message");
+    assert!(!first.contains("second message"), "the first Enter submitted only its own paste");
+    drop(app);
+    fs::remove_dir_all(repo).unwrap();
+}
+
 #[test]
 fn web_approve_steer_clears_the_named_plans_gate() {
     let dir = unique_test_repo("steer-approve");
@@ -770,7 +804,7 @@ fn web_conductor_steer_uses_task_input_path_without_a_live_conductor() {
     // /help is a task-input command with no process spawn, so it proves the
     // conductor web target reached start_task_from_input rather than the old
     // "target not found" branch.
-    let _ = app.deliver_steer_request("conductor", "/help");
+    let _ = app.deliver_steer_request("conductor", "/help", false);
 
     assert!(
         app.notice
@@ -813,7 +847,7 @@ fn web_steer_running_worker_injects_and_persists_a_user_turn() {
     run.needs_user_input = true;
     app.agents.push(run);
 
-    let _ = app.deliver_steer_request("n-running", "focus on the failing parser test");
+    let _ = app.deliver_steer_request("n-running", "focus on the failing parser test", false);
     assert_eq!(
         app.notice.as_deref(),
         Some("steered n-running: \"focus on the failing parser test\"")
@@ -865,7 +899,7 @@ fn web_steer_rejects_terminal_worker_statuses() {
         run.status = status;
         app.agents.push(run);
 
-        let _ = app.deliver_steer_request("n-terminal", "change the implementation");
+        let _ = app.deliver_steer_request("n-terminal", "change the implementation", false);
 
         assert_eq!(app.agents[0].status, status);
         assert_eq!(app.agents[0].turns.len(), 1, "no turn was appended");
@@ -903,7 +937,7 @@ fn web_steer_done_worker_regoals_the_same_row() {
     run.session_id = Some("web-steer-session".to_string());
     app.agents.push(run);
 
-    let _ = app.deliver_steer_request("n-done", "also cover malformed input");
+    let _ = app.deliver_steer_request("n-done", "also cover malformed input", false);
 
     let status = app.agents[0].status;
     let current_prompt = app.agents[0].current_prompt.clone();
@@ -959,7 +993,7 @@ fn web_steer_resumes_a_stopped_worker() {
         run.session_id = Some("web-steer-session".to_string());
         app.agents.push(run);
 
-        let delivery = app.deliver_steer_request("n-stopped", "pick it back up");
+        let delivery = app.deliver_steer_request("n-stopped", "pick it back up", false);
         results.push((
             status,
             matches!(delivery, SteerDelivery::Delivered),
@@ -14500,7 +14534,7 @@ fn remote_home_task_uses_the_same_discussion_routing_once() {
     let mut app = App::new();
     app.cwd = repo.clone();
     app.backend = Backend::Codex;
-    let result = app.deliver_steer_request("conductor", "Plan the migration, planning only");
+    let result = app.deliver_steer_request("conductor", "Plan the migration, planning only", false);
     assert!(matches!(result, SteerDelivery::Delivered));
     assert_eq!(app.agents.len(), 1);
     assert_eq!(app.agents[0].mode, AgentMode::Main);
@@ -28450,7 +28484,7 @@ fn a_phone_message_is_refused_with_a_reason_when_the_pane_has_a_menu_open() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let result = app.deliver_steer_request("isabelle", "Hello?");
+    let result = app.deliver_steer_request("isabelle", "Hello?", false);
 
     match result {
         SteerDelivery::Failed(reason) => assert!(reason.contains("menu is open"), "{reason}"),

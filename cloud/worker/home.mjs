@@ -36,7 +36,7 @@ import { readProjectPlan } from "./plan.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
-import { queueSteer, waitSteerReceipt } from "./steer-inbox.mjs";
+import { queueSteer, readSteerReceipt, waitSteerReceipt } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
@@ -878,12 +878,18 @@ async function handleRpc(method, params) {
     return await agentNotes(project.dir, String(params.runId || ""), params.request);
   }
   if (method === "transcript") {
-    return readTranscript(project.dir, String(params.runId || ""), {
+    const transcript = readTranscript(project.dir, String(params.runId || ""), {
       limit: Number(params.limit) || 300,
       home: HOME,
       before: typeof params.before === "string" ? params.before : null,
       after: typeof params.after === "string" ? params.after : null,
     });
+    const receipts = [];
+    for (const requestId of Array.isArray(params.pending) ? params.pending.slice(0, 40) : []) {
+      const receipt = readSteerReceipt(project.dir, requestId);
+      if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error });
+    }
+    return { ...transcript, receipts };
   }
   if (method === "slashCommands") {
     return await slashCommands.forRun(project.dir, String(params.runId || ""));
@@ -1538,7 +1544,7 @@ async function steer(project, { kind, taskId, instruction }) {
   if (receipt?.status === "failed") {
     throw new Error(receipt.error || "the dashboard could not deliver it");
   }
-  return { ok: true, status: "queued" };
+  return { ok: true, status: "queued", requestId };
 }
 
 // ---------------------------------------------------------------------------

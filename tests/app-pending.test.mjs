@@ -27,9 +27,19 @@ test("a sent message settles on its own transcript entry, once", () => {
 
   // Both in flight before either entry shows: each settles on one entry.
   const twin = { ...first, id: "p1b", after: sentAfter(before) };
-  const twin2 = { ...first, id: "p2b", after: sentAfter(before) };
-  assert.deepEqual(settlePending([twin, twin2], withFirst, now + 2000), [twin2]);
-  assert.deepEqual(settlePending([twin, twin2], withBoth, now + 92_000), []);
+  const twin2 = { ...first, id: "p2b", state: "queued", after: sentAfter(before) };
+  const remaining = settlePending([twin, twin2], withFirst, now + 2000);
+  assert.deepEqual(remaining, [twin2]);
+  assert.deepEqual(settlePending(remaining, withFirst, now + 600_000), [twin2], "a previous entry cannot settle a queued message on a later poll");
+  assert.deepEqual(settlePending(remaining, withBoth, now + 601_000), []);
+});
+
+test("automatic compaction does not settle a queued /compact", () => {
+  const item = { id: "p4", text: "/compact", ts: now, state: "queued", after: now + skew };
+  const auto = { id: "c1", role: "system", kind: "compact", ts: now + skew + 1000, compact: { trigger: "auto" } };
+  const manual = { ...auto, id: "c2", ts: auto.ts + 1000, compact: { trigger: "manual" } };
+  assert.deepEqual(settlePending([item], [auto], now + 2000), [item]);
+  assert.deepEqual(settlePending([item], [auto, manual], now + 3000), []);
 });
 
 test("a message sent with files settles on the transcript entry with the same words and files", () => {

@@ -769,6 +769,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
         s3: Boolean(snapshotBucket),
         fabric: Boolean(fabricHttp),
         fly: Boolean(flyApiToken && flyAppName && flyWorkerImage),
+        workerImage: flyWorkerImage,
         byoVm: Boolean(snapshotBucket && flyWorkerImage),
         state: Boolean(snapshotBucket && persistStateToS3),
         secrets: Boolean(secretsKeyBase64),

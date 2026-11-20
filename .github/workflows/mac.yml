@@ -4,8 +4,8 @@
 # and every Rudder version tag (v*), or a manual run with `release: true`,
 # archives, signs with Developer ID,
 # notarizes and staples the app, wraps it in Rudder.dmg (notarized and stapled
-# too) and publishes it as the latest GitHub release, which
-# https://rudder.exla.ai/download/mac serves. The steps themselves are
+# too). When Cloud serves the matching release, the job publishes it as the
+# latest GitHub release, which https://rudder.exla.ai/download/mac serves. The steps are
 # mac/scripts/ci.sh (check, sign, notarize, dmg).
 #
 # Secrets: OFFSTAGE_API_KEY (the offstage team key), and for a release the
@@ -98,6 +98,27 @@ jobs:
           MAC_DEVELOPER_ID_P12: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_P12 || '' }}
           MAC_DEVELOPER_ID_PASSWORD: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
         run: node .offstage/mac.mjs
+      - name: Wait for the matching Cloud release
+        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          image="$(sed -n 's/^ *RUDDER_WORKER_IMAGE = "\([^"]*\)"$/\1/p' cloud/fly.toml)"
+          version="$(sed -n 's/^VERSION=//p' offstage-out/mac/build/release.env)"
+          if [[ -z "$version" || "$image" != *":$version" ]]; then
+            echo "::error::The signed Mac version does not match the worker image in cloud/fly.toml"
+            exit 1
+          fi
+          echo "Waiting for Cloud to serve $image"
+          for attempt in {1..60}; do
+            if curl -fsS --max-time 10 -H 'Cache-Control: no-cache' https://rudder.exla.ai/health \
+              | jq -e --arg image "$image" '.ok == true and .workerImage == $image' >/dev/null \
+              && curl -fsSL --max-time 10 https://rudder.exla.ai/app -o /dev/null; then
+              echo "Cloud is healthy on $image"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::Cloud did not report a healthy deployment of $image. The Mac release is held."
+          exit 1
       - name: Publish the release
         if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
         env:

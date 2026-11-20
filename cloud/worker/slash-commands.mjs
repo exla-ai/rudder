@@ -26,6 +26,9 @@
 // are identical at rust-v0.169.0 and rust-v0.170.0 (diffed), and both
 // versions' popups were read in a terminal, so both are in CODEX_VERSIONS; any
 // other Codex version is refused rather than guessed.
+//
+// OpenCode. The CLI's local /command endpoint resolves project, user and MCP
+// commands. The TUI registers its own actions separately.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -33,6 +36,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { buildOpencodeCommands, OPENCODE_VERSION, readOpencodeCommands } from "./opencode-commands.mjs";
 
 const MAX_DESCRIPTION = 400;
 
@@ -915,6 +919,30 @@ function codexStamp({ bin, cwd, env }) {
     fileStamp(path.join(cwd, ".codex", "config.toml"))].join("\n");
 }
 
+function opencodeStamp({ bin, cwd, env }) {
+  const home = env.HOME || os.homedir();
+  const config = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "opencode");
+  const real = fs.realpathSync(bin);
+  const parts = [real, fileStamp(real), env.OPENCODE_CONFIG_CONTENT || ""];
+  const configFiles = (dir) => {
+    for (const name of ["opencode.json", "opencode.jsonc"]) parts.push(fileStamp(path.join(dir, name)));
+  };
+  for (const dir of [config, env.OPENCODE_CONFIG_DIR].filter(Boolean)) {
+    configFiles(dir);
+    for (const name of ["command", "commands"]) treeStamp(path.join(dir, name), 4, parts);
+  }
+  if (env.OPENCODE_CONFIG) parts.push(fileStamp(env.OPENCODE_CONFIG));
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    configFiles(dir);
+    const dot = path.join(dir, ".opencode");
+    configFiles(dot);
+    for (const name of ["command", "commands"]) treeStamp(path.join(dot, name), 4, parts);
+    if (path.dirname(dir) === dir) break;
+  }
+  // Persist a digest, since OPENCODE_CONFIG_CONTENT can contain credentials.
+  return createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
 function readCodexModels(env) {
   const home = env.CODEX_HOME?.trim() || path.join(env.HOME || os.homedir(), ".codex");
   const file = path.join(home, "models_cache.json");
@@ -1054,7 +1082,8 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
   };
   const binaryCache = new Map(); // claude realpath -> Promise<Map>
   // Codex reads its state in milliseconds; it does not wait behind Claude.
-  const queues = { claude: buildQueue(), codex: buildQueue() };
+  const queues = { claude: buildQueue(), codex: buildQueue(), opencode: buildQueue() };
+  const opencodeBinary = () => which(env.RUDDER_OPENCODE_BIN?.trim() || "opencode", env);
 
   const claudeBinary = (bin) => {
     const real = fs.realpathSync(bin);
@@ -1091,6 +1120,22 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
       build: async ({ cwd, plugins }) => {
         const bin = which(env.RUDDER_CODEX_BIN?.trim() || "codex", env);
         return readCodexState({ bin, cwd, env, plugins });
+      },
+    },
+    opencode: {
+      key: ({ cwd }) => `opencode\n${cwd}`,
+      stamp: ({ cwd }) => opencodeStamp({ bin: opencodeBinary(), cwd, env }),
+      build: async ({ cwd }) => {
+        const bin = opencodeBinary();
+        const version = (await run(bin, ["--version"], { cwd, env })).stdout.trim();
+        if (version !== OPENCODE_VERSION) throw new Error(`OpenCode ${version} has an unverified command list`);
+        const commands = await readOpencodeCommands({ bin, cwd, env });
+        // Save only picker rows. Server responses contain project prompt templates.
+        return {
+          version,
+          withSession: buildOpencodeCommands(commands, { hasSession: true }),
+          withoutSession: buildOpencodeCommands(commands, { hasSession: false }),
+        };
       },
     },
   };
@@ -1154,6 +1199,7 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
     }
     if (backend === "claude") return { backend, input: { cwd, model: record.model?.trim() || null } };
     if (backend === "codex") return { backend, input: { cwd, plugins: codexPluginsFor(record.mode) } };
+    if (backend === "opencode") return { backend, input: { cwd } };
     throw new Error(`the app has no "/" list for ${backend} agents`);
   }
 
@@ -1167,6 +1213,10 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
     if (backend === "claude") {
       // settling: a first reading; the app asks again for the finished list.
       return { backend, ...entry.value, ...(entry.settling ? { settling: true } : {}) };
+    }
+    if (backend === "opencode") {
+      const { version, withSession, withoutSession } = entry.value;
+      return { backend, version, commands: record.session?.nativeSessionId ? withSession : withoutSession };
     }
     const { models, configModel } = readCodexModels(env);
     const model = record.model || configModel;

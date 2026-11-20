@@ -114,6 +114,16 @@ export const RudderAgent = async ({ client }) => {
   globalThis.rudderAgentLoaded = true;
 
   const post = (url, body) => client._client.post({ url, body, headers: { "Content-Type": "application/json" } });
+  const get = async (url, query) => {
+    const result = await client._client.get({ url, query, throwOnError: true });
+    return result.data;
+  };
+  const postCommand = (url, body) => client._client.post({
+    url,
+    body,
+    headers: { "Content-Type": "application/json" },
+    throwOnError: true,
+  });
   const parents = new Map(); // session -> whether it is a subagent's
   const busy = new Set(); // sessions mid-turn
   const waiting = new Map(); // OpenCode request id -> { file, answer, timer }
@@ -148,15 +158,40 @@ export const RudderAgent = async ({ client }) => {
   async function sendPrompt(sessionID) {
     if (prompted || !sessionID) return;
     prompted = true;
+    const text = env.RUDDER_OPENCODE_PROMPT;
     const model = env.RUDDER_OPENCODE_MODEL || "";
     const slash = model.indexOf("/");
-    const body = { parts: [{ type: "text", text: env.RUDDER_OPENCODE_PROMPT }], agent: env.RUDDER_OPENCODE_AGENT || "build" };
+    const body = { parts: [{ type: "text", text }], agent: env.RUDDER_OPENCODE_AGENT || "build" };
     if (slash > 0) body.model = { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
     if (env.RUDDER_OPENCODE_VARIANT) body.variant = env.RUDDER_OPENCODE_VARIANT;
+    const sessionUrl = `/session/${sessionID}`;
     try {
-      await post(`/session/${sessionID}/prompt_async`, body);
+      // A resumed TUI never sees the first message as keystrokes. Dispatch
+      // session commands through the same APIs as its slash picker.
+      const command = /^\/([^\s/]+)(?:\s+([\s\S]+))?$/.exec(text);
+      if (command && !command[2] && ["compact", "summarize"].includes(command[1])) {
+        const last = body.model ? null : (await get(`${sessionUrl}/message`, { limit: 1 })).at(-1)?.info;
+        const { providerID, modelID } = body.model ?? last?.model ?? last ?? {};
+        if (!providerID || !modelID) {
+          report("error", "select a model before compacting this session");
+          return;
+        }
+        await postCommand(`${sessionUrl}/summarize`, { providerID, modelID });
+        return;
+      }
+      if (command && (await get("/command")).some((item) => item.name === command[1])) {
+        await postCommand(`${sessionUrl}/command`, {
+          command: command[1],
+          arguments: command[2] ?? "",
+          agent: body.agent,
+          ...(body.model ? { model } : {}),
+          ...(body.variant ? { variant: body.variant } : {}),
+        });
+        return;
+      }
+      await post(`${sessionUrl}/prompt_async`, body);
     } catch {
-      report("error", "could not send the first message");
+      report("error", "could not send the first message or command");
     }
   }
   if (env.RUDDER_OPENCODE_SESSION) {
@@ -212,6 +247,12 @@ export const RudderAgent = async ({ client }) => {
   }
 
   return {
+    // OpenCode stores the expanded command as the user turn. Preserve the
+    // command name so Rudder can settle the same text in the chat composer.
+    "command.execute.before": async ({ command }, { parts }) => {
+      const text = parts.find((part) => part.type === "text");
+      if (text) text.metadata = { ...text.metadata, rudderSlashCommand: command };
+    },
     // Every user message, before OpenCode saves it and runs it: on the run's
     // own model it runs at the run's effort. Another model the user picked
     // in the pane keeps its own variant.

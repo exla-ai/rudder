@@ -1,5 +1,5 @@
 // The "/" menu in a chat's composer: what "/" offers in the agent's own CLI,
-// Claude Code's or Codex's, with their names and descriptions. The home
+// Claude Code's, Codex's or OpenCode's, with their names and descriptions. The home
 // builds each list ahead of time (cloud/worker/slash-commands.mjs). This
 // device keeps the lists it has had, so the menu shows the moment "/" is
 // typed: the agent's own last list, or for an agent not opened here yet, the
@@ -200,7 +200,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
       modelControl.el.click();
       return;
     }
-    const name = alias ?? c.name;
+    const name = data()?.backend === "opencode" ? c.name : alias ?? c.name;
     if (c.args === "required" || how === "tab" || (how === "click" && !opensTerminal(c))) {
       setValue(`/${name} `);
       close();
@@ -218,6 +218,11 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
     const c = m && find(m[1]);
     if (!c) return;
     const rest = (m[2] || "").trim();
+    // OpenCode records session actions under their canonical command. In
+    // particular /summarize and /compact leave the same compaction marker.
+    if (data()?.backend === "opencode" && m[1] !== c.name) {
+      ta.value = `/${c.name}${rest ? ` ${rest}` : ""}`;
+    }
     if (c.opens === "model" && !rest && chipWorks()) {
       e.preventDefault();
       e.stopPropagation();

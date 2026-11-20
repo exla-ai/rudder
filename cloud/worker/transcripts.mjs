@@ -725,8 +725,11 @@ function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
         .map((part) => String(part.text || ""))
         .join("\n")
         .trim();
-      if (text) {
-        messages.push({ id: row.id, role: "user", ts, text });
+      const command = row.parts.find((part) => part.metadata?.rudderSlashCommand)?.metadata.rudderSlashCommand
+        ?? row.parts.find((part) => part.type === "subtask")?.command;
+      const slash = typeof command === "string" && /^[^\s/]+$/.test(command) ? `/${command}` : null;
+      if (text || slash) {
+        messages.push({ id: row.id, role: "user", ts, text: text || slash, ...(slash ? { command: slash } : {}) });
       }
       turn = { id: row.id, at: ts };
       continue;

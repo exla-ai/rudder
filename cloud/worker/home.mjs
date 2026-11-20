@@ -908,7 +908,13 @@ async function handleRpc(method, params) {
     if (question) {
       return { ...(await answerCodexAsk(project, runId, question, codexTypedAnswer(question, text))), answered: true };
     }
-    return await steer(project, { kind: "steer", taskId: runId, instruction: text });
+    let kind = "steer";
+    const command = record?.backend === "opencode" && /^\/([^\s/]+)$/.exec(text.trim());
+    if (command && command[1] !== "compact" && command[1] !== "summarize") {
+      const { commands } = await slashCommands.forRun(project.dir, runId);
+      if (commands.some((item) => item.name === command[1] && item.prompt)) kind = "opencode-prompt";
+    }
+    return await steer(project, { kind, taskId: runId, instruction: text });
   }
   if (method === "task") {
     return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });

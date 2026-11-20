@@ -3,9 +3,9 @@
 //
 // Anonymous: no IP, user agent or cookie is kept, and each download gets a
 // random id. The event says where the click came from (?from=, the referring
-// site's domain, utm tags), the OS and chip the browser reports, and whether
-// it looks like a bot or a link preview (Slack and X fetch a link to unfurl
-// it), so dashboards can leave those out.
+// site's domain, utm tags), the country Vercel reports, the OS and chip the
+// browser reports, and whether it looks like a bot or a link preview (Slack
+// and X fetch a link to unfurl it), so dashboards can leave those out.
 const DMG = "https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg";
 const POSTHOG = "https://us.i.posthog.com/i/v0/e/";
 // The same write-only project token as site/analytics.js.
@@ -51,6 +51,8 @@ export default async function handler(req, res) {
     const fromSite = referrer === "rudder.exla.ai";
     const properties = {
       $process_person_profile: false,
+      // PostHog would locate Vercel's address, not the person's.
+      $geoip_disable: true,
       source: "site",
       app: "mac",
       from: word(url.searchParams.get("from")) || (fromSite ? "site" : referrer ? "link" : "direct"),
@@ -60,6 +62,7 @@ export default async function handler(req, res) {
       utm_campaign: word(url.searchParams.get("utm_campaign")),
       os: os(ua, req.headers["sec-ch-ua-platform"]),
       arch: arch(req.headers["sec-ch-ua-arch"]),
+      country: word(req.headers["x-vercel-ip-country"]),
       bot: BOT.test(ua),
     };
     const controller = new AbortController();

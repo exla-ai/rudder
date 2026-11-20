@@ -8,7 +8,8 @@ import { createSlashCommands } from "../cloud/worker/slash-commands.mjs";
 import { RudderAgent } from "../native/src/opencode_plugin.mjs";
 
 test("OpenCode's picker separates session actions from project and MCP prompts", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-opencode-commands-"));
+  // The fake server compares against process.cwd(), which resolves macOS's temporary directory symlink.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-opencode-commands-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dockerfile = fs.readFileSync(new URL("../cloud/worker/Dockerfile", import.meta.url), "utf8");
   assert.equal(/^ARG OPENCODE_VERSION=(\S+)$/m.exec(dockerfile)?.[1], OPENCODE_VERSION);

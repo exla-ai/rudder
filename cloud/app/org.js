@@ -6,7 +6,7 @@
 // - /app/link/slack/<code> binds a Slack user (from `/rudder link`) to this account.
 import { h, icon, setText, copyText } from "/app/render.js";
 import { app, api, ls, PLATFORM, rel, confirmDialog, openSheet, openExternal, showError, toast, track } from "/app/core.js";
-import { DOWNLOAD_MAC_URL } from "/app/onboarding.js";
+import { DOWNLOAD_MAC_URL, openTour } from "/app/tutorial.js";
 import { dropdown } from "/app/select.js";
 import { planUsageShown, setPlanUsageShown } from "/app/agent-stats.js";
 import { TailscaleCard } from "/app/tailscale-step.js";
@@ -208,7 +208,7 @@ export function SettingsScreen() {
   };
   addAct("terminal", "Sign in a computer", () => app.openComputerSignIn?.());
   const ghBtn = addAct("github", "Connect GitHub", () => app.openGithubConnect?.());
-  addAct("spark", "How you use Rudder", () => app.navigate?.("/app/welcome"));
+  addAct("spark", "Show the tour", () => openTour({ again: true }));
   if (PLATFORM !== "mac") {
     addAct("down", "Get the Mac app", () => { track("download_mac_clicked", { from: "settings" }); openExternal(DOWNLOAD_MAC_URL); });
   }

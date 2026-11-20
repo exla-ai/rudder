@@ -111,7 +111,7 @@ export function showError(err) {
 }
 
 /**
- * Product events (onboarding, orgs, integrations...). Fire and forget: a
+ * Product events (the tour, orgs, integrations...). Fire and forget: a
  * failed or refused event never reaches the person using the app.
  */
 export function track(name, props) {

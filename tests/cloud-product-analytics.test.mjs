@@ -1,25 +1,19 @@
-// Onboarding surfaces (cloud/src/onboarding.ts) and product analytics
-// (cloud/src/product-analytics.ts): validation, storage and the event
-// whitelist + sanitizer, with an injected fetch so nothing leaves the machine.
+// Product analytics (cloud/src/product-analytics.ts): the event whitelist, the
+// props sanitizer, the internal flag, device events before sign-in and the
+// cloud machine watch, with an injected fetch so nothing leaves the machine.
 import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cloudDir = path.join(path.resolve(here, ".."), "cloud");
-const built =
-  fs.existsSync(path.join(cloudDir, "dist", "onboarding.js")) &&
-  fs.existsSync(path.join(cloudDir, "dist", "product-analytics.js")) &&
-  fs.existsSync(path.join(cloudDir, "node_modules", "better-sqlite3"));
+const built = fs.existsSync(path.join(cloudDir, "dist", "product-analytics.js"));
 const test = built
   ? nodeTest
   : (name, fn) => nodeTest(name, { skip: "cloud not built (npm --prefix cloud install && npm --prefix cloud run build)" }, fn);
-const onboarding = built ? await import(path.join(cloudDir, "dist", "onboarding.js")) : null;
 const analytics = built ? await import(path.join(cloudDir, "dist", "product-analytics.js")) : null;
-const Database = built ? createRequire(path.join(cloudDir, "package.json"))("better-sqlite3") : null;
 
 function fakeRes() {
   return {
@@ -40,76 +34,6 @@ const readJsonBody = async (r) => {
   if (r.body === "BAD") throw new SyntaxError("bad json");
   return r.body ?? {};
 };
-
-test("a fresh account has no surfaces and has not finished", () => {
-  const store = onboarding.createOnboardingStore(new Database(":memory:"));
-  assert.deepEqual(store.onboardingSummary("a"), { surfaces: [], completedAt: null });
-});
-
-test("surfaces are validated, deduped and kept in canonical order", () => {
-  assert.deepEqual(onboarding.normalizeSurfaces(["phone", "web", "phone", "terminal"]), ["web", "terminal", "phone"]);
-  assert.deepEqual(onboarding.normalizeSurfaces([]), []);
-  assert.throws(() => onboarding.normalizeSurfaces(["web", "watch"]), (e) => e.status === 400);
-  assert.throws(() => onboarding.normalizeSurfaces("web"), (e) => e.status === 400);
-  assert.throws(() => onboarding.normalizeSurfaces([1]), (e) => e.status === 400);
-});
-
-test("complete stamps completedAt once and cannot be undone", () => {
-  let clock = Date.parse("2026-10-20T12:00:00Z");
-  const store = onboarding.createOnboardingStore(new Database(":memory:"), { now: () => clock });
-  assert.deepEqual(store.updateOnboarding("a", { surfaces: ["mac", "web"] }), { surfaces: ["web", "mac"], completedAt: null });
-  const done = store.updateOnboarding("a", { complete: true });
-  assert.deepEqual(done, { surfaces: ["web", "mac"], completedAt: "2026-10-20T12:00:00.000Z" });
-  clock += 60_000;
-  const again = store.updateOnboarding("a", { surfaces: ["terminal"], complete: true });
-  assert.deepEqual(again, { surfaces: ["terminal"], completedAt: "2026-10-20T12:00:00.000Z" });
-  assert.throws(() => store.updateOnboarding("a", { complete: false }), (e) => e.status === 400);
-  assert.throws(() => store.updateOnboarding("a", { complete: "yes" }), (e) => e.status === 400);
-  assert.equal(store.onboardingSummary("a").completedAt, "2026-10-20T12:00:00.000Z");
-  assert.deepEqual(store.onboardingSummary("b"), { surfaces: [], completedAt: null });
-});
-
-test("handleOnboardingApi routes GET and POST and reports errors as JSON", async () => {
-  const store = onboarding.createOnboardingStore(new Database(":memory:"));
-  const captured = [];
-  const deps = { store, sendJson, readJsonBody, capture: (id, name, props) => captured.push({ id, name, props }) };
-  const account = { accountId: "a" };
-  const url = (p) => new URL(`http://x${p}`);
-
-  assert.equal(await onboarding.handleOnboardingApi(req("GET"), fakeRes(), url("/api/app/orgs"), account, deps), false);
-
-  let res = fakeRes();
-  assert.equal(await onboarding.handleOnboardingApi(req("GET"), res, url("/api/app/onboarding"), account, deps), true);
-  assert.deepEqual([res.status, res.body], [200, { surfaces: [], completedAt: null }]);
-
-  res = fakeRes();
-  await onboarding.handleOnboardingApi(req("POST", { surfaces: ["web", "nope"] }), res, url("/api/app/onboarding"), account, deps);
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /unknown surface/);
-
-  res = fakeRes();
-  await onboarding.handleOnboardingApi(req("POST", "BAD"), res, url("/api/app/onboarding"), account, deps);
-  assert.equal(res.status, 400);
-
-  res = fakeRes();
-  await onboarding.handleOnboardingApi(req("POST", { surfaces: ["phone", "web"], complete: true }), res, url("/api/app/onboarding"), account, deps);
-  assert.equal(res.status, 200);
-  assert.deepEqual(res.body.surfaces, ["web", "phone"]);
-  assert.ok(res.body.completedAt);
-  assert.deepEqual(captured, [
-    { id: "a", name: "onboarding_completed", props: { surface_count: 2, surface_web: true, surface_mac: false, surface_terminal: false, surface_phone: true } },
-  ]);
-
-  // Completing again does not re-fire the event.
-  await onboarding.handleOnboardingApi(req("POST", { complete: true }), fakeRes(), url("/api/app/onboarding"), account, deps);
-  assert.equal(captured.length, 1);
-
-  res = fakeRes();
-  await onboarding.handleOnboardingApi(req("DELETE"), res, url("/api/app/onboarding"), account, deps);
-  assert.equal(res.status, 405);
-});
-
-// Product analytics.
 
 const noTeam = () => false;
 
@@ -220,7 +144,7 @@ test("handleEventApi answers 204 for known events and 400 for unknown ones", asy
   const account = { accountId: "acct" };
   const url = (p) => new URL(`http://x${p}`);
 
-  assert.equal(await pa.handleEventApi(req("POST"), fakeRes(), url("/api/app/onboarding"), account, deps), false);
+  assert.equal(await pa.handleEventApi(req("POST"), fakeRes(), url("/api/app/orgs"), account, deps), false);
 
   let res = fakeRes();
   assert.equal(await pa.handleEventApi(req("POST", { name: "agent_panel_opened", props: { tab: "diff" } }), res, url("/api/app/event"), account, deps), true);
@@ -249,7 +173,7 @@ test("handleEventApi answers 204 for known events and 400 for unknown ones", asy
 
 test("every contract event name is whitelisted", () => {
   const names = [
-    "onboarding_viewed", "onboarding_surface_toggled", "onboarding_completed", "org_created", "org_invite_created",
+    "tutorial_viewed", "tutorial_step", "tutorial_completed", "tutorial_skipped", "org_created", "org_invite_created",
     "org_invite_accepted", "org_member_role_changed", "org_member_removed", "integration_connect_clicked",
     "integration_connected", "integration_disconnected", "model_picked", "agent_panel_opened", "plan_panel_opened",
     "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened", "chat_model_switched",

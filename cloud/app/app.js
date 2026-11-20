@@ -32,7 +32,7 @@ import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
 import { sentAfter, settlePending, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
-import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
+import { openTour, tourDue } from "/app/tutorial.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
 import { ALL_PATH, AllAgentsScreen, allAgentPath, allAgentsButton, coordinatorTool } from "/app/all-agents.js";
@@ -151,7 +151,7 @@ function needsList() {
   return out;
 }
 
-// The feature modules (org.js, onboarding.js, model-picker.js, plan.js)
+// The feature modules (org.js, model-picker.js, plan.js, ...)
 // reach the router and store through `app`.
 Object.assign(app, {
   store, navigate: (...a) => navigate(...a), goBack: (...a) => goBack(...a), refreshState: () => refreshState(),
@@ -210,6 +210,12 @@ async function refreshState() {
       const count = needs.length;
       if (count !== store.badge) { store.badge = count; postNative({ type: "badge", count }); }
       notifyNewNeeds(needs);
+      // First open on this device: the tour, once, when the app opens on the
+      // home screen (tutorial.js). A later poll never pops it up mid-session.
+      if (!store.tourChecked) {
+        store.tourChecked = true;
+        if (tourDue() && parseRoute(location.pathname).name === "home") openTour();
+      }
     } catch (err) {
       if (err.status !== 401) {
         if (!store.stateError || store.stateError !== err.message) toast(err.message, { error: true });
@@ -531,7 +537,7 @@ function openAddProject() {
 function openSettings() { navigate("/app/settings"); }
 
 // Everything this app keeps in localStorage belongs to the signed-in account
-// (its org scope, last screen, drafts, onboarding), so a different account
+// (its org scope, last screen, drafts, the tour seen), so a different account
 // signed in next on this device starts clean instead of on the old one's.
 function forgetAccount() {
   try {
@@ -569,7 +575,6 @@ function parseRoute(path) {
     return { name: "team-agent", member: decodeURIComponent(parts[2]), tws: decodeURIComponent(parts[3]), run: decodeURIComponent(parts[4]), path };
   }
   if (parts[1] === "team") return { name: "team", path: `/app/team${location.search}` };
-  if (parts[1] === "welcome") return { name: "welcome", path: "/app/welcome" };
   // "All agents": /app/all (the newest chat), /app/all/new, /app/all/<ws>/<run>.
   if (parts[1] === "all" && parts[2] && parts[3]) return { name: "all-agent", ws: decodeURIComponent(parts[2]), run: decodeURIComponent(parts[3]), path };
   if (parts[1] === "all") return { name: "all", fresh: parts[2] === "new", path: parts[2] ? `${ALL_PATH}/new` : ALL_PATH };
@@ -654,7 +659,7 @@ const isDesktop = () => !!desktop;
 // screen, so the project screen keeps the plan as a section, as on a phone.
 const hasPlanColumn = () => isDesktop() && PLAN_COLUMN_MQ.matches;
 // Full-page screens (no sidebar), on desktop too.
-const FULL_PAGE = new Set(["join", "slack-link", "welcome", "onboarding"]);
+const FULL_PAGE = new Set(["join", "slack-link"]);
 
 function buildScreen(route, paneOpts = {}) {
   if (route.name === "project") return ProjectScreen(route.ws);
@@ -666,10 +671,8 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
   if (route.name === "all") return AllAgentsScreen({ fresh: route.fresh, store, createComposer, navigate, goBack, refreshState });
   if (route.name === "all-agent") return AgentScreen(route.ws, route.run, { allAgents: true });
-  if (route.name === "welcome") return OnboardingScreen({ again: !onboardingDue(store.state) });
   if (route.name === "join") return JoinScreen(route.token);
   if (route.name === "slack-link") return SlackLinkScreen(route.code);
-  if (route.name === "onboarding") return OnboardingScreen();
   return HomeScreen();
 }
 
@@ -677,9 +680,7 @@ function mountScreen(dir = "forward") {
   let route = null;
   if (!store.signedOut) {
     route = parseRoute(location.pathname);
-    // First run: pick how you use Rudder before anything else.
-    if (route.name === "home" && onboardingDue(store.state)) route = { name: "onboarding", path: "/app" };
-    if (!route.needsAccount && route.name !== "onboarding") ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
+    if (!route.needsAccount) ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
   }
   const wantDesktop = DESKTOP_MQ.matches && !!route && !FULL_PAGE.has(route.name);
   document.body.classList.toggle("desktop", wantDesktop);
@@ -714,8 +715,6 @@ function mountScreen(dir = "forward") {
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
   if (!store.signedOut && screen?.isSignIn) return mountScreen();
-  // The state that says onboarding is due (or done) arrives after the first paint.
-  if (!store.signedOut && parseRoute(location.pathname).name === "home" && !!screen?.isOnboarding !== onboardingDue(store.state)) return mountScreen();
   screen?.update?.();
   desktop?.update(parseRoute(location.pathname));
 }

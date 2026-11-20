@@ -1,5 +1,5 @@
-// The web app's new control-plane routes, through the REAL server: the surface
-// picker, orgs and invites, analytics, the Slack surface without
+// The web app's new control-plane routes, through the REAL server: orgs and
+// invites, analytics, the Slack surface without
 // credentials, and the pull route without a cloud machine. The modules have
 // their own unit tests; this one proves server.ts wires them and that two
 // accounts see what they should of each other.
@@ -57,7 +57,7 @@ async function waitFor(fn, { timeout = 10000, interval = 100 } = {}) {
   }
 }
 
-test("web app routes: picker, orgs, invites, analytics, integrations, pull", async (t) => {
+test("web app routes: orgs, invites, analytics, integrations, pull", async (t) => {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-cloud-web-"));
   const dbPath = path.join(dataDir, "state.sqlite");
@@ -144,15 +144,8 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
   assert.equal(active[0].properties.platform, "mac");
   assert.doesNotMatch(JSON.stringify(active[0]), /alice|acct-/);
 
-  // Surface picker: starts empty, saves a multi-select, completes once.
   let state = await ok("alice", "GET", "/api/app/state");
-  assert.deepEqual(state.onboarding, { surfaces: [], completedAt: null });
   assert.deepEqual(state.orgs, []);
-  await ok("alice", "POST", "/api/app/onboarding", { surfaces: ["phone", "web", "mac"] });
-  const done = await ok("alice", "POST", "/api/app/onboarding", { complete: true });
-  assert.deepEqual(done.surfaces, ["web", "mac", "phone"]);
-  assert.ok(done.completedAt);
-  assert.equal((await call("alice", "POST", "/api/app/onboarding", { surfaces: ["fax"] })).status, 400);
 
   // Analytics: whitelisted names are accepted, others refused.
   assert.equal((await call("alice", "POST", "/api/app/event", { name: "agent_panel_opened" })).status, 204);

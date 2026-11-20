@@ -21,9 +21,10 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 export const PRODUCT_EVENTS = [
-  "onboarding_viewed",
-  "onboarding_surface_toggled",
-  "onboarding_completed",
+  "tutorial_viewed",
+  "tutorial_step",
+  "tutorial_completed",
+  "tutorial_skipped",
   "org_created",
   "org_invite_created",
   "org_invite_accepted",

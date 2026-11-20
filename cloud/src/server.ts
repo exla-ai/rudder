@@ -28,7 +28,6 @@ import {
 } from "./slack.js";
 import { createOrgStore, handleOrgApi } from "./orgs.js";
 import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } from "./team.js";
-import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
 import { createHomeWatch, createProductAnalytics, isInternalEmail } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
@@ -389,13 +388,12 @@ database.exec(`
   );
 `);
 
-// Orgs (admins and members), the first-run surface picker, and product
-// analytics for the web app. Each module owns its tables; see cloud/src/*.ts.
+// Orgs (admins and members) and product analytics for the web app. Each
+// module owns its tables; see cloud/src/*.ts.
 const orgStore = createOrgStore(database);
 // Team view + private agents (cloud/src/team.ts): visibility per home-repo
 // workspace and run id, never in the dashboard's run.json.
 const visibilityStore = createVisibilityStore(database);
-const onboardingStore = createOnboardingStore(database);
 // The team's own accounts are marked `internal` on every event (an exla.ai
 // address or an admin), so dashboards can leave them out. Only accounts with
 // a known address are cached: one without stays not internal until it has one.
@@ -7570,9 +7568,6 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
     return;
   }
-  if (await handleOnboardingApi(req, res, url, account, { store: onboardingStore, sendJson, readJsonBody, capture: captureProductEvent })) {
-    return;
-  }
   if (await productAnalytics.handleEventApi(req, res, url, account, { sendJson, readJsonBody })) {
     return;
   }
@@ -7606,7 +7601,6 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       projects: home ? homeProjects(home) : [],
       // The "All agents" chat's project, once it was opened.
       coordinator: (home ? homeProjects(home, { coordinator: true })[0] ?? null : null) as Json,
-      onboarding: onboardingStore.onboardingSummary(account.accountId) as unknown as Json,
       orgs: orgStore.listOrgsForAccount(account.accountId) as unknown as Json,
       github: vaultGithubStatus(account.accountId),
       digest: latestDigestPreview(account.accountId),

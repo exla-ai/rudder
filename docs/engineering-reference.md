@@ -1643,10 +1643,12 @@ redirect there). It is deliberately simple: an agent panel and an orchestrator
 (plan) panel, a model picker instead of typing `/model`, no god's view. The Mac
 app is the same web UI in a native shell plus local abilities. Agents always run
 on the user's own Claude Code / Codex subscription.
-- **Surface picker** (`cloud/src/onboarding.ts`, table `rudder_onboarding`): first
-  run after sign-in asks Web / Mac app / Terminal / Phone (multi-select), then shows
-  each one's next step. `GET|POST /api/app/onboarding`; `/api/app/state` carries
-  `onboarding` and `orgs`.
+- **The tour** (`cloud/app/tutorial.js`, `tutorial.css`): the one first-run flow.
+  The first home screen on a device opens it once (localStorage `rudder.tourSeen`,
+  cleared on sign-out); Settings > Show the tour reopens it. Five or six steps,
+  each a small scripted copy of the app's UI. Fires `tutorial_viewed`,
+  `tutorial_step`, `tutorial_completed`, `tutorial_skipped` (step numbers only).
+  The old server surface picker (`rudder_onboarding`) is gone; its table is unused.
 - **Orgs** (`cloud/src/orgs.ts`): roles `admin` (adds/removes people, changes
   roles, connects integrations) and `member`. Invites are single-use links
   (`/app/join/<token>`, hash stored, 7 days, optional email lock); nothing sends
@@ -1682,7 +1684,7 @@ on the user's own Claude Code / Codex subscription.
 - **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
   whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
   anonymous (sha256 of the account id), props sanitized. Server-side events
-  (org_*, onboarding_completed, integration_*) are captured
+  (org_*, integration_*) are captured
   by the modules themselves; the client must not resend them. The server also
   counts what every client does at the route, so web, Mac, phone and voice are
   covered at once (`SERVER_ONLY_EVENTS`, which `/api/app/event` refuses):

@@ -9,7 +9,7 @@ IOS_DIR="$(cd "$(dirname "$0")/.." && pwd)"; ROOT="$(dirname "$IOS_DIR")"
 OUT="${1:-$IOS_DIR/build/screens}"; mkdir -p "$OUT"
 BUNDLE_ID=dev.viraat.rudder; PORT="${PORT:-4321}"; SERVER="http://localhost:$PORT"
 
-MOCK_ONBOARDED=1 PORT="$PORT" node "$ROOT/cloud/app/dev-mock.mjs" >"$OUT/mock.log" 2>&1 &
+PORT="$PORT" node "$ROOT/cloud/app/dev-mock.mjs" >"$OUT/mock.log" 2>&1 &
 MOCK=$!
 trap 'kill $MOCK 2>/dev/null || true' EXIT
 for _ in $(seq 50); do curl -sf "$SERVER/app" >/dev/null && break; sleep 0.2; done

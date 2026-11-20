@@ -17,7 +17,7 @@
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/tailscale/<on|off|login|approval|connecting|error|expired> (the Tailscale step's states), and
 // /app/__mock/tailscale-flow/<ok|approval|refused> (how the next Connect goes),
-// /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
+// /app/__mock/integrations/<on|off|unset>,
 // /app/__mock/invite (prints a join link), /app/__mock/files/agent-edit (an agent rewrites README.md
 // in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack and a plan are mocked too,
 // and so is the team view (two teammates in Exla, one asleep; uses cloud/dist/team.js).
@@ -608,8 +608,7 @@ function teamRoutes(req, res, p, url, body) {
   return undefined;
 }
 
-// ---------- Onboarding, orgs, invites, integrations (CONTRACT.md) ----------
-const onboarding = { surfaces: [], completedAt: process.env.MOCK_ONBOARDED === "1" ? iso(now()) : null };
+// ---------- Orgs, invites, integrations (CONTRACT.md) ----------
 const ME = "better-auth:me";
 const orgs = new Map([["org_exla", {
   id: "org_exla", name: "Exla", createdAt: iso(now() - 40 * 24 * 60 * MIN),
@@ -637,13 +636,6 @@ function orgRoutes(req, res, p, url, body) {
   const m = req.method;
   const send = (status, obj) => { if (status === 204) { res.writeHead(204); res.end(); } else json(res, status, obj); return true; };
   if (p === "/api/app/event" && m === "POST") return send(204);
-  if (p === "/api/app/onboarding") {
-    if (m === "POST") {
-      if (Array.isArray(body.surfaces)) onboarding.surfaces = body.surfaces.filter((s) => ["web", "mac", "terminal", "phone"].includes(s));
-      if (body.complete) onboarding.completedAt = iso(now());
-    }
-    return send(200, { ...onboarding });
-  }
   if (p === "/api/app/orgs") {
     if (m === "POST") {
       const name = String(body.name || "").trim();
@@ -1094,7 +1086,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("notes changed on another device\n");
   }
-  if (p === "/app/__mock/onboard") { onboarding.completedAt = null; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/integrations/")) { integMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/settings" }); return res.end(); }
   if (p === "/app/__mock/invite") {
     const token = `tok_${Math.random().toString(36).slice(2, 10)}`;
@@ -1126,7 +1117,6 @@ const server = http.createServer(async (req, res) => {
         coordinator: allMode === "lost" ? null : coordinator,
         github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
         digest: digestPreviewOf(digestStore[0]) ?? null,
-        onboarding: { ...onboarding },
         orgs: orgList(),
       });
     }

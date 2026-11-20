@@ -443,6 +443,15 @@ On Mac, the tab strip appears when a second tab opens and hides again with
 one tab. Cmd+T opens a tab while the strip is hidden. Desktop browsers keep
 the strip visible to provide the + button for opening the first extra tab.
 
+Mac and iPhone Settings show a working Claude sign-in's upcoming expiry
+separately from failed model checks. Antigravity's signed-out response is a
+sign-in state. The worker checks terminal approval controls before blocking
+chat delivery, so permission-related prose does not stop a reply.
+
+The iPhone shell's foreground and pull-to-refresh bridge reloads state using
+the token injected when the web view was created. The tutorial links directly
+to the iPhone TestFlight invite.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

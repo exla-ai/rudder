@@ -871,14 +871,27 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
         process.stdout.write("Paste code here if prompted > ");
       });
     `);
+    const loginExpiresAt = new Date(Date.now() + 5 * 86_400_000).toISOString();
+    fs.writeFileSync(path.join(bin, "agy"), `#!/bin/sh
+echo 'Error: Please sign in to view available models. Launch the CLI without arguments to sign in.' >&2
+exit 1
+`, { mode: 0o755 });
     // Each account's sign-in is in its own config dir (CLAUDE_CONFIG_DIR).
     fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
 dir="\${CLAUDE_CONFIG_DIR:-$HOME}"
 case "$1 $2" in
   "auth login") exec "${process.execPath}" "${fakeLogin}" ;;
   "auth logout") rm -f "$dir/.claude-ok" ;;
-  "auth status") if [ -f "$dir/.claude-ok" ]; then if [ -n "$CLAUDE_CONFIG_DIR" ]; then email=work@example.com; else email=me@example.com; fi; echo '{"loggedIn":true,"authMethod":"claude.ai","email":"'$email'","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
-  *) if [ -f "$dir/.claude-ok" ]; then echo OK; exit 0; fi; echo "Not logged in"; exit 1 ;;
+  "auth status") if [ -f "$dir/.claude-ok" ]; then if [ -n "$CLAUDE_CONFIG_DIR" ]; then email=work@example.com; else email=me@example.com; fi; echo '{"loggedIn":true,"authMethod":"claude.ai","email":"'$email'","subscriptionType":"max","loginExpiresAt":"${loginExpiresAt}"}'; else echo '{"loggedIn":false}'; fi ;;
+  *)
+    [ "$5 $6" = "--output-format json" ] || exit 1
+    echo 'Warning: this sign-in ends soon.' >&2
+    if [ -z "$CLAUDE_CONFIG_DIR" ]; then
+      echo '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Usage limit reached"]}'
+      exit 1
+    fi
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"Okay."}'
+    ;;
 esac
 `, { mode: 0o755 });
     const home = path.join(scratch, "home");
@@ -918,6 +931,7 @@ esac
     }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
     assert.deepEqual(state.home.credentials.claude.map((row) => [row.id, row.default, row.ok]), [["main", true, false]]);
     assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
+    assert.equal(state.home.credentials.antigravity[0].detail, "not logged in");
 
     // The supervisor reports the failed update: Cloud stops waiting on its
     // token and keeps why, and the dashboards' status file shows it.
@@ -954,8 +968,10 @@ esac
         return done(next.home?.credentials?.claude ?? []) ? next : null;
       }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
     };
-    const signedIn = await signIn("main", (rows) => rows[0]?.ok && !rows[0].checking);
+    const signedIn = await signIn("main", (rows) => rows[0]?.signedIn && !rows[0].checking);
     assert.deepEqual(signedIn.home.credentials.claude.map((row) => [row.id, row.account, row.plan]), [["main", "me@example.com", "max"]]);
+    assert.equal(signedIn.home.credentials.claude[0].ok, false);
+    assert.equal(signedIn.home.credentials.claude[0].detail, "Usage limit reached");
     assert.equal(signedIn.home.logins.claude.status, "done");
 
     // Another Claude account: its own config dir under ~/.rudder/accounts,
@@ -963,6 +979,8 @@ esac
     const added = await signIn("new", (rows) => rows.length === 2 && rows[1].ok && !rows[1].checking);
     const [, extra] = added.home.credentials.claude;
     assert.deepEqual([extra.account, extra.default], ["work@example.com", false]);
+    assert.equal(extra.loginExpiresAt, loginExpiresAt);
+    assert.equal(extra.detail, null);
     const extraDir = path.join(home, ".rudder", "accounts", "claude", extra.id);
     assert.ok(fs.existsSync(path.join(extraDir, ".claude-ok")), "the new account's sign-in is in its own dir");
     assert.equal(fs.readlinkSync(path.join(extraDir, "projects")), path.join(home, ".claude", "projects"), "its conversations are the main dir's");

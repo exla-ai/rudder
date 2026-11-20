@@ -1146,24 +1146,24 @@ fn long_chatty_line_does_not_trigger_input_need() {
 
 #[test]
 fn detects_permission_prompts_without_matching_task_text() {
-    assert!(permission_text_needs_attention(
-        "Approval required\nPress enter to approve this command, or no to deny"
-    ));
-    assert!(permission_text_needs_attention(
-        "do you want to allow this shell command to run?"
-    ));
-    assert!(permission_text_needs_attention(
-        "authorization required\npress enter to approve this operation"
-    ));
-    assert!(!permission_text_needs_attention(
-            "it allows need to maeke the sound even if the agent is waiting for permission and it should show that in the agent pane so that it's obvious"
-        ));
-    assert!(!permission_text_needs_attention(
-        "make the sound even if the agent is waiting for permission"
-    ));
-    assert!(!permission_text_needs_attention(
-        "inspect and annotate the live review, then show when waiting for permission"
-    ));
+    for rows in [
+        &["Approval required", "Press enter to approve this command, or no to deny"][..],
+        &["Authorization required", "Press enter to approve this operation"],
+    ] {
+        let lines = rows.iter().map(|row| row.to_string()).collect::<Vec<_>>();
+        assert!(terminal_needs_permission_from_lines(Backend::Claude, &lines));
+    }
+
+    // A clipped footer should not turn a conversational question or a list
+    // in the agent's reply into a permission dialog.
+    let reply = [
+        "Do you want to allow this shell command to run?",
+        "1. Yes, pass the access check.",
+        "2. No, keep the default.",
+        "──────────",
+        "❯ ",
+    ].map(str::to_string);
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &reply), None);
 }
 
 #[test]
@@ -25381,7 +25381,7 @@ fn a_codex_diff_about_permission_above_its_composer_is_not_a_prompt() {
     .iter()
     .map(|line| line.to_string())
     .collect();
-    assert!(terminal_composer_blocked(Backend::Codex, &approval).is_some());
+    assert!(terminal_needs_permission_from_lines(Backend::Codex, &approval));
 }
 
 /// A live worker whose turn ends on an API error reports it, the tab shows a

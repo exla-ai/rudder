@@ -13,7 +13,7 @@ import { INSTALL_LINE, MAC_ICON } from "/app/mac-local.js";
 
 // ?from=app: the site counts downloads that came from the app.
 export const DOWNLOAD_MAC_URL = "https://rudder.exla.ai/download/mac?from=app";
-export const PHONE_APP_URL = "https://rudder.exla.ai/download/ios";
+export const PHONE_APP_URL = "https://testflight.apple.com/join/JV4dwM6E";
 
 // Finished or skipped on this device. Signing out clears it with the rest of
 // rudder.* (app.js forgetAccount), so the next account here sees the tour too.

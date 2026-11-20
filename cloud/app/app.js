@@ -2017,11 +2017,19 @@ function accountLoginState(home, provider, account) {
   }
   if (account.ok) {
     const bits = [account.account, planLabel(account.plan)].filter(Boolean);
-    return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in" };
+    const expiration = Date.parse(account.loginExpiresAt);
+    const until = expiration - Date.now();
+    const expiring = until > 0 && until <= 10 * 86_400_000;
+    if (expiring) {
+      const date = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(expiration);
+      bits.push(`Sign-in ends by ${date}`);
+    }
+    return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in", expiring };
   }
   if (account.ok === false) {
     const detail = account.detail || "";
     const who = account.account ? `${account.account}: ` : "";
+    if (account.signedIn) return { kind: "error", pill: "Check failed", cls: "s-failed", sub: `${who}${detail}`, err: true };
     if (/expired/i.test(detail)) return { kind: "out", sub: `${who}Login expired. Sign in again.`, err: true, expired: true };
     if (/not logged in|not signed in/i.test(detail)) return { kind: "out", sub: "Not signed in" };
     return { kind: "out", sub: detail, err: true };
@@ -2123,7 +2131,9 @@ function AccountsCard() {
       sub.classList.toggle("err", !!st.err);
       // A sign-in left half done (the app closed mid-way) can be started
       // over from here; the machine drops the old one.
-      row.querySelector(".a-btn").hidden = !(st.kind === "out" || st.kind === "busy");
+      const signIn = row.querySelector(".a-btn");
+      signIn.hidden = !(st.kind === "out" || st.kind === "busy" || st.expiring);
+      setText(signIn, st.expiring ? "Sign in again" : "Sign in");
       const more = row.querySelector(".a-more");
       more.hidden = st.kind === "busy" || st.kind === "checking" || (st.kind === "out" && id === MAIN);
       more.setAttribute("aria-label", `${agent.label} account ${account.account || ""}`.trim());
@@ -2621,7 +2631,7 @@ function SetupCard() {
       sub.classList.toggle("err", !!x.err);
       row.classList.toggle("done", x.kind === "ok");
       row.querySelector(".setup-check").hidden = x.kind !== "ok";
-      row.querySelector(".a-btn").hidden = x.kind === "ok" || x.kind === "checking";
+      row.querySelector(".a-btn").hidden = x.kind === "ok" || x.kind === "checking" || x.kind === "error";
     }
   }
   return { el, update };
@@ -4832,7 +4842,6 @@ window.rudderOpenPath = ({ path } = {}) => {
 
 window.rudderRefresh = () => {
   nativeSignInRequested = false;
-  if (NATIVE && window.RUDDER_NATIVE?.token) NATIVE.token = window.RUDDER_NATIVE.token;
   return refreshState().then(approvePendingComputer);
 };
 // A computer's approve code that waited for this phone to sign in.

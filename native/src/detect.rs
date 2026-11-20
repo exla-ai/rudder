@@ -451,124 +451,70 @@ pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[St
     if idle_footer_showing(backend, lines) {
         return false;
     }
-    // Chrome-filtered for the same reason as above: Codex's status bar and
-    // composer are two of the last three rows, so an unfiltered 14-line window
-    // spent them on text the agent never wrote.
-    let recent = recent_agent_lines(backend, lines, 14);
-    if recent.is_empty() {
-        return false;
-    }
-    // Strong signal: agent's yes/no permission menu shape. Claude and codex
-    // both render permission prompts as a numbered selection list ending in
-    // "Yes" / "No" options, often with a "(esc)" hint. This is rock-solid
-    // when present and language-agnostic to natural-language keyword soup.
+    // Keep the selection cursor: the normal text reader filters out rows
+    // starting with it. Ordinary output can discuss permissions or list
+    // yes/no choices, even without an idle footer (e.g. during a resize).
+    let recent: Vec<String> = lines
+        .iter()
+        .rev()
+        .map(|line| normalize_terminal_line(line).to_ascii_lowercase())
+        .filter(|line| !line.is_empty())
+        .take(14)
+        .collect();
     if looks_like_yes_no_menu(&recent) {
         return true;
     }
-    let text = recent.iter().rev().cloned().collect::<Vec<_>>().join("\n");
-    // Claude's folder-trust dialog ("❯ No, exit / Yes, I trust this folder") has
-    // no numbers and no permission word. On the cloud machine nobody was there
-    // to answer it, and the row read "working" for a day, which also held back
-    // the machine's update-when-idle.
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("trust this folder") || lower.contains("trust the files in this folder") {
+    if recent.iter().any(|row| {
+        row.starts_with("press enter to approve ") || row.starts_with("press y to approve ")
+    }) {
         return true;
     }
-
-    permission_text_needs_attention(&text)
+    match backend {
+        Backend::Claude => {
+            recent.iter().any(|row| row.trim_start_matches('❯').trim() == "no, exit")
+                && recent.iter().any(|row| row.trim_start_matches('❯').trim() == "yes, i trust this folder")
+        }
+        Backend::Codex => {
+            recent.iter().any(|row| row.starts_with("trust this folder?"))
+                && recent.iter().any(|row| row.ends_with(". trust and continue"))
+                && recent.iter().any(|row| {
+                    row.strip_prefix('›').is_some_and(is_numbered_option)
+                })
+        }
+        Backend::Opencode => {
+            recent.iter().any(|row| {
+                row.contains("allow once")
+                    && (row.contains("always allow") || row.contains("allow always"))
+                    && row.contains("reject")
+            }) && recent.iter().any(|row| row.starts_with("enter confirm"))
+        }
+        Backend::Antigravity => recent.iter().any(|row| {
+            (row.ends_with("[y/n]") || row.ends_with("(y/n)"))
+                && contains_any_word(row, &["allow", "approve", "proceed", "permission"])
+        }),
+    }
 }
 
-/// True if the most recent lines look like an agent's yes/no permission menu:
-/// a leading "❯ 1. Yes" with a follow-on "2. No..." nearby.
-pub(crate) fn looks_like_yes_no_menu(recent_rev: &[String]) -> bool {
+/// A cursor on a numbered choice plus Yes and No options. Some permission
+/// menus offer several ways to say Yes before the No option.
+fn looks_like_yes_no_menu(recent_rev: &[String]) -> bool {
+    let mut saw_cursor = false;
     let mut saw_yes_option = false;
     let mut saw_no_option = false;
-    for line in recent_rev.iter().take(8) {
-        let lower = line.to_ascii_lowercase();
-        let stripped = lower.trim_start_matches(|c: char| {
-            c.is_whitespace() || c == '\u{276f}' || c == '>' || c == '*'
-        });
-        if (stripped.starts_with("1.") || stripped.starts_with("1)")) && stripped.contains("yes") {
-            saw_yes_option = true;
+    for line in recent_rev {
+        let option = line.trim_start_matches(['❯', '›', '>']).trim_start();
+        if !is_numbered_option(option) {
+            continue;
         }
-        if (stripped.starts_with("2.") || stripped.starts_with("2)"))
-            && (stripped.contains("no")
-                || stripped.contains("don't")
-                || stripped.contains("do not"))
-        {
-            saw_no_option = true;
-        }
+        saw_cursor |= option.len() < line.len();
+        let (number, label) = option.split_once(['.', ')']).unwrap();
+        let label = label.trim_start();
+        let first_word = label.split(|ch: char| !ch.is_ascii_alphabetic()).next();
+        saw_yes_option |= number == "1" && first_word == Some("yes");
+        saw_no_option |= number != "1"
+            && (first_word == Some("no") || label.starts_with("don't ") || label.starts_with("do not "));
     }
-    saw_yes_option && saw_no_option
-}
-
-pub(crate) fn permission_text_needs_attention(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    let text = text.as_str();
-
-    let has_permission_word = contains_any_word(
-        &text,
-        &[
-            "permission",
-            "approval",
-            "approve",
-            "allow",
-            "authorize",
-            "authorization",
-            "confirmation",
-            "proceed",
-            "deny",
-        ],
-    );
-    if !has_permission_word {
-        return false;
-    }
-
-    let asks_decision =
-        contains_any_phrase(&text, &["do you want", "would you like", "are you sure"])
-            && contains_any_word(
-                &text,
-                &["allow", "approve", "run", "execute", "continue", "proceed"],
-            );
-    let approves_action = contains_any_word(&text, &["allow", "approve", "authorize"])
-        && contains_any_word(
-            &text,
-            &[
-                "command",
-                "tool",
-                "edit",
-                "write",
-                "file",
-                "access",
-                "execution",
-                "network",
-                "shell",
-                "operation",
-            ],
-        );
-    let approval_request = contains_any_word(
-        &text,
-        &["permission", "approval", "authorization", "confirmation"],
-    ) && contains_any_word(
-        &text,
-        &[
-            "required",
-            "needed",
-            "need",
-            "request",
-            "requested",
-            "requesting",
-            "waiting",
-            "prompt",
-        ],
-    ) && contains_approval_response(&text);
-    let key_prompt = contains_word(&text, "press")
-        && contains_any_word(&text, &["y", "yes", "enter", "return"])
-        && contains_any_word(&text, &["allow", "approve", "continue", "proceed"]);
-    let yes_no_prompt = (contains_word(&text, "yes") || contains_word(&text, "no"))
-        && contains_any_word(&text, &["approve", "deny", "allow"]);
-
-    asks_decision || approves_action || approval_request || key_prompt || yes_no_prompt
+    saw_cursor && saw_yes_option && saw_no_option
 }
 
 pub(crate) fn looks_busy(line: &str) -> bool {
@@ -677,20 +623,8 @@ pub(crate) fn normalize_terminal_line(line: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn contains_any_phrase(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
-}
-
 pub(crate) fn contains_any_word(text: &str, words: &[&str]) -> bool {
     words.iter().any(|word| contains_word(text, word))
-}
-
-pub(crate) fn contains_approval_response(text: &str) -> bool {
-    contains_any_word(
-        text,
-        &["approve", "allow", "deny", "enter", "return", "press"],
-    ) || contains_word(text, "yes")
-        || contains_word(text, "no")
 }
 
 pub(crate) fn contains_word(text: &str, word: &str) -> bool {
@@ -840,7 +774,7 @@ fn is_numbered_option(text: &str) -> bool {
 /// (the phone, the web board) is typed into a pane.
 pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
     if terminal_needs_permission_from_lines(backend, lines) {
-        return Some("it is waiting on a permission prompt; answer that first");
+        return Some("the agent is waiting for approval. Open its Terminal to review the prompt, then retry");
     }
     const MENU_HINTS: [&str; 10] = [
         "esc to close",

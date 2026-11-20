@@ -1854,7 +1854,7 @@ async function credentialsAfterLogin(provider, account) {
         : await codexStatus(env);
   if (quick.loggedIn) {
     const list = credentials?.[provider] ?? [];
-    const entry = { id: account, default: list.find((row) => row.id === account)?.default ?? false, ok: true, account: quick.account, plan: quick.plan, detail: null, checking: true };
+    const entry = { id: account, default: list.find((row) => row.id === account)?.default ?? false, ok: true, account: quick.account, plan: quick.plan, loginExpiresAt: quick.loginExpiresAt, detail: null, checking: true };
     credentials = {
       ...(credentials ?? {}),
       [provider]: list.some((row) => row.id === account) ? list.map((row) => (row.id === account ? entry : row)) : [...list, entry],
@@ -1916,12 +1916,17 @@ async function signOut(provider, env) {
 
 async function claudeStatus(env) {
   const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
+  let parsed;
   try {
-    const parsed = JSON.parse(status.stdout);
-    return { loggedIn: Boolean(parsed.loggedIn), account: parsed.email || null, plan: claudePlan(parsed) };
+    parsed = JSON.parse(status.stdout);
   } catch {
-    return { loggedIn: false, account: null, plan: null };
+    return { loggedIn: false, account: null, plan: null, detail: firstLine(status.stderr) || "Claude returned an invalid sign-in status" };
   }
+  if (typeof parsed?.loggedIn !== "boolean") {
+    return { loggedIn: false, account: null, plan: null, detail: "Claude returned an invalid sign-in status" };
+  }
+  const loginExpiresAt = typeof parsed.loginExpiresAt === "string" ? parsed.loginExpiresAt : null;
+  return { loggedIn: parsed.loggedIn, account: parsed.email || null, plan: claudePlan(parsed), loginExpiresAt, detail: parsed.loggedIn ? null : "not logged in" };
 }
 
 async function codexStatus(env) {
@@ -1971,12 +1976,14 @@ async function checkOpencode(env) {
   return { ok: false, account, plan: null, detail };
 }
 
-// agy lists models only when signed in ("Please sign in" otherwise, still
-// exit 0). It does not say which Google account it uses.
+// agy explicitly asks for sign-in when its model list needs a Google account.
 async function antigravityStatus(env) {
   const models = await capture("agy", ["models"], { env, timeoutMs: 20_000 });
   const text = `${models.stdout}\n${models.stderr}`;
-  return { loggedIn: models.code === 0 && !/sign in/i.test(text), account: null, plan: null, code: models.code, text };
+  const signedOut = /please sign in to view available models/i.test(text);
+  const loggedIn = models.code === 0 && !signedOut;
+  const detail = signedOut ? "not logged in" : loggedIn ? null : firstLine(text) || `exit ${models.code}`;
+  return { loggedIn, account: null, plan: null, detail };
 }
 // "max", "pro", ... for a subscription; "API" for a Console login.
 function claudePlan(status) {
@@ -2008,28 +2015,27 @@ async function checkGithub(env) {
 }
 
 async function checkClaude(env) {
-  const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
-  let account = null;
-  let plan = null;
+  const { loggedIn, account, plan, loginExpiresAt, detail } = await claudeStatus(env);
+  if (!loggedIn) {
+    return { ok: false, account, plan, detail };
+  }
+  // JSON reports the request result separately from sign-in expiry warnings.
+  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku", "--output-format", "json"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
+  let result;
   try {
-    const parsed = JSON.parse(status.stdout);
-    account = parsed.email || null;
-    plan = claudePlan(parsed);
-    if (!parsed.loggedIn) {
-      return { ok: false, account, plan, detail: "not logged in" };
-    }
+    result = JSON.parse(probe.stdout);
   } catch {
-    // fall through to the real request
+    // A CLI failure before a model request can exit without a JSON result.
   }
-  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
-  const text = `${probe.stdout}\n${probe.stderr}`;
-  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account, plan, detail: null };
+  if (probe.code === 0 && result?.type === "result" && result.subtype === "success" && result.is_error === false) {
+    return { ok: true, account, plan, loginExpiresAt, detail: null };
   }
-  const detail = /login expired|please run \/login|invalid.*(token|api key)|not logged in|authentication/i.test(text)
+  const reported = Array.isArray(result?.errors) ? result.errors.join("\n") : result?.result;
+  const errors = reported || probe.stderr.split("\n").filter((line) => !/^Warning: this sign-in ends /i.test(line)).join("\n");
+  const failure = /login expired|sign-in.*time limit|please run \/login|invalid.*(token|api key)|not logged in|authentication error|authentication_error/i.test(errors)
     ? "login expired"
-    : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, account, plan, detail };
+    : firstLine(errors) || (probe.code === 0 ? "Claude returned an invalid model response" : `Claude exited with code ${probe.code}`);
+  return { ok: false, signedIn: failure !== "login expired", account, plan, loginExpiresAt, detail: failure };
 }
 
 async function checkCodex(env) {
@@ -2054,7 +2060,7 @@ async function checkCodex(env) {
 async function checkAntigravity(env) {
   const status = await antigravityStatus(env);
   if (!status.loggedIn) {
-    return { ok: false, account: null, plan: null, detail: status.code !== 0 ? firstLine(status.text) || `exit ${status.code}` : "not logged in" };
+    return { ok: false, account: null, plan: null, detail: status.detail };
   }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {

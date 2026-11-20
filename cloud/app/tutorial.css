@@ -557,8 +557,10 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
 }
 .trk-tabs {
   display: flex; align-items: center; gap: 3px; height: 38px; margin: -14px -16px 14px; padding: 0 8px;
-  background: var(--bg); border-bottom: 1px solid var(--line);
+  background: var(--bg); border-bottom: 1px solid var(--line); overflow: hidden;
+  animation: trk-tabs-in 260ms ease 4050ms both;
 }
+@keyframes trk-tabs-in { from { height: 0; margin-block: 0; opacity: 0; } }
 .trk-tab {
   flex: 0 1 auto; min-width: 0; height: 26px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
   border-radius: 7px; color: var(--muted); font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
@@ -569,15 +571,9 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
 .trk-tab.was { flex: 0 1 150px; }
 .trk-tabt { flex: 1; min-width: 0; display: grid; }
 .trk-tabt .trk-t { font-size: 11px; font-weight: 500; }
-/* The tab on screen; the agent's until Cmd+T, then the new one. */
-.trk-tab.new, .trk-tab.was { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong); }
+/* The first Cmd+T reveals the strip and selects the new tab. */
+.trk-tab.new { max-width: 110px; background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong); }
 .trk-tab.new > svg:last-child { opacity: 0.6; }
-.trk-tab.was { background: none; color: var(--muted); box-shadow: none; animation: trk-was-on 4050ms linear; }
-.trk-tab.was > svg:last-child { animation: trk-was-x 4050ms linear; }
-@keyframes trk-was-on { 0%, 100% { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong); } }
-@keyframes trk-was-x { 0%, 100% { opacity: 0.6; } }
-.trk-tab.new { max-width: 110px; animation: trk-tab-in 380ms cubic-bezier(.2, .7, .2, 1) 4050ms both; }
-@keyframes trk-tab-in { from { max-width: 0; padding: 0; opacity: 0; } }
 .trk-plus { flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--muted); }
 .trk-plus svg { width: 13px; height: 13px; }
 .trk-proj {

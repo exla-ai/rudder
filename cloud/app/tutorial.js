@@ -19,8 +19,7 @@ export const PHONE_APP_URL = "https://testflight.apple.com/join/JV4dwM6E";
 // rudder.* (app.js forgetAccount), so the next account here sees the tour too.
 const SEEN_KEY = "rudder.tourSeen";
 const ALT = /Mac/.test(navigator.platform) ? "Option" : "Alt";
-// Tabs take Cmd+T and Cmd+1 to Cmd+9 in the Mac app only (tabs.js); a
-// browser keeps those keys for its own tabs.
+// The Mac app handles these tab shortcuts. Browsers keep them for their own tabs.
 const TAB_KEYS = PLATFORM === "mac";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 // Every scene is drawn on a board this size and scaled to the stage. A
@@ -210,7 +209,6 @@ function keysScene() {
   const titles = AGENTS.map((t, i) => `<b class="trk-t k${i}">${t}</b>`).join("");
   const tabs = TAB_KEYS ? `<div class="trk-tabs">
       <span class="trk-tab was s-working"><span class="dot"></span><span class="trk-tabt">${titles}</span>${icon("x")}</span>
-      <span class="trk-tab">${icon("code")}<span>wagerpals</span></span>
       <span class="trk-tab new">${icon("code")}<span>rudder</span>${icon("x")}</span>
       <span class="trk-plus">${icon("plus")}</span>
     </div>` : "";
@@ -291,7 +289,9 @@ const STEPS = [
   {
     id: "keys",
     title: TAB_KEYS ? "Jump between agents and tabs" : "Jump between agents",
-    body: `${ALT}+[ and ${ALT}+] go to the previous and next agent, even while you type.${TAB_KEYS ? " Cmd+T opens a new tab, and Cmd+1 to Cmd+9 jump between tabs." : ""}`,
+    body: TAB_KEYS
+      ? `${ALT}+[ and ${ALT}+] step through agents. The first Cmd+T opens a second tab and reveals the tab bar. Control+Tab moves to the next tab and Control+Shift+Tab moves back. Cmd+1 to Cmd+8 pick a tab, and Cmd+9 jumps to the last.`
+      : `${ALT}+[ and ${ALT}+] go to the previous and next agent, even while you type.`,
     scene: keysScene,
     // A keyboard shortcut: only where there is a keyboard to press it.
     when: () => !coarse,

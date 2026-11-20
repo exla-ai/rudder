@@ -10,10 +10,10 @@
 //
 // The + button opens a tab. In the Mac app the bar appears with the second
 // tab, and Cmd+T opens a tab even with the bar hidden. Cmd+W closes it (the
-// last one leaves Cmd+W to the window), Cmd+Shift+[ and
-// Cmd+Shift+] step through them, Cmd+1 to Cmd+8 jump to one and Cmd+9 to the
-// last, and Cmd+click on a link opens it in a new tab behind this one. A
-// browser keeps those keys for its own tabs.
+// last one leaves Cmd+W to the window). Control+Tab and Control+Shift+Tab
+// step through tabs, as do Cmd+Shift+[ and Cmd+Shift+]. Cmd+1 to Cmd+8 jump
+// to one and Cmd+9 to the last. Cmd+click on a link opens it in a tab behind
+// this one. A browser keeps those keys for its own tabs.
 import { h, icon, setText, reconcile } from "/app/render.js";
 import { ls, PLATFORM } from "/app/core.js";
 import { teamAgent } from "/app/team.js";
@@ -158,6 +158,11 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   });
 
   if (MAC) {
+    // The Mac window catches Control+Tab even if focus is in an iframe.
+    document.addEventListener("rudder:cycle-tab", (e) => {
+      if (document.querySelector("dialog[open]")) return;
+      if (e.detail === 1 || e.detail === -1) step(e.detail);
+    }, { signal: life.signal });
     document.addEventListener("keydown", (e) => {
       if (!e.metaKey || e.ctrlKey || e.altKey || document.querySelector("dialog[open]")) return;
       const key = e.key.toLowerCase();

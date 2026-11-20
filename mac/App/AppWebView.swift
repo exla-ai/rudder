@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 import WebKit
 
@@ -76,6 +77,7 @@ struct AppWebView: NSViewRepresentable {
         let model: AppModel
         weak var webView: WKWebView?
         private var urlObservation: NSKeyValueObservation?
+        private var tabKeyMonitor: Any?
         private var revealTask: Task<Void, Never>?
 
         init(model: AppModel) {
@@ -85,6 +87,21 @@ struct AppWebView: NSViewRepresentable {
         func attach(_ webView: WKWebView) {
             self.webView = webView
             model.webView = webView
+            // Handle Control+Tab before AppKit or a focused web editor moves
+            // focus. The site's Tabs object owns which tab comes next.
+            tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak webView] event in
+                guard event.keyCode == UInt16(kVK_Tab),
+                      let self, let webView, let window = webView.window, event.window === window,
+                      self.model.webState == .ready else { return event }
+                let modifiers = event.modifierFlags.intersection([.control, .shift, .command, .option])
+                guard modifiers == .control || modifiers == [.control, .shift] else { return event }
+                let direction = modifiers.contains(.shift) ? -1 : 1
+                webView.evaluateJavaScript(
+                    "document.dispatchEvent(new CustomEvent('rudder:cycle-tab', {detail: \(direction)}))",
+                    completionHandler: nil
+                )
+                return nil
+            }
             let server = model.session.server
             let key = AppModel.lastURLKey
             // pushState navigations change `url` without a page load, so the
@@ -104,6 +121,10 @@ struct AppWebView: NSViewRepresentable {
         func detach() {
             revealTask?.cancel()
             urlObservation = nil
+            if let tabKeyMonitor {
+                NSEvent.removeMonitor(tabKeyMonitor)
+                self.tabKeyMonitor = nil
+            }
             if model.webView === webView { model.webView = nil }
         }
 

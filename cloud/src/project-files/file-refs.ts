@@ -21,7 +21,11 @@ const RUN_ID = /^[A-Za-z0-9._-]{1,256}$/;
 const REVISION = /^[a-f0-9]{64}$/;
 const CONTROL = /[\x00-\x1f\x7f]/;
 const TEXT_BYTES = 2 * 1024 * 1024;
-const MIMES = ["text/plain", "text/css", "text/html", "text/markdown"];
+const MEDIA_BYTES = 16 * 1024 * 1024;
+const TEXT_MIMES = new Set(["text/plain", "text/css", "text/html", "text/markdown"]);
+const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+// Match through the actual end of the string, including when it ends in a newline.
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}(?!.)/s;
 
 function targetFrom(url: URL): Target {
   const q = url.searchParams;
@@ -45,14 +49,24 @@ function documentFrom(value: unknown, target: Target) {
   const invalid = () => new CloudProjectFileError(502, "Invalid file reply");
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) throw invalid();
   if (typeof doc.path !== "string" || !doc.path.startsWith("/") || doc.path.length > 4096 || CONTROL.test(doc.path)
-    || typeof doc.revision !== "string" || !REVISION.test(doc.revision)
-    || !["text", "markdown"].includes(String(doc.kind)) || !MIMES.includes(String(doc.mime))) throw invalid();
+    || typeof doc.revision !== "string" || !REVISION.test(doc.revision) || typeof doc.mime !== "string") throw invalid();
+  const media = doc.kind === "image" || doc.kind === "pdf";
+  const supported = doc.kind === "pdf" ? doc.mime === "application/pdf"
+    : doc.kind === "image" ? IMAGE_MIMES.has(doc.mime)
+    : (doc.kind === "text" || doc.kind === "markdown") && TEXT_MIMES.has(doc.mime);
+  if (!supported) throw invalid();
   const base = { path: doc.path, revision: doc.revision, kind: doc.kind, mime: doc.mime };
   if (doc.unchanged !== undefined) {
-    if (doc.unchanged !== true || doc.revision !== target.knownRevision || doc.text !== undefined) throw invalid();
+    if (doc.unchanged !== true || doc.revision !== target.knownRevision || doc.text !== undefined || doc.base64 !== undefined) throw invalid();
     return { ...base, unchanged: true };
   }
-  if (typeof doc.text !== "string" || Buffer.byteLength(doc.text) > TEXT_BYTES) throw invalid();
+  if (media) {
+    const { base64 } = doc;
+    if (doc.text !== undefined || typeof base64 !== "string" || base64.length > Math.ceil(MEDIA_BYTES / 3) * 4
+      || base64.length % 4 !== 0 || !BASE64.test(base64) || Buffer.byteLength(base64, "base64") > MEDIA_BYTES) throw invalid();
+    return { ...base, base64 };
+  }
+  if (doc.base64 !== undefined || typeof doc.text !== "string" || Buffer.byteLength(doc.text) > TEXT_BYTES) throw invalid();
   return { ...base, text: doc.text };
 }
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { build } from "esbuild";
@@ -12,6 +12,8 @@ async function load(entry) {
 }
 const { privateReason, readFileRef, PRIVATE_FILE, SYSTEM_FILE } = await load("../src/project-files/file-refs.ts");
 const { FileRefRoutes } = await load("../cloud/src/project-files/file-refs.ts");
+
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1sAAAAASUVORK5CYII=";
 
 const ref = (path, line = 0, col = 0) => ({ path, line, col, end: 0 });
 
@@ -93,18 +95,19 @@ async function machine(t) {
   await writeFile(path.join(checkout, "src", "both.ts"), "checkout\n");
   await writeFile(path.join(checkout, "src", "only-checkout.ts"), "checkout only\n");
   await writeFile(path.join(agent, "src", "both.ts"), "agent\n");
-  await writeFile(path.join(checkout, "image.png"), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   await writeFile(path.join(checkout, "blob.txt"), Buffer.from([0, 1, 2, 3]));
   await writeFile(path.join(checkout, "big.txt"), "x".repeat(2 * 1024 * 1024 + 1));
   await symlink(path.join(home, ".ssh", "id_ed25519"), path.join(checkout, "innocent.txt"));
   const grant = (workspaceId, dir) => ({ scope: { projectId: "p", workspaceId, attemptId: workspaceId, ownerEpoch: 1 }, root: dir, access: { kind: "host" } });
+  const scratch = path.join(root, "workspace", "scratch");
+  await mkdir(scratch, { recursive: true });
   const dependencies = {
     grants: async () => [grant("checkout", checkout), grant("run_1", agent)],
     read: async () => { throw new Error("host grants never read through the file service"); },
-    policy: { home, homes: [home], roots: [home, path.join(root, "code"), path.join(root, "ws")] },
+    policy: { home, homes: [home], roots: [home, path.join(root, "code"), path.join(root, "ws"), path.dirname(scratch)] },
   };
   const open = (p, extra = {}) => readFileRef({ version: 1, runId: "run_1", path: p, ...extra }, dependencies, AbortSignal.timeout(5000));
-  return { root, home, checkout, agent, open };
+  return { root, home, checkout, agent, scratch, dependencies, open };
 }
 
 test("a file reference resolves in the agent's workspace, then the checkout, then the home's own folders", async (t) => {
@@ -121,11 +124,70 @@ test("a file reference resolves in the agent's workspace, then the checkout, the
   await assert.rejects(m.open("~/.ssh/id_ed25519"), (e) => e.message === PRIVATE_FILE);
   await assert.rejects(m.open("innocent.txt"), (e) => e.message === PRIVATE_FILE, "a symlink to a private file stays private");
   await assert.rejects(m.open(path.join(m.root, "outside")), /Only files under/);
-  await assert.rejects(m.open("image.png"), /Only text files/);
-  await assert.rejects(m.open("blob.txt"), /Only text files/);
+  await assert.rejects(m.open("blob.txt"), /This file type has no preview/);
   await assert.rejects(m.open("big.txt"), /over 2 MB/);
   await assert.rejects(m.open("src"), /That is a folder/);
   await assert.rejects(readFileRef({ version: 1, runId: "../x", path: "a" }, {}, AbortSignal.timeout(1000)), /Invalid file request/);
+});
+
+test("file references preview screenshots from scratch and PDFs from the checkout", async (t) => {
+  const m = await machine(t);
+  const screenshot = path.join(m.scratch, "Screenshot.png");
+  await writeFile(screenshot, Buffer.from(PNG, "base64"));
+  await writeFile(path.join(m.checkout, "report.pdf"), "%PDF-1.4\n");
+  await writeFile(path.join(m.checkout, "incorrect.png"), "<html>renamed</html>");
+  const large = path.join(m.scratch, "large.png");
+  await writeFile(large, "");
+  await truncate(large, 16 * 1024 * 1024 + 1);
+
+  const image = await m.open(screenshot);
+  assert.deepEqual(image, { path: screenshot, revision: image.revision, mime: "image/png", kind: "image", base64: PNG });
+  assert.deepEqual(await m.open(screenshot, { knownRevision: image.revision }),
+    { path: screenshot, revision: image.revision, mime: "image/png", kind: "image", unchanged: true });
+  const pdf = await m.open("report.pdf");
+  assert.deepEqual(pdf, { path: path.join(m.checkout, "report.pdf"), revision: pdf.revision, mime: "application/pdf", kind: "pdf", base64: Buffer.from("%PDF-1.4\n").toString("base64") });
+  await assert.rejects(m.open("incorrect.png"), /content does not match its media type/);
+  await assert.rejects(m.open(large), /over 16 MB/);
+
+  const grants = await m.dependencies.grants();
+  const fork = grants.find((grant) => grant.scope.workspaceId === "run_1");
+  fork.access = { kind: "namespace", pid: 123 };
+  const doc = await readFileRef({ version: 1, runId: "run_1", path: "Screenshot.png" }, {
+    ...m.dependencies,
+    grants: async () => grants,
+    read: async (scope, relative) => {
+      assert.deepEqual(scope, fork.scope);
+      assert.equal(relative, "Screenshot.png");
+      return { ...image, path: relative };
+    },
+  }, AbortSignal.timeout(1000));
+  assert.deepEqual(doc, { ...image, path: path.join(m.agent, "Screenshot.png") });
+});
+
+test("Cloud passes through only bounded media preview documents", async () => {
+  const image = { path: "/workspace/scratch/Screenshot.png", revision: "a".repeat(64), mime: "image/png", kind: "image", base64: PNG };
+  let reply = image;
+  const routes = new FileRefRoutes({
+    ownHome: () => "home_1",
+    workspace: () => ({ homeId: "home_1" }),
+    rpc: async () => reply,
+  });
+  const get = (extra = {}) => routes.handle({ method: "GET" }, new URL(`https://x/api/app/file-ref?${new URLSearchParams({
+    workspaceId: "repo_1", runId: "run_1", path: image.path, ...extra,
+  })}`), "owner", AbortSignal.timeout(1000));
+  assert.deepEqual(await get(), image);
+  const { base64, ...metadata } = image;
+  reply = { ...metadata, unchanged: true };
+  assert.deepEqual(await get({ knownRevision: image.revision }), reply);
+  for (const invalid of [
+    { mime: "image/svg+xml" }, { mime: "application/pdf" }, { kind: "pdf" },
+    { base64: "" }, { base64: "A-==" }, { base64: "AAAAA" }, { base64: "abc\n" },
+    { base64: "A".repeat(Math.ceil(16 * 1024 * 1024 / 3) * 4) },
+    { text: "not a media payload" }, { unchanged: true },
+  ]) {
+    reply = { ...image, ...invalid };
+    await assert.rejects(get({ knownRevision: image.revision }), (e) => e.status === 502);
+  }
 });
 
 test("only the machine's own account opens files, and an older machine offers Update now", async () => {

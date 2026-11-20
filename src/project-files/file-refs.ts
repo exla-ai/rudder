@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { classification, ProjectFileError, revisionOf, textOf, type FileGrant } from "./service.js";
+import { classification, FILE_LIMITS, mediaDocument, ProjectFileError, revisionOf, textOf, type FileGrant } from "./service.js";
 import type { FileDocument, FileScope } from "./types.js";
 
 /** A file a chat message names (cloud/app/file-refs.js): a Markdown link or
@@ -13,9 +13,8 @@ import type { FileDocument, FileScope } from "./types.js";
  * workspace first, then the project checkout. A file inside a Linux overlay
  * fork is read through the file service, which sees the agent's own mount.
  * Any other file comes from the home's filesystem, when it is under one of
- * the home user's folders, is a regular UTF-8 text file of at most 2 MB, and
- * neither the path asked for nor the file it resolves to is on the deny list
- * below. */
+ * the home user's folders, is a regular text file, image or PDF within the
+ * preview limits, and neither the requested nor resolved path is denied below. */
 export const FILE_REF_LIMITS = { textBytes: 2 * 1024 * 1024, pathChars: 4096 } as const;
 const CHECKOUT = "checkout";
 const RUN_ID = /^[A-Za-z0-9._-]{1,256}$/;
@@ -94,8 +93,8 @@ export function outsideReason(file: string, roots: readonly string[]): string | 
 
 // ---------- Reading ----------
 
-const notText = () => new ProjectFileError("unsupported", "Only text files open in the viewer");
-const tooLarge = () => new ProjectFileError("large", "This file is over 2 MB, too large to show here");
+const unsupported = () => new ProjectFileError("unsupported", "This file type has no preview");
+const tooLarge = (limit: number) => new ProjectFileError("large", `This file is over ${limit / (1024 * 1024)} MB, too large to show here`);
 
 function validRequest(value: unknown): FileRefRequest {
   const request = value as FileRefRequest | undefined;
@@ -147,11 +146,14 @@ async function readAt(file: string, places: FileGrant[], knownRevision: string |
   if (!fork) return readHost(file, knownRevision, policy, signal);
   const relative = inside(fork.root, file)!;
   if (!relative) throw new ProjectFileError("unsupported", "That is a folder. Only files open in the viewer");
+  const kind = classification(file).kind;
+  const limit = kind === "image" || kind === "pdf" ? FILE_LIMITS.mediaBytes : FILE_REF_LIMITS.textBytes;
   let doc: FileDocument;
   try { doc = await dependencies.read(fork.scope, relative, knownRevision, signal); }
-  catch (error) { throw error instanceof ProjectFileError && error.code === "large" ? tooLarge() : error; }
-  if (!["text", "markdown", "html"].includes(doc.kind)) throw notText();
-  if (typeof doc.text === "string" && Buffer.byteLength(doc.text) > FILE_REF_LIMITS.textBytes) throw tooLarge();
+  catch (error) { throw error instanceof ProjectFileError && error.code === "large" ? tooLarge(limit) : error; }
+  if (doc.kind === "image" || doc.kind === "pdf") return { ...doc, path: file };
+  if (!["text", "markdown", "html"].includes(doc.kind)) throw unsupported();
+  if (typeof doc.text === "string" && Buffer.byteLength(doc.text) > limit) throw tooLarge(limit);
   return shown(file, doc.revision, doc.text, doc.unchanged === true);
 }
 
@@ -181,13 +183,15 @@ async function readHost(file: string, knownRevision: string | undefined, policy:
     const stat = await handle.stat();
     if (stat.isDirectory()) throw new ProjectFileError("unsupported", "That is a folder. Only files open in the viewer");
     if (!stat.isFile()) throw new ProjectFileError("unsupported", "Only regular files open in the viewer");
-    if (["image", "pdf"].includes(classification(file).kind)) throw notText();
     // The descriptor is the file the checks passed: a folder above it swapped
     // for a symlink after realpath is refused.
     const named = process.platform === "linux" ? null : await lstat(real);
     const opened = named ? named.ino === stat.ino && named.dev === stat.dev : await realpath(`/proc/self/fd/${handle.fd}`) === real;
     if (!opened) throw new ProjectFileError("changed", "The file moved while opening it");
-    if (stat.size > FILE_REF_LIMITS.textBytes) throw tooLarge();
+    const format = classification(file);
+    const media = format.kind === "image" || format.kind === "pdf";
+    const limit = media ? FILE_LIMITS.mediaBytes : FILE_REF_LIMITS.textBytes;
+    if (stat.size > limit) throw tooLarge(limit);
     const bytes = Buffer.alloc(stat.size + 1);
     let offset = 0;
     while (offset < bytes.length) {
@@ -198,10 +202,11 @@ async function readHost(file: string, knownRevision: string | undefined, policy:
     }
     if (offset !== stat.size) throw new ProjectFileError("changed", "The file changed while reading it");
     const content = bytes.subarray(0, offset);
+    if (media) return mediaDocument(file, format, content, knownRevision);
     const revision = revisionOf(content);
     if (revision === knownRevision) return shown(file, revision, undefined, true);
     const text = textOf(content);
-    if (text === null) throw notText();
+    if (text === null) throw unsupported();
     return shown(file, revision, text, false);
   } catch (error) { throw error instanceof ProjectFileError ? error : fsError(error); }
   finally { await handle.close(); }

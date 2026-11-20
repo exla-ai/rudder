@@ -93,6 +93,13 @@ function validMedia(bytes: Buffer, mime: string): boolean {
   if (mime === "image/avif") return bytes.subarray(4, 8).toString() === "ftyp" && /avif|avis/.test(bytes.subarray(8, 32).toString());
   return false;
 }
+/** A previewable media file has a matching signature before any bytes reach a viewer. */
+export function mediaDocument(file: string, format: Pick<FileDocument, "mime" | "kind">, content: Buffer, knownRevision?: string): FileDocument {
+  if (!validMedia(content, format.mime)) throw new ProjectFileError("unsupported", "The file content does not match its media type");
+  const revision = revisionOf(content);
+  return revision === knownRevision ? { path: file, revision, ...format, unchanged: true } : { path: file, revision, ...format, base64: content.toString("base64") };
+}
+
 /** UTF-8 text without control characters, or null for binary content. */
 export function textOf(content: Buffer): string | null {
   if (content.includes(0)) return null;
@@ -263,11 +270,8 @@ export class ProjectFileService {
     const format = classification(relative);
     const media = format.kind === "image" || format.kind === "pdf";
     const content = await this.bytes(handle, media ? FILE_LIMITS.mediaBytes : FILE_LIMITS.textBytes, "This file is too large to preview", signal);
+    if (media) return mediaDocument(relative, format, content, knownRevision);
     const revision = revisionOf(content);
-    if (media) {
-      if (!validMedia(content, format.mime)) throw new ProjectFileError("unsupported", "The file content does not match its media type");
-      return revision === knownRevision ? { path: relative, revision, ...format, unchanged: true } : { path: relative, revision, ...format, base64: content.toString("base64") };
-    }
     const text = textOf(content);
     if (text === null) return { path: relative, revision, mime: "application/octet-stream", kind: "binary", ...(revision === knownRevision ? { unchanged: true } : {}) };
     return revision === knownRevision ? { path: relative, revision, ...format, unchanged: true } : { path: relative, revision, ...format, text };

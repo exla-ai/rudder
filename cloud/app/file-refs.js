@@ -25,7 +25,7 @@ const EXTENSION = /\.([A-Za-z][A-Za-z0-9]{0,11})$/;
 const BARE_EXTENSIONS = new Set(("md markdown mdx txt rst adoc ts tsx mts cts js jsx mjs cjs json jsonc jsonl ndjson "
   + "rs toml yaml yml py pyi swift kt kts java scala c h cc cpp cxx hpp hh cs rb php lua dart ex exs erl hs "
   + "sh bash zsh fish ps1 css scss sass less html htm xml svg vue svelte astro graphql gql proto tf hcl nix zig "
-  + "ini plist pbxproj gradle csv tsv patch diff ipynb").split(" "));
+  + "ini plist pbxproj gradle csv tsv patch diff ipynb png jpg jpeg gif webp avif").split(" "));
 // Receivers that make `x.json` or `x.html` a property, not a file (`res.json`).
 const RECEIVERS = new Set(["res", "req", "resp", "response", "request", "console", "process", "window", "document", "this", "self", "JSON", "Math", "$", "jQuery"]);
 // Files without an extension that are still files.

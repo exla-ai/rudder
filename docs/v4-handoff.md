@@ -415,13 +415,15 @@ account of a backend is `backends.<backend>.account` in config.json. A run
 keeps its account in run.json, and the model and harness steers name it.
 Cloud homes sign in each account (`login/start` with `account`: main, an id or
 "new"), and `/api/app/agent-account` makes one the default, signs it out or
-removes it. The app's Settings lists a row per account with "Add another
-account", and the model pickers choose the account when a harness has more
-than one. Plan usage is per account; on macOS Claude's keychain entry for an
-added dir is `Claude Code-credentials-<sha256(dir)[:8]>`. Antigravity has one
-account (agy has no config dir setting). Open: a real sign-in into an added
-account on a Cloud home and on macOS, a Codex chat resumed on another account,
-and adding accounts from the Mac dashboard.
+removes it. Settings and Home list a row per account. The Add account button
+at the bottom opens sign-in for Claude Code or Codex, even while existing
+accounts are still checking. The model pickers choose the account when a
+harness has more than one. Plan usage is per account. On macOS, Claude's
+keychain entry for an added dir is `Claude Code-credentials-<sha256(dir)[:8]>`.
+Antigravity has one account because agy has no config dir setting. Open work
+includes verifying a real sign-in into an added account on a Cloud home and on
+macOS, resuming a Codex chat on another account, and adding accounts from the
+Mac dashboard.
 
 Mac release CI imports the existing Developer ID Application identity from
 `MAC_DEVELOPER_ID_P12` and `MAC_DEVELOPER_ID_PASSWORD`. It archives with Xcode
@@ -436,6 +438,10 @@ the public Sparkle feed verified against the shipped key.
 Chat and subagent Markdown preserve `vnc://` link destinations and show the
 address on hover. The macOS shell opens these links in Screen Sharing.
 This change landed after the Mac 5.0.18 build.
+
+On Mac, the tab strip appears when a second tab opens and hides again with
+one tab. Cmd+T opens a tab while the strip is hidden. Desktop browsers keep
+the strip visible to provide the + button for opening the first extra tab.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

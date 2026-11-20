@@ -258,12 +258,13 @@ a { color: var(--accent); }
 .acct .a-sub.err { color: var(--failed); white-space: normal; }
 .acct .a-btn { flex: none; margin-right: 4px; }
 .acct .a-more { width: 40px; height: 40px; color: var(--faint); }
-/* "Add another account" under a harness's accounts */
-.acct.acct-add { min-height: 0; padding: 4px 10px 8px 66px; }
-.acct + .acct.acct-add { border-top: 0; }
-.acct-add .a-add { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; margin-left: -8px; border: 0; border-radius: 8px; background: none; color: var(--accent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
-.acct-add .a-add:hover { background: var(--surface-2); }
-.acct-add .a-add svg { width: 15px; height: 15px; }
+.acct-add {
+  width: 100%; border: 0; border-top: 1px solid var(--line); background: none;
+  color: var(--accent); font-size: 15px; font-weight: 600; text-align: left;
+}
+.acct-add .m-icon { background: var(--accent-soft); color: inherit; }
+.acct-add:hover, .acct-add:active { background: var(--surface-2); }
+.acct-add:focus-visible { outline-offset: -2px; }
 
 /* Signing an agent in */
 .login-sheet .add-head { margin-bottom: 14px; }

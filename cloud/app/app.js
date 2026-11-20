@@ -2048,16 +2048,35 @@ function agentLoginTrouble(home) {
 }
 
 /**
- * Settings > Agents: a row per account, each harness's in turn. Claude Code
- * and Codex also get "Add another account", which runs the same sign-in into
- * a new account. An account's menu makes it the one new agents start on,
- * signs it in again, signs the main one out, or removes an added one.
+ * A row per account, with an action at the end to add a Claude Code or Codex
+ * account. An account's menu makes it the default for new agents, signs it
+ * in again, signs the main one out, or removes an added one.
  */
 function AccountsCard() {
-  const el = h(`<div class="card accounts" role="list" aria-label="Agent sign-in"></div>`);
+  const el = h(`<div class="card accounts">
+    <div role="list" aria-label="Agent sign-in"></div>
+    <button type="button" class="acct acct-add" aria-haspopup="menu">
+      <span class="m-icon" aria-hidden="true">${icon("plus")}</span>
+      <span>Add account</span>
+    </button>
+  </div>`);
+  const accountList = el.querySelector('[role="list"]');
+  const add = el.querySelector(".acct-add");
+  add.addEventListener("click", () => showAgentMenu({
+    anchor: add,
+    label: "Add account",
+    items: AGENTS.filter((agent) => MULTI_ACCOUNT.has(agent.id)).map((agent) => ({
+      label: agent.label,
+      icon: agent.ic,
+      run: () => {
+        add.focus({ preventScroll: true });
+        openAgentSignIn(agent.id, "new");
+      },
+    })),
+    returnFocus: add,
+  }));
   let shape = "";
   let rows = [];
-  let adds = [];
 
   function accountRow(agent, account) {
     const row = h(`<div class="acct" role="listitem">
@@ -2074,30 +2093,9 @@ function AccountsCard() {
     return { el: row, agent, id: account.id };
   }
 
-  function addRow(agent) {
-    const row = h(`<div class="acct acct-add" role="listitem"><button type="button" class="a-add">${icon("plus")}<span></span></button></div>`);
-    setText(row.querySelector("span"), `Add another ${agent.label} account`);
-    row.querySelector("button").addEventListener("click", () => openAgentSignIn(agent.id, "new"));
-    return { el: row, agent };
-  }
-
   function build(home) {
-    rows = [];
-    adds = [];
-    const children = [];
-    for (const agent of AGENTS) {
-      for (const account of agentAccounts(home, agent.id)) {
-        const row = accountRow(agent, account);
-        rows.push(row);
-        children.push(row.el);
-      }
-      if (MULTI_ACCOUNT.has(agent.id)) {
-        const add = addRow(agent);
-        adds.push(add);
-        children.push(add.el);
-      }
-    }
-    el.replaceChildren(...children);
+    rows = AGENTS.flatMap((agent) => agentAccounts(home, agent.id).map((account) => accountRow(agent, account)));
+    accountList.replaceChildren(...rows.map((row) => row.el));
   }
 
   function update(home) {
@@ -2129,10 +2127,6 @@ function AccountsCard() {
       const more = row.querySelector(".a-more");
       more.hidden = st.kind === "busy" || st.kind === "checking" || (st.kind === "out" && id === MAIN);
       more.setAttribute("aria-label", `${agent.label} account ${account.account || ""}`.trim());
-    }
-    // Another account once one is signed in; until then, Sign in above.
-    for (const { el: row, agent } of adds) {
-      row.hidden = !agentAccounts(home, agent.id).some((a) => a.ok);
     }
   }
   return { el, update };

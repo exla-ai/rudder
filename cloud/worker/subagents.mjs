@@ -13,13 +13,14 @@
 //     the sessions are every teammate the team ever had.
 //   - Codex subagents: a rollout whose session_meta names the agent's thread as
 //     its parent (source.subagent.thread_spawn.parent_thread_id).
+//   - OpenCode subagents: a session whose parent_id names the agent's session.
 // Each log is followed (transcripts.mjs followFile), so a poll reads only what
 // was appended since the last one.
 //
 // The list has one line per subagent:
 //   { id, backend, type, kind, name, description, status, startedAt, endedAt,
 //     toolCalls, step }
-// type is "subagent" or "teammate"; status is running, done or stopped; step is
+// type is "subagent" or "teammate"; status is running, done, stopped or failed; step is
 // what a running one does now, or what a finished one came back with. `open`
 // names one subagent whose activity comes back too, in the shape of the chat's
 // cards (cloud/app/subagents.js): the line plus prompt, result, messages and
@@ -40,6 +41,8 @@ import {
   codexReader,
   followFile,
   oneLine,
+  opencodeSubagentActivity,
+  opencodeSubagents,
   readRunRecord,
   shownMessages,
   subagentsLive,
@@ -51,8 +54,13 @@ export function listSubagents(repoDir, runId, { home, open = null }) {
   if (!record) {
     throw new Error("agent not found");
   }
-  const file = transcriptFile(record, home);
   const live = subagentsLive(record);
+  if (record.backend === "opencode") {
+    const subagents = opencodeSubagents(home, record.session?.nativeSessionId, live).sort(newestFirst);
+    const opened = subagents.find((entry) => entry.id === open);
+    return { runId: record.id, subagents, open: opened ? opencodeSubagentActivity(opened, { home, live }) : null };
+  }
+  const file = transcriptFile(record, home);
   const found = !file
     ? []
     : record.backend === "codex"

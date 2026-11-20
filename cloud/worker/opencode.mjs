@@ -70,6 +70,42 @@ export function opencodeUpdatedAt(home, id) {
   return Number.isFinite(at) && at > 0 ? at : null;
 }
 
+/** Direct children and their latest turn, including unfinished background tasks. */
+export function opencodeChildSessions(home, parentId) {
+  if (!isOpencodeSessionId(parentId)) {
+    return [];
+  }
+  const children = withDb(home, (db) => db.prepare(`
+    SELECT child.id, child.title, child.agent, child.time_created, child.time_updated,
+      latest.data AS turn,
+      (SELECT COUNT(*) FROM part WHERE session_id = child.id AND json_extract(data, '$.type') = 'tool') AS tool_calls,
+      EXISTS (SELECT 1 FROM part WHERE message_id = latest.id AND json_extract(data, '$.type') = 'tool'
+        AND json_extract(data, '$.metadata.providerExecuted') IS NOT 1
+        AND (json_extract(data, '$.state.status') IS NOT 'error' OR json_extract(data, '$.state.metadata.interrupted') IS NOT 1)) AS has_tool_calls,
+      (SELECT data FROM part WHERE message_id = latest.id
+        AND json_extract(data, '$.type') IN ('text', 'tool') AND json_extract(data, '$.synthetic') IS NOT 1
+        ORDER BY id DESC LIMIT 1) AS step
+    FROM session child
+    LEFT JOIN message latest ON latest.id = (
+      SELECT m.id FROM message m WHERE m.session_id = child.id
+        AND json_extract(m.data, '$.summary') IS NOT 1
+        AND NOT EXISTS (SELECT 1 FROM part WHERE message_id = m.id AND json_extract(data, '$.type') = 'compaction')
+      ORDER BY m.time_created DESC, m.id DESC LIMIT 1
+    )
+    WHERE child.parent_id = ?`).all(parentId));
+  return children?.map((row) => ({ ...row, turn: JSON.parse(row.turn), step: JSON.parse(row.step) })) ?? [];
+}
+
+/** The user's first prompt, even when it has scrolled out of the activity. */
+export function opencodeFirstPrompt(home, id) {
+  const parts = withDb(home, (db) => db.prepare(`
+    SELECT json_extract(data, '$.text') AS text FROM part
+    WHERE message_id = (SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' ORDER BY time_created, id LIMIT 1)
+      AND json_extract(data, '$.type') = 'text' AND json_extract(data, '$.synthetic') IS NOT 1
+    ORDER BY id`).all(id));
+  return parts?.map((part) => part.text).join("\n").trim() ?? "";
+}
+
 /**
  * Session `id`'s messages from index `start` up to `end` (null: its end), or
  * without a `start` its last `limit` before `end`; oldest first, each

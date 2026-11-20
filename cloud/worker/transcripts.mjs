@@ -16,7 +16,7 @@ import { activeGoal } from "./chat-goal.mjs";
 import { promptSuggestion } from "./suggestion.mjs";
 import { handoffShown } from "./handoff.mjs";
 import { claudeCallFiles, claudeResultFiles, codexChangedFiles, opencodeFiles, setToolFiles, withFiles } from "./tool-files.mjs";
-import { isOpencodeSessionId, opencodeContextWindow, opencodeDb, opencodeLastText, opencodeMessages, opencodeSessionExists } from "./opencode.mjs";
+import { isOpencodeSessionId, opencodeChildSessions, opencodeContextWindow, opencodeDb, opencodeFirstPrompt, opencodeLastText, opencodeMessages, opencodeSessionExists } from "./opencode.mjs";
 import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile, codexTypedText, editablePrompts, readSessionLines, unwrapPastedContent } from "./session-lineage.mjs";
 
 const TAIL_BYTES = 6 * 1024 * 1024;
@@ -654,6 +654,7 @@ function opencodeTranscript(record, { home, limit, before, after }) {
     base.messages = showAttachments(recordedTurns(record).map(showHandoff));
     return base;
   }
+  attachOpencodeSubagents(page.spawns, { home, parentId: conversation, live: subagentsLive(record), depth: 1 });
   base.messages = showAttachments(showUserTask(page.messages, record));
   base.earlier = page.start > 0 ? `${conversation}:${page.start}:` : null;
   if (end) {
@@ -679,8 +680,8 @@ function opencodeSessionPage(record, home, { end, start, limit, stats }) {
   if (!rows) {
     return null;
   }
-  const { messages, lines } = opencodeChat(rows.messages);
-  const page = { messages, lines, start: rows.start, stats: null, context: null };
+  const { messages, lines, spawns } = opencodeChat(rows.messages);
+  const page = { messages, lines, spawns, start: rows.start, stats: null, context: null };
   if (stats) {
     // The numbers are extra: a model list that cannot be read says so and
     // the conversation still shows.
@@ -697,9 +698,10 @@ function opencodeSessionPage(record, home, { end, start, limit, stats }) {
 // OpenCode's rows as chat messages: a user's text, the agent's text and
 // tool calls (each with its result), a compaction's marker with its summary,
 // and a finished turn's duration.
-function opencodeChat(rows) {
+function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
   const messages = [];
   const lines = [];
+  const spawns = [];
   let turn = null; // { at: the prompt's time, last: the turn's newest reply }
   const endTurn = () => {
     const done = turn?.last?.time?.completed;
@@ -757,18 +759,23 @@ function opencodeChat(rows) {
         const tool = {
           name: String(part.tool || "tool"),
           input: summarizeOpencodeInput(state.input),
-          output: state.status === "completed" ? clip(state.output) : state.status === "error" ? clip(state.error) : null,
+          output: state.status === "completed" ? clip(state.output, outputLimit) : state.status === "error" ? clip(state.error, outputLimit) : null,
           isError: state.status === "error",
         };
-        setToolFiles(tool, opencodeFiles(part, { text: state.output, limit: TOOL_OUTPUT_LIMIT }));
-        messages.push({ id: part.callID || id, role: "tool", ts: toMillis(state.time?.start) ?? ts, text: "", tool });
+        setToolFiles(tool, opencodeFiles(part, { text: state.output, limit: outputLimit }));
+        const message = { id: part.callID || id, role: "tool", ts: toMillis(state.time?.start) ?? ts, text: "", tool };
+        messages.push(message);
+        const childId = state.metadata?.sessionId;
+        if (part.tool === "task" && isOpencodeSessionId(childId)) {
+          spawns.push({ message, childId });
+        }
       }
     });
   }
   if (turn?.last) {
     endTurn();
   }
-  return { messages, lines };
+  return { messages, lines, spawns };
 }
 
 function summarizeOpencodeInput(input) {
@@ -783,6 +790,72 @@ function summarizeOpencodeInput(input) {
     return `${input.todos.length} todo(s)`;
   }
   return oneLine(JSON.stringify(input));
+}
+
+export function opencodeSubagents(home, parentId, live) {
+  return opencodeChildSessions(home, parentId).map(({ id, title, agent, time_created, time_updated, turn, tool_calls, has_tool_calls, step }) => {
+    // Background tasks outlive the parent call. The child's own loop also stays
+    // active after unknown finishes and after providers say stop with tool calls.
+    const endedAt = turn?.role === "assistant" ? toMillis(turn.time?.completed) : null;
+    const finished = turn?.finish && !["tool-calls", "unknown"].includes(turn.finish) && !has_tool_calls;
+    const terminal = endedAt !== null && (turn.error || finished);
+    const status = terminal
+      ? turn.error?.name === "MessageAbortedError" ? "stopped" : turn.error ? "failed" : "done"
+      : live ? "running" : "stopped";
+    const detail = step?.type === "tool" ? `${step.tool} ${summarizeOpencodeInput(step.state?.input)}` : step?.text;
+    return {
+      id,
+      backend: "opencode",
+      type: "subagent",
+      kind: agent ?? null,
+      name: null,
+      description: title.replace(/ \(@[^)]+ subagent\)$/, ""),
+      status,
+      startedAt: time_created,
+      endedAt: status === "running" ? null : terminal ? endedAt : Math.max(time_updated, toMillis(turn?.time?.created) ?? 0, endedAt ?? 0),
+      toolCalls: tool_calls,
+      step: oneLine(turn?.error?.data?.message || detail) || null,
+    };
+  });
+}
+
+export function opencodeSubagentActivity(entry, { home, live, depth = 1 }) {
+  const page = opencodeMessages(home, entry.id, { start: null, end: null, limit: SUBAGENT_KEEP });
+  if (!page) {
+    return { ...entry, prompt: null, result: null, ...shownMessages(null) };
+  }
+  const { messages, spawns } = opencodeChat(page.messages, SUBAGENT_OUTPUT_LIMIT);
+  if (depth < SUBAGENT_DEPTH) {
+    attachOpencodeSubagents(spawns, { home, parentId: entry.id, live, depth: depth + 1 });
+  }
+  const prompt = page.start ? opencodeFirstPrompt(home, entry.id) : messages.find((message) => message.role === "user")?.text;
+  const reply = page.messages.findLast((message) => message.data.role === "assistant" && message.data.summary !== true);
+  const result = entry.status === "done"
+    ? reply?.parts.filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text).join("\n").trim()
+    : entry.status === "failed" ? reply?.data.error?.data?.message : null;
+  return {
+    ...entry,
+    prompt: prompt ? clip(prompt, SUBAGENT_PROMPT_LIMIT) : null,
+    result: result ? clip(result, SUBAGENT_OUTPUT_LIMIT) : null,
+    ...shownMessages({ messages, dropped: page.start }),
+  };
+}
+
+function attachOpencodeSubagents(spawns, { home, parentId, live, depth }) {
+  if (spawns.length === 0) {
+    return;
+  }
+  const children = new Map(opencodeSubagents(home, parentId, live).map((entry) => [entry.id, entry]));
+  const cards = new Map();
+  for (const { message, childId } of spawns) {
+    const entry = children.get(childId);
+    if (entry) {
+      if (!cards.has(childId)) {
+        cards.set(childId, opencodeSubagentActivity(entry, { home, live, depth }));
+      }
+      message.subagent = cards.get(childId);
+    }
+  }
 }
 
 // The speed of the page's replies and how full the context is after the

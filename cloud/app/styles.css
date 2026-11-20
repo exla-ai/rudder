@@ -312,8 +312,12 @@ a { color: var(--accent); }
 .ls-steps { display: flex; flex-direction: column; gap: 12px; }
 .ls-step { display: flex; gap: 12px; align-items: flex-start; font-size: 15px; line-height: 1.4; }
 .ls-n { width: 24px; height: 24px; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); font-size: 13px; font-weight: 700; display: grid; place-items: center; flex: none; margin-top: -1px; }
-.ls-code { display: flex; flex-direction: column; gap: 10px; }
-.ls-code .input { height: 48px; padding: 0 14px; border-radius: 12px; font: 16px/1 var(--mono); box-sizing: border-box; width: 100%; -webkit-appearance: none; appearance: none; }
+.ls-code { display: grid; gap: 10px; }
+.ls-code .input {
+  width: 100%; height: 50px; border-radius: 14px;
+  font: 16px/1.4 var(--mono); -webkit-appearance: none; appearance: none;
+}
+.ls-code .input::placeholder { color: var(--muted); opacity: 1; font-family: var(--font); }
 .ls-usercode { font: 700 28px/1 var(--mono); letter-spacing: 0.08em; padding: 18px 12px; border-radius: 14px; border: 1px dashed var(--line-strong); background: var(--surface-2); color: var(--ink); text-align: center; }
 .ls-usercode:active { transform: scale(0.98); }
 .ls-done { text-align: center; padding: 6px 0 10px; }

@@ -422,8 +422,9 @@ Cloud homes sign in each account (`login/start` with `account`: main, an id or
 "new"), and `/api/app/agent-account` makes one the default, signs it out or
 removes it. Settings and Home list a row per account. The Add account button
 at the bottom opens sign-in for Claude Code or Codex, even while existing
-accounts are still checking. The model pickers choose the account when a
-harness has more than one. Plan usage is per account. On macOS, Claude's
+accounts are still checking. The Claude Code sign-in sheet has a full-width
+field for pasting the sign-in code. The model pickers choose the account when
+a harness has more than one. Plan usage is per account. On macOS, Claude's
 keychain entry for an added dir is `Claude Code-credentials-<sha256(dir)[:8]>`.
 Antigravity has one account because agy has no config dir setting. Open work
 includes verifying a real sign-in into an added account on a Cloud home and on

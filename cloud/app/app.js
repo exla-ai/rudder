@@ -2331,7 +2331,10 @@ function openAgentSignIn(provider, account) {
       <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and tap <b>Authorize</b>.</div></div>
       <button type="button" class="btn block accent ls-open">${icon("external")}<span>Open the sign-in page</span></button>
       <div class="ls-step"><span class="ls-n">2</span><div>Copy the code it shows, then paste it here.</div></div>
-      <form class="ls-code">${codeField}<button type="submit" class="btn block primary">Connect</button></form>
+      <form class="ls-code">
+        <label><span class="sr-only">Sign-in code</span>${codeField}</label>
+        <button type="submit" class="btn block primary">Connect</button>
+      </form>
     </div>`));
     const form = body.querySelector("form");
     const input = form.elements.code;

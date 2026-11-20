@@ -3771,7 +3771,16 @@ function createAskCard(ask, { onAnswer }) {
       field.querySelector(".ask-q-head").hidden = !q.header;
       setText(field.querySelector(".ask-q-text"), q.question || "");
       const opts = field.querySelector(".ask-opts");
-      for (const o of Array.isArray(q.options) ? q.options : []) {
+      const options = Array.isArray(q.options) ? q.options : [];
+      const otherText = h(`<input type="text" class="ask-other-text" placeholder="Type your answer" enterkeyhint="send">`);
+      otherText.setAttribute("aria-label", `Your answer to: ${q.question || "this question"}`);
+      otherText.addEventListener("input", () => refreshValidity());
+      body.appendChild(field);
+      if (!options.length) {
+        opts.appendChild(otherText);
+        return { q, value: () => otherText.value.trim() || null };
+      }
+      for (const o of options) {
         const row = h(`<label class="ask-opt"><input type="${type}" name="${name}"><span class="ask-opt-t"><b></b><small></small></span></label>`);
         row.querySelector("input").value = o.label || "";
         setText(row.querySelector("b"), o.label || "");
@@ -3780,12 +3789,11 @@ function createAskCard(ask, { onAnswer }) {
         opts.appendChild(row);
       }
       const other = h(`<label class="ask-opt ask-opt-other"><input type="${type}" name="${name}" data-other="1"><span class="ask-opt-t"><b>Other…</b></span></label>`);
-      const otherText = h(`<input type="text" class="ask-other-text" placeholder="Type something" hidden>`);
-      otherText.setAttribute("aria-label", `Your own answer to: ${q.question || "this question"}`);
+      otherText.hidden = true;
       opts.append(other, otherText);
       // Claude's options can carry a preview (a mockup, a snippet). As in its
       // dialog, the card shows the picked option's, the first one's until then.
-      const withPreview = (Array.isArray(q.options) ? q.options : []).filter((o) => typeof o?.preview === "string" && o.preview);
+      const withPreview = options.filter((o) => typeof o?.preview === "string" && o.preview);
       const previewName = withPreview.length ? note("", "ask-more") : null;
       const previewBox = withPreview.length ? pre("", "mono") : null;
       if (previewBox) field.append(previewName, previewBox);
@@ -3797,8 +3805,6 @@ function createAskCard(ask, { onAnswer }) {
         if (previewBox.textContent !== shown.preview) previewBox.textContent = shown.preview;
       };
       paintPreview();
-      body.appendChild(field);
-      const st = { q, multi, field, otherText };
       field.addEventListener("change", () => {
         const otherOn = other.querySelector("input").checked;
         otherText.hidden = !otherOn;
@@ -3806,15 +3812,14 @@ function createAskCard(ask, { onAnswer }) {
         paintPreview();
         refreshValidity();
       });
-      otherText.addEventListener("input", () => refreshValidity());
-      st.value = () => {
+      const value = () => {
         const checked = [...field.querySelectorAll("input:checked")];
         const labels = checked.filter((x) => !x.dataset.other).map((x) => x.value);
         const own = checked.some((x) => x.dataset.other) ? otherText.value.trim() : "";
         if (multi) { const all = own ? [...labels, own] : labels; return all.length ? all : null; }
         return own || labels[0] || null;
       };
-      return st;
+      return { q, value };
     });
     const submit = btn("Submit", "accent", () => {
       const answers = {};
@@ -3824,6 +3829,11 @@ function createAskCard(ask, { onAnswer }) {
     refreshValidity = () => { if (!busy) submit.disabled = !states.every((st) => st.value() != null); };
     refreshValidity();
     actions.append(submit);
+    body.addEventListener("keydown", (e) => {
+      if (!e.target.matches(".ask-other-text") || e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      if (!e.repeat) submit.click();
+    });
     return el;
   }
 

@@ -1,0 +1,43 @@
+# Issues a Developer ID Application certificate for a signing request through
+# the App Store Connect API (mac/scripts/developer-id-cert.mjs), so the Mac
+# release in CI signs without anyone's laptop. The private key stays with
+# whoever made the CSR: they join it with the certificate (artifact
+# developer-id-cert, public) into a .p12 and store it as MAC_DEVELOPER_ID_P12
+# with its password in MAC_DEVELOPER_ID_PASSWORD. Also the way to replace the
+# certificate before it expires.
+#
+#   gh workflow run mac-cert.yml -f csr="$(base64 -w0 request.csr)"
+name: Mac certificate
+
+on:
+  workflow_dispatch:
+    inputs:
+      csr:
+        description: "base64 of the PEM certificate signing request"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  issue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Issue the certificate
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          CSR: ${{ inputs.csr }}
+        run: node mac/scripts/developer-id-cert.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: developer-id-cert
+          path: developer-id.cer
+          if-no-files-found: error
+          retention-days: 1

@@ -3760,6 +3760,7 @@ function createAskCard(ask, { onAnswer }) {
   }
 
   if (kind === "question") {
+    el.classList.add("question");
     const questions = Array.isArray(input.questions) ? input.questions : [];
     const safeId = String(ask.id || "ask").replace(/[^a-zA-Z0-9_-]/g, "");
     const states = questions.map((q, i) => {
@@ -3780,17 +3781,19 @@ function createAskCard(ask, { onAnswer }) {
         opts.appendChild(otherText);
         return { q, value: () => otherText.value.trim() || null };
       }
+      const choices = h(`<div class="ask-choices"></div>`);
+      opts.append(choices, otherText);
       for (const o of options) {
         const row = h(`<label class="ask-opt"><input type="${type}" name="${name}"><span class="ask-opt-t"><b></b><small></small></span></label>`);
         row.querySelector("input").value = o.label || "";
         setText(row.querySelector("b"), o.label || "");
         const d = row.querySelector("small");
         setText(d, o.description || ""); d.hidden = !o.description;
-        opts.appendChild(row);
+        choices.appendChild(row);
       }
       const other = h(`<label class="ask-opt ask-opt-other"><input type="${type}" name="${name}" data-other="1"><span class="ask-opt-t"><b>Other…</b></span></label>`);
       otherText.hidden = true;
-      opts.append(other, otherText);
+      choices.appendChild(other);
       // Claude's options can carry a preview (a mockup, a snippet). As in its
       // dialog, the card shows the picked option's, the first one's until then.
       const withPreview = options.filter((o) => typeof o?.preview === "string" && o.preview);
@@ -3830,7 +3833,7 @@ function createAskCard(ask, { onAnswer }) {
     refreshValidity();
     actions.append(submit);
     body.addEventListener("keydown", (e) => {
-      if (!e.target.matches(".ask-other-text") || e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+      if (!e.target.matches(".ask-other-text, .ask-opt input[type=radio]:checked") || e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       if (!e.repeat) submit.click();
     });

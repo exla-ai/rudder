@@ -304,9 +304,13 @@ pub(super) fn runtime_snapshot(
                 observation: serde_json::from_str(&json)?,
                 owner_epoch,
                 observed_at_ms,
+                // Only an old heartbeat is stale. Callers sample now_ms before
+                // their transaction serializes behind the owner's writes, so a
+                // heartbeat committed in between carries a later time: it is
+                // newer than the caller's clock, not stale.
                 stale: now_ms
                     .checked_sub(observed_at_ms)
-                    .is_none_or(|age| !(0..=RUNTIME_MAX_AGE_MS).contains(&age)),
+                    .is_none_or(|age| age > RUNTIME_MAX_AGE_MS),
             })
         })
         .transpose()

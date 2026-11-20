@@ -101,6 +101,17 @@ fn observation_is_bound_to_actor_attempt_and_discovery_marks_age() {
 }
 
 #[test]
+fn heartbeat_committed_after_the_callers_clock_sample_is_fresh() {
+    // The broker samples now_ms, then the owner commits a heartbeat stamped
+    // later, then the broker's acceptance transaction reads that heartbeat.
+    let (_dir, mut j, _owner, token) = setup();
+    let found = j.find_agent_runtime(&token, 999).unwrap();
+    let target = found.iter().find(|agent| agent.identity.run_id == "target").unwrap();
+    assert!(!target.runtime.as_ref().unwrap().stale);
+    j.accept_command(&token, &command(), 999).unwrap();
+}
+
+#[test]
 fn explicit_thread_turn_and_current_owned_phase_are_required_at_acceptance() {
     let (_dir, mut j, owner, token) = setup();
     for payload in [

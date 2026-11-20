@@ -58,8 +58,18 @@ RUN_URL="$(gh workflow run "$WORKFLOW" --repo "$REPO" --ref main -f tag="$TAG")"
 [[ "$RUN_URL" =~ /actions/runs/([0-9]+) ]] || die "gh workflow run printed no run URL (${RUN_URL:-nothing}); find the run with gh run list --repo $REPO --workflow $WORKFLOW and watch it with gh run watch"
 RUN_ID="${BASH_REMATCH[1]}"
 echo "publish.sh: signing and publishing $TAG in $RUN_URL"
+# The dispatch response can return before the run is visible to the Actions API.
+for attempt in {1..10}; do
+  if lookup=$(gh api "repos/$REPO/actions/runs/$RUN_ID?exclude_pull_requests=true" --silent 2>&1); then
+    break
+  fi
+  if [[ "$lookup" != *"(HTTP 404)"* || "$attempt" -eq 10 ]]; then
+    die "cannot read run $RUN_URL: $lookup"
+  fi
+  sleep 2
+done
 if ! gh run watch "$RUN_ID" --repo "$REPO" --exit-status --interval 10 >/dev/null; then
-  echo "publish.sh: $WORKFLOW failed, see $RUN_URL. The draft $TAG is still there: fix the cause and run gh workflow run $WORKFLOW --repo $REPO --ref main -f tag=$TAG" >&2
+  echo "publish.sh: could not confirm that $WORKFLOW published $TAG. See $RUN_URL." >&2
   gh run view "$RUN_ID" --repo "$REPO" --log-failed | tail -40
   exit 1
 fi

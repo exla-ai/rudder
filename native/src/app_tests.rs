@@ -32989,7 +32989,10 @@ sleep 5"#;
     }
     assert!(app.agents[0].codex_goal_menu.is_none());
     let screen = app.agents[0].terminal.as_mut().unwrap().live_screen_lines();
-    assert!(screen.iter().any(|row| row.trim() == "1b 5b 41 0d"), "{screen:?}");
+    assert!(
+        screen.iter().any(|row| row.split_whitespace().eq(["1b", "5b", "41", "0d"])),
+        "{screen:?}"
+    );
     assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Failed(_)));
     app.agents[0].terminal = None;
     fs::remove_dir_all(repo).unwrap();

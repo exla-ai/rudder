@@ -453,6 +453,19 @@ enum LocalTools {
         return dirs.joined(separator: ":")
     }
 
+    static func findExecutable(_ tool: String, in path: String) -> String? {
+        let files = FileManager.default
+        for dir in path.split(separator: ":") {
+            let candidate = (String(dir) as NSString).appendingPathComponent(tool)
+            var isDirectory: ObjCBool = false
+            if files.fileExists(atPath: candidate, isDirectory: &isDirectory), !isDirectory.boolValue,
+               files.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
     /// Single-quoted for sh/zsh: safe for any path.
     static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"

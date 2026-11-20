@@ -13,8 +13,8 @@ import WebKit
 /// - `openExternal {url}`: the system URL handler.
 /// - `badge {count}`: the Dock badge.
 /// - `notify {title, body, path}`: a macOS notification; a click opens `path`.
-/// - `localStatus {id?}`: answered with `window.rudderLocalStatus({id, rudder,
-///   claude, codex, rudderVersion?})`.
+/// - `localStatus {id?, refreshPATH?}`: answered with `window.rudderLocalStatus({id, rudder,
+///   claude, codex})`.
 /// - `openLocal {id, runId, repo}`: `rudder cloud pull <runId> --json` in this
 ///   Mac's checkout of `repo`, answered with `window.rudderLocal({id, ok, path?,
 ///   title?, checkout?, error?, cancelled?})`, then Terminal / Finder / Xcode.
@@ -34,7 +34,7 @@ struct AppWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(
-            source: Bridge.bootstrapScript(token: token, version: Bundle.main.shortVersion, local: LocalAgents.shared.lastKnownInstalled),
+            source: Bridge.bootstrapScript(token: token, version: Bundle.main.shortVersion, local: LocalAgents.lastKnownInstalled),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -111,11 +111,6 @@ struct AppWebView: NSViewRepresentable {
                       RudderLinks.restorable(string, server: server) != nil else { return }
                 UserDefaults.standard.set(string, forKey: key)
             }
-            // Tell the page what is installed here once this launch has looked.
-            Task { [weak self] in
-                let status = await LocalAgents.shared.status()
-                self?.reply("rudderLocalStatus", status)
-            }
         }
 
         func detach() {
@@ -152,8 +147,9 @@ struct AppWebView: NSViewRepresentable {
                 Notifier.shared.post(title: title, body: text, path: path)
             case "localStatus":
                 let id = body["id"] as? String
+                let refreshPATH = body["refreshPATH"] as? Bool == true
                 Task { [weak self] in
-                    var status = await LocalAgents.shared.status()
+                    var status = await LocalAgents.shared.status(refreshPATH: refreshPATH)
                     if let id { status["id"] = id }
                     self?.reply("rudderLocalStatus", status)
                 }

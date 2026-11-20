@@ -101,3 +101,50 @@ test("app files negotiate br/gzip, prefer sidecars and revalidate per encoding",
   assert.equal(stale.status, 500);
   assert.match(stale.text, /older than/);
 });
+
+test("frequent app polls compress private JSON without changing responses", async (t) => {
+  const transcript = {
+    messages: Array.from({ length: 50 }, (_, i) => ({ id: `msg-${i}`, role: "assistant", text: "Updated the launch tests. ✓" })),
+  };
+  const server = http.createServer((req, res) => {
+    lib.sendAppPollJson(req, res, req.url === "/small" ? { messages: [] } : transcript).catch((error) => {
+      res.writeHead(500);
+      res.end(String(error.message));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const { port } = server.address();
+
+  const compressed = await get(port, "transcript", { "accept-encoding": "gzip, br" });
+  assert.equal(compressed.status, 200);
+  assert.deepEqual(JSON.parse(compressed.text), transcript);
+  assert.equal(compressed.headers["content-encoding"], "gzip");
+  assert.equal(compressed.headers["cache-control"], "private, no-store");
+  assert.equal(compressed.headers.vary, "Accept-Encoding");
+  assert.equal(Number(compressed.headers["content-length"]), compressed.raw.length);
+  assert.ok(compressed.raw.length < Buffer.byteLength(compressed.text) / 2);
+
+  const plain = await get(port, "transcript", { "accept-encoding": "gzip;q=0, br" });
+  assert.equal(plain.headers["content-encoding"], undefined);
+  assert.equal(plain.text, compressed.text);
+  assert.equal(plain.headers["cache-control"], compressed.headers["cache-control"]);
+  assert.equal(plain.headers.vary, compressed.headers.vary);
+  assert.equal(Number(plain.headers["content-length"]), plain.raw.length);
+  assert.equal((await get(port, "transcript")).text, compressed.text);
+
+  const small = await get(port, "small", { "accept-encoding": "gzip" });
+  assert.equal(small.headers["content-encoding"], undefined);
+  assert.deepEqual(JSON.parse(small.text), { messages: [] });
+});
+
+test("app polls skip the response if the client disconnects during compression", async () => {
+  const res = {
+    destroyed: false,
+    writeHead() { assert.fail("sent headers after disconnect"); },
+    end() { assert.fail("sent a body after disconnect"); },
+  };
+  const sending = lib.sendAppPollJson({ headers: { "accept-encoding": "gzip" } }, res, { text: "word ".repeat(1000) });
+  res.destroyed = true;
+  await sending;
+});

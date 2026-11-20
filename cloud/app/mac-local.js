@@ -14,18 +14,13 @@ export const canOpenOnMac = () => PLATFORM === "mac" && !!NATIVE?.openLocal;
 let seq = 0;
 const nextId = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
 const waiting = { status: new Map(), local: new Map(), opened: new Map() };
-let lastStatus = null; // the shell also answers once per page load, unasked
 
 function settle(map, key, value) {
   const fn = map.get(key);
   if (fn) { map.delete(key); fn(value); }
 }
 if (PLATFORM === "mac") {
-  window.rudderLocalStatus = (s) => {
-    lastStatus = s || null;
-    if (s?.id && waiting.status.has(s.id)) settle(waiting.status, s.id, s);
-    else for (const id of [...waiting.status.keys()]) settle(waiting.status, id, s);
-  };
+  window.rudderLocalStatus = (s) => settle(waiting.status, s?.id, s);
   window.rudderLocal = (r) => settle(waiting.local, r?.id, r || {});
   window.rudderOpenedPath = (r) => settle(waiting.opened, `${r?.path}|${r?.app}`, r || {});
 }
@@ -37,9 +32,10 @@ function ask(map, key, msg, ms) {
     postNative(msg);
   });
 }
-function localStatus() {
+function localStatus(refreshPATH) {
   const id = nextId();
-  return ask(waiting.status, id, { type: "localStatus", id }, 15_000).then((s) => s || lastStatus);
+  // The first check can spend 10 seconds in the shell and 5 draining its pipes.
+  return ask(waiting.status, id, { type: "localStatus", id, refreshPATH }, 20_000);
 }
 function openPath(path, app) {
   return ask(waiting.opened, `${path}|${app}`, { type: "openPath", path, app }, 15_000);
@@ -65,17 +61,14 @@ export function openCopyOnMac({ runId, repo, title }) {
   const wait = () => slot.replaceChildren(h(`<div class="ls-wait mc-wait"><span class="spin"></span><div class="ls-title"></div><div class="ls-sub"></div></div>`));
   function waitText(t, sub = "") { setText(slot.querySelector(".ls-title"), t); setText(slot.querySelector(".ls-sub"), sub); }
 
-  function showInstall(status) {
+  function showInstall() {
     slot.replaceChildren(h(`<div class="mc-install">
       <p>Copying needs the Rudder CLI on this Mac. Install it, then try again.</p>
       <button type="button" class="c-cmd ob-cmd" aria-label="Copy the install command"><code></code>${icon("copy")}</button>
       <button type="button" class="btn block mc-retry">${icon("refresh")}<span>Check again</span></button></div>`));
     setText(slot.querySelector("code"), INSTALL_LINE);
     slot.querySelector(".c-cmd").addEventListener("click", async () => { if (await copyText(INSTALL_LINE)) toast("Copied"); });
-    slot.querySelector(".mc-retry").addEventListener("click", start);
-    if (status && status.rudder && !status.claude && !status.codex) {
-      slot.prepend(h(`<p class="hint">Claude Code or Codex is needed too.</p>`));
-    }
+    slot.querySelector(".mc-retry").addEventListener("click", () => start(true));
   }
 
   function showStart() {
@@ -98,24 +91,25 @@ export function openCopyOnMac({ runId, repo, title }) {
         b.disabled = true;
         const res = await openPath(r.path, o.app);
         b.disabled = false;
-        if (res && res.ok === false) toast(`Couldn't open it in ${o.label.replace(/^Open Rudder in /, "")}`, { error: true });
+        if (!res?.ok) toast(`Couldn't open it in ${o.label.replace(/^Open Rudder in /, "")}`, { error: true });
         else if (o.app === "dashboard") dlg.close();
       });
       row.appendChild(b);
     }
   }
 
-  function showError(text, retry = true) {
-    slot.replaceChildren(h(`<div class="mc-err"><p class="err"></p>${retry ? `<button type="button" class="btn block mc-retry">${icon("refresh")}<span>Try again</span></button>` : ""}</div>`));
+  function showError(text, retry = pull) {
+    slot.replaceChildren(h(`<div class="mc-err"><p class="err"></p><button type="button" class="btn block mc-retry">${icon("refresh")}<span>Try again</span></button></div>`));
     setText(slot.querySelector("p"), text);
-    slot.querySelector(".mc-retry")?.addEventListener("click", pull);
+    slot.querySelector(".mc-retry").addEventListener("click", retry);
   }
 
-  async function start() {
+  async function start(refreshPATH = false) {
     wait(); waitText("Checking this Mac…");
-    const s = await localStatus();
+    const s = await localStatus(refreshPATH);
     if (!dlg.open) return;
-    if (s && s.rudder === false) return showInstall(s);
+    if (!s) return showError("No answer from the Mac app. Try again.", () => start(true));
+    if (!s.rudder) return showInstall();
     showStart();
   }
 
@@ -130,7 +124,7 @@ export function openCopyOnMac({ runId, repo, title }) {
     if (r.cancelled) { if (dlg.open) showStart(); return; }
     if (!r.ok) {
       const msg = r.error || "The copy did not finish.";
-      if (/not (found|installed)|command not found/i.test(msg)) return showInstall(null);
+      if (dlg.open && msg.startsWith("The rudder CLI is not installed on this Mac.")) return showInstall();
       if (dlg.open) showError(msg); else toast(msg, { error: true });
       return;
     }

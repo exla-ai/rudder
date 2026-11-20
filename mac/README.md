@@ -64,8 +64,9 @@ window.RUDDER_NATIVE = Object.freeze({
 ```
 
 `picker`, `login`, `voice` and `digest` are absent, so the page uses its plain
-web paths for those. `local` is a cached value from the previous check; the
-current answer arrives once per page load as `window.rudderLocalStatus(...)`.
+web paths for those. `local` is the value recorded by the last local tool check.
+Opening a local copy requests the current status from the shell. Checking again
+reads the login shell's PATH afresh.
 
 Messages, sent with `window.webkit.messageHandlers.rudder.postMessage(msg)`
 (only pages under `/app` or `/api` of the control plane are listened to):
@@ -76,7 +77,7 @@ Messages, sent with `window.webkit.messageHandlers.rudder.postMessage(msg)`
 | `openExternal` | `url` | default browser (http, https, mailto) |
 | `badge` | `count` | Dock badge |
 | `notify` | `title`, `body`, `path` (an `/app/...` path) | notification; a click opens `path` |
-| `localStatus` | `id?` | `window.rudderLocalStatus({id, rudder, claude, codex, rudderVersion?})` |
+| `localStatus` | `id?`, `refreshPATH?` | `window.rudderLocalStatus({id, rudder, claude, codex})` |
 | `openLocal` | `id`, `runId`, `repo` (`owner/name`) | `window.rudderLocal({id, runId, ok, path?, title?, checkout?, error?, cancelled?})` |
 | `openPath` | `path`, `app` (`dashboard`, `terminal`, `finder`, `xcode`) | `window.rudderOpenedPath({path, app, ok})` |
 | `appearance` | `value` (`system`, `light`, `dark`) | none; the whole app follows it and keeps it for the next launch |
@@ -87,7 +88,7 @@ the page moves within itself instead of reloading.
 
 `openLocal` in detail:
 
-1. `rudder` is found on the PATH your login shell prints (run once per launch as
+1. `rudder` is found on the PATH your login shell prints (read on demand as
    `$SHELL -l -i -c`, so Homebrew, npm, nvm and volta installs are found) plus the
    usual install directories. Missing: `ok:false` with the npm install line.
 2. The checkout of `repo` comes from a remembered mapping (UserDefaults

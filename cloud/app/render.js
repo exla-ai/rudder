@@ -7,12 +7,15 @@ const CDN = "https://cdn.jsdelivr.net/npm/";
 const WITH_FILE_URIS = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|file):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
 let libs = null;
 let libsPromise = null;
+let highlighter = null;
+let highlighterPromise = null;
 const listeners = new Set();
 
-// Runs `fn` once, when the libraries load. Once they have, there is nothing
-// to wait for, and holding `fn` (an agent screen's repaint) would keep that
-// screen alive for good.
-export function onMarkdownReady(fn) { if (!libs) listeners.add(fn); }
+// An open chat can repaint once Markdown is ready and unsubscribe on close.
+export function onMarkdownReady(fn) {
+  if (!libs) listeners.add(fn);
+  return () => listeners.delete(fn);
+}
 export function markdownReady() { return !!libs; }
 
 export function loadMarkdown() {
@@ -20,8 +23,7 @@ export function loadMarkdown() {
   libsPromise = Promise.all([
     import(CDN + "marked@12.0.2/lib/marked.esm.js"),
     import(CDN + "dompurify@3.1.6/dist/purify.es.mjs"),
-    import(CDN + "@highlightjs/cdn-assets@11.9.0/es/highlight.min.js"),
-  ]).then(([m, p, h]) => {
+  ]).then(([m, p]) => {
     const marked = new m.Marked({ gfm: true, breaks: false });
     const purify = p.default;
     purify.addHook("uponSanitizeAttribute", (node, attr) => {
@@ -40,7 +42,7 @@ export function loadMarkdown() {
         if (/^vnc:/i.test(href)) node.setAttribute("title", href);
       }
     });
-    libs = { marked, purify, hljs: h.default };
+    libs = { marked, purify };
     const waiting = [...listeners];
     listeners.clear();
     for (const fn of waiting) { try { fn(); } catch (e) { console.error(e); } }
@@ -49,6 +51,18 @@ export function loadMarkdown() {
     libsPromise = null;
   });
   return libsPromise;
+}
+
+function loadHighlighter() {
+  if (!highlighterPromise) {
+    highlighterPromise = import(CDN + "@highlightjs/cdn-assets@11.9.0/es/highlight.min.js")
+      .then(({ default: lib }) => { highlighter = lib; })
+      .catch((err) => {
+        console.warn("syntax highlighter unavailable", err);
+        highlighterPromise = null;
+      });
+  }
+  return highlighterPromise;
 }
 
 export function escapeHtml(s) {
@@ -81,21 +95,33 @@ function enhance(root) {
   for (const pre of root.querySelectorAll("pre")) {
     const code = pre.querySelector("code");
     if (!code) continue;
-    const m = /language-([\w+#-]+)/.exec(code.className || "");
-    let lang = m ? m[1] : "";
-    try {
-      if (lang && libs.hljs.getLanguage(lang)) libs.hljs.highlightElement(code);
-      else if (code.textContent.length < 20000) {
-        const r = libs.hljs.highlightAuto(code.textContent);
-        if (r.relevance > 5) { code.innerHTML = r.value; lang = lang || r.language || ""; }
-      }
-    } catch { /* leave plain */ }
+    const lang = /language-([\w+#-]+)/.exec(code.className || "")?.[1] || "";
     const box = document.createElement("div");
     box.className = "codeblock";
     box.innerHTML = `<div class="cb-head"><span class="cb-lang">${escapeHtml(lang || "text")}</span><button type="button" class="copy-btn" aria-label="Copy code">${icon("copy")}<span>Copy</span></button></div>`;
     pre.replaceWith(box);
     box.appendChild(pre);
+    const label = box.querySelector(".cb-lang");
+    if (highlighter) highlightCode(code, label, lang);
+    else loadHighlighter().then(() => {
+      // The Markdown, copy button and links are ready even on a slow load of
+      // the optional colors. Leave a user's active code selection intact.
+      if (highlighter && !window.getSelection()?.containsNode(code, true)) highlightCode(code, label, lang);
+    });
   }
+}
+
+function highlightCode(code, label, lang) {
+  try {
+    if (lang && highlighter.getLanguage(lang)) highlighter.highlightElement(code);
+    else if (code.textContent.length < 20000) {
+      const r = highlighter.highlightAuto(code.textContent);
+      if (r.relevance > 5) {
+        code.innerHTML = r.value;
+        label.textContent = lang || r.language || "text";
+      }
+    }
+  } catch { /* leave plain */ }
 }
 
 export async function copyText(text) {

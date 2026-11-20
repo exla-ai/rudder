@@ -74,20 +74,19 @@ struct AppWebView: UIViewRepresentable {
             start = url
         }
         #endif
-        webView.load(URLRequest(url: start))
+        context.coordinator.loadApp(start)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        // Coming back to the foreground: ask the page for fresh state instead of
-        // reloading it (which would lose scroll position and drafts).
-        if context.coordinator.lastTick != session.foregroundTick {
-            context.coordinator.lastTick = session.foregroundTick
-            webView.evaluateJavaScript("window.rudderRefresh && window.rudderRefresh()")
-        }
-        if context.coordinator.lastDigestTick != session.openDigestTick {
-            context.coordinator.lastDigestTick = session.openDigestTick
-            webView.evaluateJavaScript("window.rudderOpenDigest ? window.rudderOpenDigest() : location.assign('/app/digest')")
+        let coordinator = context.coordinator
+        let becameActive = coordinator.lastTick != session.foregroundTick
+        coordinator.lastTick = session.foregroundTick
+        if coordinator.lastDigestTick != session.openDigestTick {
+            coordinator.lastDigestTick = session.openDigestTick
+            coordinator.openDigest()
+        } else if becameActive {
+            coordinator.refresh()
         }
     }
 
@@ -125,15 +124,49 @@ struct AppWebView: UIViewRepresentable {
         weak var webView: WKWebView?
         var lastTick = 0
         var lastDigestTick = 0
+        private var requestedAppURL: URL
+        private var activeNavigation: WKNavigation?
+        private var appPageCommitted = false
+        private var offline = false
 
         init(session: Session) {
             self.session = session
             self.attachmentPicker = AttachmentPicker()
             self.agentLogin = AgentLogin()
+            self.requestedAppURL = session.appURL
+        }
+
+        func loadApp(_ url: URL) {
+            guard let webView else { return }
+            requestedAppURL = url
+            appPageCommitted = false
+            offline = false
+            activeNavigation = webView.load(URLRequest(url: url))
+        }
+
+        func refresh(reloadIfMissing: Bool = false) {
+            guard let webView else { return }
+            if offline || (reloadIfMissing && !appPageCommitted && !webView.isLoading) {
+                loadApp(requestedAppURL)
+            } else if appPageCommitted {
+                // Keep the running page, including its draft and scroll position.
+                let action = reloadIfMissing ? "window.rudderRefresh ? window.rudderRefresh() : location.reload()"
+                    : "window.rudderRefresh && window.rudderRefresh()"
+                webView.evaluateJavaScript(action)
+            }
+        }
+
+        func openDigest() {
+            if !appPageCommitted {
+                // A notification may arrive before the first document commits.
+                loadApp(session.appURL.appendingPathComponent("digest"))
+            } else {
+                webView?.evaluateJavaScript("window.rudderOpenDigest ? window.rudderOpenDigest() : location.assign('/app/digest')")
+            }
         }
 
         @objc func pullToRefresh(_ control: UIRefreshControl) {
-            webView?.evaluateJavaScript("window.rudderRefresh ? window.rudderRefresh() : location.reload()")
+            refresh(reloadIfMissing: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                 control.endRefreshing()
             }
@@ -255,7 +288,8 @@ struct AppWebView: UIViewRepresentable {
                 return
             }
             let sameHost = url.host == session.server.host
-            let inApp = sameHost && (url.path == "/app" || url.path.hasPrefix("/app/") || url.path.hasPrefix("/api/"))
+            let appPage = isAppPage(url)
+            let inApp = appPage || (sameHost && url.path.hasPrefix("/api/"))
             if inApp && navigationAction.targetFrame != nil {
                 if url.path == "/app/login" {
                     // The web app should not do this in the shell, but if it
@@ -263,6 +297,10 @@ struct AppWebView: UIViewRepresentable {
                     decisionHandler(.cancel)
                     session.signOut()
                     return
+                }
+                if appPage && navigationAction.targetFrame?.isMainFrame == true {
+                    requestedAppURL = url
+                    offline = false
                 }
                 decisionHandler(.allow)
                 return
@@ -283,35 +321,64 @@ struct AppWebView: UIViewRepresentable {
             return nil
         }
 
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            activeNavigation = navigation
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // WebKit can omit the navigation for a back/forward cache restore.
+            guard navigation == nil || navigation === activeNavigation else { return }
+            appPageCommitted = webView.url.map(isAppPage) == true
+            if appPageCommitted, let url = webView.url {
+                requestedAppURL = url
+                offline = false
+            }
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            guard navigation === activeNavigation else { return }
             showOffline(webView, error: error)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            showOffline(webView, error: error)
+            self.webView(webView, didFail: navigation, withError: error)
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            webView.reload()
+            if appPageCommitted {
+                // The page can change its route with pushState before a reload.
+                if let url = webView.url, isAppPage(url) { requestedAppURL = url }
+                appPageCommitted = false
+                activeNavigation = webView.reload()
+            } else {
+                loadApp(requestedAppURL)
+            }
+        }
+
+        private func isAppPage(_ url: URL) -> Bool {
+            url.host == session.server.host && (url.path == "/app" || url.path.hasPrefix("/app/"))
         }
 
         private func showOffline(_ webView: WKWebView, error: Error) {
             let nsError = error as NSError
-            if nsError.code == NSURLErrorCancelled {
-                return
-            }
+            guard !offline, nsError.code != NSURLErrorCancelled else { return }
+            offline = true
+            appPageCommitted = false
             let message = nsError.localizedDescription
                 .replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
+            let retry = requestedAppURL.absoluteString
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
             let html = """
             <html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
             <style>body{font:17px -apple-system;display:flex;height:100vh;margin:0;align-items:center;justify-content:center;
             text-align:center;padding:24px;box-sizing:border-box;color:#555;background:transparent}
             @media(prefers-color-scheme:dark){body{color:#aaa}}a{color:#4a7bd8;text-decoration:none;font-weight:600}</style></head>
             <body><div><p>Can't reach Rudder.</p><p style="font-size:14px">\(message)</p>
-            <p><a href="\(session.appURL.absoluteString)">Try again</a></p></div></body></html>
+            <p><a href="\(retry)">Try again</a></p></div></body></html>
             """
-            webView.loadHTMLString(html, baseURL: session.server)
+            activeNavigation = webView.loadHTMLString(html, baseURL: nil)
         }
 
         private func openExternally(_ url: URL) {

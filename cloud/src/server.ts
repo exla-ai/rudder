@@ -31,7 +31,7 @@ import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } fr
 import { createHomeWatch, createProductAnalytics, isInternalEmail } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
-import { sendStaticFile } from "./app-static.js";
+import { sendAppPollJson, sendStaticFile } from "./app-static.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
@@ -7596,7 +7596,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
         wakeHomeInBackground(account.accountId);
       }
     }
-    sendJson(res, 200, {
+    await sendAppPollJson(req, res, {
       email: account.email ?? null,
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
@@ -7864,7 +7864,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       after: url.searchParams.get("after"),
       pending: url.searchParams.getAll("pending").slice(0, 40),
     });
-    sendJson(res, 200, result);
+    await sendAppPollJson(req, res, result);
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/app/slash-commands") {

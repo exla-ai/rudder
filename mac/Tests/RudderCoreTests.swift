@@ -221,6 +221,26 @@ final class RudderCoreTests: XCTestCase {
         XCTAssertTrue(LocalTools.searchPATH(shellPATH: nil, home: "/h").contains("/h/.local/bin"))
     }
 
+    func testFindExecutableSkipsDirectoriesAndAcceptsSymlinks() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let shadow = root.appendingPathComponent("shadow")
+        let bin = root.appendingPathComponent("bin")
+        defer { try? files.removeItem(at: root) }
+        try files.createDirectory(at: shadow.appendingPathComponent("rudder"), withIntermediateDirectories: true)
+        try files.createDirectory(at: bin, withIntermediateDirectories: true)
+        let installed = root.appendingPathComponent("installed")
+        try Data("#!/bin/sh\n".utf8).write(to: installed)
+        let linked = bin.appendingPathComponent("rudder")
+        try files.createSymbolicLink(at: linked, withDestinationURL: installed)
+        let path = "\(shadow.path):\(bin.path)"
+
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: installed.path)
+        XCTAssertNil(LocalTools.findExecutable("rudder", in: path))
+        try files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installed.path)
+        XCTAssertEqual(LocalTools.findExecutable("rudder", in: path), linked.path)
+    }
+
     func testDashboardScript() {
         XCTAssertEqual(LocalTools.shellQuote("/Users/me/it's here"), "'/Users/me/it'\\''s here'")
         XCTAssertEqual(LocalTools.dashboardScript(checkout: "/Users/me/code/site", rudder: "/opt/homebrew/bin/rudder"),

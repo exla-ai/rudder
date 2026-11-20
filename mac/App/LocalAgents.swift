@@ -13,9 +13,9 @@ struct ProcessOutput {
 /// are installed, and `rudder cloud pull`, which brings a cloud agent here.
 ///
 /// GUI apps start with launchd's bare PATH, so tools installed by Homebrew,
-/// npm or nvm are found through the PATH a login shell prints (once per launch),
-/// plus the usual install directories. Arguments always go to the process as
-/// an argv array, never through a shell.
+/// npm or nvm are found through the PATH a login shell prints on the first
+/// check and on explicit retries, plus the usual install directories. Arguments
+/// go to the process as an argv array, never through a shell.
 @MainActor
 final class LocalAgents {
     static let shared = LocalAgents()
@@ -25,6 +25,7 @@ final class LocalAgents {
     static let checkoutsKey = "pulledWorkspaceCheckouts"
 
     private var searchPATH: String?
+    private var searchPATHTask: Task<String, Never>?
     private var inFlight: Set<String> = []
     /// Workspaces this app pulled. The page may only ask to open these.
     private(set) var pulledPaths: [String]
@@ -36,28 +37,25 @@ final class LocalAgents {
         pulledCheckouts = UserDefaults.standard.dictionary(forKey: Self.checkoutsKey) as? [String: String] ?? [:]
     }
 
-    /// Whether `rudder` was installed the last time we looked (for
-    /// RUDDER_NATIVE.local before the first check of this launch finishes).
-    var lastKnownInstalled: Bool {
+    /// Whether `rudder` was installed the last time the copy feature checked.
+    static var lastKnownInstalled: Bool {
         UserDefaults.standard.bool(forKey: Self.installedKey)
     }
 
     // MARK: Status
 
-    /// `{rudder, claude, codex, rudderVersion?}` for `window.rudderLocalStatus`.
-    func status() async -> [String: Any] {
-        let rudder = await which("rudder")
-        let claude = await which("claude")
-        let codex = await which("codex")
-        UserDefaults.standard.set(rudder != nil, forKey: Self.installedKey)
-        var out: [String: Any] = ["rudder": rudder != nil, "claude": claude != nil, "codex": codex != nil]
-        if let rudder {
-            let version = await Self.run(rudder, ["--version"], cwd: nil, env: await environment(), timeout: 20)
-            let line = CLIOutput.stripANSI(version.stdout).split(whereSeparator: \.isNewline).last
-                .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-            if version.status == 0, !line.isEmpty, line.count < 40 { out["rudderVersion"] = line }
-        }
-        return out
+    /// `{rudder, claude, codex}` for `window.rudderLocalStatus`.
+    func status(refreshPATH: Bool = false) async -> [String: Any] {
+        let path = await resolvedPATH(refresh: refreshPATH)
+        let (rudder, claude, codex) = await Task.detached(priority: .userInitiated) {
+            (
+                LocalTools.findExecutable("rudder", in: path) != nil,
+                LocalTools.findExecutable("claude", in: path) != nil,
+                LocalTools.findExecutable("codex", in: path) != nil
+            )
+        }.value
+        UserDefaults.standard.set(rudder, forKey: Self.installedKey)
+        return ["rudder": rudder, "claude": claude, "codex": codex]
     }
 
     // MARK: Pull
@@ -267,11 +265,9 @@ final class LocalAgents {
 
     func which(_ tool: String) async -> String? {
         let path = await resolvedPATH()
-        for dir in path.split(separator: ":") {
-            let candidate = (String(dir) as NSString).appendingPathComponent(tool)
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
-        }
-        return nil
+        return await Task.detached(priority: .userInitiated) {
+            LocalTools.findExecutable(tool, in: path)
+        }.value
     }
 
     /// This app's environment with the login shell's PATH, and no CLI self-update
@@ -285,20 +281,26 @@ final class LocalAgents {
         return env
     }
 
-    func resolvedPATH() async -> String {
-        if let searchPATH { return searchPATH }
-        let home = NSHomeDirectory()
-        let shell = Self.loginShell()
-        let script = "printf '%s%s%s' '\(LocalTools.pathStart)' \"$PATH\" '\(LocalTools.pathEnd)'"
-        // Interactive as well as login: nvm and friends add to PATH in .zshrc.
-        let out = await Self.run(
-            shell, ["-l", "-i", "-c", script],
-            cwd: URL(fileURLWithPath: home),
-            env: ["HOME": home, "USER": NSUserName(), "LOGNAME": NSUserName(), "SHELL": shell, "TERM": "dumb"],
-            timeout: 10
-        )
-        let path = LocalTools.searchPATH(shellPATH: LocalTools.shellPATH(fromOutput: out.stdout), home: home)
+    private func resolvedPATH(refresh: Bool = false) async -> String {
+        if let searchPATHTask { return await searchPATHTask.value }
+        if !refresh, let searchPATH { return searchPATH }
+        let task = Task.detached(priority: .userInitiated) {
+            let home = NSHomeDirectory()
+            let shell = Self.loginShell()
+            let script = "printf '%s%s%s' '\(LocalTools.pathStart)' \"$PATH\" '\(LocalTools.pathEnd)'"
+            // Interactive as well as login: nvm and friends add to PATH in .zshrc.
+            let out = await Self.run(
+                shell, ["-l", "-i", "-c", script],
+                cwd: URL(fileURLWithPath: home),
+                env: ["HOME": home, "USER": NSUserName(), "LOGNAME": NSUserName(), "SHELL": shell, "TERM": "dumb"],
+                timeout: 10
+            )
+            return LocalTools.searchPATH(shellPATH: LocalTools.shellPATH(fromOutput: out.stdout), home: home)
+        }
+        searchPATHTask = task
+        let path = await task.value
         searchPATH = path
+        searchPATHTask = nil
         return path
     }
 

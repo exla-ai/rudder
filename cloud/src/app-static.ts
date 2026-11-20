@@ -51,6 +51,24 @@ export function acceptedCodings(header: string | string[] | undefined): Coding[]
   return CODINGS.filter((coding) => (q.get(coding) ?? q.get("*") ?? 0) > 0);
 }
 
+// State and transcript are fetched every few seconds. Use fast compression for
+// these private, fresh responses instead of the static asset compression level.
+export async function sendAppPollJson(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+  if (res.destroyed) return;
+  const json = Buffer.from(JSON.stringify(body));
+  const compressed = json.length >= MIN_BYTES && acceptedCodings(req.headers["accept-encoding"]).includes("gzip");
+  const payload = compressed ? await gzip(json, { level: zlib.constants.Z_BEST_SPEED }) : json;
+  if (res.destroyed) return;
+  res.writeHead(200, {
+    "content-type": "application/json",
+    "cache-control": "private, no-store",
+    vary: "Accept-Encoding",
+    "content-length": String(payload.length),
+    ...(compressed ? { "content-encoding": "gzip" } : {}),
+  });
+  res.end(payload);
+}
+
 function etagMatches(header: string | undefined, etag: string): boolean {
   if (!header) return false;
   if (header.trim() === "*") return true;

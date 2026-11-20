@@ -3778,6 +3778,9 @@ function createAskCard(ask, { onAnswer }) {
       sheet.dlg.querySelector(".add-head h3").after(copyButton());
       const full = h(`<div class="plan-read md"></div>`);
       renderMarkdown(full, planText);
+      if (!markdownReady()) loadMarkdown().then(() => {
+        if (sheet.dlg.open && markdownReady()) renderMarkdown(full, planText);
+      });
       const bar = h(`<div class="ask-actions"></div>`);
       bar.append(
         btn("Revise…", "", () => { sheet.close(); revise.click(); }),
@@ -3916,6 +3919,7 @@ function createAskCard(ask, { onAnswer }) {
 const OUT_LIMIT = 2400;
 
 function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false } = {}) {
+  loadMarkdown();
   // `member`: a teammate's agent (team.js), read only. No composer, prompts,
   // terminal or actions, and its transcript comes through the team route.
   const ro = !!member;
@@ -4016,7 +4020,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const fileLinks = !ro;
   const chatMarkdown = { fileRefs: fileLinks };
   if (!ro) mountFileRefs(msgsEl, { ws, run });
-  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript(), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
+  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript({ replace: true }), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -4146,7 +4150,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       postNative({ type: "haptic" });
       paint();
       refreshState();
-      setTimeout(loadTranscript, 800);
+      setTimeout(() => loadTranscript({ replace: true }), 800);
       return true;
     } catch (err) {
       if (err.status !== 401) toast(err.message, { error: true });
@@ -4165,7 +4169,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     try {
       await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
       toast("Interrupted");
-      setTimeout(() => { loadTranscript(); refreshState(); }, 600);
+      setTimeout(() => { loadTranscript({ replace: true }); refreshState(); }, 600);
     } catch (err) {
       if (err.status !== 401) toast(err.message, { error: true });
     } finally {
@@ -4329,7 +4333,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
     if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>${a.backend === "antigravity" ? "Open in Antigravity" : "Open in Claude"}</span></button>`, () => openExternal(a.remoteUrl));
     if (canOpenOnMac() && findProject(ws)?.repo) add(`<button type="button" role="menuitem">${MAC_ICON}<span>Open a copy on this Mac</span></button>`, copyHere);
-    add(`<button type="button" role="menuitem">${icon("refresh")}<span>Refresh</span></button>`, () => { loadTranscript(); refreshState(); });
+    add(`<button type="button" role="menuitem">${icon("refresh")}<span>Refresh</span></button>`, () => { loadTranscript({ replace: true }); refreshState(); });
     menu.appendChild(h("<hr>"));
     if (canStop) {
       add(`<button type="button" role="menuitem" class="danger">${icon("stop")}<span>Stop agent</span></button>`, () => act("stop"));
@@ -4353,7 +4357,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     try {
       await api("/api/app/action", { method: "POST", body: { workspace: ws, run, action } });
       toast(action === "merge" ? "Merge started" : "Agent stopped");
-      refreshState(); loadTranscript();
+      refreshState(); loadTranscript({ replace: true });
     } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
   }
 
@@ -4386,7 +4390,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
         void refreshState();
       }
-      setTimeout(loadTranscript, 1200);
+      setTimeout(() => loadTranscript({ replace: true }), 1200);
     } catch (err) {
       item.state = "failed";
       if (err.status !== 401) toast(err.message, { error: true });
@@ -4394,12 +4398,17 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     paint();
   }
 
-  let inflight = false;
+  let inflight = null;
+  let destroyed = false;
   let lastErr = null;
   let waking = false;
-  async function loadTranscript() {
-    if (inflight) return;
-    inflight = true;
+  async function loadTranscript({ replace = false } = {}) {
+    if (destroyed || (inflight && !replace)) return;
+    // A message receipt, edit, or explicit refresh needs a snapshot taken
+    // after the action, even if a background read is still pending.
+    inflight?.abort();
+    const controller = new AbortController();
+    inflight = controller;
     // With earlier pages loaded, the newest page starts where they end (its
     // `after` cursor), so messages that scroll out of its last 300 stay shown.
     const pin = store.earlier.get(key)?.pin ?? null;
@@ -4410,7 +4419,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         if (p.state === "queued" && p.requestId) page.append("pending", p.requestId);
       }
       const query = page.toString();
-      const t = await api(transcriptUrl(query ? `&${query}` : ""));
+      const t = await api(transcriptUrl(query ? `&${query}` : ""), { signal: controller.signal });
+      if (controller.signal.aborted) return;
       // Asked for before the first earlier page pinned it: the next poll asks again.
       if ((store.earlier.get(key)?.pin ?? null) !== pin) return;
       // An edit started a new conversation: the pages loaded above were the old one's.
@@ -4420,6 +4430,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       waking = false;
       reconcilePending(t);
     } catch (err) {
+      if (controller.signal.aborted) return;
       // A sleeping home is being woken by the server: say so in place, no toast.
       // A teammate's sleeping machine is never woken from here; a private (or
       // deleted) agent is a 404. Both say so in place.
@@ -4440,8 +4451,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       if (err.status !== 401 && err.message !== lastErr) { toast(err.message, { error: true }); lastErr = err.message; }
       if (!store.transcripts.has(key)) store.transcripts.set(key, { messages: [], error: err.message });
     } finally {
-      inflight = false;
-      paint();
+      if (inflight === controller) {
+        inflight = null;
+        if (!destroyed) paint();
+      }
     }
   }
 
@@ -4476,14 +4489,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     paint();
     try {
       const page = await api(transcriptUrl(`&before=${encodeURIComponent(e.cursor)}`));
-      if (store.earlier.get(key) !== e) return;
+      if (store.earlier.get(key) !== e || page.conversation !== e.conversation) return;
       e.messages = [...page.messages, ...e.messages];
       e.cursor = page.earlier;
     } catch (err) {
-      if (err.status !== 401) toast(err.message, { error: true });
+      if (!destroyed && store.earlier.get(key) === e && err.status !== 401) toast(err.message, { error: true });
     } finally {
       e.loading = false;
-      paintKeepingView();
+      if (!destroyed) paintKeepingView();
     }
   }
   el.querySelector(".load-earlier").addEventListener("click", loadEarlier);
@@ -4821,20 +4834,20 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Polling
   let timer = null;
   const tick = async () => {
-    timer = null;
-    if (!document.hidden) {
-      // A teammate's agent: its title and status come from the team view.
-      if (ro) loadTeamFor(member).then(() => { if (timer !== -1) paint(); });
-      await loadTranscript();
-    }
-    if (timer !== -1) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
+    if (destroyed || document.hidden) return;
+    // A teammate's agent: its title and status come from the team view.
+    if (ro) loadTeamFor(member).then(() => { if (!destroyed) paint(); });
+    await loadTranscript();
+    // A foreground refresh can overlap an outstanding poll. Keep one timer.
+    clearTimeout(timer);
+    if (!destroyed && !document.hidden) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
   };
   const onVis = () => {
-    if (!document.hidden) { clearTimeout(timer); tick(); }
+    clearTimeout(timer);
+    if (!document.hidden) tick();
   };
   document.addEventListener("visibilitychange", onVis);
-  const unReady = () => { if (el.isConnected) paint(); };
-  onMarkdownReady(unReady);
+  const stopMarkdownReady = onMarkdownReady(() => { if (el.isConnected) paint(); });
   tick();
 
   return {
@@ -4843,7 +4856,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     destroy() {
-      clearTimeout(timer); timer = -1;
+      destroyed = true;
+      clearTimeout(timer);
+      inflight?.abort();
+      stopMarkdownReady();
       fastPolls.delete(fastPoll);
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
@@ -4881,13 +4897,15 @@ let stateTimer = null;
 const fastPolls = new Set();
 function pollState() {
   clearTimeout(stateTimer);
+  if (document.hidden) return;
   stateTimer = setTimeout(async () => {
     if (!document.hidden) await refreshState();
     pollState();
   }, [...fastPolls].some((f) => f()) ? 1500 : 4000);
 }
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) { refreshState(); pollState(); }
+  if (!document.hidden) refreshState();
+  pollState();
 });
 // Re-render relative times every 30s even when data holds still.
 setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
@@ -4972,8 +4990,6 @@ function approvePendingComputer() {
   const code = takePendingApprove();
   if (code) openComputerSignIn(code);
 }
-
-loadMarkdown();
 
 function restoreLastRoute() {
   const here = parseRoute(location.pathname);

@@ -434,6 +434,8 @@ Holder and replace both signing secrets. The team API key cannot issue it.
 CI published Mac 5.0.18 (5000018) on 2026-11-20 at 01:28 UTC. The public DMG
 and the copied app passed Gatekeeper and stapler validation on macOS, and
 the public Sparkle feed verified against the shipped key.
+Mac release CI holds the signed installer until Cloud reports the worker image
+pinned for that version and the hosted app responds.
 
 Chat and subagent Markdown preserve `vnc://` link destinations and show the
 address on hover. The macOS shell opens these links in Screen Sharing.
@@ -468,7 +470,9 @@ second tab. Control+Tab and Control+Shift+Tab cycle through the open tabs.
 
 Chat links open supported images and PDFs in the read-only file viewer.
 Questions with no choices open directly to an answer field, and Enter submits
-an answer from that field.
+an answer from that field. Codex question answers stay visible as queued until
+all terminal writes have delivery receipts. If the worker restarts mid-answer,
+Rudder marks delivery unconfirmed and the terminal can be checked.
 
 ## 1. Which doc is authoritative (locked 2026-11-04)
 

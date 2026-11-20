@@ -19,6 +19,42 @@ fn valid_conversation_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
 }
 
+/// A live Remote Control link printed by agy. Opening it lets Google show and
+/// answer the current tool prompt using its own request identity. The terminal
+/// status OSC only reports a wait and cannot safely route an approval.
+pub(crate) fn remote_control_url(
+    output: &str,
+    conversation_id: &str,
+    previous_url: Option<&str>,
+) -> Option<String> {
+    const DASHBOARD: &str = "https://antigravity.google.com";
+    const ROUTE: &str = "https://antigravity.google.com/r/";
+    const CONNECTED: &str = "Remote control on for this session.";
+    const DISCONNECTED: &str = "Remote control off. This machine is no longer reachable";
+    let (output, previous_url) = match output.rsplit_once(DISCONNECTED) {
+        Some((_, remaining)) => (remaining, None),
+        None => (output, previous_url),
+    };
+    let notice = output.rsplit_once(CONNECTED)
+        .map(|(_, message)| super::strip_ansi_for_plan(message));
+    let printed_url = notice.as_deref().and_then(|text| {
+        let (_, open) = text.split_once("Open ")?;
+        let (link, _) = open.split_once(" on another device")?;
+        Some(link.trim())
+    });
+    let url = printed_url.or(previous_url)?;
+    if url == DASHBOARD {
+        return Some(url.to_string());
+    }
+    let (instance, conversation) = url.strip_prefix(ROUTE)?.split_once("?p=c%2F")?;
+    (valid_conversation_id(conversation_id)
+        && conversation == conversation_id
+        && !instance.is_empty()
+        && instance.len() <= 128
+        && instance.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)))
+        .then(|| url.to_string())
+}
+
 /// The folder agy keeps one conversation's working files in.
 fn brain_dir(id: &str) -> Option<PathBuf> {
     valid_conversation_id(id).then(|| antigravity_cli_dir()).flatten().map(|dir| dir.join("brain").join(id))
@@ -131,6 +167,28 @@ mod tests {
     #[test]
     fn usage_sums_model_replies_with_cache_reads_as_input() {
         assert_eq!(transcript_usage(TRANSCRIPT), TokenUsage { input: 2233 + 46659 + 2344, output: 74 });
+    }
+
+    #[test]
+    fn remote_control_opens_only_the_live_conversation() {
+        let conversation = "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10";
+        let url = format!("https://antigravity.google.com/r/cli-42?p=c%2F{conversation}");
+        let message = format!(
+            "Remote control on for this session.\r\nHostname: devbox\r\nOpen \x1b[4m{url}\x1b[0m on another device to continue this conversation.\r\n"
+        );
+        assert_eq!(remote_control_url(&message, conversation, None), Some(url.clone()));
+        assert_eq!(remote_control_url("later output", conversation, Some(&url)), Some(url.clone()));
+        let startup = "Remote control on for this session.\nHostname: devbox\nOpen https://antigravity.google.com on another device and look for this hostname.";
+        assert_eq!(remote_control_url(startup, conversation, None).as_deref(), Some("https://antigravity.google.com"));
+        assert_eq!(remote_control_url(&message, "ab", Some(&url)), None);
+        assert_eq!(remote_control_url(&format!("{message}Remote control off. This machine is no longer reachable"), conversation, Some(&url)), None);
+        for bad in [
+            url.replace(".com/", ".com.evil/"),
+            url.replace("cli-42?", "../cli-42?"),
+            format!("{url}&p=elsewhere"),
+        ] {
+            assert_eq!(remote_control_url("", conversation, Some(&bad)), None);
+        }
     }
 
     #[test]

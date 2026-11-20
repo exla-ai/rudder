@@ -1508,6 +1508,27 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
                 .or_insert_with(|| value.clone());
         }
     }
+    if run.backend == Backend::Antigravity {
+        record["antigravityRemoteControl"] = run
+            .terminal
+            .as_ref()
+            .zip(run.session_id.as_deref())
+            .and_then(|(terminal, conversation_id)| {
+                let previous = &existing_record["antigravityRemoteControl"];
+                let previous_url = (previous["terminalId"].as_str() == Some(terminal.instance_id()))
+                    .then(|| previous["url"].as_str())
+                    .flatten();
+                antigravity::remote_control_url(
+                    terminal.output_log_snapshot(),
+                    conversation_id,
+                    previous_url,
+                )
+                .map(|url| serde_json::json!({ "terminalId": terminal.instance_id(), "url": url }))
+            })
+            .unwrap_or(serde_json::Value::Null);
+    } else if let Some(map) = record.as_object_mut() {
+        map.remove("antigravityRemoteControl");
+    }
     if let Some(pid) = run
         .terminal
         .as_ref()

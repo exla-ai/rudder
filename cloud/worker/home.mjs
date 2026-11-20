@@ -28,7 +28,7 @@ import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConv
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer } from "./asks.mjs";
-import { phoneStatus, statusFields } from "./agent-status.mjs";
+import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
@@ -1692,6 +1692,16 @@ function agentSummary(record, options = {}) {
     if (previewErrors.get(record.id) !== message) {
       previewErrors.set(record.id, message);
       log(`preview ${record.id}: ${message}`);
+    }
+  }
+  if (record.backend === "antigravity") {
+    const pid = record.process?.pid;
+    const url = record.antigravityRemoteControl?.url;
+    const route = typeof url === "string" && /^https:\/\/antigravity\.google\.com\/r\/[A-Za-z0-9_-]{1,128}\?p=c%2F([a-f0-9-]{1,64})$/i.exec(url);
+    const conversationLink = route && route[1] === record.session?.nativeSessionId;
+    if (options.dashboardRunning && Number.isInteger(pid) && pid > 0 && pidAlive(pid)
+        && (url === "https://antigravity.google.com" || conversationLink)) {
+      remoteUrl = url;
     }
   }
   return {

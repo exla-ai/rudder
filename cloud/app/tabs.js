@@ -14,13 +14,16 @@
 // step through tabs, as do Cmd+Shift+[ and Cmd+Shift+]. Cmd+1 to Cmd+8 jump
 // to one and Cmd+9 to the last. Cmd+click on a link opens it in a tab behind
 // this one. A browser keeps those keys for its own tabs.
+// Drag or use Shift+Left/Right on a focused tab to reorder it.
 import { h, icon, setText, reconcile } from "/app/render.js";
 import { ls, PLATFORM } from "/app/core.js";
+import { tabDragPosition } from "/app/tab-drag.js";
 import { teamAgent } from "/app/team.js";
 
 const KEY = "rudder.tabs"; // { tabs: [{ id, path, split }], active }
 const MAC = PLATFORM === "mac";
 const newId = () => Math.random().toString(36).slice(2, 10);
+const TAB_MOVE = { id: "tab-reorder", duration: 190, easing: "cubic-bezier(.2,.75,.2,1)" };
 
 /**
  * `main`: the shell's main area, whose panes hold the screens. The shell's
@@ -41,11 +44,16 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   const el = h(`<div class="tab-strip">
     <div class="tab-list" role="tablist" aria-label="Tabs"></div>
     <button type="button" class="tab-new" aria-label="New tab">${icon("plus")}</button>
+    <span class="sr-only" role="status"></span>
   </div>`);
   const list = el.querySelector(".tab-list");
   const newBtn = el.querySelector(".tab-new");
   newBtn.title = `New tab${shortcut("Cmd+T")}`;
+  const announcement = el.querySelector("[role=status]");
   const life = new AbortController();
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  let drag = null;
+  let draggedClick = false;
 
   // A parked screen keeps the size it had, out of sight and out of reach, so
   // nothing in it lays out again or scrolls while it waits.
@@ -106,6 +114,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   // (its task box takes the typing), or the home screen. A link's tab (`path`)
   // opens next to the tab it came from, as in a browser.
   function open(path = null, { behind = false } = {}) {
+    endDrag(false, false);
     const r = parseRoute(location.pathname);
     const fresh = !path;
     const t = { id: newId(), path: path || (r.name === "agent" || r.name === "project" ? projectPath(r.ws) : "/app"), split: null, kept: null, focus: null };
@@ -118,6 +127,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   // The next tab to the right takes its place, as in a browser.
   function close(id) {
     if (tabs.length < 2) return;
+    endDrag(false, false);
     const i = tabs.findIndex((t) => t.id === id);
     const t = tabs[i];
     if (id === active) select((tabs[i + 1] || tabs[i - 1]).id);
@@ -131,10 +141,135 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
     select(tabs[(i + dir + tabs.length) % tabs.length].id);
   };
 
+  function reorder(from, to) {
+    if (from === to) return;
+    const focused = document.activeElement;
+    const [tab] = tabs.splice(from, 1);
+    tabs.splice(to, 0, tab);
+    save();
+    paint();
+    if (list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+    announcement.textContent = `${describe(tab).title}, tab ${to + 1} of ${tabs.length}`;
+  }
+
+  function tabPositions() {
+    return [...list.children].map((tab) => [tab, tab.getBoundingClientRect().left]);
+  }
+
+  function settle(positions) {
+    if (reducedMotion.matches) return;
+    const offsets = positions.map(([tab, left]) => [tab, left - tab.getBoundingClientRect().left]);
+    for (const [tab, offset] of offsets) {
+      if (Math.abs(offset) > 0.5) {
+        tab.animate([{ transform: `translateX(${offset}px)` }, { transform: "translateX(0)" }], TAB_MOVE);
+      }
+    }
+  }
+
+  function cancelSettle() {
+    for (const tab of list.children) {
+      for (const animation of tab.getAnimations()) {
+        if (animation.id === TAB_MOVE.id) animation.cancel();
+      }
+    }
+  }
+
+  function renderDrag() {
+    const d = drag;
+    d.frame = 0;
+    const bounds = list.getBoundingClientRect();
+    const edge = Math.min(40, bounds.width / 4);
+    const scroll = list.scrollLeft;
+    // Holding near an edge reveals tabs outside the visible part of the strip.
+    const proximity = Math.max(0, d.x - bounds.right + edge) - Math.max(0, bounds.left + edge - d.x);
+    if (edge && proximity) list.scrollLeft += Math.sign(proximity) * Math.min(16, Math.ceil(16 * Math.abs(proximity) / edge));
+    const { to, offset } = tabDragPosition(d, bounds, list);
+    if (to !== d.to) {
+      d.items.forEach(({ tab }, i) => {
+        if (i === d.from) return;
+        const shift = i > d.from && i <= to ? -d.stride : i < d.from && i >= to ? d.stride : 0;
+        tab.style.transform = shift ? `translateX(${shift}px)` : "";
+      });
+      d.to = to;
+    }
+    d.tab.style.transform = `translateX(${offset}px)`;
+    if (list.scrollLeft !== scroll) d.frame = requestAnimationFrame(renderDrag);
+  }
+
+  function endDrag(commit, animated = true) {
+    const d = drag;
+    drag = null;
+    if (!d?.items) return;
+    cancelAnimationFrame(d.frame);
+    const positions = animated ? tabPositions() : [];
+    list.removeAttribute("data-reordering");
+    d.tab.removeAttribute("data-dragging");
+    for (const { tab } of d.items) tab.style.removeProperty("transform");
+    if (list.hasPointerCapture(d.pointer)) list.releasePointerCapture(d.pointer);
+    if (commit) reorder(d.from, d.to);
+    if (animated) settle(positions);
+  }
+
+  list.addEventListener("pointerdown", (e) => {
+    if (drag || !e.isPrimary || e.button !== 0) return;
+    draggedClick = false;
+    const button = e.target.closest(".tab-b");
+    if (!button || tabs.length < 2) return;
+    const tab = button.closest(".tab");
+    drag = { tab, pointer: e.pointerId, start: e.clientX, grab: e.clientX - tab.getBoundingClientRect().left };
+  });
+  window.addEventListener("pointermove", (e) => {
+    const d = drag;
+    if (!d || e.pointerId !== d.pointer) return;
+    if (!d.items) {
+      if (Math.abs(e.clientX - d.start) < 6) return;
+      cancelSettle();
+      const origin = list.getBoundingClientRect().left - list.scrollLeft;
+      d.items = [...list.children].map((tab) => {
+        const rect = tab.getBoundingClientRect();
+        return { tab, left: rect.left - origin, center: rect.left - origin + rect.width / 2 };
+      });
+      d.from = d.to = d.items.findIndex(({ tab }) => tab === d.tab);
+      d.width = d.tab.getBoundingClientRect().width;
+      d.right = list.lastElementChild.getBoundingClientRect().right - origin;
+      d.stride = d.width + parseFloat(getComputedStyle(list).columnGap);
+      list.setPointerCapture(d.pointer);
+      list.setAttribute("data-reordering", "");
+      d.tab.setAttribute("data-dragging", "");
+      draggedClick = true;
+    }
+    d.x = e.clientX;
+    if (!d.frame) d.frame = requestAnimationFrame(renderDrag);
+  }, { signal: life.signal });
+  window.addEventListener("pointerup", (e) => {
+    if (e.pointerId !== drag?.pointer) return;
+    if (drag.items) {
+      cancelAnimationFrame(drag.frame);
+      drag.x = e.clientX;
+      renderDrag();
+    }
+    endDrag(true);
+  }, { signal: life.signal });
+  const cancelPointer = (e) => { if (e.pointerId === drag?.pointer) endDrag(false); };
+  window.addEventListener("pointercancel", cancelPointer, { signal: life.signal });
+  list.addEventListener("lostpointercapture", (e) => { if (e.target === list) cancelPointer(e); });
+  window.addEventListener("blur", () => endDrag(false, false), { signal: life.signal });
+  window.addEventListener("resize", () => endDrag(false, false), { signal: life.signal });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !drag?.items) return;
+    e.preventDefault();
+    e.stopPropagation();
+    endDrag(false);
+  }, { capture: true, signal: life.signal });
+
   newBtn.addEventListener("click", () => open());
   // A double click on the strip's empty part opens a tab, as in a browser.
   el.addEventListener("dblclick", (e) => { if (e.target === el || e.target === list) open(); });
   list.addEventListener("click", (e) => {
+    if (draggedClick && e.detail) {
+      draggedClick = false;
+      return;
+    }
     const tab = e.target.closest(".tab");
     if (!tab) return;
     if (e.target.closest(".tab-x")) close(tab.dataset.key);
@@ -154,7 +289,17 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
     const at = btns.indexOf(document.activeElement);
     if (at < 0) return;
     e.preventDefault();
-    btns[(at + (e.key === "ArrowRight" ? 1 : -1) + btns.length) % btns.length].focus();
+    const next = at + (e.key === "ArrowRight" ? 1 : -1);
+    if (e.shiftKey) {
+      if (next < 0 || next >= tabs.length) return;
+      endDrag(false, false);
+      const positions = tabPositions();
+      cancelSettle();
+      reorder(at, next);
+      settle(positions);
+    } else {
+      btns[(next + btns.length) % btns.length].focus();
+    }
   });
 
   if (MAC) {
@@ -209,6 +354,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   function paint() {
     const many = tabs.length > 1;
     el.hidden = MAC && !many;
+    list.toggleAttribute("data-reorderable", many);
     reconcile(list, tabs, (t) => t.id,
       () => h(`<div class="tab" role="presentation"><button type="button" class="tab-b" role="tab"><span class="tab-ic"></span><span class="tab-t"></span></button><button type="button" class="tab-x" tabindex="-1">${icon("x")}</button></div>`),
       (tabEl, t) => {
@@ -217,6 +363,8 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
         tabEl.className = `tab${on ? " on" : ""}${d.status ? ` ${d.status.cls}` : ""}`;
         const b = tabEl.querySelector(".tab-b");
         b.setAttribute("aria-selected", String(on));
+        if (many) b.setAttribute("aria-keyshortcuts", "Shift+ArrowLeft Shift+ArrowRight");
+        else b.removeAttribute("aria-keyshortcuts");
         b.tabIndex = on ? 0 : -1;
         b.title = d.tip || (d.status ? `${d.title} · ${d.status.label}` : d.title);
         setText(tabEl.querySelector(".tab-t"), d.title);
@@ -245,6 +393,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
       paint();
     },
     destroy() {
+      endDrag(false, false);
       life.abort();
       for (const t of tabs) drop(t);
     },

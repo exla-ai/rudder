@@ -24,6 +24,17 @@
   border: 0; border-radius: inherit; background: none; color: inherit; font: 500 13px/1 var(--font); text-align: left; cursor: default;
 }
 .tab-b:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-list[data-reorderable] .tab-b { cursor: grab; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.tab-list[data-reordering], .tab-list[data-reordering] .tab-b, .tab-list[data-reordering] .tab-x { cursor: grabbing; }
+.tab-list[data-reordering] .tab:not([data-dragging]) {
+  transition: background 120ms, color 120ms, transform 170ms cubic-bezier(.2,.75,.2,1);
+}
+.tab[data-dragging] {
+  z-index: 1;
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--line-strong) inset;
+}
 .tab-ic { flex: none; display: grid; place-items: center; width: 14px; height: 14px; }
 .tab-ic svg { width: 14px; height: 14px; }
 .tab-ic .dot { width: 7px; height: 7px; }

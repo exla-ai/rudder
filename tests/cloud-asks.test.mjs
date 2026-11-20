@@ -190,6 +190,24 @@ test("a Codex goal confirmation comes from the live menu and only accepts its tw
   assert.deepEqual(codexAsks(record, null, { isAlive: () => false }), []);
 });
 
+test("a Codex rate-limit prompt offers each explicit choice without a rollout", () => {
+  const record = { ...live, id: "run_test", codexRateLimitMenu: { opened_at: "1795168589000", model: "gpt-6-luna" } };
+  const [ask] = codexAsks(record, null);
+  assert.equal(ask.tool, "rate_limit");
+  assert.equal(ask.input.message, "Switch to gpt-6-luna for lower credit usage?");
+  for (const [label, action] of [
+    ["Switch to gpt-6-luna", "switch"],
+    ["Keep current model", "keep"],
+    ["Keep current model (never show again)", "hide"],
+  ]) {
+    assert.deepEqual(codexAskSteps(ask, codexTypedAnswer(ask, label)), [
+      { kind: "codex-rate-limit-answer", instruction: `1795168589000 ${action}` },
+    ]);
+  }
+  assert.throws(() => codexAskSteps(ask, {}), /Choose an option/);
+  assert.deepEqual(codexAsks(record, null, { isAlive: () => false }), []);
+});
+
 test("a Codex question waits in the rollout until its call has an output", () => {
   const dir = tmpdir();
   const rollout = path.join(dir, "rollout.jsonl");

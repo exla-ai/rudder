@@ -336,6 +336,7 @@ pub(crate) fn create_main_agent(
         needs_user_input: false,
         codex_plan_menu: false,
         codex_goal_menu: None,
+        codex_rate_limit_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -908,6 +909,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         needs_user_input: false,
         codex_plan_menu: false,
         codex_goal_menu: None,
+        codex_rate_limit_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: parked.as_ref().map(ParkedNote::card_note),
@@ -1441,6 +1443,7 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // the menu writes nothing to the rollout (`App::poll_codex_rollouts`).
         "codexPlanMenu": run.codex_plan_menu,
         "codexGoalMenu": run.codex_goal_menu,
+        "codexRateLimitMenu": run.codex_rate_limit_menu,
         // Claude's compaction spinner is on the pane (`App::poll_agents`): the
         // phone's "Compacting context" row, from this moment (Unix ms).
         "compactingSince": run.compacting_since,

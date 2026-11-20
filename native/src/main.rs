@@ -2706,6 +2706,12 @@ impl CodexGoalMenu {
     }
 }
 
+#[derive(serde::Serialize)]
+struct CodexRateLimitMenu {
+    opened_at: String,
+    model: String,
+}
+
 struct AgentRun {
     pinned: bool,
     id: String,
@@ -2768,6 +2774,7 @@ struct AgentRun {
     codex_plan_menu: bool,
     /// The pending replacement dialog, tracked from the live Codex pane.
     codex_goal_menu: Option<CodexGoalMenu>,
+    codex_rate_limit_menu: Option<CodexRateLimitMenu>,
     /// When this pane first showed Claude's compaction spinner, in Unix ms,
     /// while it still shows it (`claude_compacting_from_lines`). Nothing reaches
     /// the session file until a compaction ends, so the screen is the only live
@@ -3164,6 +3171,7 @@ fn fork_row(
         needs_user_input: false,
         codex_plan_menu: false,
         codex_goal_menu: None,
+        codex_rate_limit_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -6335,7 +6343,7 @@ impl App {
             }
             let waiting = !run.needs_permission
                 && (self.codex_waits.contains_key(&run.id)
-                    || (run.terminal.is_some() && run.codex_goal_menu.is_some()));
+                    || (run.terminal.is_some() && (run.codex_goal_menu.is_some() || run.codex_rate_limit_menu.is_some())));
             if run.needs_user_input != waiting {
                 run.needs_user_input = waiting;
                 self.dirty = true;
@@ -9559,6 +9567,7 @@ impl App {
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -9722,6 +9731,7 @@ impl App {
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -10235,6 +10245,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -10337,6 +10348,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -11559,6 +11571,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -14764,6 +14777,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_user_input: false,
             codex_plan_menu: false,
             codex_goal_menu: None,
+            codex_rate_limit_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -16383,6 +16397,7 @@ Address the objection directly. If you disagree, say why inside \
                 // Raw keys for a live agent (the phone's key strip): what a
                 // picker opened by `/model` or `/resume` waits for.
                 "keys" => self.deliver_keys_request(&task_id, &instruction),
+                "codex-rate-limit-answer" => self.deliver_codex_rate_limit_answer(&task_id, &instruction),
                 "codex-goal-answer" => self.deliver_codex_goal_answer(&task_id, &instruction),
                 // The home machine staged an agent moved off a laptop: load
                 // its record and resume its conversation here.
@@ -16691,6 +16706,39 @@ Address the objection directly. If you disagree, say why inside \
             (_, false) => "up,enter",
         };
         self.deliver_keys_request(task_id, keys)
+    }
+
+    fn deliver_codex_rate_limit_answer(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
+        let Some((opened_at, action)) = instruction.split_once(' ') else {
+            return SteerDelivery::Failed("Invalid rate-limit response.".to_owned());
+        };
+        let target = match action {
+            "switch" => 0,
+            "keep" => 1,
+            "hide" => 2,
+            _ => return SteerDelivery::Failed("Invalid rate-limit response.".to_owned()),
+        };
+        let closed = || SteerDelivery::Failed("The rate-limit prompt is no longer open.".to_owned());
+        let Some(index) = self.agent_index_for_token(task_id) else { return closed() };
+        let run = &mut self.agents[index];
+        let (Some(menu), Some(terminal)) = (&run.codex_rate_limit_menu, run.terminal.as_mut()) else {
+            return closed();
+        };
+        if menu.opened_at != opened_at || !terminal.is_alive() {
+            return closed();
+        }
+        let lines = terminal.live_screen_lines();
+        let Some((model, selected)) = codex_rate_limit_menu_from_lines(&lines) else {
+            return closed();
+        };
+        if model != menu.model {
+            return closed();
+        }
+        let mut keys = Vec::new();
+        keys.extend(std::iter::repeat_n("up", selected.saturating_sub(target)));
+        keys.extend(std::iter::repeat_n("down", target.saturating_sub(selected)));
+        keys.push("enter");
+        self.deliver_keys_request(task_id, &keys.join(","))
     }
 
     fn deliver_keys_request(&mut self, task_id: &str, keys: &str) -> SteerDelivery {
@@ -22123,7 +22171,16 @@ What to do\n\
                 }
             }
             if had_output && !headless_planner && run.backend == Backend::Codex {
-                let menu = codex_goal_menu_from_lines(&terminal.live_lines_snapshot());
+                let lines = terminal.live_lines_snapshot();
+                let model = codex_rate_limit_menu_from_lines(&lines).map(|(model, _)| model);
+                if model != run.codex_rate_limit_menu.as_ref().map(|menu| menu.model.as_str()) {
+                    run.codex_rate_limit_menu = model.map(|model| CodexRateLimitMenu {
+                        opened_at: now_stamp(),
+                        model: model.to_owned(),
+                    });
+                    changed = true;
+                }
+                let menu = codex_goal_menu_from_lines(&lines);
                 changed |= CodexGoalMenu::update(&mut run.codex_goal_menu, menu.as_ref().map(|(objective, _)| objective.as_str()));
             }
             // Feed the orchestrator's JSON event stream into its live transcript +
@@ -22288,6 +22345,7 @@ What to do\n\
                         Some(WaitSignal::Input | WaitSignal::Interrupted | WaitSignal::Idle)
                     ) || self.codex_waits.contains_key(&run.id)
                         || run.codex_goal_menu.is_some()
+                        || run.codex_rate_limit_menu.is_some()
                         || visible_lines.as_ref().is_some_and(|lines| {
                             terminal_needs_user_input_from_lines(run.backend, lines)
                         }));

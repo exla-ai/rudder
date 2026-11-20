@@ -8532,6 +8532,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         needs_user_input: false,
         codex_plan_menu: false,
         codex_goal_menu: None,
+        codex_rate_limit_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -10802,6 +10803,7 @@ fn delete_agent_requires_second_d() {
         needs_user_input: false,
         codex_plan_menu: false,
         codex_goal_menu: None,
+        codex_rate_limit_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -32994,6 +32996,61 @@ sleep 5"#;
         "{screen:?}"
     );
     assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Failed(_)));
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(repo).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
+fn codex_rate_limit_prompt_keeps_the_current_model_when_switch_is_highlighted() {
+    let repo = unique_test_repo("codex-rate-limit-prompt");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let script = r#"stty -icanon -echo -icrnl
+printf '%s\n' '    Approaching rate limits' '    Switch to gpt-6-luna for lower credit usage?' '' '  › 1. Switch to gpt-6-luna  Fast and affordable model for easier tasks.' '    2. Keep current model' '    3. Keep current model (never show again)  Hide future rate limit reminders' '' '    enter select · esc back'
+keys=$(dd bs=1 count=4 2>/dev/null | od -An -tx1)
+printf '\033[2J\033[H%s\n' "$keys"
+sleep 5"#;
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 24, cols: 85 },
+            cwd: Some(repo.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker PTY");
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "codex-rate-limit".into();
+    run.backend = Backend::Codex;
+    run.status = AgentStatus::Done;
+    app.agents.push(run);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].codex_rate_limit_menu.is_none() && Instant::now() < deadline {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let menu = app.agents[0].codex_rate_limit_menu.as_ref().expect("rate-limit menu detected");
+    assert_eq!(menu.model, "gpt-6-luna");
+    let answer = format!("{} keep", menu.opened_at);
+    let raw = fs::read_to_string(native_run_dir(&repo, "codex-rate-limit").join("run.json")).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["codexRateLimitMenu"]["model"], menu.model);
+    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", "0 switch"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", &answer), SteerDelivery::Delivered));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].codex_rate_limit_menu.is_some() && Instant::now() < deadline {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(app.agents[0].codex_rate_limit_menu.is_none());
+    let screen = app.agents[0].terminal.as_mut().unwrap().live_screen_lines();
+    assert!(
+        screen.iter().any(|row| row.split_whitespace().eq(["1b", "5b", "42", "0d"])),
+        "{screen:?}"
+    );
+    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", &answer), SteerDelivery::Failed(_)));
     app.agents[0].terminal = None;
     fs::remove_dir_all(repo).unwrap();
 }

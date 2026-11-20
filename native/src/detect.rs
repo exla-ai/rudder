@@ -128,6 +128,40 @@ pub(crate) fn codex_goal_menu_from_lines(lines: &[String]) -> Option<(String, bo
         .then_some((objective, selected))
 }
 
+/// This rate-limit menu is drawn by Codex after a turn and has no rollout event.
+pub(crate) fn codex_rate_limit_menu_from_lines(lines: &[String]) -> Option<(&str, usize)> {
+    let header = lines.iter().rposition(|row| row.trim() == "Approaching rate limits")?;
+    let mut rows = lines[header + 1..].iter().map(|row| row.trim()).filter(|row| !row.is_empty());
+    let model = rows.next()?.strip_prefix("Switch to ")?.strip_suffix(" for lower credit usage?")?;
+    if model.is_empty() || !model.bytes().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'.' | b'_')) {
+        return None;
+    }
+
+    let mut selected = None;
+    for (index, label) in [
+        format!("1. Switch to {model}"),
+        "2. Keep current model".to_owned(),
+        "3. Keep current model (never show again)".to_owned(),
+    ].iter().enumerate() {
+        let row = rows.next()?;
+        let (highlighted, row) = match row.strip_prefix("› ") {
+            Some(row) => (true, row),
+            None => (false, row),
+        };
+        let description = row.strip_prefix(label)?;
+        if !description.is_empty() && !description.starts_with("  ") {
+            return None;
+        }
+        if highlighted && selected.replace(index).is_some() {
+            return None;
+        }
+    }
+    if rows.next()? != "enter select · esc back" {
+        return None;
+    }
+    Some((model, selected?))
+}
+
 pub(crate) fn mark_run_done(run: &mut AgentRun) {
     finish_turn(run, true);
 }
@@ -817,6 +851,9 @@ fn is_numbered_option(text: &str) -> bool {
 /// running turn's "esc to interrupt" never match. Used before a remote message
 /// (the phone, the web board) is typed into a pane.
 pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
+    if backend == Backend::Codex && codex_rate_limit_menu_from_lines(lines).is_some() {
+        return Some("answer the Codex rate-limit prompt first");
+    }
     if terminal_needs_permission_from_lines(backend, lines) {
         return Some("the agent is waiting for approval. Open its Terminal to review the prompt, then retry");
     }

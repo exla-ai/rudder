@@ -336,8 +336,31 @@ function codexGoalAsk(record) {
   }];
 }
 
+const RATE_LIMIT_TITLE = "Approaching rate limits";
+
+function codexRateLimitAsk(record) {
+  const menu = record.codexRateLimitMenu;
+  const ts = Number(menu?.opened_at);
+  if (!Number.isSafeInteger(ts) || ts <= 0 || typeof menu?.model !== "string" || !/^[a-zA-Z0-9_.-]+$/.test(menu.model)) return [];
+  return [{
+    id: codexAskId(ts, `rate_limit:${record.id}`), ts, tool: "rate_limit", kind: "question",
+    input: {
+      message: `Switch to ${menu.model} for lower credit usage?`,
+      questions: [{
+        question: RATE_LIMIT_TITLE,
+        options: [
+          { label: `Switch to ${menu.model}` },
+          { label: "Keep current model" },
+          { label: "Keep current model (never show again)" },
+        ],
+      }],
+    },
+    suggestions: [],
+  }];
+}
+
 /**
- * Waiting prompts of a live Codex run. The pending goal lives only on the
+ * Waiting prompts of a live Codex run. The goal and rate-limit menus live only on the
  * screen. Rollout questions persist until Codex answers, and a rollout plan
  * needs its screen menu (`codexPlanMenu`) to still be open.
  */
@@ -346,13 +369,13 @@ export function codexAsks(record, rollout, { isAlive = alive } = {}) {
   if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) {
     return [];
   }
-  const goal = codexGoalAsk(record);
-  if (!rollout) return goal;
+  const menus = [...codexRateLimitAsk(record), ...codexGoalAsk(record)];
+  if (!rollout) return menus;
   let stat;
   try {
     stat = fs.statSync(rollout);
   } catch {
-    return goal;
+    return menus;
   }
   let asks = null;
   const cached = codexCache.get(rollout);
@@ -362,11 +385,11 @@ export function codexAsks(record, rollout, { isAlive = alive } = {}) {
     try {
       asks = pendingCodexAsks(tailLines(rollout, CODEX_TAIL_BYTES));
     } catch {
-      return goal; // the rollout went between stat and read
+      return menus; // the rollout went between stat and read
     }
     codexCache.set(rollout, { size: stat.size, mtimeMs: stat.mtimeMs, asks });
   }
-  return [...goal, ...asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true)];
+  return [...menus, ...asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true)];
 }
 
 /**
@@ -417,6 +440,13 @@ function pasteKey(text) {
  * follows read as Esc plus the literal text "[200~".
  */
 export function codexAskSteps(ask, answer) {
+  if (ask.tool === "rate_limit") {
+    const { question, options } = ask.input.questions[0];
+    const selected = options.findIndex(({ label }) => label === answer?.answers?.[question]);
+    const action = ["switch", "keep", "hide"][selected];
+    if (!action) throw new Error("Choose an option on the rate-limit prompt.");
+    return [{ kind: "codex-rate-limit-answer", instruction: `${ask.ts} ${action}` }];
+  }
   if (ask.tool === "replace_goal") {
     const selected = answer?.answers?.[ask.input.questions[0].question];
     if (selected !== REPLACE_GOAL && selected !== CANCEL_GOAL) {

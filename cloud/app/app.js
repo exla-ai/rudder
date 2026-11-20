@@ -3675,13 +3675,14 @@ function createAskCard(ask, { onAnswer }) {
   const tool = ask.tool || "Tool";
   const kind = ask.kind || "permission";
   const replacingGoal = tool === "replace_goal";
-  const title = replacingGoal ? "Replace goal?" : kind === "question" ? "Question" : kind === "plan" ? "Plan ready for review" : `Allow ${tool}?`;
+  const rateLimit = tool === "rate_limit";
+  const title = replacingGoal ? "Replace goal?" : rateLimit ? "Approaching rate limits" : kind === "question" ? "Question" : kind === "plan" ? "Plan ready for review" : `Allow ${tool}?`;
   const el = h(`<section class="ask-card" role="region" aria-live="polite">
     <div class="ask-head"><span class="ask-icon"></span><span class="ask-title"></span><span class="ask-count"></span></div>
     <div class="ask-body"></div>
     <div class="ask-actions"></div>
     <div class="ask-desc ask-submit-status" hidden></div></section>`);
-  el.setAttribute("aria-label", replacingGoal ? title : kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
+  el.setAttribute("aria-label", replacingGoal || rateLimit ? title : kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
   el.querySelector(".ask-icon").innerHTML = icon(kind === "question" ? "inbox" : kind === "plan" ? "task" : toolIcon(tool));
   setText(el.querySelector(".ask-title"), title);
   const body = el.querySelector(".ask-body");
@@ -3748,6 +3749,14 @@ function createAskCard(ask, { onAnswer }) {
     el.appendChild(box);
     return open;
   };
+
+  if (rateLimit) {
+    const { question, options: [switchModel, keep, hide] } = input.questions[0];
+    body.append(note(input.message));
+    const choose = ({ label }, cls) => btn(label, cls, () => answer({ answers: { [question]: label } }));
+    actions.append(choose(keep, "accent"), choose(switchModel, ""), choose(hide, ""));
+    return el;
+  }
 
   if (replacingGoal) {
     const { question, options: [replace, cancel] } = input.questions[0];

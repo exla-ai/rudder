@@ -3,7 +3,7 @@
 // typing it in the dashboard's task bar does (effort "auto" lets the agent
 // decide; native/src/main.rs handle_command).
 import { h, icon, setText } from "/app/render.js";
-import { app, api, coarse, ls, showError, toast, track } from "/app/core.js";
+import { app, api, coarse, ls, showError, toast, track, accountCanRun, accountUsageLabel } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
 import { UpdateNow } from "/app/home-update.js";
 
@@ -133,11 +133,20 @@ const accountsOf = (backend) => app.store?.state?.home?.credentials?.[backend] ?
 const accountOf = (backend, id) => accountsOf(backend).find((a) => a.id === id) ?? null;
 /** The account new agents on a harness start on. */
 const defaultAccount = (backend) => accountsOf(backend).find((a) => a.default)?.id ?? MAIN;
-/** Whether that check found the account signed out (cloud/worker/handoff.mjs handoffRefusal). */
-const signedOut = (backend, id) => {
+function accountRefusal(backend, id) {
   const account = accountOf(backend, id);
-  return !!account && !account.ok;
-};
+  if (!account || accountCanRun(account)) return "";
+  return accountUsageLabel(account) || (account.signedIn
+    ? account.detail || "Could not check usage for this account"
+    : "Sign in to this account from Settings");
+}
+
+// Use the preferred account again after its allowance resets.
+function availableDefault(backend) {
+  const preferred = defaultAccount(backend);
+  if (!accountUsageLabel(accountOf(backend, preferred))) return preferred;
+  return accountsOf(backend).find(accountCanRun)?.id ?? preferred;
+}
 /** An account in words: its email, else which one it is. */
 const accountName = (backend, id) => {
   const list = accountsOf(backend);
@@ -148,7 +157,11 @@ const accountName = (backend, id) => {
 function accountLine(harness, id) {
   const cred = accountOf(harness.id, id);
   if (!cred) return `Runs on your own ${harness.account} subscription`;
-  if (cred.ok) return [cred.account, cred.plan ? `${PLAN_LABEL[cred.plan] || cred.plan} plan` : null].filter(Boolean).join(" · ") || "Signed in";
+  if (cred.ok || cred.signedIn) return [
+    cred.account,
+    cred.plan ? `${PLAN_LABEL[cred.plan] || cred.plan} plan` : null,
+    accountRefusal(harness.id, id),
+  ].filter(Boolean).join(" · ") || "Signed in";
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
 }
 
@@ -173,10 +186,12 @@ function paintAccounts(el, harness, { selected, onPick }) {
   el.replaceChildren(...list.map((a) => {
     const b = h(`<button type="button" role="radio" class="mp-acct"><span class="mp-acct-n"></span><span class="mp-acct-p"></span></button>`);
     setText(b.querySelector(".mp-acct-n"), accountName(harness.id, a.id));
-    setText(b.querySelector(".mp-acct-p"), a.ok ? (a.plan ? PLAN_LABEL[a.plan] || a.plan : "") : "Signed out");
+    const refusal = accountRefusal(harness.id, a.id);
+    const label = accountUsageLabel(a) ? "At limit" : refusal ? (a.signedIn ? "Check failed" : "Signed out") : PLAN_LABEL[a.plan] || a.plan || "";
+    setText(b.querySelector(".mp-acct-p"), label);
     b.setAttribute("aria-checked", String(a.id === selected));
-    b.disabled = !a.ok;
-    b.title = a.ok ? accountLine(harness, a.id) : "Not signed in on the cloud machine. Sign in again from Settings.";
+    b.disabled = Boolean(refusal);
+    b.title = accountLine(harness, a.id);
     b.addEventListener("click", () => onPick(a.id));
     return b;
   }), ...(addable ? [addAccountChip(harness)] : []));
@@ -390,7 +405,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
   let effort = start?.effort || "auto";
   // The account picked per harness; until a pick, the harness's default.
   const picked = {};
-  const accountFor = (backend) => picked[backend] ?? defaultAccount(backend);
+  const accountFor = (backend) => picked[backend] ?? availableDefault(backend);
   // The harness tab shown: the picked model's until another is chosen.
   let tab = pick?.backend ?? null;
   let revealed = false;
@@ -420,7 +435,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     const row = pickedRow();
     const eff = effortFor(row, effort);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
-    useBtn.disabled = !pick || signedOut(pick.backend, accountFor(pick.backend));
+    useBtn.disabled = !pick || Boolean(accountRefusal(pick.backend, accountFor(pick.backend)));
     setText(useBtn, pick ? `Use ${modelText(pick.backend, row.label, dial ? eff : null)}` : "Use this model");
   }
 
@@ -434,7 +449,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
       // New agents on a harness start on its default account (native reads
       // it at launch), so picking another account here makes it the default.
       const account = accountFor(backend);
-      if (account !== defaultAccount(backend)) {
+      if (picked[backend] && account !== defaultAccount(backend)) {
         await api("/api/app/agent-account", { method: "POST", body: { provider: backend, account, action: "default" } });
       }
       // Exactly the dashboard grammar: /model <harness> <model> [effort].
@@ -664,7 +679,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   // default for the others, until a pick.
   const own = start.account ?? MAIN;
   const picked = { [backend]: own };
-  const accountFor = (b) => picked[b] ?? defaultAccount(b);
+  const accountFor = (b) => picked[b] ?? availableDefault(b);
   // The harness tab shown: the chat's own until another is chosen.
   let tab = backend;
   let revealed = false;
@@ -707,14 +722,14 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const to = harnessLabel(pick.backend);
     // An account the machine is not signed in to can't take the chat: its
     // agent would fail at once. The home refuses it too.
-    const blocked = (moving || reaccount) && signedOut(pick.backend, account);
+    const blocked = (moving || reaccount) && accountRefusal(pick.backend, account);
     setText(note, blocked
-      ? `${to} isn't signed in on your cloud machine as ${accountName(pick.backend, account)}. Sign in again from Settings first.`
+      ? blocked
       : moving ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
       : busy ? "It is working right now. Switch when this turn ends."
       : reaccount ? `The conversation carries on as ${accountName(pick.backend, account)}. Its next reply uses that account.`
       : "The conversation carries on. Its next reply uses the new model.");
-    note.classList.toggle("mp-blocked", blocked);
+    note.classList.toggle("mp-blocked", Boolean(blocked));
     const same = !moving && !reaccount && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
     const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
     useBtn.disabled = !row || same || (busy && !moving) || blocked;

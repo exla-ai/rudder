@@ -563,6 +563,8 @@ export type QuotaWindow = {
   resetsAt: string | null;
 };
 
+export type SubscriptionLimit = { window: "session" | "weekly" | null; resetsAt: number | null };
+
 export type AccountQuota = {
   provider: Provider;
   /** Which of the provider's accounts: "main" or an extra account's id. */
@@ -574,6 +576,7 @@ export type AccountQuota = {
   windows: QuotaWindow[];
   /** Human-readable reason a request would be rejected or throttled right now (rate limit hit, credits depleted), or null when clear. */
   blocked: string | null;
+  usageLimit: SubscriptionLimit | null;
   /** Human-readable reason the meters are missing, with the fix. */
   error: string | null;
   fetchedAt: string;
@@ -686,12 +689,19 @@ export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string 
   const plan = planLabel(profile?.organization?.rate_limit_tier, fallbackPlan);
   const lockedReason = [usage?.five_hour, usage?.seven_day].map((w) => w?.locked_reason).find((r) => typeof r === "string" && r);
   const blocked = lockedReason ? `blocked: ${String(lockedReason).replace(/_/g, " ")}` : null;
-  return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
+  // Use the raw account-wide windows. Display percentages are rounded, and
+  // a model-specific limit or an enabled extra-usage balance can leave the
+  // account available for work.
+  const usageLimit = extra?.is_enabled ? null : quotaLimit([
+    [usage?.five_hour?.utilization, Date.parse(usage?.five_hour?.resets_at), "session"],
+    [usage?.seven_day?.utilization, Date.parse(usage?.seven_day?.resets_at), "weekly"],
+  ]);
+  return { email, plan, windows, blocked, usageLimit, error: windows.length ? null : "this plan does not expose limits" };
 }
 
-async function fetchClaudeQuota(account: AgentAccount, env: NodeJS.ProcessEnv): Promise<AccountQuota> {
+async function fetchClaudeQuota(account: AgentAccount, env: NodeJS.ProcessEnv, timeoutMs = 15_000): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
-  const base = { provider: "claude" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, fetchedAt };
+  const base = { provider: "claude" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, usageLimit: null, fetchedAt };
   const creds = await readClaudeCredentials(account, env);
   if (!creds) return { ...base, error: "not signed in: run `claude` and log in" };
   if (creds.expiresAt && creds.expiresAt < Date.now()) {
@@ -704,8 +714,8 @@ async function fetchClaudeQuota(account: AgentAccount, env: NodeJS.ProcessEnv): 
   };
   try {
     const [usageRes, profileRes] = await Promise.all([
-      fetch("https://api.anthropic.com/api/oauth/usage", { headers, signal: AbortSignal.timeout(15_000) }),
-      fetch("https://api.anthropic.com/api/oauth/profile", { headers, signal: AbortSignal.timeout(15_000) }),
+      fetch("https://api.anthropic.com/api/oauth/usage", { headers, signal: AbortSignal.timeout(timeoutMs) }),
+      fetch("https://api.anthropic.com/api/oauth/profile", { headers, signal: AbortSignal.timeout(timeoutMs) }),
     ]);
     if (usageRes.status === 401 || usageRes.status === 403) {
       return { ...base, error: "sign-in rejected: run `claude` once to refresh it" };
@@ -807,12 +817,34 @@ export function parseCodexQuota(body: any): Omit<AccountQuota, "fetchedAt" | "pr
   const blocked = body?.rate_limit?.limit_reached
     ? `blocked: ${CODEX_BLOCK_REASONS[reachedKind] ?? (typeof reachedKind === "string" ? reachedKind.replace(/_/g, " ") : "rate limit reached")}`
     : null;
-  return { email, plan, windows, blocked, error: windows.length ? null : "this plan does not expose limits" };
+  const windowLimit = (window: any): [number, number, SubscriptionLimit["window"]] => {
+    const seconds = window?.limit_window_seconds;
+    return [window?.used_percent, window?.reset_at * 1000, seconds === 604800 ? "weekly" : seconds === 18000 ? "session" : null];
+  };
+  const usageLimit = body?.rate_limit?.limit_reached && body.rate_limit.allowed !== true
+    ? quotaLimit([windowLimit(body.rate_limit.primary_window), windowLimit(body.rate_limit.secondary_window)])
+    : null;
+  return { email, plan, windows, blocked, usageLimit, error: windows.length ? null : "this plan does not expose limits" };
 }
 
-async function fetchCodexQuota(account: AgentAccount): Promise<AccountQuota> {
+/** A later reset is needed when two account-wide windows are exhausted. */
+function quotaLimit(windows: [number, number, SubscriptionLimit["window"]][]): SubscriptionLimit | null {
+  const hit = windows.filter(([percent]) => Number.isFinite(percent) && percent >= 100);
+  if (!hit.length) return null;
+  const validReset = (reset: number) => Number.isFinite(reset) && reset > 0 && reset <= 8_640_000_000_000_000;
+  const unknown = hit.find(([, reset]) => !validReset(reset));
+  if (unknown) return { window: unknown[2], resetsAt: null };
+  const [, reset, window] = hit.reduce((latest, next) => next[1] > latest[1] ? next : latest);
+  return { window, resetsAt: reset };
+}
+
+export async function fetchAccountQuota(account: AgentAccount, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<AccountQuota> {
+  return account.backend === "claude" ? fetchClaudeQuota(account, env, timeoutMs) : fetchCodexQuota(account, timeoutMs);
+}
+
+async function fetchCodexQuota(account: AgentAccount, timeoutMs = 15_000): Promise<AccountQuota> {
   const fetchedAt = new Date().toISOString();
-  const base = { provider: "codex" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, fetchedAt };
+  const base = { provider: "codex" as const, account: account.id, default: account.default, email: null, plan: null, windows: [], blocked: null, usageLimit: null, fetchedAt };
   const creds = await readCodexCredentials(account);
   if (!creds) return { ...base, error: "not signed in: run `codex login`" };
   const headers: Record<string, string> = {
@@ -821,7 +853,7 @@ async function fetchCodexQuota(account: AgentAccount): Promise<AccountQuota> {
   };
   if (creds.accountId) headers["chatgpt-account-id"] = creds.accountId;
   try {
-    const res = await fetch("https://chatgpt.com/backend-api/wham/usage", { headers, signal: AbortSignal.timeout(15_000) });
+    const res = await fetch("https://chatgpt.com/backend-api/wham/usage", { headers, signal: AbortSignal.timeout(timeoutMs) });
     if (res.status === 401 || res.status === 403) return { ...base, error: "sign-in expired: run `codex login`" };
     if (!res.ok) return { ...base, error: `usage endpoint returned ${res.status}` };
     return { ...base, ...parseCodexQuota(await res.json()) };

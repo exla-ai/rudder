@@ -117,10 +117,11 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every process-global var the harness injects. `EnvGuard` snapshots these on
 /// acquisition and puts them back on drop, so the list must stay a superset of what
 /// the tests set — a var missing here is a var that can leak.
-const GUARDED_ENV: [&str; 15] = [
+const GUARDED_ENV: [&str; 16] = [
     "CODEX_HOME",
     "HOME",
     "PATH",
+    "RUDDER_ACCOUNT_AVAILABILITY",
     "RUDDER_CLAUDE_BIN",
     "RUDDER_CLI",
     "RUDDER_CLOUD_RUNTIME",
@@ -32457,6 +32458,80 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     assert!(matches!(app.deliver_model_request("chat-run", "opus high main"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
     assert_eq!(app.agents[0].model, "haiku");
     app.agents[0].terminal = None;
+}
+
+#[cfg(not(windows))]
+#[test]
+fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("account-rotation");
+    let home = dir.join("home");
+    let rudder_home = home.join(".rudder");
+    env.set_home(&dir, &home);
+    std::env::set_var("RUDDER_HOME", &rudder_home);
+    let availability = rudder_home.join("account-availability.json");
+    std::env::set_var("RUDDER_ACCOUNT_AVAILABILITY", &availability);
+    let profiles = serde_json::json!([
+        {"id":"main","ok":false,"signedIn":true,"usageLimit":{"resetsAt":null}},
+        {"id":"work","ok":true}
+    ]);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    for (backend, model, executable, account_env, resume_flag) in [
+        (Backend::Claude, "sonnet", "RUDDER_CLAUDE_BIN", "CLAUDE_CONFIG_DIR", "--resume"),
+        (Backend::Codex, "gpt-5.5", "RUDDER_CODEX_BIN", "CODEX_HOME", "resume"),
+    ] {
+        let profile = rudder_home.join("accounts").join(backend.as_str()).join("work");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(&availability, serde_json::json!({(backend.as_str()): profiles}).to_string()).unwrap();
+        let bin = dir.join(backend.as_str());
+        write_fake_bin(
+            &bin,
+            &format!("#!/bin/sh\nprintf '%s\\n' \"${{{account_env}}}\" \"$@\" > rotation-args\nexec cat\n"),
+        );
+        std::env::set_var(executable, bin);
+        let run_id = format!("rotate-{}", backend.as_str());
+        let session = "3fc04baa-5b1e-4822-9831-59a018f2ce16";
+        let mut run = test_agent_run(&run_id, "previous turn");
+        run.mode = AgentMode::Main;
+        run.cwd = dir.clone();
+        run.backend = backend;
+        run.model = model.to_string();
+        run.session_id = Some(session.to_string());
+        run.status = AgentStatus::Paused;
+        run.needs_permission = true;
+        let index = app.agents.len();
+        app.agents.push(run);
+        let prompt = "continue here";
+        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(why) if why.contains("permission")));
+        assert_eq!(app.agents[index].account, None);
+        assert!(app.agents[index].terminal.is_none());
+        app.agents[index].needs_permission = false;
+
+        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Delivered));
+        let run = &mut app.agents[index];
+        assert_eq!(run.account.as_deref(), Some("work"));
+        assert_eq!(run.session_id.as_deref(), Some(session));
+        assert_eq!(run.turns.len(), 2);
+        assert_eq!(run.turns[0].prompt, "previous turn");
+        assert_eq!(run.turns[1].prompt, prompt);
+        let argv_file = dir.join("rotation-args");
+        let start = Instant::now();
+        let argv = loop {
+            if let Ok(text) = fs::read_to_string(&argv_file) {
+                if text.ends_with(&format!("{prompt}\n")) {
+                    break text;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(2), "replacement CLI did not start");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(argv.lines().next(), profile.to_str());
+        assert!(argv.contains(&format!("{resume_flag}\n{session}\n")), "{argv}");
+        assert!(argv.ends_with(&format!("--\n{prompt}\n")), "{argv}");
+        run.terminal = None;
+        fs::remove_file(argv_file).unwrap();
+    }
 }
 
 /// A model of another harness picked in a chat moves the chat there: the

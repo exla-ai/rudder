@@ -1,5 +1,10 @@
 # Rudder v4 handoff (2026-11-04)
 
+Claude Code and Codex limits on Cloud homes keep the account signed in and
+show the reset in Settings. New work and the next prompt in a saved,
+idle conversation use the first available configured account when the
+current account is confirmed exhausted. Each account keeps its own sign-in.
+
 How to work: see "Development speed" in `AGENTS.md` (main only, targeted
 checks, CI only at release, no new status docs, no hardening waves).
 

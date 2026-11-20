@@ -12,6 +12,7 @@
 // instructions.
 
 import path from "node:path";
+import { accountReady, activeUsageLimit, quotaDetail } from "./account-usage.mjs";
 
 const HEADER = "Rudder handoff: this chat moved to you from ";
 // Its own line: a mode that frames the prompt (plan mode) puts words before it.
@@ -109,7 +110,10 @@ export function handoffRefusal(credentials, backend, account, label) {
   if (credentials?.[backend] && !cred) {
     return `That ${label} account is no longer on your cloud machine.`;
   }
-  return cred && !cred.ok ? `${label} isn't signed in on your cloud machine${cred.account ? ` as ${cred.account}` : ""}.` : null;
+  const limit = activeUsageLimit(cred);
+  if (limit) return `${quotaDetail(limit)} for this ${label} account. Choose another account or wait for the reset.`;
+  if (cred?.signedIn && !accountReady(cred)) return `Rudder could not check whether this ${label} account can run. ${cred.detail ?? ""}`.trim();
+  return cred && !accountReady(cred) ? `${label} isn't signed in on your cloud machine${cred.account ? ` as ${cred.account}` : ""}.` : null;
 }
 
 function stopped(messages, working, cwd) {

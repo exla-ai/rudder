@@ -8602,16 +8602,20 @@ impl App {
     }
 
     fn start_task_from_input(&mut self, input: &str) {
+        let _ = self.submit_task_from_input(input);
+    }
+
+    fn submit_task_from_input(&mut self, input: &str) -> Result<(), String> {
         // `$ ls -la` / `$`: a shell, not a task. Checked before the shared-context
         // capture so `$ export API_TOKEN=...` is not filed as shared context.
         if let Some(command_line) = input.trim_start().strip_prefix('$') {
             self.start_shell_pane(command_line);
             self.dirty = true;
-            return;
+            return Ok(());
         }
         self.capture_shared_context_from_input(input);
         if self.handle_command(&input) {
-            return;
+            return Ok(());
         }
         // A slash-command-shaped token that no command matched is almost always
         // a typo (/plna, /deploy). Falling through spawned a REAL agent whose
@@ -8632,7 +8636,7 @@ impl App {
                     "unknown command /{token} — /help lists commands · remove the leading / to send this as a task"
                 ));
                 self.dirty = true;
-                return;
+                return Ok(());
             }
         }
         self.notice = None;
@@ -8643,10 +8647,10 @@ impl App {
         // let it update RUDDER.md; headless planners still use the old refine path.
         if self.plan().awaiting_approval {
             if self.send_to_interactive_orchestrator(input) {
-                return;
+                return Ok(());
             }
             self.refine_plan(&input);
-            return;
+            return Ok(());
         }
 
         // The planner ran but produced NO DAG (it asked a clarifying question, or needs
@@ -8655,7 +8659,7 @@ impl App {
         // loses all prior context.
         if self.planner_awaiting_input() {
             self.refine_plan(&input);
-            return;
+            return Ok(());
         }
 
         // CLOUD MODE: the per-repo `/cloud` flag redirects the DEFAULT route.
@@ -8664,16 +8668,27 @@ impl App {
         // already running HERE; only "start new work" changes where it starts.
         if self.cloud_mode {
             self.start_cloud_task(input);
-            return;
+            return Ok(());
         }
 
         // New local tasks choose a workflow automatically. Ordinary implementation
         // keeps the existing isolated worker scope; only a clear multi-part task
         // enters the existing approval-gated planner.
-        self.route_fresh_task(input);
+        self.route_fresh_task(input)
     }
 
-    fn route_fresh_task(&mut self, input: &str) {
+    fn route_fresh_task(&mut self, input: &str) -> Result<(), String> {
+        let preferred = config::load_rudder_config().as_ref()
+            .and_then(|config| config::config_account(config, self.backend));
+        if let Err(error) = config::usage_account_route(self.backend, preferred.as_deref()) {
+            if self.task_input.is_empty() {
+                self.replace_task_input(input.to_string());
+            }
+            self.notice = Some(error.clone());
+            self.dirty = true;
+            return Err(error);
+        }
+
         // A Kimi or GLM agent with no OpenRouter key: say so once and keep the
         // task, instead of creating a workspace for an agent that cannot start.
         if let Some(refusal) = openrouter_key_refusal(self.backend, &self.model) {
@@ -8682,7 +8697,7 @@ impl App {
             }
             self.notice = Some(refusal.to_string());
             self.dirty = true;
-            return;
+            return Ok(());
         }
         let request = TaskRoutingRequest {
             task: input.to_string(),
@@ -8694,7 +8709,7 @@ impl App {
         let decision = deterministic_task_route(input);
         if decision.route == TaskRoute::Discuss || !optional_decisions_routing_enabled() {
             self.finish_task_routing(TaskRoutingOutcome { request, decision });
-            return;
+            return Ok(());
         }
         let tx = self.task_routing_tx.clone();
         self.notice = Some("choosing task workflow".to_string());
@@ -8703,6 +8718,7 @@ impl App {
             let decision = classify_task_with_cli(&request.cwd, &request.task);
             let _ = tx.send(TaskRoutingOutcome { request, decision });
         });
+        Ok(())
     }
 
     fn finish_task_routing(&mut self, outcome: TaskRoutingOutcome) {
@@ -16440,7 +16456,7 @@ Address the objection directly. If you disagree, say why inside \
     /// Route one steer instruction from the web board to its target agent (or the
     /// high-level task-input path) and record it in the activity feed. A blank/
     /// `conductor`/`orchestrator` target deliberately goes through
-    /// `start_task_from_input`: that is the same decision path as the task pane, so
+    /// `submit_task_from_input`: that is the same decision path as the task pane, so
     /// it can converse with a live conductor, refine/rebase an active plan, or start
     /// fresh work even when no conductor PTY currently exists.
     fn deliver_steer_request(
@@ -16466,7 +16482,9 @@ Address the objection directly. If you disagree, say why inside \
             if opencode_prompt {
                 return SteerDelivery::Failed("OpenCode commands need an OpenCode agent".to_string());
             }
-            self.start_task_from_input(&instruction);
+            if let Err(error) = self.submit_task_from_input(&instruction) {
+                return SteerDelivery::Failed(error);
+            }
             // Do not replace the notice produced by the task-input path (for
             // example a command result or a planner error); the activity stream is
             // enough to acknowledge the web action without hiding that feedback.
@@ -16481,6 +16499,32 @@ Address the objection directly. If you disagree, say why inside \
         };
         if opencode_prompt && self.agents[index].backend != Backend::Opencode {
             return SteerDelivery::Failed("the agent is no longer running OpenCode".to_string());
+        }
+        // The supervisor can prove that this account has reached its allowance.
+        // Change the account and type the user's next prompt in this one inbox
+        // operation. A second send sees the new account and cannot reopen the
+        // same chat again. The resume command supplies the first prompt so a slow
+        // CLI startup cannot drop a paste meant for the new process.
+        let run = &self.agents[index];
+        if !instruction.starts_with('/') && crate::agent_model::model_switch_refusal(run).is_none() {
+            match config::usage_account_route(run.backend, run.account.as_deref()) {
+                Ok(Some(replacement)) => {
+                    if run.needs_permission {
+                        return SteerDelivery::Failed("This chat is waiting for a permission decision. Answer it before switching accounts.".to_string());
+                    }
+                    if run.session_id.as_deref().is_none_or(|session| session.trim().is_empty()) {
+                        return SteerDelivery::Failed("This chat has no saved session to continue on another account.".to_string());
+                    }
+                    if let Some(reason) = self.composer_blocked_at(index) {
+                        return SteerDelivery::Failed(format!("not sent: {reason}"));
+                    }
+                    let run = &self.agents[index];
+                    let spec = format!("{} {} {replacement}", run.model, run.effort.map_or("auto", EffortLevel::as_str));
+                    return self.switch_model_request(task_id, &spec, Some(&instruction));
+                }
+                Ok(None) => {}
+                Err(error) => return SteerDelivery::Failed(error),
+            }
         }
         // OpenCode uses the first Enter to complete a bare prompt command.
         // A space after the name closes autocomplete so that Enter submits it.
@@ -16724,6 +16768,10 @@ Address the objection directly. If you disagree, say why inside \
     /// process takes them when it next resumes. Mid-turn it is refused:
     /// relaunching would throw that turn away.
     fn deliver_model_request(&mut self, task_id: &str, spec: &str) -> SteerDelivery {
+        self.switch_model_request(task_id, spec, None)
+    }
+
+    fn switch_model_request(&mut self, task_id: &str, spec: &str, prompt: Option<&str>) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
@@ -16758,13 +16806,20 @@ Address the objection directly. If you disagree, say why inside \
             return SteerDelivery::Failed(error.to_string());
         }
         let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
-        if live && run.status == AgentStatus::Running && !run.needs_user_input {
+        if live && run.status == AgentStatus::Running
+            && !run.needs_user_input && !matches!(run.wait_signal, Some(WaitSignal::Error(_)))
+        {
             return SteerDelivery::Failed(
                 "it is in the middle of a turn; switch when it finishes".to_string(),
             );
         }
+        if prompt.is_some() && !live && !matches!(run.status,
+            AgentStatus::Done | AgentStatus::Paused | AgentStatus::Stopped | AgentStatus::Failed | AgentStatus::Orphaned
+        ) {
+            return SteerDelivery::Failed(format!("this chat is unavailable ({})", run.status.as_str()));
+        }
         let session = run.session_id.clone().filter(|id| !id.trim().is_empty());
-        if live && session.is_none() {
+        if (live || prompt.is_some()) && session.is_none() {
             return SteerDelivery::Failed("this chat has no saved session to continue".to_string());
         }
         let account_changed = run.account != account;
@@ -16774,13 +16829,18 @@ Address the objection directly. If you disagree, say why inside \
             std::mem::replace(&mut run.account, account),
         );
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
-        if let Some(session) = session.filter(|_| live) {
+        if let Some(session) = session.filter(|_| live || prompt.is_some()) {
             let mut command = match backend {
                 Backend::Claude => claude_resume_command(run, &session),
                 Backend::Codex => codex_resume_command(run, &session),
                 Backend::Opencode => opencode_resume_command(run, &session),
                 Backend::Antigravity => antigravity_resume_command(run, &session),
             };
+            let sdk_prompt = prompt.filter(|_| run.execution_profile.as_deref() == Some("claude-sdk"));
+            if let Some(prompt) = sdk_prompt {
+                command.args.push(prompt.to_string());
+                command.env.push(("RUDDER_AGENT_INITIAL_PROMPT".to_string(), prompt.to_string()));
+            }
             let wired = if run.is_main() && run.execution_profile.is_none() {
                 signals::augment_worker_command(&mut command, backend, run.mode, &run.id, run.account.as_deref())
             } else {
@@ -16799,6 +16859,10 @@ Address the objection directly. If you disagree, say why inside \
                 (run.model, run.effort, run.account) = previous;
                 return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
             }
+            if let Some(prompt) = prompt.filter(|_| sdk_prompt.is_none()) {
+                command.args.push("--".to_string());
+                command.args.push(prompt.to_string());
+            }
             let options = TerminalPaneOptions {
                 size: run.terminal_size.unwrap_or_default(),
                 cwd: Some(run.cwd.clone()),
@@ -16814,9 +16878,26 @@ Address the objection directly. If you disagree, say why inside \
                     run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
                     run.last_output_at = Instant::now();
+                    if let Some(prompt) = prompt {
+                        let now = now_stamp();
+                        run.status = AgentStatus::Running;
+                        run.completed_at = None;
+                        run.wait_signal = None;
+                        run.last_error = None;
+                        run.needs_user_input = false;
+                        run.current_prompt = prompt.to_string();
+                        run.turns.push(AgentTurn {
+                            ts: now.clone(),
+                            prompt: prompt.to_string(),
+                            source: "user".to_string(),
+                        });
+                        run.last_user_input_at = now;
+                        run.last_worker_input_at = Some(Instant::now());
+                    }
                 }
                 Err(error) => {
                     let run = &mut self.agents[index];
+                    (run.model, run.effort, run.account) = previous;
                     run.status = AgentStatus::Failed;
                     run.last_error = Some(error.to_string());
                     let _ = save_native_run_record(&self.cwd, run);

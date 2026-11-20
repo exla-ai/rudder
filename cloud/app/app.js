@@ -6,7 +6,7 @@ import {
 
 import {
   app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
-  noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn,
+  noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn, accountUsageLabel,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
@@ -2021,8 +2021,13 @@ function accountLoginState(home, provider, account) {
   if (login && LOGIN_BUSY.has(login.status) && login.account === account.id) {
     return { kind: "busy", pill: "Signing in", cls: "s-accent", sub: login.status === "finishing" ? "Finishing on the machine…" : "Waiting for you to approve" };
   }
-  if (account.ok) {
-    const bits = [account.account, planLabel(account.plan)].filter(Boolean);
+  if (account.ok || account.signedIn) {
+    const usage = accountUsageLabel(account);
+    const bits = [account.account, planLabel(account.plan), usage].filter(Boolean);
+    if (!usage && !account.ok && !account.usageLimit) {
+      return { kind: "error", pill: "Signed in", cls: "s-done", sub: [...bits, account.detail].filter(Boolean).join(" · "), err: true };
+    }
+    if (usage) return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") };
     const expiration = Date.parse(account.loginExpiresAt);
     const until = expiration - Date.now();
     const expiring = until > 0 && until <= 10 * 86_400_000;
@@ -2035,7 +2040,6 @@ function accountLoginState(home, provider, account) {
   if (account.ok === false) {
     const detail = account.detail || "";
     const who = account.account ? `${account.account}: ` : "";
-    if (account.signedIn) return { kind: "error", pill: "Check failed", cls: "s-failed", sub: `${who}${detail}`, err: true };
     if (/expired/i.test(detail)) return { kind: "out", sub: `${who}Login expired. Sign in again.`, err: true, expired: true };
     if (/not logged in|not signed in/i.test(detail)) return { kind: "out", sub: "Not signed in" };
     return { kind: "out", sub: detail, err: true };
@@ -2166,8 +2170,10 @@ function openAccountMenu(agent, id, anchor) {
   if (MULTI_ACCOUNT.has(agent.id) && list.length > 1 && !account.default) {
     items.push({ label: "Make default", icon: "check", run: () => change("default", `New ${agent.label} agents start on ${who}`) });
   }
-  items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
-  if (MULTI_ACCOUNT.has(agent.id) && account.ok && id === MAIN) {
+  if (!accountUsageLabel(account)) {
+    items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
+  }
+  if (MULTI_ACCOUNT.has(agent.id) && (account.ok || account.signedIn) && id === MAIN) {
     items.push("divider", { label: "Sign out", icon: "power", danger: true, run: async () => {
       const ok = await confirmDialog({
         title: `Sign ${who} out?`,

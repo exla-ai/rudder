@@ -98,9 +98,103 @@ pub(crate) fn config_account(config: &serde_json::Value, backend: Backend) -> Op
 /// The account a NEW agent row on `backend` starts on, read from config.json
 /// at launch. A row that continues a conversation keeps its own instead.
 pub(crate) fn new_agent_account(backend: Backend) -> Option<String> {
-    load_rudder_config()
+    let preferred = load_rudder_config()
         .as_ref()
-        .and_then(|config| config_account(config, backend))
+        .and_then(|config| config_account(config, backend));
+    match usage_account_route(backend, preferred.as_deref()) {
+        Ok(Some(id)) => (id != MAIN_ACCOUNT).then_some(id),
+        Ok(None) | Err(_) => preferred,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountAvailability {
+    id: String,
+    ok: bool,
+    #[serde(default)]
+    signed_in: bool,
+    usage_limit: Option<AccountUsageLimit>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountUsageLimit {
+    resets_at: Option<u64>,
+}
+
+impl AccountUsageLimit {
+    fn active(&self, now: u64) -> bool {
+        self.resets_at.is_none_or(|reset| reset > now)
+    }
+}
+
+fn select_usage_account<'a>(
+    rows: &'a [AccountAvailability],
+    current: &str,
+    now: u64,
+) -> Result<Option<&'a str>, String> {
+    let exhausted = |row: &AccountAvailability| {
+        row.usage_limit.as_ref().is_some_and(|limit| limit.active(now))
+    };
+    if !rows.iter().any(|row| row.id == current && exhausted(row)) {
+        return Ok(None);
+    }
+    rows.iter()
+        .find(|row| {
+            (row.ok || row.signed_in && row.usage_limit.is_some())
+                && !exhausted(row)
+                && (row.id == MAIN_ACCOUNT || valid_account_id(&row.id))
+        })
+        .map(|row| Some(row.id.as_str()))
+        .ok_or_else(|| "This account has reached its usage limit. Wait for the reset or add another account in Settings.".to_string())
+}
+
+/// The cloud supervisor owns the account snapshot. Local dashboards without
+/// that supervisor keep using their configured account.
+pub(crate) fn usage_account_route(backend: Backend, current: Option<&str>) -> Result<Option<String>, String> {
+    if !matches!(backend, Backend::Claude | Backend::Codex) {
+        return Ok(None);
+    }
+    let Some(file) = std::env::var_os("RUDDER_ACCOUNT_AVAILABILITY") else {
+        return Ok(None);
+    };
+    let raw = match fs::read(&file) {
+        Ok(raw) => raw,
+        // The supervisor is still running its first credential check.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not read agent account availability: {error}")),
+    };
+    let availability: std::collections::HashMap<String, Vec<AccountAvailability>> =
+        serde_json::from_slice(&raw).map_err(|error| format!("Invalid agent account availability: {error}"))?;
+    let Some(rows) = availability.get(backend.as_str()) else {
+        return Ok(None);
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    select_usage_account(rows, current.unwrap_or(MAIN_ACCOUNT), now).map(|replacement| replacement.map(str::to_string))
+}
+
+#[cfg(test)]
+mod account_rotation_tests {
+    use super::*;
+
+    #[test]
+    fn account_rotation_only_replaces_a_confirmed_exhausted_account() {
+        let rows: Vec<AccountAvailability> = serde_json::from_value(serde_json::json!([
+            {"id":"main", "ok":false, "signedIn":true, "usageLimit":{"resetsAt":1000}},
+            {"id":"expired", "ok":false, "signedIn":false},
+            {"id":"outage", "ok":false, "signedIn":true},
+            {"id":"older", "ok":false, "signedIn":true, "usageLimit":{"resetsAt":900}},
+            {"id":"newer", "ok":true}
+        ])).unwrap();
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 800).unwrap(), Some("newer"));
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 900).unwrap(), Some("older"));
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 1000).unwrap(), None);
+        assert!(select_usage_account(&rows[..4], MAIN_ACCOUNT, 899).is_err());
+        assert_eq!(select_usage_account(&rows, "outage", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, "expired", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, "newer", 800).unwrap(), None);
+    }
 }
 
 /// An extra account's id: 1 to 32 lowercase letters and digits, never "main".

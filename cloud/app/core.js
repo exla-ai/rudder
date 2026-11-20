@@ -241,3 +241,20 @@ export function openSheet({ title, className = "" }) {
   dlg.showModal();
   return { dlg, body: dlg.querySelector(".sheet-body"), close: () => dlg.close() };
 }
+
+
+export function accountUsageLabel(account, now = Date.now()) {
+  const limit = account?.usageLimit;
+  if (!limit || (limit.resetsAt !== null && limit.resetsAt <= now)) return "";
+  const label = limit.window === "weekly" ? "Weekly limit reached"
+    : limit.window === "session" ? "Session limit reached" : "Usage limit reached";
+  if (limit.resetsAt === null) return label;
+  const when = new Intl.DateTimeFormat(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  }).format(limit.resetsAt);
+  return `${label} · Resets ${when}`;
+}
+
+export function accountCanRun(account) {
+  return !accountUsageLabel(account) && (account?.ok || (account?.signedIn && account.usageLimit));
+}

@@ -26,6 +26,7 @@ import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
+import { activeUsageLimit, checkedAccount, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
@@ -59,6 +60,7 @@ const { modelName } = await import(fromDist("models.js"));
 // Several Claude Code and Codex accounts, each a config dir (src/accounts.ts).
 // Paths resolve from the agents' env: RUDDER_HOME here is a flag.
 const accounts = await import(fromDist("accounts.js"));
+const { writeJson } = await import(fromDist("util.js"));
 
 let projectFiles;
 async function fileService() {
@@ -184,6 +186,10 @@ const tailscale = createTailscale({
 });
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
+const accountAvailabilityFile = path.join(PERSIST_HOME, ".rudder", "account-availability.json");
+baseChildEnv.RUDDER_ACCOUNT_AVAILABILITY = accountAvailabilityFile;
+const accountQuotaChecks = new Map();
+const lastQuotaChecks = new Map();
 
 // Claude Code, Codex, OpenCode and Antigravity sign-ins started from the phone (cloud/worker/logins.mjs).
 const logins = createLoginRunner({
@@ -909,6 +915,7 @@ async function handleRpc(method, params) {
     if (question) {
       return { ...answerCodexAsk(project, runId, question, codexTypedAnswer(question, text)), answered: true };
     }
+    await refreshRoutingQuota(record);
     let kind = "steer";
     const command = record?.backend === "opencode" && /^\/([^\s/]+)$/.exec(text.trim());
     if (command && command[1] !== "compact" && command[1] !== "summarize") {
@@ -1823,6 +1830,66 @@ async function scanPorts() {
 // ---------------------------------------------------------------------------
 
 
+async function publishAccountAvailability() {
+  const rows = (backend) => (credentials?.[backend] ?? []).map(({ id, ok, signedIn, usageLimit }) => ({
+    id, ok, signedIn, usageLimit,
+  }));
+  await writeJson(accountAvailabilityFile, { claude: rows("claude"), codex: rows("codex") }, { mode: 0o600 });
+  lastStateJson = "";
+  scheduleStateSoon();
+}
+
+function readAccountQuota(backend, id, env) {
+  const key = `${backend}:${id}`;
+  let pending = accountQuotaChecks.get(key);
+  if (!pending) {
+    const account = { backend, id, default: false, dir: accounts.accountDir(backend, id, baseChildEnv) };
+    pending = import(fromDist("usage.js")).then(({ fetchAccountQuota }) => fetchAccountQuota(account, env, 2500))
+      .finally(() => accountQuotaChecks.delete(key));
+    accountQuotaChecks.set(key, pending);
+  }
+  return pending;
+}
+
+async function usageStatus(backend, id, env, limit, previous) {
+  if (limit.resetsAt !== null) return limit;
+  const confirmed = activeUsageLimit(previous);
+  if (confirmed?.resetsAt != null) return confirmed;
+  const quota = await readAccountQuota(backend, id, env);
+  return activeUsageLimit(quota) ?? limit;
+}
+
+async function refreshRoutingQuota(record) {
+  if (!accounts.isAccountBackend(record?.backend)) return;
+  const backend = record.backend;
+  // Claude's StopFailure already indicates a failure. Codex does not save
+  // terminal provider errors in its rollout, so check its allowance on the
+  // next send when alternatives exist.
+  if (record.attention !== "error" && (backend !== "codex" || (credentials?.codex?.length ?? 0) < 2)) return;
+  const id = record.account ?? accounts.MAIN_ACCOUNT;
+  const row = credentials?.[backend]?.find((entry) => entry.id === id);
+  if (!row || (!row.ok && !row.signedIn) || activeUsageLimit(row)) return;
+  // A single lookup serves all affected chats and concurrent sends. An
+  // outage or a generic rate limit never becomes an account quota decision.
+  const key = `${backend}:${id}`;
+  const last = lastQuotaChecks.get(key);
+  if (last && Date.now() - last.at < 30_000) return await last.pending;
+  const entry = { at: Date.now(), pending: null };
+  entry.pending = (async () => {
+    const env = loginEnv(backend, id);
+    const quota = await readAccountQuota(backend, id, env);
+    const usageLimit = !quota.error && activeUsageLimit(quota);
+    // A login or removal may have changed the slot during the lookup.
+    if (!usageLimit || !credentials?.[backend]?.includes(row)) return;
+    credentials[backend] = credentials[backend].map((account) => account === row
+      ? { ...account, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) }
+      : account);
+    await publishAccountAvailability();
+  })().catch((error) => log(`account usage check failed for ${backend} ${id}: ${error.code || error.name}`));
+  lastQuotaChecks.set(key, entry);
+  await entry.pending;
+}
+
 async function checkCredentials() {
   if (credentialsRunning) {
     // A login just finished mid-check: look again once this one is done, or
@@ -1837,11 +1904,18 @@ async function checkCredentials() {
     const all = await accounts.listAccounts(env);
     // Each agent harness is a list of accounts, main first: Claude Code and
     // Codex can hold several (src/accounts.ts), OpenCode and Antigravity one.
-    const each = (backend, check) => Promise.all(all[backend].map(async (account) => ({
-      id: account.id,
-      default: account.default,
-      ...(await check(accounts.accountEnv(backend, account.id, env))),
-    })));
+    const each = (backend, check) => Promise.all(all[backend].map(async (account) => {
+      const { id } = account;
+      const previous = credentials?.[backend]?.find((row) => row.id === id);
+      const accountEnv = accounts.accountEnv(backend, id, env);
+      const result = await check(accountEnv, id, previous);
+      const current = credentials?.[backend]?.find((row) => row.id === id);
+      // A live turn can confirm the cap while the periodic probe is running.
+      const status = current && current !== previous && activeUsageLimit(current) && result.signedIn !== false && result.account === current.account
+        ? current
+        : checkedAccount(previous, result);
+      return { ...status, id, default: account.default };
+    }));
     const only = async (check) => [{ id: accounts.MAIN_ACCOUNT, default: true, ...(await check(env)) }];
     const [github, claude, codex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), each("claude", checkClaude), each("codex", checkCodex), only(checkOpencode), only(checkAntigravity), checkAws(env)]);
     credentials = { github, claude, codex, opencode, antigravity, aws, checkedAt: new Date().toISOString() };
@@ -1850,7 +1924,7 @@ async function checkCredentials() {
     if ([github, ...claude, ...codex, ...opencode, ...antigravity, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
-    lastStateJson = "";
+    await publishAccountAvailability();
     const who = (list) => list.map((check) => (check.ok ? check.account || "yes" : "no")).join(",");
     log(`credentials: github=${github.ok ? github.account : "no"} claude=${who(claude)} codex=${who(codex)} opencode=${who(opencode)} antigravity=${who(antigravity)}`);
   } catch (error) {
@@ -1883,8 +1957,8 @@ async function credentialsAfterLogin(provider, account) {
       [provider]: list.some((row) => row.id === account) ? list.map((row) => (row.id === account ? entry : row)) : [...list, entry],
       checkedAt: new Date().toISOString(),
     };
-    lastStateJson = "";
-    scheduleStateSoon();
+    lastQuotaChecks.delete(`${provider}:${account}`);
+    await publishAccountAvailability();
   }
   await checkCredentials();
 }
@@ -1915,6 +1989,13 @@ async function changeAccount(provider, account, action) {
       throw new Error(`The main ${harnessLabel(provider)} account can be signed out, not removed.`);
     }
     await signOut(provider, loginEnv(provider, account));
+    lastQuotaChecks.delete(`${provider}:${account}`);
+    if (credentials?.[provider]) {
+      credentials[provider] = action === "remove"
+        ? credentials[provider].filter((row) => row.id !== account)
+        : credentials[provider].map((row) => row.id === account ? { id: row.id, default: row.default, ok: false, detail: "not signed in" } : row);
+      await publishAccountAvailability();
+    }
     if (action === "remove") {
       await accounts.removeAccount(provider, account, baseChildEnv);
     }
@@ -1943,10 +2024,10 @@ async function claudeStatus(env) {
   try {
     parsed = JSON.parse(status.stdout);
   } catch {
-    return { loggedIn: false, account: null, plan: null, detail: firstLine(status.stderr) || "Claude returned an invalid sign-in status" };
+    return { loggedIn: null, account: null, plan: null, detail: status.code === -1 ? firstLine(status.stderr) : "Claude returned an invalid sign-in status" };
   }
   if (typeof parsed?.loggedIn !== "boolean") {
-    return { loggedIn: false, account: null, plan: null, detail: "Claude returned an invalid sign-in status" };
+    return { loggedIn: null, account: null, plan: null, detail: "Claude returned an invalid sign-in status" };
   }
   const loginExpiresAt = typeof parsed.loginExpiresAt === "string" ? parsed.loginExpiresAt : null;
   return { loggedIn: parsed.loggedIn, account: parsed.email || null, plan: claudePlan(parsed), loginExpiresAt, detail: parsed.loggedIn ? null : "not logged in" };
@@ -1955,7 +2036,13 @@ async function claudeStatus(env) {
 async function codexStatus(env) {
   const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
   const { account, plan } = codexAccount(env);
-  return { loggedIn: status.code === 0, account, plan };
+  if (status.code === 0) return { loggedIn: true, account, plan, detail: null };
+  const text = `${status.stdout}
+${status.stderr}`;
+  if (/not logged in|not signed in/i.test(text)) {
+    return { loggedIn: false, account, plan, detail: "not logged in" };
+  }
+  return { loggedIn: null, account, plan, detail: status.code === -1 ? firstLine(status.stderr) : "Codex could not verify its sign-in" };
 }
 
 // OpenCode runs on the providers it holds credentials for (its auth.json,
@@ -2037,46 +2124,69 @@ async function checkGithub(env) {
     : { ok: false, account: null, detail: firstLine(result.stderr || result.stdout) || "GitHub rejected the token" };
 }
 
-async function checkClaude(env) {
-  const { loggedIn, account, plan, loginExpiresAt, detail } = await claudeStatus(env);
-  if (!loggedIn) {
-    return { ok: false, account, plan, detail };
-  }
-  // JSON reports the request result separately from sign-in expiry warnings.
-  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku", "--output-format", "json"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
-  let result;
-  try {
-    result = JSON.parse(probe.stdout);
-  } catch {
-    // A CLI failure before a model request can exit without a JSON result.
-  }
-  if (probe.code === 0 && result?.type === "result" && result.subtype === "success" && result.is_error === false) {
-    return { ok: true, account, plan, loginExpiresAt, detail: null };
-  }
-  const reported = Array.isArray(result?.errors) ? result.errors.join("\n") : result?.result;
-  const errors = reported || probe.stderr.split("\n").filter((line) => !/^Warning: this sign-in ends /i.test(line)).join("\n");
-  const failure = /login expired|sign-in.*time limit|please run \/login|invalid.*(token|api key)|not logged in|authentication error|authentication_error/i.test(errors)
-    ? "login expired"
-    : firstLine(errors) || (probe.code === 0 ? "Claude returned an invalid model response" : `Claude exited with code ${probe.code}`);
-  return { ok: false, signedIn: failure !== "login expired", account, plan, loginExpiresAt, detail: failure };
+function unknownSignIn(previous, detail) {
+  return {
+    account: previous?.account ?? null,
+    plan: previous?.plan ?? null,
+    loginExpiresAt: previous?.loginExpiresAt ?? null,
+    ok: false,
+    signedIn: !!(previous?.ok || previous?.signedIn),
+    detail,
+  };
 }
 
-async function checkCodex(env) {
-  const { account, plan } = codexAccount(env);
-  const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
-  if (status.code !== 0) {
-    return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
+async function checkClaude(env, id, previous) {
+  const { loggedIn, account, plan, loginExpiresAt, detail } = await claudeStatus(env);
+  const identity = { account, plan, loginExpiresAt };
+  if (loggedIn === null) return unknownSignIn(previous, detail);
+  if (!loggedIn) return { ...identity, ok: false, signedIn: false, detail };
+
+  const known = activeUsageLimit(previous);
+  if (known?.resetsAt != null && account === previous.account) {
+    return { ...identity, ok: false, signedIn: true, usageLimit: known, detail: quotaDetail(known) };
   }
-  // The account's own default model (any account can use it) at low effort:
-  // the user's config.toml effort (often max) is for agents, not for a
-  // sign-in check.
-  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "-c", 'model_reasoning_effort="low"', "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
-  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account, plan, detail: null };
+  // Stream JSON carries the subscription cap and exact reset separately from
+  // the turn result, warnings and generic API rate limits.
+  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku", "--output-format", "stream-json", "--verbose"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
+  const events = jsonEvents(probe.stdout);
+  const result = events.findLast((event) => event?.type === "result");
+  if (probe.code === 0 && result?.subtype === "success" && result.is_error === false) {
+    return { ...identity, ok: true, detail: null };
   }
-  const text = `${probe.stdout}\n${probe.stderr}`;
-  const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, account, plan, detail };
+  const reported = Array.isArray(result?.errors) ? result.errors : [result?.result];
+  const usage = claudeUsageLimit(events) ?? reported.map(claudeUsageLimitText).find(Boolean);
+  if (usage) {
+    const usageLimit = await usageStatus("claude", id, env, usage, previous);
+    return { ...identity, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) };
+  }
+  const errors = reported.filter(Boolean).join("\n") || probe.stderr.split("\n").filter((line) => !/^Warning: this sign-in ends /i.test(line)).join("\n");
+  const expired = /login expired|sign-in.*time limit|please run \/login|invalid.*(token|api key)|not logged in|authentication error|authentication_error/i.test(errors);
+  return { ...identity, ok: false, signedIn: !expired, detail: expired ? "login expired" : probe.code === -1 ? firstLine(probe.stderr) : "Claude could not complete the sign-in check" };
+}
+
+async function checkCodex(env, id, previous) {
+  const status = await codexStatus(env);
+  const identity = { account: status.account, plan: status.plan };
+  if (status.loggedIn === null) return unknownSignIn(previous, status.detail);
+  if (!status.loggedIn) return { ...identity, ok: false, signedIn: false, detail: status.detail };
+
+  const known = activeUsageLimit(previous);
+  if (known?.resetsAt != null && identity.account === previous.account) {
+    return { ...identity, ok: false, signedIn: true, usageLimit: known, detail: quotaDetail(known) };
+  }
+  const probe = await capture("codex", ["exec", "--json", "--skip-git-repo-check", "-c", 'model_reasoning_effort="low"', "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  const events = jsonEvents(probe.stdout);
+  if (probe.code === 0 && events.some((event) => event?.type === "turn.completed")) {
+    return { ...identity, ok: true, detail: null };
+  }
+  const usage = codexUsageLimit(events);
+  if (usage) {
+    const usageLimit = await usageStatus("codex", id, env, usage, previous);
+    return { ...identity, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) };
+  }
+  const error = events.findLast((event) => event?.type === "turn.failed")?.error?.message;
+  const expired = /refresh token.*(?:revoked|expired|already used)|(?:status|http) (?:code )?401|401 unauthorized|log ?in again|not logged in|authentication failed/i.test(error || probe.stderr);
+  return { ...identity, ok: false, signedIn: !expired, detail: expired ? "login expired" : probe.code === -1 ? firstLine(probe.stderr) : "Codex could not complete the sign-in check" };
 }
 
 // Signed in (antigravityStatus), then one real request proves it works.

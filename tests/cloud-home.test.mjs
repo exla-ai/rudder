@@ -885,9 +885,10 @@ case "$1 $2" in
   "auth logout") rm -f "$dir/.claude-ok" ;;
   "auth status") if [ -f "$dir/.claude-ok" ]; then if [ -n "$CLAUDE_CONFIG_DIR" ]; then email=work@example.com; else email=me@example.com; fi; echo '{"loggedIn":true,"authMethod":"claude.ai","email":"'$email'","subscriptionType":"max","loginExpiresAt":"${loginExpiresAt}"}'; else echo '{"loggedIn":false}'; fi ;;
   *)
-    [ "$5 $6" = "--output-format json" ] || exit 1
+    [ "$5 $6" = "--output-format stream-json" ] || exit 1
     echo 'Warning: this sign-in ends soon.' >&2
     if [ -z "$CLAUDE_CONFIG_DIR" ]; then
+      echo '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","resetsAt":${Date.parse(loginExpiresAt) / 1000}}}'
       echo '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Usage limit reached"]}'
       exit 1
     fi
@@ -972,7 +973,8 @@ esac
     const signedIn = await signIn("main", (rows) => rows[0]?.signedIn && !rows[0].checking);
     assert.deepEqual(signedIn.home.credentials.claude.map((row) => [row.id, row.account, row.plan]), [["main", "me@example.com", "max"]]);
     assert.equal(signedIn.home.credentials.claude[0].ok, false);
-    assert.equal(signedIn.home.credentials.claude[0].detail, "Usage limit reached");
+    assert.equal(signedIn.home.credentials.claude[0].detail, "Reached the weekly usage limit");
+    assert.deepEqual(signedIn.home.credentials.claude[0].usageLimit, { window: "weekly", resetsAt: Date.parse(loginExpiresAt) });
     assert.equal(signedIn.home.logins.claude.status, "done");
 
     // Another Claude account: its own config dir under ~/.rudder/accounts,

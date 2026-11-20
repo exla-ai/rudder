@@ -14,7 +14,7 @@
 // step through tabs, as do Cmd+Shift+[ and Cmd+Shift+]. Cmd+1 to Cmd+8 jump
 // to one and Cmd+9 to the last. Cmd+click on a link opens it in a tab behind
 // this one. A browser keeps those keys for its own tabs.
-// Drag or use Shift+Left/Right on a focused tab to reorder it.
+// Drag a tab to reorder it.
 import { h, icon, setText, reconcile } from "/app/render.js";
 import { ls, PLATFORM } from "/app/core.js";
 import { tabDragPosition } from "/app/tab-drag.js";
@@ -284,22 +284,13 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   });
   // Left and Right move between tabs, Enter or Space opens one.
   list.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (e.shiftKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
     const btns = [...list.querySelectorAll(".tab-b")];
     const at = btns.indexOf(document.activeElement);
     if (at < 0) return;
     e.preventDefault();
     const next = at + (e.key === "ArrowRight" ? 1 : -1);
-    if (e.shiftKey) {
-      if (next < 0 || next >= tabs.length) return;
-      endDrag(false, false);
-      const positions = tabPositions();
-      cancelSettle();
-      reorder(at, next);
-      settle(positions);
-    } else {
-      btns[(next + btns.length) % btns.length].focus();
-    }
+    btns[(next + btns.length) % btns.length].focus();
   });
 
   if (MAC) {
@@ -363,8 +354,6 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
         tabEl.className = `tab${on ? " on" : ""}${d.status ? ` ${d.status.cls}` : ""}`;
         const b = tabEl.querySelector(".tab-b");
         b.setAttribute("aria-selected", String(on));
-        if (many) b.setAttribute("aria-keyshortcuts", "Shift+ArrowLeft Shift+ArrowRight");
-        else b.removeAttribute("aria-keyshortcuts");
         b.tabIndex = on ? 0 : -1;
         b.title = d.tip || (d.status ? `${d.title} · ${d.status.label}` : d.title);
         setText(tabEl.querySelector(".tab-t"), d.title);

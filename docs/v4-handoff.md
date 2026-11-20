@@ -449,7 +449,7 @@ This change landed after the Mac 5.0.18 build.
 On Mac, the tab strip appears when a second tab opens and hides again with
 one tab. Cmd+T opens a tab while the strip is hidden. Desktop browsers keep
 the strip visible to provide the + button for opening the first extra tab.
-Drag a tab to reorder it, or use Shift+Left/Right while it has focus.
+Drag a tab to reorder it.
 The order is saved on the device and used by the tab cycling shortcuts.
 
 Mac and iPhone Settings show a working Claude sign-in's upcoming expiry

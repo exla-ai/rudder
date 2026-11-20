@@ -31,8 +31,6 @@ const OPENCODE_EDIT_TOOLS = new Set(["edit", "write", "multiedit"]);
 // A Codex patch's file headers, also inside a code-mode script's string
 // (`tools.apply_patch("*** Begin Patch\n*** Update File: ...")`).
 const PATCH_FILE = /\*\*\* (?:Add|Update|Delete) File: (.+?)(?=\\n|\n|"|$)/g;
-// Turns Codex adds as the user that the user did not type.
-const CODEX_INJECTED = /^<codex_internal_context\b/;
 
 const clip = (text, max) => {
   const value = String(text || "").trim();
@@ -153,7 +151,6 @@ function recent(messages, fromHarness, cwd) {
       // What another agent (a teammate, a subagent) sent it.
       blocks.push(`From ${m.peer.from}, another agent: ${clip(m.text, MESSAGE_MAX)}`);
     } else if (m.role === "user") {
-      if (CODEX_INJECTED.test(m.text || "")) continue;
       const files = m.attachments?.length ? `\n(Attached: ${m.attachments.join(", ")})` : "";
       blocks.push(`User: ${clip(m.text, MESSAGE_MAX)}${files}`);
     } else {

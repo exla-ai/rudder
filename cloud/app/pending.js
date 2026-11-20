@@ -6,7 +6,8 @@
 // bubble settles on a user message that the transcript added after the send,
 // that reads the same once whitespace is ignored and that has the same files
 // attached. Each message settles one bubble: the same text sent twice shows
-// twice until the transcript has both.
+// twice until the transcript has both. A slash command settles on the note
+// or compaction it left instead (settlePending).
 
 const KEEP_MS = 5 * 60 * 1000;
 
@@ -37,15 +38,30 @@ export function sentAfter(messages) {
   return at;
 }
 
+/**
+ * The slash command a message runs ("/goal" for "/goal ship it"), or null.
+ * A path ("/tmp/x is gone") is words the agent gets as a message.
+ */
+const commandOf = (text) => /^\/[^\s/]+(?=\s|$)/.exec(sentKey(text))?.[0] ?? null;
+
+/**
+ * The command a transcript item records. The agent's CLI runs a slash
+ * command instead of recording what was typed: a note names it
+ * (worker/transcripts.mjs `command`), and /compact leaves a compaction.
+ */
+const recorded = (m) => (m.kind === "compact" ? "/compact" : m.command ?? null);
+
 /** The bubbles of `list` the transcript `messages` does not show yet. */
 export function settlePending(list, messages, now) {
-  const users = (messages || []).filter((m) => m.role === "user" && m.ts != null);
+  const shown = (messages || []).filter((m) => m.ts != null && (m.role === "user" || recorded(m)));
   const taken = new Set();
   return list.filter((p) => {
     if (p.state === "failed") return true;
     if (now - p.ts > KEEP_MS) return false;
     const key = matchKey(p.text, (p.files || []).map((f) => f.path));
-    const hit = users.find((m) => !taken.has(m) && m.ts > p.after && matchKey(m.text, m.attachments || []) === key);
+    const command = commandOf(p.text);
+    const hit = shown.find((m) => !taken.has(m) && m.ts > p.after
+      && (m.role === "user" ? matchKey(m.text, m.attachments || []) === key : command !== null && recorded(m) === command));
     if (!hit) return true;
     taken.add(hit);
     return false;

@@ -966,6 +966,40 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       }
       return;
     }
+    // A slash command, typed in the chat or the terminal. Claude Code records
+    // the command line (<command-name>, <command-args>) and then what it
+    // printed (<local-command-stdout>, its parent) as user entries, or as
+    // local_command system entries for some. The model does not answer it, so
+    // the chat shows a note reading what it printed ("Goal set: ..."), or the
+    // command line when it printed nothing. The note names the command, which
+    // settles the message the chat sent (cloud/app/pending.js). /compact is
+    // recorded after the compaction it ran, whose marker is its note.
+    const local = own && !entry.isMeta && (entry.type === "user" || entry.subtype === "local_command")
+      ? localCommand(entry.type === "user" ? entry.message?.content : entry.content)
+      : null;
+    if (local) {
+      const last = messages[messages.length - 1];
+      if (local.output !== undefined) {
+        if (local.output && last?.kind === "command" && last.id === entry.parentUuid) {
+          last.text = local.output;
+        }
+      } else if (!(local.name === "/compact" && last?.kind === "compact")) {
+        push({ id: entry.uuid || `command-${offset}`, role: "system", kind: "command", ts: toMillis(entry.timestamp), text: local.line, command: local.name });
+      }
+      return;
+    }
+    // The goal /goal set (chat-goal.mjs). While background work holds off its
+    // evaluation, Claude Code checks in on it: a task notification that wakes
+    // the agent, or a hidden turn at the end of one. Each evaluation is a
+    // goal_status attachment with the evaluator's reason. Each is a note where
+    // the agent read it, so a turn it started has a reason in the chat. A goal
+    // set, cleared or carried over a compaction (sentinel) has no note of its
+    // own: the /goal command's note is that.
+    const goal = own ? claudeGoalNote(entry, offset) : null;
+    if (goal) {
+      push(goal);
+      return;
+    }
     // Claude Code's own (isMeta) turns stay out of the chat, but for what
     // other agents send (peerMessages).
     if ((entry.type !== "user" && entry.type !== "assistant") || !own || (entry.isMeta && !PEER_ORIGINS.has(entry.origin?.kind))) {
@@ -1107,6 +1141,53 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
 function xmlTag(text, tag) {
   const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
   return match ? match[1].trim() : null;
+}
+
+// A slash command's own entries (claudeReader): { name, line } for the
+// command line, { output } for what it printed (its terminal colors
+// removed), null for anything else.
+const ANSI_SGR = /\x1b\[[0-9;]*m/g;
+
+function localCommand(content) {
+  const text = typeof content === "string" ? content.trim() : "";
+  if (text.startsWith("<command-name>")) {
+    const name = xmlTag(text, "command-name");
+    const args = xmlTag(text, "command-args");
+    return { name, line: args ? `${name} ${args}` : name };
+  }
+  if (text.startsWith("<local-command-stdout>")) {
+    return { output: xmlTag(text, "local-command-stdout").replace(ANSI_SGR, "").trim() };
+  }
+  return null;
+}
+
+// A note about the goal (claudeReader), or null for any other entry.
+function claudeGoalNote(entry, offset) {
+  const id = entry.uuid || `goal-${offset}`;
+  const ts = toMillis(entry.timestamp);
+  const status = entry.type === "attachment" ? entry.attachment : null;
+  if (status?.type === "goal_status") {
+    if (status.sentinel === true) {
+      return null;
+    }
+    return goalNote(id, ts, status.failed === true ? "Goal can't be met" : status.met === true ? "Goal met" : "Goal not met yet", status.reason);
+  }
+  const content = entry.type === "user" ? entry.message?.content : null;
+  if (typeof content !== "string") {
+    return null;
+  }
+  if (entry.queueOrigin?.source === "goal-checkin") {
+    return goalNote(id, ts, "Goal check-in", xmlTag(content, "system-reminder"));
+  }
+  if (entry.isMeta && content.startsWith("Goal check-in: ")) {
+    return goalNote(id, ts, "Goal check-in", content);
+  }
+  return null;
+}
+
+// `detail` is what the note opens to: the check-in or the evaluator's reason.
+function goalNote(id, ts, text, detail) {
+  return { id, role: "system", kind: "goal", ts, text, goal: { detail: typeof detail === "string" ? detail.trim() : "" } };
 }
 
 // What other agents send this one, as Claude Code hands it over: null for
@@ -1389,7 +1470,18 @@ function codexReader({ stats = null, child = false } = {}) {
         return;
       }
       if (payload.role === "user") {
-        if (codexTypedText(text)) {
+        // Codex (0.170) tells the model about the goal as the user: what
+        // /goal changed (`user_goal`), and each turn it starts to keep at the
+        // goal (`goal`, its standing instructions). The chat shows notes, like
+        // Claude's (claudeReader): the change as /goal's note, which settles
+        // the message the chat sent, and the new turn as a marker.
+        const internal = CODEX_GOAL_CONTEXT.exec(text);
+        if (internal?.[1] === "user_goal") {
+          const said = internal[2].split("\n").map((line) => line.trim()).filter(Boolean).join("\n\n");
+          messages.push({ id: payload.id || id, role: "system", kind: "command", ts, text: said, command: "/goal" });
+        } else if (internal?.[1] === "goal") {
+          messages.push({ id: payload.id || id, role: "system", kind: "goal", ts, text: "Continuing toward the goal", goal: { detail: "" } });
+        } else if (codexTypedText(text)) {
           messages.push({ id: payload.id || id, role: "user", ts, text: codexQuestionReply(text) });
         }
       } else if (payload.role === "assistant") {
@@ -1444,6 +1536,8 @@ function codexReader({ stats = null, child = false } = {}) {
   }
   return reader;
 }
+
+const CODEX_GOAL_CONTEXT = /^<codex_internal_context source="(user_goal|goal)">\n?([\s\S]*?)\n?<\/codex_internal_context>$/;
 
 // An answer to a `request_user_input_async` question comes back as a user
 // message, `<send_user_message_question_reply>[{answer, question,

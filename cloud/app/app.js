@@ -4468,12 +4468,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         items[i] = { kind: "msg", id: m.id, m };
       }
     }
-    // A compaction under way stands where its marker will (compaction.js),
-    // from the size the context meter last read. The marker that replaces it
-    // settles in from it.
+    // Sent messages, then a compaction under way below them (the /compact
+    // you sent stands above its card). The card stands where its marker will
+    // (compaction.js), from the size the context meter last read. The marker
+    // that replaces it settles in from it.
+    for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
     if (t.compacting) { items.push({ kind: "compacting", id: "compacting", since: t.compacting.since, before: t.context?.used }); compactEndedAt = 0; }
     else if (msgsEl.querySelector(".compact.live")) compactEndedAt = Date.now();
-    for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
     if (!items.length && t.waking) {
       items.push({ kind: "error", id: "waking", text: "Waking the cloud machine. Your agents reopen in about a minute." });
@@ -4524,7 +4525,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       if (fresh) node.addEventListener("animationend", () => node.classList.remove("c-new"), { once: true });
       return node;
     }
-    if (role === "system" && (x.m.kind === "handoff" || x.m.kind === "scheduled")) {
+    if (role === "system" && (x.m.kind === "handoff" || x.m.kind === "scheduled" || x.m.kind === "goal")) {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
     if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
@@ -4556,7 +4557,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "compacting") return paintCompacting(node, x.since, x.before);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
-    if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled" || m.kind === "goal") { node._msg = m; return paintCompact(node, m); }
     if (m.kind === "peer") { node._msg = m; return paintPeer(node, m); }
     if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
     const md = node.querySelector(".md");
@@ -4572,13 +4573,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   }
 
   // A compacted context (compaction.js), a chat moved here from another
-  // harness ("Moved from Claude · Opus 5.5", cloud/worker/handoff.mjs) or a
-  // scheduled task's turn: one marker with what the agent continued from, or
-  // the prompt it ran, behind it.
+  // harness ("Moved from Claude · Opus 5.5", cloud/worker/handoff.mjs), a
+  // scheduled task's turn or a note about the goal (a check-in): one marker
+  // with what the agent continued from, the prompt it ran or the check-in
+  // behind it.
   function paintCompact(node, m) {
     if (m.kind === "compact") return paintCompactMarker(node, m.compact || {});
     const moved = m.kind === "handoff";
-    const c = (moved ? m.handoff : { summary: m.scheduled.prompt }) || {};
+    const c = (moved ? m.handoff : { summary: m.kind === "goal" ? m.goal.detail : m.scheduled.prompt }) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
     const row = node.querySelector(".compact-row");
     node.classList.toggle("open", open);
@@ -4586,7 +4588,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.disabled = !c.summary;
     row.setAttribute("aria-expanded", String(open));
     setText(row.querySelector(".c-text"), m.text);
-    row.setAttribute("aria-label", `${m.text}.${c.summary ? ` ${open ? "Hide" : "Show"} ${moved ? "what it was handed" : "the prompt it ran"}.` : ""}`);
+    const behind = moved ? "what it was handed" : m.kind === "goal" ? "the details" : "the prompt it ran";
+    row.setAttribute("aria-label", `${m.text}.${c.summary ? ` ${open ? "Hide" : "Show"} ${behind}.` : ""}`);
     const sum = node.querySelector(".compact-sum");
     sum.hidden = !open;
     if (!open) return;

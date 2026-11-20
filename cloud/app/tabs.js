@@ -8,8 +8,9 @@
 // chat keeps following the agent. Tabs belong to this device and come back
 // after a reload. Phones have no shell, and no tabs.
 //
-// The + button opens a tab. In the Mac app, Cmd+T opens one too, Cmd+W
-// closes it (the last one leaves Cmd+W to the window), Cmd+Shift+[ and
+// The + button opens a tab. In the Mac app the bar appears with the second
+// tab, and Cmd+T opens a tab even with the bar hidden. Cmd+W closes it (the
+// last one leaves Cmd+W to the window), Cmd+Shift+[ and
 // Cmd+Shift+] step through them, Cmd+1 to Cmd+8 jump to one and Cmd+9 to the
 // last, and Cmd+click on a link opens it in a new tab behind this one. A
 // browser keeps those keys for its own tabs.
@@ -202,7 +203,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   }
   function paint() {
     const many = tabs.length > 1;
-    el.classList.toggle("many", many);
+    el.hidden = MAC && !many;
     reconcile(list, tabs, (t) => t.id,
       () => h(`<div class="tab" role="presentation"><button type="button" class="tab-b" role="tab"><span class="tab-ic"></span><span class="tab-t"></span></button><button type="button" class="tab-x" tabindex="-1">${icon("x")}</button></div>`),
       (tabEl, t) => {

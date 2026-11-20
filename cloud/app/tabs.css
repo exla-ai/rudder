@@ -46,8 +46,8 @@
 /* With the sidebar hidden, its show button sits at the strip's left end,
    so the topbar below needs no room for it. */
 body.side-closed .tab-strip { padding-left: calc(var(--sal) + 52px); }
-.dsk > .ds-show { top: calc(var(--sat) + 4px); }
-body.desktop.side-closed .dsk .dsk-pane.p0 .topbar { padding-left: 16px; }
+.dsk:has(> .tab-strip:not([hidden])) > .ds-show { top: calc(var(--sat) + 4px); }
+body.desktop.side-closed .dsk:has(> .tab-strip:not([hidden])) .dsk-pane.p0 .topbar { padding-left: 16px; }
 
 /* A tab's screens while another tab is on screen: the size they had, out of
    sight and out of reach (inert). */

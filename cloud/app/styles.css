@@ -841,6 +841,33 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .add-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .add-head h3 { margin: 0; }
 .add-head .icon-btn { margin-right: -8px; }
+
+dialog.sheet.antigravity-login { max-width: 476px; max-height: var(--vvh); }
+.antigravity-login .dialog { padding-inline: max(24px, var(--sal)) max(24px, var(--sar)); }
+.antigravity-login .add-head { margin-bottom: 12px; }
+.antigravity-login .add-head h3 { font-size: 22px; line-height: 1.2; letter-spacing: -0.025em; }
+.antigravity-login .add-head h3:focus { outline: none; }
+.antigravity-login .add-head .icon-btn { color: var(--muted); }
+.antigravity-browser {
+  display: flex; align-items: center; gap: 16px;
+  padding-bottom: 18px; margin-bottom: 18px; border-bottom: 1px solid var(--line);
+}
+.antigravity-browser p { margin: 0; line-height: 1.45; }
+.antigravity-browser .btn { flex: none; min-height: 44px; padding-inline: 12px; font-size: 14px; }
+.antigravity-browser .btn svg { color: var(--muted); width: 16px; height: 16px; }
+.antigravity-code { display: flex; align-items: end; gap: 10px; }
+.antigravity-code label { display: grid; gap: 6px; flex: 1; min-width: 0; font-size: 14px; font-weight: 600; }
+.antigravity-code .input { width: 100%; height: 48px; font-weight: 400; appearance: none; }
+.antigravity-code .input::placeholder { color: var(--muted); font-family: var(--font); }
+.antigravity-code .btn { min-height: 48px; }
+.antigravity-code .btn:disabled {
+  color: var(--muted); background: var(--surface-2); border-color: var(--line); opacity: 1;
+}
+@media (max-width: 479px) {
+  .antigravity-browser, .antigravity-code { flex-direction: column; align-items: stretch; gap: 10px; }
+  .antigravity-browser .btn { align-self: start; }
+}
+
 .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 4px; border-radius: 14px; background: var(--surface-2); }
 .seg button { min-height: 42px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font: inherit; font-size: 15px; font-weight: 600;
   display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 6px 8px; cursor: pointer; transition: background 120ms, color 120ms; }

@@ -2197,9 +2197,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function openAgentSignIn(provider, account) {
   const name = agentName(provider);
   const heading = account === "new" ? `Add a ${name} account` : `Sign in to ${name}`;
-  const dlg = h(`<dialog class="sheet login-sheet" aria-label="${escapeHtml(heading)}"><div class="dialog">
+  const antigravity = provider === "antigravity";
+  const dlg = h(`<dialog class="sheet login-sheet${antigravity ? " antigravity-login" : ""}" aria-label="${escapeHtml(heading)}"><div class="dialog">
     <div class="sheet-grab"></div>
-    <div class="add-head"><h3></h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="add-head"><h3${antigravity ? ' tabindex="-1" autofocus' : ""}></h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
     <div class="ls-body" aria-live="polite"></div>
   </div></dialog>`);
   setText(dlg.querySelector("h3"), heading);
@@ -2310,20 +2311,33 @@ function openAgentSignIn(provider, account) {
   }
 
   function showCode() {
-    const approve = provider === "antigravity" ? "sign in with Google" : "tap <b>Authorize</b>";
-    body.replaceChildren(h(`<div class="ls-steps">
-      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and ${approve}.</div></div>
+    const codeField = `<input class="input" name="code" placeholder="Paste the code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">`;
+    body.replaceChildren(h(antigravity ? `<div class="antigravity-steps">
+      <div class="antigravity-browser">
+        <p>Sign in with Google and copy the code shown in your browser.</p>
+        <button type="button" class="btn ls-open"><span>Open sign-in page</span>${icon("external")}</button>
+      </div>
+      <form class="antigravity-code">
+        <label><span>Sign-in code</span>${codeField}</label>
+        <button type="submit" class="btn accent" disabled>Connect</button>
+      </form>
+    </div>` : `<div class="ls-steps">
+      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and tap <b>Authorize</b>.</div></div>
       <button type="button" class="btn block accent ls-open">${icon("external")}<span>Open the sign-in page</span></button>
       <div class="ls-step"><span class="ls-n">2</span><div>Copy the code it shows, then paste it here.</div></div>
-      <form class="ls-code"><input class="input" name="code" placeholder="Paste the code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
-      <button type="submit" class="btn block primary">Connect</button></form>
+      <form class="ls-code">${codeField}<button type="submit" class="btn block primary">Connect</button></form>
     </div>`));
-    const input = body.querySelector("input");
+    const form = body.querySelector("form");
+    const input = form.elements.code;
+    if (antigravity) {
+      const submit = form.querySelector("button");
+      input.addEventListener("input", () => { submit.disabled = !input.value.trim(); });
+    }
     body.querySelector(".ls-open").addEventListener("click", () => {
       openSignInPage(session.codeUrl);
-      setTimeout(() => input.focus(), 400);
+      if (!antigravity) setTimeout(() => input.focus(), 400);
     });
-    body.querySelector("form").addEventListener("submit", (e) => {
+    form.addEventListener("submit", (e) => {
       e.preventDefault();
       const code = input.value.trim();
       if (!code) { input.focus(); return; }

@@ -6935,6 +6935,15 @@ function homeStateLive(homeId: string): boolean {
   return Boolean(state && control && state.via === control && isOpen(control));
 }
 
+// The app reads each agent's sign-ins as a list (one per account). A machine
+// still on Rudder 5.0.14 or older publishes one record per agent instead: it
+// gets no credentials, as an asleep machine does, until its Update now moves it
+// to a version that lists them. Passing the record on breaks the app's sidebar.
+function agentListCredentials(credentials: JsonRecord | undefined): JsonRecord | null {
+  if (!credentials) return null;
+  return ["claude", "codex", "opencode"].every((id) => credentials[id] === undefined || Array.isArray(credentials[id])) ? credentials : null;
+}
+
 function homeSummary(home: Workspace | null): JsonRecord | null {
   if (!home) {
     return null;
@@ -6951,7 +6960,7 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     activeAgents: home.activeAgents ?? 0,
     lastActivityAt: home.lastActivityAt ?? null,
     tailnet: state?.tailnet ?? null,
-    credentials: state?.credentials ?? null,
+    credentials: agentListCredentials(state?.credentials),
     logins: state?.logins ?? null,
     stateUpdatedAt: state?.updatedAt ?? null,
     stateLive: homeStateLive(home.id),

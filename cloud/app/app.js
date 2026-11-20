@@ -592,17 +592,17 @@ const agentPath = (ws, run) => `${projectPath(ws)}/a/${encodeURIComponent(run)}`
 const digestPath = (id) => (id ? `/app/digest/${encodeURIComponent(id)}` : "/app/digest");
 
 let depth = history.state?.depth || 0;
-function navigate(path, { replace = false } = {}) {
+function navigate(path, { replace = false, revealSidebar = false } = {}) {
   if (path === location.pathname && !replace) return;
   if (replace) history.replaceState({ depth }, "", path);
   else { depth += 1; history.pushState({ depth }, "", path); }
-  mountScreen("forward");
+  mountScreen("forward", { revealSidebar });
 }
 window.addEventListener("popstate", (e) => {
   const d = e.state?.depth ?? 0;
   const dir = d < depth ? "back" : "forward";
   depth = d;
-  mountScreen(dir);
+  mountScreen(dir, { revealSidebar: true });
 });
 function goBack(fallback) {
   if (depth > 0) history.back();
@@ -676,7 +676,7 @@ function buildScreen(route, paneOpts = {}) {
   return HomeScreen();
 }
 
-function mountScreen(dir = "forward") {
+function mountScreen(dir = "forward", { revealSidebar = false } = {}) {
   let route = null;
   if (!store.signedOut) {
     route = parseRoute(location.pathname);
@@ -705,7 +705,7 @@ function mountScreen(dir = "forward") {
     viewEl.appendChild(screen.el);
   }
   screen.update?.();
-  desktop?.update(route);
+  desktop?.update(route, { revealSidebar });
   followFiles(route, findAgent);
   followCanvas(route, findAgent);
   followNotes(route, findAgent);
@@ -1293,7 +1293,7 @@ function DesktopShell() {
     const next = at < 0 ? steps[dir > 0 ? 0 : steps.length - 1] : steps[(at + dir + steps.length) % steps.length];
     if (sameAgent(next, here)) return;
     const typing = !!document.activeElement?.closest(".composer");
-    navigate(agentPath(next.ws, next.run));
+    navigate(agentPath(next.ws, next.run), { revealSidebar: true });
     // Keep typing where you were: in the new agent's composer.
     if (typing) screen?.el.querySelector(".composer textarea")?.focus();
   }
@@ -1412,7 +1412,7 @@ function DesktopShell() {
     renameRow(row);
   }, { signal: life.signal });
 
-  function update(r) {
+  function update(r, { revealSidebar = false } = {}) {
     if (r) route = r;
     const s = store.state;
     tabs.update(route);
@@ -1430,11 +1430,17 @@ function DesktopShell() {
     el.querySelector(".ds-team").classList.toggle("on", route?.name === "team" || route?.name === "team-agent");
 
     const needs = needsList();
+    const needsRows = needs.slice(0, 8);
+    if (revealSidebar && !needsOpen && route?.name === "agent"
+      && needsRows.some(({ p, a }) => p.workspaceId === route.ws && a.id === route.run)) {
+      needsOpen = true;
+      ls.set("rudder.needsOpen", true);
+    }
     needsSec.hidden = !needs.length;
     setText(needsSec.querySelector(".ds-c"), needs.length ? String(needs.length) : "");
     needsToggle.setAttribute("aria-expanded", String(needsOpen));
     needsEl.hidden = !needsOpen;
-    if (needsEl !== drag?.list) reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
+    if (needsEl !== drag?.list) reconcile(needsEl, needsRows, (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
 
     const projects = sortProjects(s?.projects || []);
     // Arriving on a project or one of its agents opens that project once.

@@ -3674,13 +3674,14 @@ function createAskCard(ask, { onAnswer }) {
   const input = ask.input && typeof ask.input === "object" ? ask.input : {};
   const tool = ask.tool || "Tool";
   const kind = ask.kind || "permission";
-  const title = kind === "question" ? "Question" : kind === "plan" ? "Plan ready for review" : `Allow ${tool}?`;
+  const replacingGoal = tool === "replace_goal";
+  const title = replacingGoal ? "Replace goal?" : kind === "question" ? "Question" : kind === "plan" ? "Plan ready for review" : `Allow ${tool}?`;
   const el = h(`<section class="ask-card" role="region" aria-live="polite">
     <div class="ask-head"><span class="ask-icon"></span><span class="ask-title"></span><span class="ask-count"></span></div>
     <div class="ask-body"></div>
     <div class="ask-actions"></div>
     <div class="ask-desc ask-submit-status" hidden></div></section>`);
-  el.setAttribute("aria-label", kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
+  el.setAttribute("aria-label", replacingGoal ? title : kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
   el.querySelector(".ask-icon").innerHTML = icon(kind === "question" ? "inbox" : kind === "plan" ? "task" : toolIcon(tool));
   setText(el.querySelector(".ask-title"), title);
   const body = el.querySelector(".ask-body");
@@ -3747,6 +3748,14 @@ function createAskCard(ask, { onAnswer }) {
     el.appendChild(box);
     return open;
   };
+
+  if (replacingGoal) {
+    const { question, options: [replace, cancel] } = input.questions[0];
+    body.append(note("New objective"), pre(input.objective));
+    const choose = (label) => answer({ answers: { [question]: label } });
+    actions.append(btn(cancel.label, "", () => choose(cancel.label)), btn(replace.label, "accent", () => choose(replace.label)));
+    return el;
+  }
 
   if (kind === "plan") {
     el.classList.add("plan");

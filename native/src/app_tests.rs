@@ -8531,6 +8531,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        codex_goal_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -10800,6 +10801,7 @@ fn delete_agent_requires_second_d() {
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        codex_goal_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -32937,6 +32939,60 @@ fn phone_keys_paste_text_as_a_bracketed_paste() {
     assert!(crate::remote_input_bytes("paste:zz").is_err());
     assert!(crate::remote_input_bytes("paste:").is_err());
     assert!(crate::remote_input_bytes("hyperspace").is_err());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn codex_goal_confirmation_tracks_the_live_menu_and_delivers_the_named_choice() {
+    let repo = unique_test_repo("codex-goal-confirmation");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    // Codex 0.170's centered dialog can cover old output. Cancel is highlighted
+    // here to ensure a Replace click does not just press Enter on the selection.
+    let script = r#"stty -icanon -echo -icrnl
+printf '%s\n' '  /per  Replace goal?' '  /mod  New objective: Check the Mac app' '  /rev  and the phone app.' '' '        1. Replace current goal  Set the new objective and start it now' '      › 2. Cancel                Keep the current goal' '' '        enter select · esc back'
+keys=$(dd bs=1 count=4 2>/dev/null | od -An -tx1)
+printf '\033[2J\033[H%s\n' "$keys"
+sleep 5"#;
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 24, cols: 85 },
+            cwd: Some(repo.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker PTY");
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "codex-goal".into();
+    run.backend = Backend::Codex;
+    run.status = AgentStatus::Done;
+    app.agents.push(run);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].codex_goal_menu.is_none() && Instant::now() < deadline {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let menu = app.agents[0].codex_goal_menu.as_ref().expect("goal menu detected");
+    assert_eq!(menu.objective, "Check the Mac app and the phone app.");
+    let answer = format!("{} replace", menu.opened_at);
+    let raw = fs::read_to_string(native_run_dir(&repo, "codex-goal").join("run.json")).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["codexGoalMenu"]["objective"], menu.objective);
+    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", "0 cancel"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Delivered));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].codex_goal_menu.is_some() && Instant::now() < deadline {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(app.agents[0].codex_goal_menu.is_none());
+    let screen = app.agents[0].terminal.as_mut().unwrap().live_screen_lines();
+    assert!(screen.iter().any(|row| row.trim() == "1b 5b 41 0d"), "{screen:?}");
+    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Failed(_)));
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(repo).unwrap();
 }
 
 #[cfg(not(windows))]

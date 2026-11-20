@@ -478,7 +478,9 @@ second tab. Control+Tab and Control+Shift+Tab cycle through the open tabs.
 
 Chat links open supported images and PDFs in the read-only file viewer. Bare
 image filenames in inline code also link to the viewer.
-The chat composer highlights `/goal` as you type it.
+The chat composer highlights `/goal` as you type it. Cloud home Codex chats
+show the new objective with Replace current goal and Cancel while the terminal
+confirmation is open.
 Questions with no choices open directly to an answer field, and Enter submits
 an answer from that field. Codex question answers stay visible as queued until
 all terminal writes have delivery receipts. If the worker restarts mid-answer,

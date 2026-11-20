@@ -2687,6 +2687,25 @@ impl ParkedNote {
     }
 }
 
+#[derive(serde::Serialize)]
+struct CodexGoalMenu {
+    opened_at: String,
+    objective: String,
+}
+
+impl CodexGoalMenu {
+    fn update(menu: &mut Option<Self>, objective: Option<&str>) -> bool {
+        if objective == menu.as_ref().map(|menu| menu.objective.as_str()) {
+            return false;
+        }
+        *menu = objective.map(|objective| Self {
+            opened_at: now_stamp(),
+            objective: objective.to_owned(),
+        });
+        true
+    }
+}
+
 struct AgentRun {
     pinned: bool,
     id: String,
@@ -2747,6 +2766,8 @@ struct AgentRun {
     /// screen decides. Persisted as run.json `codexPlanMenu`: the phone shows the
     /// plan's card only while it is set.
     codex_plan_menu: bool,
+    /// The pending replacement dialog, tracked from the live Codex pane.
+    codex_goal_menu: Option<CodexGoalMenu>,
     /// When this pane first showed Claude's compaction spinner, in Unix ms,
     /// while it still shows it (`claude_compacting_from_lines`). Nothing reaches
     /// the session file until a compaction ends, so the screen is the only live
@@ -3142,6 +3163,7 @@ fn fork_row(
         needs_permission: false,
         needs_user_input: false,
         codex_plan_menu: false,
+        codex_goal_menu: None,
         compacting_since: None,
         wait_signal: None,
         worker_exit_note: None,
@@ -6311,7 +6333,9 @@ impl App {
             if run.status != AgentStatus::Done {
                 continue;
             }
-            let waiting = !run.needs_permission && self.codex_waits.contains_key(&run.id);
+            let waiting = !run.needs_permission
+                && (self.codex_waits.contains_key(&run.id)
+                    || (run.terminal.is_some() && run.codex_goal_menu.is_some()));
             if run.needs_user_input != waiting {
                 run.needs_user_input = waiting;
                 self.dirty = true;
@@ -9534,6 +9558,7 @@ impl App {
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -9696,6 +9721,7 @@ impl App {
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -10208,6 +10234,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -10309,6 +10336,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -11530,6 +11558,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -14734,6 +14763,7 @@ Address the objection directly. If you disagree, say why inside \
             needs_permission: false,
             needs_user_input: false,
             codex_plan_menu: false,
+            codex_goal_menu: None,
             compacting_since: None,
             wait_signal: None,
             worker_exit_note: None,
@@ -16353,6 +16383,7 @@ Address the objection directly. If you disagree, say why inside \
                 // Raw keys for a live agent (the phone's key strip): what a
                 // picker opened by `/model` or `/resume` waits for.
                 "keys" => self.deliver_keys_request(&task_id, &instruction),
+                "codex-goal-answer" => self.deliver_codex_goal_answer(&task_id, &instruction),
                 // The home machine staged an agent moved off a laptop: load
                 // its record and resume its conversation here.
                 "adopt" => self.deliver_adopt_request(&task_id),
@@ -16631,6 +16662,35 @@ Address the objection directly. If you disagree, say why inside \
                 SteerDelivery::Failed(format!("{label} is unavailable ({})", status.as_str()))
             }
         }
+    }
+
+    fn deliver_codex_goal_answer(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
+        let Some((opened_at, action @ ("replace" | "cancel"))) = instruction.split_once(' ') else {
+            return SteerDelivery::Failed("invalid goal response".to_string());
+        };
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        let run = &mut self.agents[index];
+        let no_menu = || SteerDelivery::Failed("The goal confirmation is no longer open.".to_string());
+        let (Some(menu), Some(terminal)) = (&run.codex_goal_menu, run.terminal.as_mut()) else {
+            return no_menu();
+        };
+        if menu.opened_at != opened_at || !terminal.is_alive() {
+            return no_menu();
+        }
+        let live_menu = codex_goal_menu_from_lines(&terminal.live_screen_lines());
+        if CodexGoalMenu::update(&mut run.codex_goal_menu, live_menu.as_ref().map(|(objective, _)| objective.as_str())) {
+            let _ = save_native_run_record(&self.cwd, run);
+            return no_menu();
+        }
+        let Some((_, replace_selected)) = live_menu else { return no_menu() };
+        let keys = match (action, replace_selected) {
+            ("cancel", _) => "esc",
+            (_, true) => "enter",
+            (_, false) => "up,enter",
+        };
+        self.deliver_keys_request(task_id, keys)
     }
 
     fn deliver_keys_request(&mut self, task_id: &str, keys: &str) -> SteerDelivery {
@@ -22062,6 +22122,10 @@ What to do\n\
                     changed = true;
                 }
             }
+            if had_output && !headless_planner && run.backend == Backend::Codex {
+                let menu = codex_goal_menu_from_lines(&terminal.live_lines_snapshot());
+                changed |= CodexGoalMenu::update(&mut run.codex_goal_menu, menu.as_ref().map(|(objective, _)| objective.as_str()));
+            }
             // Feed the orchestrator's JSON event stream into its live transcript +
             // reconstructed plan text, and capture the backend session id so a refine
             // can resume the same conversation. Incremental: a no-op when no new bytes.
@@ -22223,6 +22287,7 @@ What to do\n\
                         run.wait_signal,
                         Some(WaitSignal::Input | WaitSignal::Interrupted | WaitSignal::Idle)
                     ) || self.codex_waits.contains_key(&run.id)
+                        || run.codex_goal_menu.is_some()
                         || visible_lines.as_ref().is_some_and(|lines| {
                             terminal_needs_user_input_from_lines(run.backend, lines)
                         }));

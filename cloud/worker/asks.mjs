@@ -3,7 +3,7 @@
 // agent's settings there). Each pending prompt is <signals>/<run>.asks/<id>.json,
 // held open by a hook process; the phone's answer becomes <id>.answer.json,
 // which the hook prints as Claude's decision. Codex has no such hook; its
-// prompts are read from its rollout (codexAsks, below).
+// prompts come from its rollout and live terminal (codexAsks, below).
 
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -316,21 +316,43 @@ export function pendingCodexAsks(lines) {
   return asks;
 }
 
+const REPLACE_GOAL = "Replace current goal";
+const CANCEL_GOAL = "Cancel";
+
+function codexGoalAsk(record) {
+  const menu = record.codexGoalMenu;
+  const ts = Number(menu?.opened_at);
+  if (!Number.isSafeInteger(ts) || ts <= 0 || typeof menu?.objective !== "string" || !menu.objective.trim()) return [];
+  return [{
+    id: codexAskId(ts, `replace_goal:${record.id}`), ts, tool: "replace_goal", kind: "question",
+    input: clipInput({ objective: menu.objective, questions: [{
+      question: "Replace goal?", header: "", multiSelect: false,
+      options: [
+        { label: REPLACE_GOAL, description: "Set the new objective and start it now" },
+        { label: CANCEL_GOAL, description: "Keep the current goal" },
+      ],
+    }] }),
+    suggestions: [],
+  }];
+}
+
 /**
- * A Codex run's waiting prompts, from its rollout. None once its process is
- * gone: a Codex killed mid-question leaves the call open in the rollout. A plan
- * only while the dashboard sees its menu on the pane's screen (`codexPlanMenu`).
+ * Waiting prompts of a live Codex run. The pending goal lives only on the
+ * screen. Rollout questions persist until Codex answers, and a rollout plan
+ * needs its screen menu (`codexPlanMenu`) to still be open.
  */
 export function codexAsks(record, rollout, { isAlive = alive } = {}) {
   const pid = record?.process?.pid;
-  if (!rollout || !Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) {
+  if (!Number.isInteger(pid) || pid <= 0 || !isAlive(pid)) {
     return [];
   }
+  const goal = codexGoalAsk(record);
+  if (!rollout) return goal;
   let stat;
   try {
     stat = fs.statSync(rollout);
   } catch {
-    return [];
+    return goal;
   }
   let asks = null;
   const cached = codexCache.get(rollout);
@@ -340,11 +362,11 @@ export function codexAsks(record, rollout, { isAlive = alive } = {}) {
     try {
       asks = pendingCodexAsks(tailLines(rollout, CODEX_TAIL_BYTES));
     } catch {
-      return []; // the rollout went between stat and read
+      return goal; // the rollout went between stat and read
     }
     codexCache.set(rollout, { size: stat.size, mtimeMs: stat.mtimeMs, asks });
   }
-  return asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true);
+  return [...goal, ...asks.filter((ask) => ask.kind !== "plan" || record.codexPlanMenu === true)];
 }
 
 /**
@@ -395,6 +417,14 @@ function pasteKey(text) {
  * follows read as Esc plus the literal text "[200~".
  */
 export function codexAskSteps(ask, answer) {
+  if (ask.tool === "replace_goal") {
+    const selected = answer?.answers?.[ask.input.questions[0].question];
+    if (selected !== REPLACE_GOAL && selected !== CANCEL_GOAL) {
+      throw new Error("Choose Replace current goal or Cancel.");
+    }
+    const action = selected === REPLACE_GOAL ? "replace" : "cancel";
+    return [{ kind: "codex-goal-answer", instruction: `${ask.ts} ${action}` }];
+  }
   if (ask.kind === "plan") {
     if (answer?.approve === true) {
       return [{ kind: "keys", instruction: "1" }];

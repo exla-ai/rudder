@@ -173,6 +173,23 @@ const asyncReply = (callId, index, answer) => codexLine("response_item", { type:
 const COLOR = [{ id: "button_color", header: "Button color", question: "Which color should the button be?", options: [{ label: "Red (Recommended)", description: "Use a red button." }, { label: "Blue", description: "Use a blue button." }] }];
 const live = { process: { pid: process.pid } };
 
+test("a Codex goal confirmation comes from the live menu and only accepts its two choices", () => {
+  const record = { ...live, id: "run_test", codexGoalMenu: { opened_at: "1795168589000", objective: "Check the release" } };
+  const [ask] = codexAsks(record, null);
+  assert.equal(ask.tool, "replace_goal");
+  assert.equal(ask.input.objective, "Check the release");
+  assert.match(ask.id, /^1795168589000-[0-9a-f]{8}$/);
+  assert.deepEqual(codexAskSteps(ask, { answers: { "Replace goal?": "Replace current goal" } }), [
+    { kind: "codex-goal-answer", instruction: "1795168589000 replace" },
+  ]);
+  assert.deepEqual(codexAskSteps(ask, { answers: { "Replace goal?": "Cancel" } }), [
+    { kind: "codex-goal-answer", instruction: "1795168589000 cancel" },
+  ]);
+  assert.throws(() => codexAskSteps(ask, { answers: { "Replace goal?": "Yes" } }), /Choose Replace current goal or Cancel/);
+  assert.deepEqual(codexAsks({ ...record, codexGoalMenu: null }, null), []);
+  assert.deepEqual(codexAsks(record, null, { isAlive: () => false }), []);
+});
+
 test("a Codex question waits in the rollout until its call has an output", () => {
   const dir = tmpdir();
   const rollout = path.join(dir, "rollout.jsonl");

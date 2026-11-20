@@ -84,6 +84,50 @@ pub(crate) fn claude_compacting_from_lines(lines: &[String]) -> bool {
         })
 }
 
+/// Codex 0.170's replacement dialog is local to its TUI. The rollout only
+/// records the goal change after confirmation. Read the live dialog, including
+/// its selection, so a click can never accept the highlighted Cancel option.
+pub(crate) fn codex_goal_menu_from_lines(lines: &[String]) -> Option<(String, bool)> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    let (header, column) = lines.iter().enumerate().rev().find_map(|(index, row)| {
+        let header = row.trim_end().strip_suffix("Replace goal?")?;
+        // The selected row's cursor sits two columns before its label.
+        Some((index, header.width().saturating_sub(2)))
+    })?;
+    // Codex centers the dialog on top of the existing screen. Ignore anything
+    // to its left, including the previous assistant output and its prompt glyph.
+    let mut rows = lines[header + 1..].iter().map(|row| {
+        let mut width = 0;
+        row.char_indices()
+            .find_map(|(offset, ch)| {
+                if width >= column {
+                    return Some(row[offset..].trim());
+                }
+                width += ch.width().unwrap_or(0);
+                None
+            })
+            .unwrap_or("")
+    });
+    let start = rows.next()?.strip_prefix("New objective:")?.trim();
+    let objective = std::iter::once(start)
+        .chain(rows.by_ref().take_while(|row| !row.is_empty()))
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let first = rows.by_ref().find(|row| !row.is_empty())?;
+    let second = rows.next()?;
+    let selected = if first.starts_with("› 1. Replace current goal") && second.starts_with("2. Cancel") {
+        true
+    } else if first.starts_with("1. Replace current goal") && second.starts_with("› 2. Cancel") {
+        false
+    } else {
+        return None;
+    };
+    (rows.any(|row| row == "enter select · esc back") && !objective.is_empty())
+        .then_some((objective, selected))
+}
+
 pub(crate) fn mark_run_done(run: &mut AgentRun) {
     finish_turn(run, true);
 }

@@ -3,7 +3,7 @@
 // typing it in the dashboard's task bar does (effort "auto" lets the agent
 // decide; native/src/main.rs handle_command).
 import { h, icon, setText } from "/app/render.js";
-import { app, api, ls, showError, toast, track } from "/app/core.js";
+import { app, api, coarse, ls, showError, toast, track } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
 import { UpdateNow } from "/app/home-update.js";
 
@@ -221,14 +221,18 @@ function paintTabs(tabsEl, harnesses, { tab, onTab }) {
  * scroll while the tab stays; a new tab starts at the top. `reveal` scrolls
  * the checked row into view.
  */
-function paintModels(modelsEl, section, { selected, current, onPick, reveal }) {
+function paintModels(modelsEl, section, { selected, current, onPick, reveal, query = "" }) {
   const { harness, models } = section;
-  const top = modelsEl.dataset.harness === harness.id ? modelsEl.scrollTop : 0;
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = words.length ? models.filter((o) => words.every((w) => `${o.label} ${o.value} ${o.detail || ""}`.toLowerCase().includes(w))) : models;
+  // A new search starts at the top, like a new tab.
+  const top = modelsEl.dataset.harness === harness.id && modelsEl.dataset.query === query ? modelsEl.scrollTop : 0;
   modelsEl.dataset.harness = harness.id;
+  modelsEl.dataset.query = query;
   modelsEl.setAttribute("aria-label", `${harness.label} models`);
   modelsEl.replaceChildren();
   let aliases = false;
-  for (const o of models) {
+  for (const o of shown) {
     if (o.alias && !aliases) {
       aliases = true;
       modelsEl.appendChild(h(`<div class="mp-group" role="presentation">Always the newest</div>`));
@@ -244,13 +248,61 @@ function paintModels(modelsEl, section, { selected, current, onPick, reveal }) {
     b.addEventListener("click", () => onPick(harness.id, o.value));
     modelsEl.appendChild(b);
   }
-  if (!models.length) {
+  if (!shown.length) {
     const note = h(`<div class="repo-note"></div>`);
-    note.textContent = `No ${harness.label} models found on the cloud machine.`;
+    note.textContent = models.length ? `No ${harness.label} model matches "${query.trim()}".` : `No ${harness.label} models found on the cloud machine.`;
     modelsEl.appendChild(note);
   }
   modelsEl.scrollTop = top;
-  if (reveal) modelsEl.querySelector('[aria-checked="true"]')?.scrollIntoView({ block: "nearest" });
+  if (reveal && !words.length) modelsEl.querySelector('[aria-checked="true"]')?.scrollIntoView({ block: "nearest" });
+}
+
+// OpenCode lists every provider's models (over 400 on a cloud machine), so
+// its tab has a search over them.
+const SEARCHED = new Set(["opencode"]);
+
+/**
+ * The search between a sheet's accounts and its model list, on a SEARCHED
+ * harness's tab. Typing filters the list by name, provider/model id and
+ * detail; Escape clears it before it would close the sheet; Enter picks the
+ * first match. A new tab clears it. While it has text, the list keeps the
+ * height it had with every model, so the sheet does not shrink and move the
+ * field under the cursor.
+ */
+function modelSearch(dlg, modelsEl, onInput) {
+  const wrap = dlg.querySelector(".mp-search");
+  const input = wrap.querySelector("input");
+  const hold = () => {
+    if (!input.value) modelsEl.style.minHeight = "";
+    else if (!modelsEl.style.minHeight) modelsEl.style.minHeight = `${modelsEl.getBoundingClientRect().height}px`;
+  };
+  input.addEventListener("input", () => { hold(); onInput(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && input.value) {
+      e.preventDefault();
+      input.value = "";
+      hold();
+      onInput();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      modelsEl.querySelector(".mp-model")?.click();
+    }
+  });
+  return {
+    query: () => (wrap.hidden ? "" : input.value),
+    paint(harness, count) {
+      wrap.hidden = !SEARCHED.has(harness.id);
+      input.placeholder = `Search ${count} ${harness.label} models`;
+      input.setAttribute("aria-label", `Search ${harness.label} models`);
+    },
+    // A tab picked: an empty search, focused on a SEARCHED one (not on a
+    // phone, where it would raise the keyboard over the list).
+    tab(id) {
+      input.value = "";
+      hold();
+      if (SEARCHED.has(id) && !coarse) requestAnimationFrame(() => input.focus());
+    },
+  };
 }
 
 /** The list with no harness in it: no tabs, a note. */
@@ -316,6 +368,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     <div class="repo-note err mp-error" hidden></div>
     <div class="seg modes mp-tabs" role="tablist" aria-label="Harness"></div>
     <div class="mp-account" hidden></div>
+    <label class="search-wrap mp-search" hidden>${icon("search")}<input class="input repo-search" type="search" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off"></label>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="mp-effort-l">Effort</div>
@@ -341,7 +394,8 @@ export function openModelPicker(ws, { onPicked } = {}) {
   // The harness tab shown: the picked model's until another is chosen.
   let tab = pick?.backend ?? null;
   let revealed = false;
-  const showTab = (id) => { tab = id; revealed = false; render(); };
+  const search = modelSearch(dlg, modelsEl, () => render());
+  const showTab = (id) => { tab = id; revealed = false; search.tab(id); render(); };
 
   const pickedRow = () => (pick ? rowsOf(data, pick.backend).find((o) => o.value === pick.model) || null : null);
   function render() {
@@ -359,7 +413,8 @@ export function openModelPicker(ws, { onPicked } = {}) {
       paintTabs(tabsEl, harnesses, { tab, onTab: showTab });
       const harness = harnessOf(data, tab);
       paintAccounts(accountEl, harness, { selected: accountFor(harness.id), onPick: (id) => { picked[harness.id] = id; render(); } });
-      paintModels(modelsEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed });
+      search.paint(harness, harness.models.length);
+      paintModels(modelsEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed, query: search.query() });
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const row = pickedRow();
@@ -584,6 +639,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     <div class="repo-note err mp-error" hidden></div>
     <div class="seg modes mp-tabs" role="tablist" aria-label="Harness"></div>
     <div class="mp-account" hidden></div>
+    <label class="search-wrap mp-search" hidden>${icon("search")}<input class="input repo-search" type="search" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off"></label>
     <div class="mp-models" role="radiogroup" aria-label="Model"><div class="repo-note">Loading models…</div></div>
     <div class="mp-effort-wrap">
       <div class="field-label" id="cm-effort-l">Effort</div>
@@ -612,7 +668,8 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   // The harness tab shown: the chat's own until another is chosen.
   let tab = backend;
   let revealed = false;
-  const showTab = (id) => { tab = id; revealed = false; render(); };
+  const search = modelSearch(dlg, modelsEl, () => render());
+  const showTab = (id) => { tab = id; revealed = false; search.tab(id); render(); };
 
   // Every harness in the list's order. Its own is led by the model the agent
   // runs on when the list does not have it (an id it was started with by
@@ -639,9 +696,10 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
       tab = section.harness.id;
       paintTabs(tabsEl, all.map((x) => x.harness), { tab, onTab: showTab });
       paintAccounts(accountEl, section.harness, { selected: accountFor(tab), onPick: (id) => { picked[section.harness.id] = id; render(); } });
+      search.paint(section.harness, section.models.length);
       paintModels(modelsEl, section, {
         selected: pick, current: { backend, model: a.model },
-        onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed,
+        onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed, query: search.query(),
       });
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;

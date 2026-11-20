@@ -138,20 +138,19 @@ facts.
 
 ## 4. Mac app on an Offstage Mac
 
-`.github/workflows/mac.yml` runs on `runs-on: offstage-macos-gui`. A headless
-`offstage-macos` slot cannot reach `testmanagerd`, so `xcodebuild test` fails
-there before any test runs. Each job is a fresh macOS account with no root and
-no Homebrew. The workflow therefore uses
-the newest `/Applications/Xcode*.app` through `DEVELOPER_DIR`. It also fetches
-pinned, checksummed xcodegen, uv (for Python 3.12, which dmgbuild needs) and
-`gh` into `$RUNNER_TEMP`.
+`.github/workflows/mac.yml` runs on a Linux runner and drives an Offstage
+cloud Mac through its API (`.offstage/mac.mjs`, stages in `mac/scripts/ci.sh`).
+Signing needs the `MAC_DEVELOPER_ID_P12` and `MAC_DEVELOPER_ID_PASSWORD` repo
+secrets (the exported Developer ID Application certificate); the job checks
+every release secret first and stops in seconds if one is missing.
 
 1. The Mac app has Rudder's version: `npm version` (step 2) runs
    `scripts/mac-version.mjs`, which sets `MARKETING_VERSION` and the derived
-   build number in `mac/project.yml`. Release the Mac app from a tagged
-   Rudder version, never with its own number. Push `main` first.
-2. The workflow may be disabled. If so, run `gh workflow enable mac.yml`.
-3. Run `gh workflow run mac.yml --ref main -f release=true`.
+   build number in `mac/project.yml`. Never give it its own number.
+2. The version tag's push (step 2) starts the Mac release with npm. Watch it
+   with `gh run list --workflow mac.yml --limit 2`.
+3. To repeat a failed Mac release for the same version, run
+   `gh workflow run mac.yml --ref main -f release=true`.
 
 The job archives and signs with the Developer ID secrets, notarizes, staples and
 builds `Rudder.dmg`. `mac/scripts/publish.sh` then uploads `Rudder.dmg` and

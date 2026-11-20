@@ -1,7 +1,8 @@
 # The Mac app on an offstage Mac, driven from Linux through the offstage API
 # (.offstage/mac.mjs; the job's runner never builds anything). Every change
 # under mac/ is compiled and its core tested (the Linux home machine cannot),
-# and a manual run with `release: true` archives, signs with Developer ID,
+# and every Rudder version tag (v*), or a manual run with `release: true`,
+# archives, signs with Developer ID,
 # notarizes and staples the app, wraps it in Rudder.dmg (notarized and stapled
 # too) and publishes it as the latest GitHub release, which
 # https://rudder.exla.ai/download/mac serves. The steps themselves are
@@ -15,8 +16,9 @@
 # cloud-managed Developer ID signing for this key. They reach the Mac only as
 # the environment of the commands that need them, and the sandbox account is
 # wiped when the job ends. The Mac app carries Rudder's version
-# (scripts/mac-version.mjs), so release from a tagged Rudder version: push,
-# then `gh workflow run mac.yml -f release=true` and `gh run watch`.
+# (scripts/mac-version.mjs), and the release commit bumps mac/project.yml, so
+# the tag's push releases the Mac app with npm. A manual run with
+# `release: true` on main repeats a failed one.
 #
 # A release then runs mac/scripts/publish.sh: it stages Rudder.dmg in a draft
 # release and runs mac-publish.yml, which signs it into appcast.xml (the feed
@@ -27,6 +29,8 @@ name: Mac
 on:
   push:
     branches: ["**"]
+    # Path filters do not apply to tags: every version tag releases.
+    tags: ["v*"]
     paths:
       - "mac/**"
       - ".offstage/**"
@@ -39,7 +43,7 @@ on:
         default: false
 
 concurrency:
-  group: mac-${{ github.ref }}-${{ inputs.release || false }}
+  group: mac-${{ github.ref }}-${{ inputs.release == true || startsWith(github.ref, 'refs/tags/v') }}
   cancel-in-progress: true
 
 permissions:
@@ -52,14 +56,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      # Before the Mac build, not after it: without the key mac-publish.yml cannot publish.
-      - name: Sparkle key
-        if: inputs.release
+      # Before the Mac build, not after it: a release missing any of these
+      # stops here in seconds instead of after the build. SPARKLE_ED_PRIVATE_KEY
+      # signs appcast.xml in mac-publish.yml.
+      - name: Release secrets
+        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
         env:
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          MAC_DEVELOPER_ID_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
         run: |
-          if [ -z "$SPARKLE_ED_PRIVATE_KEY" ]; then
-            echo "SPARKLE_ED_PRIVATE_KEY is not set; mac-publish.yml signs appcast.xml with it"
+          missing=""
+          for name in SPARKLE_ED_PRIVATE_KEY ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_PASSWORD; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "Repository secrets not set:$missing"
             exit 1
           fi
       - uses: actions/checkout@v4
@@ -76,15 +91,15 @@ jobs:
         env:
           OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
           OFFSTAGE_API_URL: https://api.offstage.cloud
-          RELEASE: ${{ inputs.release == true }}
-          ASC_KEY_ID: ${{ inputs.release == true && secrets.ASC_KEY_ID || '' }}
-          ASC_ISSUER_ID: ${{ inputs.release == true && secrets.ASC_ISSUER_ID || '' }}
-          ASC_KEY_P8: ${{ inputs.release == true && secrets.ASC_KEY_P8 || '' }}
-          MAC_DEVELOPER_ID_P12: ${{ inputs.release == true && secrets.MAC_DEVELOPER_ID_P12 || '' }}
-          MAC_DEVELOPER_ID_PASSWORD: ${{ inputs.release == true && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
+          RELEASE: ${{ inputs.release == true || startsWith(github.ref, 'refs/tags/v') }}
+          ASC_KEY_ID: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_ID || '' }}
+          ASC_ISSUER_ID: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_ISSUER_ID || '' }}
+          ASC_KEY_P8: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_P8 || '' }}
+          MAC_DEVELOPER_ID_P12: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_P12 || '' }}
+          MAC_DEVELOPER_ID_PASSWORD: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
         run: node .offstage/mac.mjs
       - name: Publish the release
-        if: inputs.release
+        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         # Release mac-v<version>-<build> with Rudder.dmg and appcast.xml, through mac-publish.yml.

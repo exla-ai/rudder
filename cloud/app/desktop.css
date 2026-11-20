@@ -1,54 +1,5 @@
 /* Desktop layout (>= 1024px: wide browsers and the Mac app) plus the pieces
-   both layouts share: the setup picker, plan, model picker, settings. */
-
-/* ---------- Setup picker ---------- */
-.onboarding .scroller { display: flex; }
-.ob-wrap { position: relative; width: 100%; max-width: 560px; margin: 0 auto; padding: calc(var(--sat) + 28px) 4px 24px; }
-.ob-back { position: absolute; top: calc(var(--sat) + 8px); left: -8px; }
-.ob-pick { display: flex; flex-direction: column; }
-.ob-logo { width: 48px; height: 48px; border-radius: 13px; box-shadow: var(--shadow-2); margin-bottom: 18px; }
-.ob-pick h1 { font-size: 26px; letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 6px; text-wrap: balance; }
-.ob-back + .ob-pick { padding-top: 40px; }
-.ob-lead { color: var(--muted); margin: 0 0 20px; font-size: 15.5px; }
-.ob-sub { color: var(--muted); font-size: 13.5px; margin: 14px 2px 0; text-align: center; }
-.ob-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-@media (max-width: 400px) { .ob-cards { grid-template-columns: 1fr; } }
-.ob-card {
-  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; text-align: left;
-  min-height: 128px; padding: 16px; border-radius: var(--radius); border: 1.5px solid var(--line-strong);
-  background: var(--surface); color: var(--ink); font: inherit; box-shadow: var(--shadow-1);
-  transition: border-color 120ms, box-shadow 120ms, transform 120ms;
-}
-@media (max-width: 400px) { .ob-card { flex-direction: row; align-items: center; min-height: 0; } }
-.ob-card:active { transform: scale(0.985); }
-.ob-card .ob-ic, .ob-step .ob-ic { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); flex: none; }
-.ob-card .ob-ic svg, .ob-step .ob-ic svg { width: 20px; height: 20px; }
-.ob-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-right: 22px; }
-.ob-t b { font-weight: 650; font-size: 16px; }
-.ob-t span { font-size: 13.5px; color: var(--muted); line-height: 1.35; }
-.ob-check { position: absolute; top: 12px; right: 12px; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line-strong); display: grid; place-items: center; color: transparent; }
-.ob-check svg { width: 13px; height: 13px; stroke-width: 3; }
-.ob-card.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.ob-card.on .ob-ic { background: var(--accent-soft); color: var(--accent); }
-.ob-card.on .ob-check { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
-.ob-actions { margin-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.ob-skip { border: 0; background: none; color: var(--muted); font-size: 14.5px; min-height: 44px; padding: 0 12px; font-weight: 500; }
-.ob-steps { display: flex; flex-direction: column; gap: 10px; }
-.ob-step { padding: 14px 16px; }
-.ob-sh { display: flex; align-items: center; gap: 12px; font-size: 16px; }
-.ob-sh b { font-weight: 650; }
-.ob-sb p { margin: 10px 0 0; color: var(--ink-2); font-size: 14.5px; }
-.ob-sb code { font-family: var(--mono); font-size: 0.9em; }
-.ob-sb .btn, .ob-row { margin-top: 12px; }
-.ob-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.ob-row .btn { margin-top: 0; }
-.ob-cmd {
-  margin-top: 12px; width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
-  padding: 11px 12px; border-radius: 12px; border: 1px dashed var(--line-strong); background: var(--surface-2); color: var(--ink);
-}
-.ob-cmd code { flex: 1; min-width: 0; font: 13.5px/1.35 var(--mono); overflow-wrap: anywhere; }
-.ob-cmd svg { width: 18px; height: 18px; flex: none; color: var(--muted); }
-.ob-dl svg, .ob-row .btn svg { width: 18px; height: 18px; }
+   both layouts share: plan, model picker, settings. */
 
 /* ---------- Composer tools: model chip, private chip ---------- */
 .c-tools { display: flex; gap: 6px; padding: 0 2px 8px; overflow-x: auto; scrollbar-width: none; }

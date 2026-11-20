@@ -228,8 +228,9 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal(task.echo, "task");
   const action = await (await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "merge" }) })).json();
   assert.deepEqual(action.params, { workspaceId: "libra-test", runId: "r1", action: "merge" });
-  const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5`, { headers: auth })).json();
-  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20, before: null, after: null });
+  const pending = "28913cb0-0050-45e9-bac1-59683b9a5b66";
+  const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5&pending=${pending}`, { headers: auth })).json();
+  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20, before: null, after: null, pending: [pending] });
 
   // Add project: the repo list and creating a repo run on the home machine.
   const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();

@@ -8748,7 +8748,7 @@ impl App {
         self.agents.insert(0, run);
         self.agent_row_map.clear();
         self.selected_agent = 0;
-        self.focus_or_spawn_main_with_prompt(&discussion_task_prompt(task));
+        self.focus_or_spawn_main_with_prompt(&discussion_task_prompt(task), false);
         self.notice = Some("discussion session in this checkout; implementation workers were not started".to_string());
         spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, task.to_string());
     }
@@ -12396,10 +12396,10 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn focus_or_spawn_main(&mut self) {
-        self.focus_or_spawn_main_with_prompt("");
+        self.focus_or_spawn_main_with_prompt("", false);
     }
 
-    fn focus_or_spawn_main_with_prompt(&mut self, override_prompt: &str) {
+    fn focus_or_spawn_main_with_prompt(&mut self, override_prompt: &str, continue_opencode: bool) {
         let main_index = match self.selected_main_index() {
             Some(idx) => idx,
             None => {
@@ -12478,8 +12478,8 @@ Address the objection directly. If you disagree, say why inside \
             } else {
                 String::new()
             };
-            let resume_existing = override_prompt.is_empty()
-                && run.status == AgentStatus::Paused
+            let resume_existing = (continue_opencode
+                || (override_prompt.is_empty() && run.status == AgentStatus::Paused))
                 && run
                     .session_id
                     .as_deref()
@@ -12505,6 +12505,9 @@ Address the objection directly. If you disagree, say why inside \
             match backend {
                 Backend::Claude => claude_resume_command(run, session_id.as_deref().unwrap()),
                 Backend::Codex => codex_resume_command(run, session_id.as_deref().unwrap()),
+                Backend::Opencode if continue_opencode => {
+                    opencode_continue_command(run, session_id.as_deref().unwrap(), &bootstrap)
+                }
                 Backend::Opencode => opencode_resume_command(run, session_id.as_deref().unwrap()),
                 Backend::Antigravity => {
                     antigravity_resume_command(run, session_id.as_deref().unwrap())
@@ -13636,7 +13639,7 @@ Address the objection directly. If you disagree, say why inside \
         }
         self.task_input.clear();
         self.task_cursor = 0;
-        self.focus_or_spawn_main_with_prompt(trimmed_prompt);
+        self.focus_or_spawn_main_with_prompt(trimmed_prompt, false);
         if !trimmed_prompt.is_empty() {
             spawn_task_summary_worker(
                 self.task_summary_tx.clone(),
@@ -20455,6 +20458,15 @@ Address the objection directly. If you disagree, say why inside \
         }
         let run_id = self.agents[index].id.clone();
         self.selected_agent = index;
+        if self.agents[index].backend == Backend::Opencode
+            && self.agents[index].session_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+        {
+            // Deliver the first message through the plugin once the session is
+            // open. A paste made during startup can miss the OpenCode prompt.
+            self.agents[index].terminal = None;
+            self.focus_or_spawn_main_with_prompt(message.trim_end(), true);
+            return self.agents.iter().any(|run| run.id == run_id && run.terminal.is_some());
+        }
         self.focus_or_spawn_main();
         let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
             return false;

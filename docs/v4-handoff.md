@@ -452,6 +452,16 @@ The iPhone shell's foreground and pull-to-refresh bridge reloads state using
 the token injected when the web view was created. The tutorial links directly
 to the iPhone TestFlight invite.
 
+The shared chat keeps queued sends visible until their transcript entries
+land. A late dashboard failure gives the message a Retry button. Consecutive
+sends to the same agent each get their own terminal submission. An automatic
+compaction leaves a manually queued `/compact` pending.
+
+OpenCode chats show subagent activity and discover project slash commands.
+Resumed OpenCode conversations send compaction and project commands through
+OpenCode after the session opens. Antigravity permission requests link to
+Antigravity Remote Control when the CLI provides its address.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

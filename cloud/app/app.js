@@ -4040,12 +4040,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         const id = `antigravity-permission:${agent.remoteUrl || ""}`;
         if (askCard?._askId === id) return;
         askCard?.remove();
-        askCard = h(`<section class="ask-card"><div class="ask-head"><strong>Antigravity needs approval</strong></div><div class="ask-desc"></div><div class="ask-actions"><button type="button" class="btn accent"></button></div></section>`);
+        askCard = h(`<section class="ask-card" role="region" aria-label="Antigravity permission request"><div class="ask-head"><span class="ask-icon" aria-hidden="true">${icon("lock")}</span><strong class="ask-title">Antigravity needs approval</strong></div><div class="ask-desc"></div><div class="ask-actions"><button type="button" class="btn accent"></button></div></section>`);
         askCard._askId = id;
         const remote = agent.remoteUrl;
+        const dashboard = remote === "https://antigravity.google.com";
         setText(askCard.querySelector(".ask-desc"), remote ? "Review the request in Antigravity Remote Control." : "Respond in the Antigravity CLI on the machine running this agent.");
         const review = askCard.querySelector("button");
-        setText(review, remote ? "Review in Antigravity" : "View terminal");
+        setText(review, dashboard ? "Open Antigravity" : remote ? "Review in Antigravity" : "View terminal");
         review.addEventListener("click", () => remote ? openExternal(remote) : setTerm(true));
         askSlot.appendChild(askCard);
       } else if (askCard) {

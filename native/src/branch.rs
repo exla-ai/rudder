@@ -77,7 +77,8 @@ impl Branched {
 
 /// Run jj in `dir`, catching a stale working copy up once: another
 /// workspace's operation routinely leaves an agent's working copy behind
-/// (as gitio.rs run_jj_with_stale_recovery does). Err is jj's own message.
+/// (as gitio.rs run_jj_with_stale_recovery does). Returns jj's status output
+/// on success or its error message on failure.
 fn jj_in(dir: &Path, args: &[&str]) -> Result<String, String> {
     let run = || {
         Command::new(jj_program())
@@ -98,7 +99,7 @@ fn jj_in(dir: &Path, args: &[&str]) -> Result<String, String> {
         output = run()?;
     }
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&output.stderr).into_owned())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
@@ -107,31 +108,35 @@ fn jj_in(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// Snapshot `source_cwd`'s working copy and duplicate its working-copy
 /// commit for the branch `run_id`. Returns the copy's commit id.
 pub(crate) fn copy_code(source_cwd: &Path, run_id: &str) -> Result<String, String> {
-    // Run ids are lowercase words and digits joined by `-`, so the marker
-    // needs no quoting in the TOML, template and revset strings below.
-    let marker = format!("rudder-branch {run_id}:");
-    let description =
-        format!(r#"templates.duplicate_description="\"{marker} the files it branched from\"""#);
-    let copied = jj_in(source_cwd, &["--config", &description, "duplicate", "@"])
-        .and_then(|_| {
-            jj_in(
-                source_cwd,
-                &[
-                    "--ignore-working-copy",
-                    "log",
-                    "--no-graph",
-                    "-r",
-                    &format!(r#"description(substring:"{marker}")"#),
-                    "-T",
-                    r#"commit_id ++ "\n""#,
-                ],
-            )
-        })
-        .map_err(|error| format!("Could not copy its files: {error}"))?;
-    let commits: Vec<&str> = copied.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
-    match commits.as_slice() {
-        [commit] => Ok((*commit).to_string()),
-        _ => Err(format!("Could not copy its files: jj shows {} copies of them", commits.len())),
+    // Run ids are lowercase words and digits joined by `-`. Have duplicate
+    // print the exact commit it created instead of searching history for it.
+    let description = format!("rudder-branch {run_id}: the files it branched from");
+    let description_config = format!(r#"templates.duplicate_description="\"{description}\"""#);
+    let tag = "rudder-branch-commit:";
+    let summary_config = format!(
+        r#"templates.commit_summary="if(description.first_line() == \"{description}\", \"{tag}\" ++ commit_id, \"\")""#
+    );
+    let copied = jj_in(
+        source_cwd,
+        &[
+            "--color=never",
+            "--config",
+            "ui.quiet=false",
+            "--config",
+            &description_config,
+            "--config",
+            &summary_config,
+            "duplicate",
+            "@",
+        ],
+    )
+    .map_err(|error| format!("Could not copy its files: {error}"))?;
+    let mut commits = copied.lines().filter_map(|line| line.split_once(tag).map(|(_, commit)| commit));
+    match (commits.next(), commits.next()) {
+        (Some(commit), None) if !commit.is_empty() && commit.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            Ok(commit.to_string())
+        }
+        _ => Err("Could not copy its files: jj did not report one snapshot commit".to_string()),
     }
 }
 
@@ -530,6 +535,8 @@ mod tests {
         let repo = root.join("repo");
         fs::create_dir_all(&repo).unwrap();
         jj(&repo, &["git", "init"]);
+        // Capture the commit even when the project normally hides jj status output.
+        jj(&repo, &["config", "set", "--repo", "ui.quiet", "true"]);
         fs::write(repo.join("app.txt"), "base\n").unwrap();
         jj(&repo, &["commit", "-m", "base"]);
         let source = root.join("source");
@@ -552,6 +559,10 @@ mod tests {
         fs::write(source.join("app.txt"), "later edit\n").unwrap();
         jj(&source, &["status"]);
         assert_eq!(show(&commit, "app.txt"), "source edit");
+        // The command identifies its own copy even when history holds the same description.
+        let next_commit = copy_code(&source, "try-sqlite-ab12c").unwrap();
+        assert_ne!(next_commit, commit);
+        assert_eq!(show(&next_commit, "app.txt"), "later edit");
         assert_eq!(
             jj(&repo, &["--ignore-working-copy", "log", "--no-graph", "-r", &commit, "-T", "description"]),
             "rudder-branch try-sqlite-ab12c: the files it branched from"

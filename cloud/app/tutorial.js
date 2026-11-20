@@ -6,10 +6,10 @@
 // reduced motion a scene shows that last frame straight away.
 // Arrow keys, Enter and a swipe move through it; Escape or Skip closes it.
 // Product events carry the step number and step id, nothing typed.
-import { h, icon, setText } from "/app/render.js";
+import { h, icon, setText, copyText } from "/app/render.js";
 import { ls, PLATFORM, coarse, track } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
-import { MAC_ICON } from "/app/mac-local.js";
+import { INSTALL_LINE, MAC_ICON } from "/app/mac-local.js";
 
 // ?from=app: the site counts downloads that came from the app.
 export const DOWNLOAD_MAC_URL = "https://rudder.exla.ai/download/mac?from=app";
@@ -19,6 +19,9 @@ export const PHONE_APP_URL = "https://rudder.exla.ai/download/ios";
 // rudder.* (app.js forgetAccount), so the next account here sees the tour too.
 const SEEN_KEY = "rudder.tourSeen";
 const ALT = /Mac/.test(navigator.platform) ? "Option" : "Alt";
+// Tabs take Cmd+T and Cmd+1 to Cmd+9 in the Mac app only (tabs.js); a
+// browser keeps those keys for its own tabs.
+const TAB_KEYS = PLATFORM === "mac";
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 // Every scene is drawn on a board this size and scaled to the stage. A
 // narrow stage (a phone) gets a narrower board: the window scenes drop the
@@ -200,16 +203,32 @@ function phoneScene() {
   </div>`;
 }
 
+// Option+[ and Option+] step through the agents. In the Mac app, Cmd+T then
+// opens a tab on the agent's project, with its composer ready (tabs.js).
 function keysScene() {
-  const main = `<div class="trk-head">${["Phone app for agent control", "Port scanner for the home", "Fix flaky Ctrl+W chord test"]
-    .map((t, i) => `<b class="trk-t k${i}">${t}</b>`).join("")}</div>
+  const AGENTS = ["Phone app for agent control", "Port scanner for the home", "Fix flaky Ctrl+W chord test"];
+  const titles = AGENTS.map((t, i) => `<b class="trk-t k${i}">${t}</b>`).join("");
+  const tabs = TAB_KEYS ? `<div class="trk-tabs">
+      <span class="trk-tab was s-working"><span class="dot"></span><span class="trk-tabt">${titles}</span>${icon("x")}</span>
+      <span class="trk-tab">${icon("code")}<span>wagerpals</span></span>
+      <span class="trk-tab new">${icon("code")}<span>rudder</span>${icon("x")}</span>
+      <span class="trk-plus">${icon("plus")}</span>
+    </div>` : "";
+  const project = TAB_KEYS ? `<div class="trk-proj">
+      <div class="trk-ph"><b>rudder</b><span>exla-ai/rudder @ main</span></div>
+      <div class="trk-cards"><i></i><i></i></div>
+      <div class="trk-comp on">Start a new task<span class="trk-caret"></span></div>
+    </div>` : "";
+  const main = `${tabs}<div class="trk-head">${titles}</div>
     <div class="trk-chat"><i class="w80"></i><i class="w60"></i><i class="w90"></i><i class="w40"></i></div>
-    <div class="trk-comp">Message the agent</div>`;
-  const opt = ALT === "Option" ? `<span class="trk-sym">⌥</span><span class="trk-word">option</span>` : `<span class="trk-word">Alt</span>`;
-  return `<div class="tr-art tr-keys">${windowScene(main, [
-    ["Phone app for agent control", "s-working"], ["Port scanner for the home", "s-working"], ["Fix flaky Ctrl+W chord test", "s-needs"],
-  ], { cls: "keys" })}
-    <div class="trk-keys"><span class="trk-key trk-opt">${opt}</span><span class="trk-key trk-l">[</span><span class="trk-key trk-r">]</span></div>
+    <div class="trk-comp">Message the agent</div>${project}`;
+  const mod = (sym, word) => ALT === "Option" ? `<span class="trk-sym">${sym}</span><span class="trk-word">${word}</span>` : `<span class="trk-word">${word}</span>`;
+  const cmd = TAB_KEYS ? `<div class="trk-row trk-tabrow"><span class="trk-key trk-mod trk-cmd">${mod("⌘", "command")}</span><span class="trk-key trk-tk">T</span></div>` : "";
+  return `<div class="tr-art tr-keys">${windowScene(main, AGENTS.map((t, i) => [t, i === 2 ? "s-needs" : "s-working"]), { cls: "keys" })}
+    <div class="trk-keys${TAB_KEYS ? " two" : ""}">
+      <div class="trk-row"><span class="trk-key trk-mod trk-opt">${mod("⌥", ALT === "Option" ? "option" : "Alt")}</span><span class="trk-key trk-l">[</span><span class="trk-key trk-r">]</span></div>
+      ${cmd}
+    </div>
   </div>`;
 }
 
@@ -222,6 +241,25 @@ function linkButton(svg, label, href, onClick) {
   // app.js sends a new-tab link to the default browser in the Mac and iPhone apps.
   a.addEventListener("click", onClick);
   return a;
+}
+
+// The terminal's install line, copied with a click. A toast would sit under
+// the tour, so the button says Copied itself.
+function installLine() {
+  const b = h(`<button type="button" class="tr-cmd" aria-label="Copy the command that installs Rudder in a terminal">
+    <span class="tr-cmd-ic">${icon("terminal")}</span><code></code><span class="tr-cmd-st">${icon("copy")}</span></button>`);
+  setText(b.querySelector("code"), INSTALL_LINE);
+  const st = b.querySelector(".tr-cmd-st");
+  let reset = 0;
+  b.addEventListener("click", async () => {
+    if (!(await copyText(INSTALL_LINE))) return;
+    track("install_cli_copied", { from: "tour" });
+    st.replaceChildren(h(`<span role="status">Copied</span>`));
+    b.classList.add("done");
+    clearTimeout(reset);
+    reset = setTimeout(() => { st.innerHTML = icon("copy"); b.classList.remove("done"); }, 1800);
+  });
+  return b;
 }
 
 const STEPS = [
@@ -251,28 +289,32 @@ const STEPS = [
     scene: subagentsScene,
   },
   {
-    id: "anywhere",
-    title: "Steer from anywhere",
-    body: "Your phone, your Mac and any browser show the same agents, so you can answer one from anywhere. Connect Tailscale and your previews open privately on all your devices.",
-    scene: phoneScene,
-    actions: () => {
-      const out = [];
-      if (!PLATFORM) {
-        out.push(linkButton(MAC_ICON, "Get the Mac app", DOWNLOAD_MAC_URL, () => track("download_mac_clicked", { from: "tour" })));
-      }
-      if (PLATFORM !== "ios") {
-        out.push(linkButton(PHONE_ICON, "Get the iPhone app", PHONE_APP_URL, () => track("phone_link_opened", { kind: "app", from: "tour" })));
-      }
-      return out;
-    },
-  },
-  {
     id: "keys",
-    title: "Jump between agents",
-    body: `${ALT}+[ and ${ALT}+] go to the previous and next agent. They work while you type, too.`,
+    title: TAB_KEYS ? "Jump between agents and tabs" : "Jump between agents",
+    body: `${ALT}+[ and ${ALT}+] go to the previous and next agent, even while you type.${TAB_KEYS ? " Cmd+T opens a new tab, and Cmd+1 to Cmd+9 jump between tabs." : ""}`,
     scene: keysScene,
     // A keyboard shortcut: only where there is a keyboard to press it.
     when: () => !coarse,
+  },
+  {
+    id: "anywhere",
+    title: "Steer from anywhere",
+    body: "Your phone, the Mac app, the terminal and any browser show the same agents. Connect Tailscale and your previews open privately on all of them.",
+    scene: phoneScene,
+    // The ways in besides this one.
+    actions: () => {
+      const links = [];
+      if (!PLATFORM) {
+        links.push(linkButton(MAC_ICON, "Download for Mac", DOWNLOAD_MAC_URL, () => track("download_mac_clicked", { from: "tour" })));
+      }
+      if (PLATFORM !== "ios") {
+        links.push(linkButton(PHONE_ICON, "Get the iPhone app", PHONE_APP_URL, () => track("phone_link_opened", { kind: "app", from: "tour" })));
+      }
+      const out = links.length ? [h(`<div class="tr-links"></div>`)] : [];
+      out[0]?.append(...links);
+      out.push(installLine());
+      return out;
+    },
   },
 ];
 
@@ -454,7 +496,8 @@ export function openTour({ again = false } = {}) {
   dlg.showModal();
   fitBoard();
   go(0);
-  // Enter is Next from the start; a touch screen has no keys to press.
-  if (!coarse) next.focus();
+  // Enter is Next from the start. A touch screen has no keys to press: the
+  // title takes focus instead of Skip, so nothing shows a focus ring.
+  if (coarse) { titleEl.tabIndex = -1; titleEl.focus(); } else next.focus();
   track("tutorial_viewed", { steps: total, again });
 }

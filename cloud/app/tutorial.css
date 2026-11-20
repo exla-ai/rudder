@@ -60,8 +60,23 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
   margin: 0 0 14px; font-size: clamp(30px, 3.1vw, 40px); line-height: 1.06; font-weight: 700;
   letter-spacing: -0.028em; text-wrap: balance;
 }
+.tr-title:focus { outline: none; }
 .tr-body { margin: 0; font-size: 16.5px; line-height: 1.55; color: var(--ink-2); text-wrap: pretty; }
-.tr-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.tr-acts { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 20px; }
+.tr-links { display: flex; flex-wrap: wrap; gap: 8px; }
+/* The terminal's install line: a copy button in the app's command style. */
+.tr-cmd {
+  align-self: stretch; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 8px 12px;
+  border: 1px solid var(--line-strong); border-radius: 12px; background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  color: var(--ink); cursor: pointer; text-align: left;
+}
+.tr-cmd:hover { background: var(--surface); }
+.tr-cmd:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
+.tr-cmd code { flex: 1; min-width: 0; font: 12.5px/1.4 var(--mono); overflow-wrap: anywhere; }
+.tr-cmd-ic, .tr-cmd-st { flex: none; display: grid; place-items: center; color: var(--muted); }
+.tr-cmd svg { width: 16px; height: 16px; }
+.tr-cmd-st { min-width: 16px; font-size: 12.5px; font-weight: 600; }
+.tr-cmd.done .tr-cmd-st { color: var(--done); }
 .tr-dl { min-height: 38px; font-size: 14px; }
 .tr-dl svg { width: 17px; height: 17px; }
 .tr-copy.swap > * { animation: tr-copy-in 420ms cubic-bezier(.2, .7, .2, 1) both; }
@@ -91,6 +106,9 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
   border: 1px solid color-mix(in srgb, var(--accent-ink) 35%, transparent); opacity: 0.85;
 }
 
+/* The smallest phones: the two links one above the other. */
+@media (max-width: 370px) { .tr-acts .tr-links { grid-auto-flow: row; } }
+
 /* Phones, and windows too narrow for two columns: the stage on top. */
 @media (max-width: 859px) {
   .tr-shell {
@@ -113,6 +131,10 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
   .tr-title { font-size: 27px; margin-bottom: 10px; }
   .tr-body { font-size: 15.5px; line-height: 1.5; }
   .tr-acts { margin-top: 14px; }
+  .tr-links { align-self: stretch; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+  .tr-dl { padding: 0 8px; gap: 6px; font-size: 13px; white-space: nowrap; }
+  .tr-dl svg { width: 15px; height: 15px; }
+  .tr-cmd code { font-size: 11.5px; }
   .tr-nav { margin-top: 16px; gap: 14px; }
   .tr-prog { justify-content: center; }
   .tr-next { flex: 1; justify-content: center; padding: 0 18px; }
@@ -488,7 +510,8 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
 @keyframes trk-k2 { 0%, 56% { opacity: 0; } 60%, 82% { opacity: 1; } 86%, 100% { opacity: 0; } }
 .trk-chat { display: flex; flex-direction: column; gap: 10px; }
 .trk-comp { position: absolute; left: 14px; right: 14px; bottom: 14px; height: 40px; display: flex; align-items: center; padding: 0 14px; border-radius: 20px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--faint); font-size: 12.5px; }
-.trk-keys { position: absolute; right: 26px; bottom: 74px; display: flex; gap: 10px; }
+.trk-keys { position: absolute; right: 26px; bottom: 74px; display: flex; flex-direction: column; align-items: flex-end; gap: 14px; }
+.trk-row { display: flex; gap: 10px; }
 .trk-key {
   position: relative; min-width: 64px; height: 64px; display: grid; place-items: center; padding: 0 14px;
   border-radius: 13px; border: 1px solid var(--line-strong); background: var(--surface);
@@ -497,13 +520,14 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
   animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) both;
 }
 :root[data-theme="dark"] .trk-key { box-shadow: 0 5px 0 #0b0c0e, 0 16px 30px -12px rgba(0, 0, 0, 0.7); }
-.trk-opt { min-width: 96px; }
+.trk-mod { min-width: 96px; }
 .trk-sym { position: absolute; top: 9px; right: 11px; font-size: 15px; }
 .trk-word { position: absolute; left: 11px; bottom: 9px; font-size: 12px; font-weight: 600; }
 .trk-word:only-child { position: static; font-size: 17px; }
-.trk-key.trk-opt { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) both, trk-hold 2800ms linear 400ms both; }
-.trk-key.trk-r { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) 60ms both, trk-r 2800ms linear 400ms both; }
-.trk-key.trk-l { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) 30ms both, trk-l 2800ms linear 400ms both; }
+/* The presses fill forwards only, so the keys still rise before them. */
+.trk-key.trk-opt { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) both, trk-hold 2800ms linear 400ms forwards; }
+.trk-key.trk-r { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) 60ms both, trk-r 2800ms linear 400ms forwards; }
+.trk-key.trk-l { animation: tr-rise 480ms cubic-bezier(.2, .7, .2, 1) 30ms both, trk-l 2800ms linear 400ms forwards; }
 @keyframes trk-hold {
   0%, 17%, 27%, 47%, 57%, 77%, 87%, 100% { transform: none; }
   19%, 25%, 49%, 55%, 79%, 85% { transform: translateY(4px); box-shadow: 0 1px 0 var(--surface-3); background: var(--surface-2); }
@@ -516,6 +540,64 @@ dialog.tour.mac .tr-shell { padding-top: 34px; }
   0%, 79%, 85%, 100% { transform: none; }
   81%, 83% { transform: translateY(4px); box-shadow: 0 1px 0 var(--surface-3); background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
 }
+
+/* In the Mac app, Cmd+T next: a second row of keys, and a tab opens on the
+   agent's project with its composer ready (tabs.js, tabs.css). */
+.trk-keys.two .trk-key { min-width: 56px; height: 56px; border-radius: 12px; font-size: 22px; }
+.trk-keys.two .trk-mod { min-width: 88px; }
+.trk-key.trk-cmd { animation: tr-rise 420ms cubic-bezier(.2, .7, .2, 1) 3300ms both, trk-hold-t 900ms linear 3700ms forwards; }
+.trk-key.trk-tk { animation: tr-rise 420ms cubic-bezier(.2, .7, .2, 1) 3340ms both, trk-press-t 900ms linear 3700ms forwards; }
+@keyframes trk-hold-t {
+  0%, 10%, 90%, 100% { transform: none; }
+  16%, 84% { transform: translateY(4px); box-shadow: 0 1px 0 var(--surface-3); background: var(--surface-2); }
+}
+@keyframes trk-press-t {
+  0%, 30%, 60%, 100% { transform: none; }
+  36%, 54% { transform: translateY(4px); box-shadow: 0 1px 0 var(--surface-3); background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+}
+.trk-tabs {
+  display: flex; align-items: center; gap: 3px; height: 38px; margin: -14px -16px 14px; padding: 0 8px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.trk-tab {
+  flex: 0 1 auto; min-width: 0; height: 26px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  border-radius: 7px; color: var(--muted); font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden;
+}
+.trk-tab > svg { flex: none; width: 11px; height: 11px; }
+.trk-tab > svg:last-child { width: 9px; height: 9px; stroke-width: 2.4; opacity: 0; }
+.trk-tab .dot { width: 6px; height: 6px; }
+.trk-tab.was { flex: 0 1 150px; }
+.trk-tabt { flex: 1; min-width: 0; display: grid; }
+.trk-tabt .trk-t { font-size: 11px; font-weight: 500; }
+/* The tab on screen; the agent's until Cmd+T, then the new one. */
+.trk-tab.new, .trk-tab.was { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong); }
+.trk-tab.new > svg:last-child { opacity: 0.6; }
+.trk-tab.was { background: none; color: var(--muted); box-shadow: none; animation: trk-was-on 4050ms linear; }
+.trk-tab.was > svg:last-child { animation: trk-was-x 4050ms linear; }
+@keyframes trk-was-on { 0%, 100% { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line-strong); } }
+@keyframes trk-was-x { 0%, 100% { opacity: 0.6; } }
+.trk-tab.new { max-width: 110px; animation: trk-tab-in 380ms cubic-bezier(.2, .7, .2, 1) 4050ms both; }
+@keyframes trk-tab-in { from { max-width: 0; padding: 0; opacity: 0; } }
+.trk-plus { flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--muted); }
+.trk-plus svg { width: 13px; height: 13px; }
+.trk-proj {
+  position: absolute; left: 0; right: 0; top: 38px; bottom: 0; padding: 14px 16px; background: var(--bg-elev);
+  animation: tr-in 260ms ease 4050ms both;
+}
+.trk-ph { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
+.trk-ph b { font-size: 14px; }
+.trk-ph span { font-size: 10.5px; color: var(--muted); }
+.trk-cards { display: flex; flex-direction: column; gap: 8px; }
+.trk-cards i {
+  position: relative; display: block; height: 46px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface) linear-gradient(var(--surface-2), var(--surface-2)) 26px 27px / 34% 6px no-repeat;
+}
+.trk-cards i::before { content: ""; position: absolute; left: 12px; top: 13px; width: 6px; height: 6px; border-radius: 50%; background: var(--working); }
+.trk-cards i::after { content: ""; position: absolute; left: 26px; top: 12px; width: 52%; height: 8px; border-radius: 4px; background: var(--surface-3); }
+.trk-cards i + i::before { background: var(--needs); }
+.trk-cards i + i::after { width: 40%; }
+.trk-comp.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.trk-caret { width: 1.5px; height: 15px; margin-right: 2px; background: var(--accent); order: -1; }
 
 /* The narrow board (410 wide): no sidebar, as on the phone, and the
    welcome devices in a row above the machine. */

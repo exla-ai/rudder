@@ -1646,9 +1646,13 @@ on the user's own Claude Code / Codex subscription.
 - **The tour** (`cloud/app/tutorial.js`, `tutorial.css`): the one first-run flow.
   The first home screen on a device opens it once (localStorage `rudder.tourSeen`,
   cleared on sign-out); Settings > Show the tour reopens it. Five or six steps,
-  each a small scripted copy of the app's UI. Fires `tutorial_viewed`,
-  `tutorial_step`, `tutorial_completed`, `tutorial_skipped` (step numbers only).
-  The old server surface picker (`rudder_onboarding`) is gone; its table is unused.
+  each a small scripted copy of the app's UI; the shortcuts step adds Cmd+T in
+  the Mac app. The last step links the other ways in, minus the one in use:
+  Download for Mac (browser), the iPhone app (not on iOS) and the CLI install
+  line (`download_mac_clicked`, `phone_link_opened`, `install_cli_copied`).
+  Fires `tutorial_viewed`, `tutorial_step`, `tutorial_completed`,
+  `tutorial_skipped` (step numbers only). The old server surface picker
+  (`rudder_onboarding`) is gone; its table is unused.
 - **Orgs** (`cloud/src/orgs.ts`): roles `admin` (adds/removes people, changes
   roles, connects integrations) and `member`. Invites are single-use links
   (`/app/join/<token>`, hash stored, 7 days, optional email lock); nothing sends

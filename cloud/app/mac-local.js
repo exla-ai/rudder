@@ -4,7 +4,7 @@
 import { h, icon, setText, copyText } from "/app/render.js";
 import { NATIVE, PLATFORM, postNative, openSheet, toast } from "/app/core.js";
 
-const INSTALL_LINE = "npm i -g @exla/rudder && rudder login";
+export const INSTALL_LINE = "npm i -g @exla/rudder && rudder login";
 export const MAC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>';
 const PULL_TIMEOUT = 4 * 60_000; // the shell allows about 3 minutes
 

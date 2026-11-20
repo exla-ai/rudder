@@ -118,9 +118,9 @@ jobs:
           brew install xcodegen
           cd ios && xcodegen generate
       - name: Archive
+        # The archive uses an ad hoc signature. Xcode applies the team's
+        # cloud-managed distribution signature during export.
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           cd ios
@@ -129,10 +129,8 @@ jobs:
           [ -n "$BUILD_NUMBER" ] && extra+=("CURRENT_PROJECT_VERSION=$BUILD_NUMBER")
           xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Release \
             -destination 'generic/platform=iOS' -archivePath build/Rudder.xcarchive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 \
-            -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            DEVELOPMENT_TEAM=3C4383262W CODE_SIGN_STYLE=Automatic "${extra[@]}" \
+            DEVELOPMENT_TEAM=3C4383262W CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY=- AD_HOC_CODE_SIGNING_ALLOWED=YES "${extra[@]}" \
             archive 2>&1 | tee archive.log | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true
           grep -q "ARCHIVE SUCCEEDED" archive.log
       - name: Sign and upload to TestFlight

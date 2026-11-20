@@ -3,15 +3,15 @@
 # .offstage/mac.mjs from the checkout's root (which holds mac/):
 #
 #   check     pinned tools, xcodegen, the core tests and a Debug build
-#   sign      archive and export signed with the Developer ID certificate, verify
+#   sign      archive unsigned, sign with the Developer ID certificate and verify
 #   notarize  notarize and staple the app
 #   dmg       Rudder.dmg, signed, notarized and stapled, and build/release.env
 #   collect   ../out.tgz with the logs and whatever dmg made
 #
 # Each stage is its own command (30 minutes at most) in the same sandbox, so
-# tools/ and mac/build/ carry over between them. sign, notarize and dmg need
-# ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (the App Store Connect key, for
-# provisioning and notarytool); sign also needs MAC_DEVELOPER_ID_P12 (base64 of
+# tools/ and mac/build/ carry over between them. notarize and dmg need
+# ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (the App Store Connect key for
+# notarytool); sign needs MAC_DEVELOPER_ID_P12 (base64 of
 # the exported "Developer ID Application" certificate with its private key)
 # and MAC_DEVELOPER_ID_PASSWORD. Apple refuses cloud-managed Developer ID
 # signing for this key ("Cloud signing permission error"), so the certificate
@@ -64,8 +64,6 @@ asc_key() {
   KEY="$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8"
   mkdir -p "$(dirname "$KEY")"
   (umask 077 && printf '%s\n' "$ASC_KEY_P8" > "$KEY")
-  AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$KEY"
-        -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 }
 
 developer_id_keychain() {
@@ -109,31 +107,14 @@ case "$stage" in
     ;;
   sign)
     use_tools
-    asc_key
     developer_id_keychain
     cd mac
     run_logged archive.log xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Release \
-      -destination 'generic/platform=macOS' -archivePath build/Rudder.xcarchive "${AUTH[@]}" \
-      DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic archive
-    cat > build/ExportOptions.plist <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>method</key><string>developer-id</string>
-  <key>signingStyle</key><string>automatic</string>
-  <key>teamID</key><string>$TEAM</string>
-</dict>
-</plist>
-PLIST
-    # The export also re-signs the helpers inside Sparkle.framework (Autoupdate,
-    # Updater.app, the XPC services) with this identity and the hardened runtime.
-    run_logged export.log xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
-      -exportOptionsPlist build/ExportOptions.plist -exportPath build/export "${AUTH[@]}"
-    codesign --verify --deep --strict --verbose=2 build/export/Rudder.app
-    codesign -dv --verbose=2 build/export/Rudder.app 2>&1 | tee sign.log
-    grep -q "Authority=Developer ID Application" sign.log
-    grep -q "flags=.*runtime" sign.log
+      -destination 'generic/platform=macOS' -archivePath build/Rudder.xcarchive \
+      CODE_SIGNING_ALLOWED=NO archive
+    mkdir -p build/export
+    ditto build/Rudder.xcarchive/Products/Applications/Rudder.app build/export/Rudder.app
+    bash scripts/sign-app.sh build/export/Rudder.app 'Developer ID Application' "$TEAM" 2>&1 | tee sign.log
     echo "signed with Developer ID"
     ;;
   notarize)

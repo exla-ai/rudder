@@ -19,14 +19,21 @@ import { Sandbox } from "offstage-cloud"
 
 const release = process.env.RELEASE === "true"
 const stages = release ? ["check", "sign", "notarize", "dmg"] : ["check"]
-const secretNames = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8", "MAC_DEVELOPER_ID_P12", "MAC_DEVELOPER_ID_PASSWORD"]
-const secrets = {}
-if (release) {
-  for (const name of secretNames) {
-    if (!process.env[name]) throw new Error(`${name} is not set; a release needs the App Store Connect key and the Developer ID certificate`)
-    secrets[name] = process.env[name]
-  }
+const notarySecrets = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"]
+const stageSecrets = {
+  check: [],
+  sign: ["MAC_DEVELOPER_ID_P12", "MAC_DEVELOPER_ID_PASSWORD"],
+  notarize: notarySecrets,
+  dmg: notarySecrets,
 }
+const stageEnvs = Object.fromEntries(stages.map(stage => {
+  const envs = { CI: "1" }
+  for (const name of stageSecrets[stage]) {
+    if (!process.env[name]) throw new Error(`${name} is required for ${stage}`)
+    envs[name] = process.env[name]
+  }
+  return [stage, envs]
+}))
 
 const source = execFileSync("git", ["archive", "--format=tar.gz", "HEAD", "mac"], { maxBuffer: 64 * 2 ** 20 })
 if (source.length > 9 * 2 ** 20) throw new Error(`mac/ packs to ${source.length} bytes; one write takes at most 10 MiB`)
@@ -74,8 +81,7 @@ try {
   code = 0
   for (const stage of stages) {
     console.log(`::group::${stage}`)
-    const envs = { CI: "1", ...(stage === "check" ? {} : secrets) }
-    const run = await sandbox.commands.run(`bash mac/scripts/ci.sh ${stage}`, { cwd: "src", envs, timeoutMs: 30 * 60_000 })
+    const run = await sandbox.commands.run(`bash mac/scripts/ci.sh ${stage}`, { cwd: "src", envs: stageEnvs[stage], timeoutMs: 30 * 60_000 })
     process.stdout.write(run.stdout)
     process.stderr.write(run.stderr)
     console.log("::endgroup::")

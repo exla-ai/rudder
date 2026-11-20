@@ -9,8 +9,8 @@
 # mac/scripts/ci.sh (check, sign, notarize, dmg).
 #
 # Secrets: OFFSTAGE_API_KEY (the offstage team key), and for a release the
-# App Store Connect key (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8: provisioning
-# and notarytool, as in ios.yml) and the Developer ID certificate
+# App Store Connect key (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 for
+# notarytool) and the Developer ID certificate
 # (MAC_DEVELOPER_ID_P12: base64 of the exported "Developer ID Application"
 # certificate with its key; MAC_DEVELOPER_ID_PASSWORD). Apple refuses
 # cloud-managed Developer ID signing for this key. They reach the Mac only as

@@ -35,8 +35,6 @@ die() { printf 'package.sh: %s\n' "$*" >&2; exit 1; }
 APP="$(cd "$1" && pwd)"
 OUT="$(dirname "$APP")"
 DMG="$OUT/Rudder.dmg"
-SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-[[ -d "$SPARKLE" ]] || die "$APP has no Sparkle.framework"
 
 notarize() {
   local file="$1"
@@ -61,36 +59,8 @@ staple() {
   [[ -n "${RUDDER_SKIP_NOTARIZE:-}" ]] || xcrun stapler staple "$1"
 }
 
-sign() {
-  codesign --force --sign "$IDENTITY" --options runtime --timestamp "$@"
-}
-
 say "Signing with $IDENTITY (team $TEAM)"
-# Inside out, as Sparkle documents for signing by hand, and never --deep. The
-# XPC services serve sandboxed apps only, but they ship in the framework, so
-# they are signed like the rest. Downloader.xpc keeps Sparkle's entitlements.
-HELPERS=(
-  "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-  "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
-  "$SPARKLE/Versions/B/Autoupdate"
-  "$SPARKLE/Versions/B/Updater.app"
-)
-sign "${HELPERS[0]}"
-sign --preserve-metadata=entitlements "${HELPERS[1]}"
-sign "${HELPERS[2]}"
-sign "${HELPERS[3]}"
-sign "$SPARKLE"
-sign --entitlements "$MAC_DIR/App/Rudder.entitlements" "$APP"
-
-say "Checking the signatures"
-codesign --verify --deep --strict --verbose=2 "$APP"
-for code in "${HELPERS[@]}" "$SPARKLE" "$APP"; do
-  # Read it into a variable first: under pipefail, `grep -q` closing the pipe
-  # early kills codesign with SIGPIPE and the check fails on a good signature.
-  SIGNATURE="$(codesign -dv --verbose=2 "$code" 2>&1)"
-  grep -q "TeamIdentifier=$TEAM" <<<"$SIGNATURE" || die "$code is not signed by team $TEAM"
-  grep -q "flags=.*runtime" <<<"$SIGNATURE" || die "$code does not have the hardened runtime"
-done
+bash "$MAC_DIR/scripts/sign-app.sh" "$APP" "$IDENTITY" "$TEAM"
 
 say "Notarizing the app"
 ZIP="$OUT/Rudder-notarize.zip"

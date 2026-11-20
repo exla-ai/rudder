@@ -306,7 +306,11 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       if (!answer) throw new Error("answer must be an object");
       remember(caller, project, agent);
       const result = await rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId, answer });
-      return result?.status === "queued" ? `Answer for ${label(project, agent)} is queued.` : sentence(`Answered ${label(project, agent)}`);
+      const name = label(project, agent);
+      if (result?.status === "queued") return `Answer for ${name} is queued.`;
+      if (result?.status === "failed") throw new Error(`The answer for ${name} failed to send. ${result.error}`);
+      if (result?.status === "unknown") return `Delivery of the answer for ${name} is unconfirmed. Check its terminal before responding.`;
+      return sentence(`Answered ${name}`);
     },
     async wait_for_events(args, { signal, caller }) {
       const timeoutMs = clampInt(args.timeout_seconds, 5, WAIT_MAX_S, WAIT_DEFAULT_S) * 1000;

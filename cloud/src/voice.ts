@@ -591,9 +591,16 @@ async function answerPrompt(ctx: VoiceContext, args: Record<string, unknown>): P
       return { output: "That prompt is a permission request: allow, allow always, or deny." };
     }
   }
-  await ctx.rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId: ask.id, answer });
+  const result = (await ctx.rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId: ask.id, answer })) as
+    | { status: "failed"; error: string }
+    | { status?: "queued" | "unknown" | "delivered" }
+    | null;
+  const name = shortTitle(agent);
+  if (result?.status === "queued") return { output: `The answer for ${name} is queued.` };
+  if (result?.status === "failed") throw new Error(`The answer for ${name} failed to send. ${result.error}`);
+  if (result?.status === "unknown") return { output: `Delivery of the answer for ${name} is unconfirmed. Check its terminal before responding.` };
   const remaining = asks.length - 1;
-  return { output: `Answered ${shortTitle(agent)}.${remaining > 0 ? ` It has ${remaining} more waiting.` : ""}` };
+  return { output: `Answered ${name}.${remaining > 0 ? ` It has ${remaining} more waiting.` : ""}` };
 }
 
 async function agentAction(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {

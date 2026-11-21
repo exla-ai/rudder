@@ -451,7 +451,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const row = pickedRow();
-    const eff = effortFor(row, effort, pick.model);
+    const eff = effortFor(row, effort, pick?.model);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     useBtn.disabled = !pick || Boolean(accountRefusal(pick.backend, accountFor(pick.backend)));
     setText(useBtn, pick ? `Use ${modelText(pick.backend, row.label, dial ? eff : null)}` : "Use this model");

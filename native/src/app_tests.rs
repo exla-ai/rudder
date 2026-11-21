@@ -32789,6 +32789,7 @@ fn interrupt_and_send_waits_for_the_same_terminal_to_accept_a_follow_up() {
 printf '✻ Thinking… (esc to interrupt)\r\n'
 : > ready
 dd bs=1 count=1 of=key 2>/dev/null
+: > key-received
 while [ ! -f show-composer ]; do sleep .01; done
 printf '\033[2J\033[H⎿ Interrupted · What should Claude do instead?\r\n\r\n────────────────────\r\n❯ \r\n────────────────────\r\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\r\n'
 dd bs=1 count=24 of=message 2>/dev/null
@@ -32816,7 +32817,7 @@ sleep 30"#;
     wait_for(&mut app, "ready");
     let prior_turns = app.agents[0].turns.len();
     assert!(app.start_interrupt_send("interrupt-test", "new message", "interrupt-test-0001", false).is_none());
-    wait_for(&mut app, "key");
+    wait_for(&mut app, "key-received");
     app.poll_agents();
     assert_eq!(fs::read(dir.join("key")).unwrap(), b"\x1b");
     assert_eq!(app.agents[0].turns.len(), prior_turns);

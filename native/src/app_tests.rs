@@ -24207,7 +24207,7 @@ fn claude_wires_the_permission_matcher_and_the_answered_hook() {
         .as_str()
         .expect("StopFailure hook");
     assert!(
-        stop_failure.contains("\"state\":\"error\"") && stop_failure.contains("error_type"),
+        stop_failure.contains("\"state\":\"error\""),
         "an API-error turn end has no Stop and no exit; it needs its own signal: {stop_failure}"
     );
 

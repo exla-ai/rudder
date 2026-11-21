@@ -215,7 +215,7 @@ const logins = createLoginRunner({
     }
   },
   // agy stays open after it signs in; its model list says when it has.
-  signedIn: async (provider) => provider === "antigravity" && (await antigravityStatus({ ...baseChildEnv })).loggedIn,
+  signedIn: async (provider, accountEnv) => provider === "antigravity" && (await antigravityStatus({ ...baseChildEnv, ...accountEnv })).loggedIn,
 });
 
 // "<provider>:<id>" of accounts made for a sign-in still running: removed

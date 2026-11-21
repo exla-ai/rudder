@@ -136,7 +136,7 @@ export function lastLines(output, count = 3) {
  *   onChange?: (provider: string, session: object) => void,
  *   fetchImpl?: typeof fetch,
  *   commands?: Partial<Record<string, string>>,
- *   signedIn?: (provider: string) => Promise<boolean>,
+ *   signedIn?: (provider: string, accountEnv: object) => Promise<boolean>,
  * }} options
  *
  * `start` takes the account to sign in and the env it runs with
@@ -171,8 +171,15 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     session.endedAt = new Date().toISOString();
     clearTimeout(session.ttl);
     try { fs.rmSync(session.urlFile, { force: true }); } catch { /* ignore */ }
-    if (status !== "done") {
+    if (status !== "done" || session.provider === "antigravity") {
       try { session.term?.kill(); } catch { /* already gone */ }
+    }
+    if (session.workspace) {
+      try {
+        fs.rmdirSync(session.workspace);
+      } catch (error) {
+        log(`login ${session.provider}: could not remove sign-in directory: ${error.message}`);
+      }
     }
     log(`login ${session.provider}: ${status}${error ? ` (${error})` : ""}`);
     for (const waiter of session.waiters.splice(0)) {
@@ -226,6 +233,9 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       verifyUrl: null,
       // agy's login method was picked (readUrls).
       chose: false,
+      trusted: false,
+      workspace: null,
+      accountEnv,
       term: null,
       exitCode: null,
       waiters: [],
@@ -245,8 +255,12 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
     let term;
     try {
+      // Only the empty directory created for this sign-in can be auto-trusted.
+      if (provider === "antigravity") {
+        session.workspace = fs.mkdtempSync(path.join(dir, "agy-"));
+      }
       // Wide, so a URL is never wrapped onto two lines by the CLI.
-      term = spawnPty(file, args, { name: "xterm-256color", cols: 2000, rows: 50, cwd, env: childEnv });
+      term = spawnPty(file, args, { name: "xterm-256color", cols: 2000, rows: 50, cwd: session.workspace ?? cwd, env: childEnv });
     } catch (error) {
       end(session, "failed", `could not start ${file}: ${error.message}`);
       throw new Error(session.error);
@@ -259,7 +273,7 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       session.exitCode = exitCode;
       // The last line (the reason it failed) can land just after the exit.
       setTimeout(() => {
-        if (exitCode === 0 && session.status !== "starting") {
+        if (provider !== "antigravity" && exitCode === 0 && session.status !== "starting") {
           end(session, "done");
         } else {
           end(session, "failed", lastLines(session.output) || `${file} exited with code ${exitCode}`);
@@ -309,7 +323,13 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     if (session.provider === "antigravity") {
       // A machine agy never signed in on asks how first; Google OAuth is
       // its first choice, already highlighted.
-      if (!session.chose && /Select login method/.test(stripAnsi(session.output))) {
+      const output = stripAnsi(session.output);
+      if (!session.trusted && />\s*Yes, I trust this folder/.test(output) && /No, exit/.test(output)) {
+        session.trusted = true;
+        session.term.write("\r");
+        return false;
+      }
+      if (!session.chose && /Select login method/.test(output)) {
         session.chose = true;
         session.term.write("\r");
       }
@@ -399,9 +419,10 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     const deadline = Date.now() + EXIT_WAIT_MS;
     while (!session.endedAt && Date.now() < deadline) {
       await sleep(1000);
-      if (!session.endedAt && await signedIn(session.provider)) {
+      if (session.endedAt) return;
+      const authenticated = await signedIn(session.provider, session.accountEnv);
+      if (authenticated && !session.endedAt) {
         end(session, "done");
-        try { session.term.kill(); } catch { /* already gone */ }
         return;
       }
     }

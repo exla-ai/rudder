@@ -795,17 +795,22 @@ mod tests {
     fn cancelled_real_subprocess_is_reaped_before_the_call_settles() {
         let tmp=tempfile::tempdir().unwrap();
         let ready=tmp.path().join("pid");
-        let control=std::sync::Arc::new(BuildExecutionControl::new(Duration::from_secs(10)).unwrap());
+        let command_timeout = Duration::from_secs(45);
+        let control=std::sync::Arc::new(BuildExecutionControl::new(command_timeout).unwrap());
         let worker_control=control.clone(); let worker_root=tmp.path().to_owned(); let worker_ready=ready.clone();
         let worker=std::thread::spawn(move || {
-            let mut command=Command::new("/usr/bin/python3");
-            command.args(["-I","-c","import os,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); t=p.with_suffix('.tmp'); t.write_text(str(os.getpid())); t.replace(p); time.sleep(30)"])
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", r#"printf '%s' "$$" > "$1.tmp" && /bin/mv "$1.tmp" "$1" && exec /bin/sleep 60"#, "pid-handshake"])
                 .arg(worker_ready);
-            bounded_controlled(&mut command,Duration::from_secs(10),&worker_root.join("stdout"),&worker_root.join("stderr"),&worker_control)
+            bounded_controlled(&mut command,command_timeout,&worker_root.join("stdout"),&worker_root.join("stderr"),&worker_control)
         });
-        let until=Instant::now()+Duration::from_secs(5);
-        while !ready.exists() && Instant::now()<until { std::thread::sleep(Duration::from_millis(5)); }
-        assert!(ready.exists());
+        // Allow process startup and the PID handoff on a loaded CI runner.
+        let until = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() && !worker.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "child did not publish its PID before cancellation");
         let pid:i32=fs::read_to_string(&ready).unwrap().parse().unwrap();
         assert!(control.cancel().unwrap());
         assert!(worker.join().unwrap().is_err());

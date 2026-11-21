@@ -106,24 +106,25 @@ if (checksum !== `${hash}  ${archiveName}`) {
 }
 
 const temp = mkdtempSync(join(tmpdir(), "rudder-offstage-native-"))
-const binaries = ["rudder-native", "rudder-jj"]
+const files = ["rudder-native", "rudder-jj", "native-manifest.json"]
+const destination = "native-dist/darwin-arm64"
 try {
   const archive = join(temp, archiveName)
   writeFileSync(archive, bytes)
   const members = execFileSync("tar", ["-tzf", archive], { encoding: "utf8", maxBuffer: 4096 }).trim().split("\n")
-  if (members.length !== binaries.length || !binaries.every(name => members.includes(name))) {
+  if (members.length !== files.length || !files.every(name => members.includes(name))) {
     throw new Error(`Offstage task ${task.id} returned an unexpected archive layout`)
   }
-  execFileSync("tar", ["-xzf", archive, "-C", temp, ...binaries])
-  for (const name of binaries) {
-    const binary = lstatSync(join(temp, name))
-    if (!binary.isFile() || binary.size === 0) throw new Error(`Offstage produced an invalid ${name} artifact`)
+  execFileSync("tar", ["-xzf", archive, "-C", temp, ...files])
+  for (const name of files) {
+    const file = lstatSync(join(temp, name))
+    if (!file.isFile() || file.size === 0) throw new Error(`Offstage produced an invalid ${name} artifact`)
   }
-  mkdirSync("target/release", { recursive: true })
-  for (const name of binaries) {
-    const binary = join("target/release", name)
-    copyFileSync(join(temp, name), binary)
-    chmodSync(binary, 0o755)
+  mkdirSync(destination, { recursive: true })
+  for (const name of files) {
+    const file = join(destination, name)
+    copyFileSync(join(temp, name), file)
+    if (name !== "native-manifest.json") chmodSync(file, 0o755)
   }
   log(`Downloaded and verified ${bytes.length} bytes from Offstage task ${task.id}`)
 } finally {

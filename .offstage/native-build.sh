@@ -45,5 +45,9 @@ for name in rudder-native rudder-jj; do
   }
 done
 
-COPYFILE_DISABLE=1 tar -czf native-release.tgz -C target/release rudder-native rudder-jj
+artifact=native-dist/darwin-arm64
+mkdir -p "$artifact"
+cp target/release/rudder-native target/release/rudder-jj "$artifact/"
+node scripts/native-artifacts.mjs create --directory "$artifact" --platform darwin-arm64 --revision "$(git rev-parse HEAD)"
+COPYFILE_DISABLE=1 tar -czf native-release.tgz -C "$artifact" rudder-native rudder-jj native-manifest.json
 shasum -a 256 native-release.tgz > native-release.sha256

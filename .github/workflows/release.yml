@@ -193,6 +193,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Stage native artifact
+        if: matrix.key != 'darwin-arm64'
         run: |
           mkdir -p "native-dist/${{ matrix.key }}"
           cp target/release/rudder-native "native-dist/${{ matrix.key }}/rudder-native"

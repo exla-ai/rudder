@@ -1716,7 +1716,8 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   };
   const grow = () => {
     fit();
-    btn.disabled = !ta.value.trim() && !files.length;
+    btn.disabled = busy || (!ta.value.trim() && !files.length);
+    el.toggleAttribute("data-send-ready", !btn.disabled);
   };
   const paintTray = () => {
     tray.hidden = !files.length;
@@ -1821,12 +1822,12 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
     ls.set("rudder.drafts", store.drafts);
   };
   let busy = false;
-  const submit = async () => {
+  const submit = async (interrupt = false) => {
     const text = ta.value.trim();
     if ((!text && !files.length) || busy) return;
-    busy = true; btn.disabled = true;
+    busy = true; grow();
     const picked = files;
-    const ok = await onSubmit(text, picked);
+    const ok = await onSubmit(text, picked, interrupt);
     busy = false;
     if (ok !== false) {
       ta.value = ""; saveDraft();
@@ -1837,9 +1838,16 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   ta.addEventListener("input", () => { grow(); saveDraft(); });
   ta.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.isComposing) return;
+    const interruptSend = e.shiftKey && (e.metaKey || e.ctrlKey)
+      ? form.querySelector(".interrupt-send:not([hidden])") : null;
+    if (interruptSend && !btn.disabled) {
+      e.preventDefault();
+      form.requestSubmit(interruptSend);
+      return;
+    }
     if (e.metaKey || e.ctrlKey || (!coarse && !e.shiftKey)) { e.preventDefault(); submit(); }
   });
-  form.addEventListener("submit", (e) => { e.preventDefault(); submit(); });
+  form.addEventListener("submit", (e) => { e.preventDefault(); submit(e.submitter?.classList.contains("interrupt-send")); });
   requestAnimationFrame(grow);
   return { el, textarea: ta, fit };
 }
@@ -4011,7 +4019,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     draftKey: `msg:${key}`,
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
     attachments: true,
-    onSubmit: (text, files) => { send(quoteReply?.wrap(text) ?? text, files); return true; },
+    onSubmit: (text, files, interrupt) => { send(quoteReply?.wrap(text) ?? text, files, null, interrupt); return true; },
     onResize: (grew) => followComposer(grew),
   });
   // With the sidebar (DesktopShell), Alt+[ and Alt+] step between agents. The
@@ -4179,7 +4187,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // Interrupt: Esc into the agent's terminal, like pressing Esc at the
   // dashboard. The agent stays alive (unlike "Stop agent" in the menu).
   const interruptBtn = h(`<button type="button" class="interrupt" aria-label="Interrupt the agent" title="Interrupt" hidden>${icon("stop")}</button>`);
+  const interruptSendBtn = h(`<button type="submit" class="interrupt-send" hidden>${icon("stop")}<span>Interrupt &amp; send</span></button>`);
+  if (!coarse) {
+    interruptSendBtn.title = /Mac/.test(navigator.platform) ? "Interrupt and send (⌘⇧Enter)" : "Interrupt and send (Ctrl+Shift+Enter)";
+    interruptSendBtn.setAttribute("aria-keyshortcuts", /Mac/.test(navigator.platform) ? "Meta+Shift+Enter" : "Control+Shift+Enter");
+  }
+  // Put the ordinary Send first in the form's implicit submit order.
   composer.el.querySelector(".send").before(interruptBtn);
+  composer.el.querySelector(".send").after(interruptSendBtn);
   interruptBtn.addEventListener("click", async () => {
     if (interruptBtn.disabled) return;
     interruptBtn.disabled = true;
@@ -4380,9 +4395,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   }
 
   let seq = 0;
-  async function send(text, files = [], retryOf = null) {
+  async function send(text, files = [], retryOf = null, interrupt = false) {
     suggestion?.sent();
-    const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })) };
+    const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })), interrupt };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
     item.ts = Date.now();
     // Only a user message the transcript adds after this point can be this one (pending.js).
@@ -4399,8 +4414,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       item.state = "sending";
       paint();
       const wasWorking = isRunning(agentNow()?.status || store.transcripts.get(key)?.status);
-      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)) } });
-      item.state = res.status === "queued" ? "queued" : wasWorking ? "waiting" : "sent";
+      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt } });
+      item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
       item.requestId = res.requestId;
       // The question card tracks a typed answer through the same receipts.
       if (res?.answered) {
@@ -4482,7 +4497,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     for (const receipt of t.receipts || []) {
       const item = list.find((p) => p.state === "queued" && p.requestId === receipt.requestId);
       if (!item) continue;
-      if (receipt.status === "delivered") item.state = "waiting";
+      if (receipt.status === "delivered") item.state = item.interrupt ? "sent" : "waiting";
       if (receipt.status === "failed") {
         item.state = "failed";
         if (receipt.error) toast(receipt.error, { error: true });
@@ -4575,6 +4590,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const status = header();
     paintAsk();
     interruptBtn.hidden = ro || !isRunning(status);
+    const agent = agentNow();
+    interruptSendBtn.hidden = interruptBtn.hidden || !["working", "running"].includes(status) || !agent?.canInterruptAndSend
+      || agent.stale || needsYou(agent);
+    composer.el.classList.toggle("can-interrupt-send", !interruptSendBtn.hidden);
     suggestion?.update({ suggestion: store.transcripts.get(key)?.suggestion, idle: !isRunning(status) && !pendingAsks(agentNow()).length });
     const t = store.transcripts.get(key);
     if (!t) {
@@ -4699,8 +4718,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       md.hidden = !body;
       paintAttachments(node.querySelector(".atts"), p.files || []);
       const uploading = (p.files || []).filter((f) => !f.path).length;
-      let label = "Sending…";
-      if (p.state === "queued") label = "Queued";
+      let label = p.interrupt ? "Interrupting…" : "Sending…";
+      if (p.state === "queued") label = p.interrupt ? "Interrupting…" : "Queued";
       else if (p.state === "waiting") label = "Waiting for agent";
       else if (p.state === "sent") label = "Sent";
       else if (p.state === "uploading" && uploading) label = `Uploading ${p.files.length - uploading + 1} of ${p.files.length}`;

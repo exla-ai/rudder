@@ -32780,6 +32780,67 @@ fn chat_edit_of_the_first_message_starts_the_conversation_over() {
 
 #[cfg(not(windows))]
 #[test]
+fn interrupt_and_send_waits_for_the_same_terminal_to_accept_a_follow_up() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("interrupt-and-send");
+    chat_edit_env(&mut env, &dir);
+    crate::signals::prepare_worker_signals("interrupt-test", Backend::Claude).unwrap();
+    let script = r#"stty raw -echo
+printf '✻ Thinking… (esc to interrupt)\r\n'
+: > ready
+dd bs=1 count=1 of=key 2>/dev/null
+while [ ! -f show-composer ]; do sleep .01; done
+printf '\033[2J\033[H⎿ Interrupted · What should Claude do instead?\r\n\r\n────────────────────\r\n❯ \r\n────────────────────\r\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\r\n'
+dd bs=1 count=24 of=message 2>/dev/null
+sleep 30"#;
+    let terminal = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
+        TerminalPaneOptions { size: TerminalSize { rows: 12, cols: 80 }, cwd: Some(dir.clone()), ..Default::default() },
+    ).unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("interrupt-test", "first message");
+    run.cwd = dir.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.terminal = Some(terminal);
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let wait_for = |app: &mut App, path: &str| {
+        while !dir.join(path).exists() {
+            assert!(Instant::now() < deadline, "the stand-in did not write {path}");
+            app.poll_agents();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    wait_for(&mut app, "ready");
+    let prior_turns = app.agents[0].turns.len();
+    assert!(app.start_interrupt_send("interrupt-test", "new message", "interrupt-test-0001", false).is_none());
+    wait_for(&mut app, "key");
+    app.poll_agents();
+    assert_eq!(fs::read(dir.join("key")).unwrap(), b"\x1b");
+    assert_eq!(app.agents[0].turns.len(), prior_turns);
+    assert!(app.pending_interrupt_sends.iter().any(|pending| pending.run_id == "interrupt-test"));
+    assert!(matches!(app.deliver_steer_request("interrupt-test", "another message", false), SteerDelivery::Failed(_)));
+
+    fs::write(dir.join("show-composer"), "").unwrap();
+    let receipt = chat_edit_receipt(&mut app, "interrupt-test-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
+    assert_eq!(app.agents[0].turns.last().unwrap().prompt, "new message");
+    wait_for(&mut app, "message");
+    let expected = [bracketed_paste_bytes("new message"), vec![b'\r']].concat();
+    while fs::metadata(dir.join("message")).unwrap().len() < expected.len() as u64 {
+        assert!(Instant::now() < deadline, "the stand-in never received the submitted message");
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read(dir.join("message")).unwrap(), expected);
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
 fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     let mut env = env_guard();
     let dir = unique_test_repo("chat-edit-mid-turn");

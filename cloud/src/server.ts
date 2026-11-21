@@ -7895,6 +7895,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       workspaceId: repo.id,
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
+      interrupt: typeof body === "object" && body !== null && !Array.isArray(body) && body.interrupt === true,
     });
     captureProductEvent(account.accountId, "message_sent", { platform: requestPlatform(req) });
     sendJson(res, 200, sent);

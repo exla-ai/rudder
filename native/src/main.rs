@@ -156,6 +156,17 @@ struct PendingEnter {
     due: Instant,
 }
 
+/// A follow-up held until the interrupted terminal is ready for input again.
+struct PendingInterruptSend {
+    run_id: String,
+    instance_id: String,
+    request_id: String,
+    text: String,
+    opencode_prompt: bool,
+    deadline: Instant,
+}
+
+
 /// One in-flight Alt+V for a Claude Code worker: scroll its normal view up
 /// to the previous message start and put that on the top row. Driven a step
 /// per poll tick by `drive_claude_message_navs`, because every step waits on
@@ -1911,6 +1922,7 @@ struct App {
     /// sites write the text as a bracketed paste and queue the CR here; it is
     /// flushed as a separate write once ENTER_SUBMIT_DELAY has passed.
     pending_enters: Vec<PendingEnter>,
+    pending_interrupt_sends: Vec<PendingInterruptSend>,
     /// `/sync` messages waiting for their agent's turn to end (agent_sync.rs).
     pending_syncs: Vec<PendingSync>,
     /// Runs a `/sync` was typed into, so the reply turn ends without a review
@@ -3614,6 +3626,7 @@ impl App {
             gods_view_tile_map: Vec::new(),
             pty_output_waker: None,
             pending_enters: Vec::new(),
+            pending_interrupt_sends: Vec::new(),
             pending_syncs: Vec::new(),
             sync_deliveries: HashMap::new(),
             claude_message_navs: Vec::new(),
@@ -16367,7 +16380,7 @@ Address the objection directly. If you disagree, say why inside \
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
-            if matches!(kind.as_str(), "steer" | "task" | "opencode-prompt") {
+            if matches!(kind.as_str(), "steer" | "task" | "opencode-prompt" | "interrupt-send" | "interrupt-opencode-prompt") {
                 if let Some(due) = self.agent_index_for_token(&task_id).and_then(|index| {
                     self.pending_enters
                         .iter()
@@ -16441,6 +16454,17 @@ Address the objection directly. If you disagree, say why inside \
                         continue;
                     }
                 },
+                "interrupt-send" | "interrupt-opencode-prompt" if valid_request_id => {
+                    match self.start_interrupt_send(
+                        &task_id, &instruction, &request_id, kind == "interrupt-opencode-prompt",
+                    ) {
+                        Some(result) => result,
+                        None => {
+                            let _ = std::fs::remove_file(&path);
+                            continue;
+                        }
+                    }
+                }
                 "steer" | "task" | "opencode-prompt" => self.deliver_steer_request(
                     &task_id,
                     &instruction,
@@ -16499,6 +16523,104 @@ Address the objection directly. If you disagree, say why inside \
         std::fs::rename(temp, file)
     }
 
+    fn start_interrupt_send(
+        &mut self,
+        task_id: &str,
+        text: &str,
+        request_id: &str,
+        opencode_prompt: bool,
+    ) -> Option<SteerDelivery> {
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return Some(SteerDelivery::Failed(format!("target not found: {task_id}")));
+        };
+        let run = &mut self.agents[index];
+        if self.pending_interrupt_sends.iter().any(|pending| pending.run_id == run.id) {
+            return Some(SteerDelivery::Failed("This chat is already interrupting to send a message.".to_owned()));
+        }
+        let text = sanitize_steer_instruction(text);
+        if text.is_empty() {
+            return Some(SteerDelivery::Failed("The message is empty.".to_owned()));
+        }
+        if run.is_orchestrator() || run.plain_process {
+            return Some(SteerDelivery::Failed("Interrupt and send requires an interactive chat.".to_owned()));
+        }
+        if run.needs_permission || self.codex_waits.contains_key(&run.id)
+            || run.codex_goal_menu.is_some() || run.codex_rate_limit_menu.is_some()
+        {
+            return Some(SteerDelivery::Failed("Answer the agent's open prompt before interrupting.".to_owned()));
+        }
+        let unsupported = || Some(SteerDelivery::Failed("Interrupt and send requires a live interactive terminal.".to_owned()));
+        let Some(terminal) = run.terminal.as_mut() else { return unsupported() };
+        if terminal.execution_profile().is_some_and(|profile| profile != "native")
+            || terminal.is_output_only() || !terminal.is_alive()
+        {
+            return unsupported();
+        }
+        let lines = terminal.live_screen_lines();
+        if let Some(reason) = terminal_composer_blocked(run.backend, &lines) {
+            return Some(SteerDelivery::Failed(format!("Could not interrupt and send: {reason}")));
+        }
+        // The agent may have completed while the user's attachment uploaded.
+        if terminal_at_idle_prompt(run.backend, &lines) {
+            return Some(self.deliver_steer_request(task_id, &text, opencode_prompt));
+        }
+        let pending = PendingInterruptSend {
+            run_id: run.id.clone(),
+            instance_id: terminal.instance_id().to_owned(),
+            request_id: request_id.to_owned(),
+            text,
+            opencode_prompt,
+            deadline: Instant::now() + Duration::from_secs(20),
+        };
+        match self.deliver_keys_request(task_id, "esc") {
+            SteerDelivery::Delivered => {
+                self.pending_interrupt_sends.push(pending);
+                None
+            }
+            failure => Some(failure),
+        }
+    }
+
+    fn finish_interrupt_sends(&mut self) {
+        let mut index = 0;
+        while index < self.pending_interrupt_sends.len() {
+            let pending = &self.pending_interrupt_sends[index];
+            let run = self.agents.iter_mut().find(|run| run.id == pending.run_id);
+            let ready = match run.and_then(|run| {
+                let terminal = run.terminal.as_mut()?;
+                (terminal.instance_id() == pending.instance_id && terminal.is_alive()).then_some(run)
+            }) {
+                None => Err("The agent's terminal closed before the message could be sent.".to_owned()),
+                Some(run) if run.needs_permission || self.codex_waits.contains_key(&run.id)
+                    || run.codex_goal_menu.is_some() || run.codex_rate_limit_menu.is_some() =>
+                {
+                    Err("The agent opened a prompt. Answer it before retrying the message.".to_owned())
+                }
+                Some(run) => {
+                    // Use the terminal already read by poll_agents. An Esc write,
+                    // a stale status flag or a fixed delay cannot prove readiness.
+                    let lines = run.terminal.as_mut().unwrap().live_lines_snapshot();
+                    if terminal_composer_blocked(run.backend, &lines).is_none()
+                        && terminal_at_idle_prompt(run.backend, &lines)
+                    {
+                        Ok(())
+                    } else if Instant::now() >= pending.deadline {
+                        Err("The agent did not return to its composer after interrupting.".to_owned())
+                    } else {
+                        index += 1;
+                        continue;
+                    }
+                }
+            };
+            let pending = self.pending_interrupt_sends.remove(index);
+            let result = match ready {
+                Ok(()) => self.deliver_steer_request(&pending.run_id, &pending.text, pending.opencode_prompt),
+                Err(reason) => SteerDelivery::Failed(reason),
+            };
+            let _ = self.write_steer_receipt(&pending.request_id, &result);
+        }
+    }
+
     /// Route one steer instruction from the web board to its target agent (or the
     /// high-level task-input path) and record it in the activity feed. A blank/
     /// `conductor`/`orchestrator` target deliberately goes through
@@ -16543,6 +16665,9 @@ Address the objection directly. If you disagree, say why inside \
             self.push_activity(format!("steer: target not found ({task_id})"));
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
+        if self.pending_interrupt_sends.iter().any(|pending| pending.run_id == self.agents[index].id) {
+            return SteerDelivery::Failed("This chat is already interrupting to send a message.".to_owned());
+        }
         if opencode_prompt && self.agents[index].backend != Backend::Opencode {
             return SteerDelivery::Failed("the agent is no longer running OpenCode".to_string());
         }
@@ -22622,6 +22747,8 @@ What to do\n\
         // After the loop, so a plan turn that just ended (mark_run_done clears
         // needs_user_input) shows its "Implement this plan?" wait this tick.
         self.poll_codex_rollouts();
+
+        self.finish_interrupt_sends();
 
         // The INITIAL planner run is KEPT as the pinned orchestrator (no removal),
         // so its index stays stable. A RECONCILE planner is transient and removed by

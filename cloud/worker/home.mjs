@@ -911,7 +911,12 @@ async function handleRpc(method, params) {
     // An open Codex question holds the agent: the message is its answer
     // (asks.mjs codexTypedAnswer), and the app drops the sent bubble.
     const record = /^[A-Za-z0-9._-]+$/.test(runId) ? readRunJson(path.join(project.dir, ".rudder", "runs", runId, "run.json")) : null;
-    const question = record?.backend === "codex" ? agentAsks(record).find((ask) => ask.kind === "question") : null;
+    const interrupt = params.interrupt === true;
+    const asks = record && (record.backend === "codex" || interrupt) ? agentAsks(record) : [];
+    if (interrupt && (record?.executionProfile !== "native" || asks.length)) {
+      throw new Error(asks.length ? "Answer the agent's open prompt before interrupting." : "Interrupt and send requires a live interactive terminal.");
+    }
+    const question = record?.backend === "codex" ? asks.find((ask) => ask.kind === "question") : null;
     if (question) {
       return { ...answerCodexAsk(project, runId, question, codexTypedAnswer(question, text)), answered: true };
     }
@@ -922,6 +927,7 @@ async function handleRpc(method, params) {
       const { commands } = await slashCommands.forRun(project.dir, runId);
       if (commands.some((item) => item.name === command[1] && item.prompt)) kind = "opencode-prompt";
     }
+    if (interrupt) kind = kind === "opencode-prompt" ? "interrupt-opencode-prompt" : "interrupt-send";
     return await steer(project, { kind, taskId: runId, instruction: text });
   }
   if (method === "task") {
@@ -1728,6 +1734,7 @@ function agentSummary(record, options, repoDir) {
     // the CLI's own dir.
     account: record.account ?? "main",
     mode: record.mode ?? null,
+    canInterruptAndSend: record.executionProfile === "native" && Number.isInteger(record.process?.pid),
     // Pinned in the app or the dashboard: kept by the day-old cleanup.
     ...(record.pinned === true ? { pinned: true } : {}),
     createdAt: toMillis(record.createdAt),

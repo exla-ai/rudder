@@ -20,8 +20,12 @@ export const QUALIFY_STEPS = {
   fixtures:'Compile engine and native test fixtures', js:'Typecheck + JS tests',
   rust:'Native tests', jj_provider:'Managed jj provider tests', tui:'TUI end-to-end tests',
 };
-export const NATIVE_STEPS = ['Board host access preflight', 'Build native pair', 'Stage native artifact',
-  'Upload native artifact', 'Record native upload identity', 'Upload native identity'];
+const STAGE_NATIVE_STEPS = ['Stage native artifact', 'Upload native artifact',
+  'Record native upload identity', 'Upload native identity'];
+export const NATIVE_STEPS = {
+  'darwin-arm64': ['Install Offstage SDK', 'Build macOS native pair on Offstage', ...STAGE_NATIVE_STEPS],
+  'linux-x64': ['Board host access preflight', 'Build Linux native pair', ...STAGE_NATIVE_STEPS],
+};
 const EVIDENCE = 'release-evidence';
 const MAX_NATIVE_ZIP = 1100*1024**2;
 const NATIVE_FILES = ['native-manifest.json','rudder-jj','rudder-native'];
@@ -83,7 +87,10 @@ function checkJobs(jobs, run, cutoff) {
   for (const name of required) {
     const job = jobs.find(job=>job.name === name); must(job && id(job.id) && job.run_id === run.id && job.head_sha === run.head_sha);
     must(time(job.completed_at) <= cutoff);
-    successfulSteps(job, name === 'Release qualification' ? Object.values(QUALIFY_STEPS) : NATIVE_STEPS);
+    const steps = name === 'Release qualification'
+      ? Object.values(QUALIFY_STEPS)
+      : NATIVE_STEPS[name.slice('Native '.length)];
+    successfulSteps(job, steps);
   }
   for (const job of jobs.filter(job=>!required.includes(job.name))) {
     must(['Release reuse probe','Publish npm release'].includes(job.name)

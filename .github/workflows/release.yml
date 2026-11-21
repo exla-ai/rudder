@@ -109,19 +109,17 @@ jobs:
     # Branch candidates ALWAYS qualify in full. Any failed/unavailable probe also does.
     if: ${{ always() && !cancelled() && (github.ref_type != 'tag' || needs.reuse.result != 'success' || needs.reuse.outputs.eligible != 'true') }}
     name: Native ${{ matrix.key }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - key: darwin-arm64
-            runner: macos-15
-            cache_profile: release-fixtures
           - key: linux-x64
-            runner: ubuntu-22.04
-            cache_profile: release
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -129,11 +127,12 @@ jobs:
 
       # Never use this cache as native artifact or qualification evidence.
       - name: Restore external Rust dependencies
+        if: matrix.key == 'linux-x64'
         id: rust_dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: rudder-external-deps-v1
-          shared-key: "${{ matrix.key }}-${{ matrix.runner }}-${{ matrix.cache_profile }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml', 'scripts/build-native.mjs', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}"
+          shared-key: "linux-x64-ubuntu-22.04-release-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml', 'scripts/build-native.mjs', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}"
           workspaces: ". -> target"
           cache-targets: "true"
           cache-workspace-crates: "false"
@@ -147,6 +146,7 @@ jobs:
       # Checked cleanup also covers local path dependencies, not just members.
       # A cache can never make source mtimes accept an old local binary.
       - name: Discard any restored local Cargo outputs
+        if: matrix.key == 'linux-x64'
         run: |
           git diff --exit-code HEAD -- Cargo.lock Cargo.toml native/Cargo.toml engine/Cargo.toml vcs-bridge/Cargo.toml
           node <<'NODE'
@@ -160,12 +160,37 @@ jobs:
       # These host/browser fixtures need no Rust artifacts. Check platform
       # paths and opener behavior before spending time compiling the pair.
       - name: Board host access preflight
+        if: matrix.key == 'linux-x64'
         run: |
           npm ci --ignore-scripts
           node --test tests/board-capability.test.mjs tests/board-host-access.test.mjs
 
-      - name: Build native pair
+      - name: Build Linux native pair
+        if: matrix.key == 'linux-x64'
         run: node scripts/build-native.mjs
+
+      - name: Install Offstage SDK
+        if: matrix.key == 'darwin-arm64'
+        run: |
+          sdk="$RUNNER_TEMP/offstage-cloud-0.3.1.tgz"
+          curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
+          echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
+          npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
+
+      - name: Build macOS native pair on Offstage
+        if: matrix.key == 'darwin-arm64'
+        env:
+          OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
+          OFFSTAGE_API_URL: https://api.offstage.cloud
+        run: node .offstage/native.mjs
+
+      - name: Upload Offstage native logs
+        if: always() && matrix.key == 'darwin-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: offstage-native-logs
+          path: offstage-out/native/
+          if-no-files-found: ignore
 
       - name: Stage native artifact
         run: |

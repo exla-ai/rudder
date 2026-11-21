@@ -71,7 +71,7 @@ function fixture() {
   const artifacts=native.map(wrap); const receipt=wrap({id:400,name:'release-qualification'}); artifacts.push(receipt);
   const names=[...PLATFORMS.map(p=>`Native ${p}`),'Release qualification'];
   const jobs=names.map((name,i)=>({id:500+i,name,run_id:100,head_sha:sha,status:'completed',conclusion:'success',
-    completed_at:'2026-10-31T12:29:00Z',steps:(i===PLATFORMS.length?Object.values(QUALIFY_STEPS):NATIVE_STEPS)
+    completed_at:'2026-10-31T12:29:00Z',steps:(i===PLATFORMS.length?Object.values(QUALIFY_STEPS):NATIVE_STEPS[PLATFORMS[i]])
       .map(name=>({name,status:'completed',conclusion:'success'}))}));
   let archive; const runs=[run,current]; let calls=0;
   const result={ctx,run,current,record,artifacts,jobs,runs,
@@ -122,6 +122,7 @@ test('ambiguous success/success and success/failure sets fall back, not latest-s
 });
 test('required jobs and steps must run successfully; continuation/skip is no waiver',async()=> {
   for (const change of [f=>{f.jobs.pop();},f=>{f.jobs[0].conclusion='skipped';},
+    f=>{f.jobs[0].steps.find(s=>s.name==='Build macOS native pair on Offstage').conclusion='skipped';},
     f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.js).conclusion='skipped';},
     f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.native_archives).conclusion='skipped';},
     f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.rust).conclusion='failure';},
@@ -301,7 +302,13 @@ test('authenticated ZIPs still reject unexpected paths and bounded-entry expansi
 
 test('workflow preserves platform/test gates and publishes only from two explicit complete paths',async()=> {
   const yaml=await fs.readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
-  for (const pair of ['key: darwin-arm64\n            runner: macos-15','key: linux-x64\n            runner: ubuntu-22.04']) assert.ok(yaml.includes(pair));
+  const native = yaml.split('\n  native-artifacts:\n')[1].split('\n  qualification:\n')[0];
+  assert.match(native,/runs-on: ubuntu-22\.04/);
+  for (const platform of PLATFORMS) {
+    assert.ok(native.includes(`key: ${platform}`));
+    for (const name of NATIVE_STEPS[platform]) assert.ok(native.includes(`- name: ${name}\n`));
+  }
+  assert.match(native,/name: Build macOS native pair on Offstage\n\s+if: matrix\.key == 'darwin-arm64'[\s\S]*?run: node \.offstage\/native\.mjs/);
   assert.match(yaml,/github\.ref_type != 'tag' \|\| needs\.reuse\.result != 'success'/);
   assert.match(yaml,/needs\.native-artifacts\.result == 'skipped' && needs\.qualification\.result == 'skipped'/);
   assert.match(yaml,/needs\.native-artifacts\.result == 'success' && needs\.qualification\.result == 'success'/);

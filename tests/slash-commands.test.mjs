@@ -180,6 +180,15 @@ test("Codex gates /daybreak on the sign-in and /voice on the install", () => {
   }
 });
 
+test("Codex /fast runs immediately without opening the terminal", () => {
+  const model = "test-model";
+  const models = [{ slug: model, service_tiers: [{ id: "priority", name: "Fast", description: "Quicker answers" }] }];
+  const commands = buildCodexCommands({ version: CODEX_VERSION, features: { fast_mode: true }, model, models });
+  const fast = commands.find((command) => command.name === "fast");
+  assert.equal(fast.opens, null);
+  assert.equal(fast.immediate, true);
+});
+
 test("typed text orders Claude rows as Claude does and Codex rows as Codex does", () => {
   const c = (name, description, extra = {}) => ({ name, description, aliases: [], ...extra });
   const claude = [

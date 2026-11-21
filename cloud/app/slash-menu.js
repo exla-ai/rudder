@@ -214,7 +214,7 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
       return;
     }
     const name = data()?.backend === "opencode" ? c.name : alias ?? c.name;
-    if (c.args === "required" || how === "tab" || (how === "click" && !opensTerminal(c))) {
+    if (c.args === "required" || how === "tab" || (how === "click" && !c.immediate && !opensTerminal(c))) {
       setValue(`/${name} `);
       close();
       return;

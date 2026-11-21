@@ -699,7 +699,7 @@ export function buildCodexCommands({ version, features, chatgpt, apiKey, voice, 
       for (const tier of preset?.service_tiers ?? []) {
         const enabled = tier.id === "flex" ? true : tier.id === "ultrafast" ? features.ultrafast_mode === true : features.fast_mode === true;
         if (!enabled) continue;
-        commands.push({ name: String(tier.name).toLowerCase(), description: clip(tier.description), hint: null, args: null, opens: "terminal", when: "always", aliases: [] });
+        commands.push({ name: String(tier.name).toLowerCase(), description: clip(tier.description), hint: null, args: null, opens: null, immediate: true, aliases: [] });
       }
     }
   }

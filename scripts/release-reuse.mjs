@@ -20,11 +20,11 @@ export const QUALIFY_STEPS = {
   fixtures:'Compile engine and native test fixtures', js:'Typecheck + JS tests',
   rust:'Native tests', jj_provider:'Managed jj provider tests', tui:'TUI end-to-end tests',
 };
-const STAGE_NATIVE_STEPS = ['Stage native artifact', 'Upload native artifact',
+const UPLOAD_NATIVE_STEPS = ['Upload native artifact',
   'Record native upload identity', 'Upload native identity'];
 export const NATIVE_STEPS = {
-  'darwin-arm64': ['Install Offstage SDK', 'Build macOS native pair on Offstage', ...STAGE_NATIVE_STEPS],
-  'linux-x64': ['Board host access preflight', 'Build Linux native pair', ...STAGE_NATIVE_STEPS],
+  'darwin-arm64': ['Install Offstage SDK', 'Build macOS native pair on Offstage', ...UPLOAD_NATIVE_STEPS],
+  'linux-x64': ['Board host access preflight', 'Build Linux native pair', 'Stage native artifact', ...UPLOAD_NATIVE_STEPS],
 };
 const EVIDENCE = 'release-evidence';
 const MAX_NATIVE_ZIP = 1100*1024**2;

@@ -6,9 +6,10 @@
 // release, Rudder.dmg and release.env back to ./offstage-out/mac/.
 //
 //   OFFSTAGE_API_KEY  the team key
-//   RELEASE           "true": also sign, notarize and build the DMG
-//   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  the App Store Connect key, release only
-//   MAC_DEVELOPER_ID_P12, MAC_DEVELOPER_ID_PASSWORD  the Developer ID certificate, release only
+//   RELEASE           "true": sign, notarize, build and publish the DMG
+//   SIGNING_CHECK     "true": sign and notarize, without publishing
+//   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  the App Store Connect key, required for signing checks
+//   MAC_DEVELOPER_ID_P12, MAC_DEVELOPER_ID_PASSWORD  the Developer ID certificate, required for signing checks
 //
 // Exits with the failing stage's exit code, or collect's when every stage
 // passed but the outputs could not be copied back. The sandbox is killed
@@ -18,7 +19,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { Sandbox } from "offstage-cloud"
 
 const release = process.env.RELEASE === "true"
-const stages = release ? ["check", "sign", "notarize", "dmg"] : ["check"]
+const signingCheck = process.env.SIGNING_CHECK === "true"
+const signedBuild = release || signingCheck
+const stages = signedBuild ? ["check", "sign", "notarize", "dmg"] : ["check"]
 const notarySecrets = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"]
 const stageSecrets = {
   check: [],

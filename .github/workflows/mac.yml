@@ -41,9 +41,13 @@ on:
         description: "Sign, notarize and publish Rudder.dmg"
         type: boolean
         default: false
+      signing_check:
+        description: "Sign and notarize on Offstage without publishing"
+        type: boolean
+        default: false
 
 concurrency:
-  group: mac-${{ github.ref }}-${{ inputs.release == true || startsWith(github.ref, 'refs/tags/v') }}
+  group: mac-${{ github.ref }}-${{ inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v') }}
   cancel-in-progress: true
 
 permissions:
@@ -56,6 +60,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Signing check secrets
+        if: inputs.signing_check == true && inputs.release != true && !startsWith(github.ref, 'refs/tags/v')
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          MAC_DEVELOPER_ID_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
+        run: |
+          missing=""
+          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_PASSWORD; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "Repository secrets not set:$missing"
+            exit 1
+          fi
       # Before the Mac build, not after it: a release missing any of these
       # stops here in seconds instead of after the build. SPARKLE_ED_PRIVATE_KEY
       # signs appcast.xml in mac-publish.yml.
@@ -92,11 +113,12 @@ jobs:
           OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
           OFFSTAGE_API_URL: https://api.offstage.cloud
           RELEASE: ${{ inputs.release == true || startsWith(github.ref, 'refs/tags/v') }}
-          ASC_KEY_ID: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_ID || '' }}
-          ASC_ISSUER_ID: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_ISSUER_ID || '' }}
-          ASC_KEY_P8: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_P8 || '' }}
-          MAC_DEVELOPER_ID_P12: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_P12 || '' }}
-          MAC_DEVELOPER_ID_PASSWORD: ${{ (inputs.release == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
+          SIGNING_CHECK: ${{ inputs.signing_check == true && inputs.release != true && !startsWith(github.ref, 'refs/tags/v') }}
+          ASC_KEY_ID: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_ID || '' }}
+          ASC_ISSUER_ID: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_ISSUER_ID || '' }}
+          ASC_KEY_P8: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_P8 || '' }}
+          MAC_DEVELOPER_ID_P12: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_P12 || '' }}
+          MAC_DEVELOPER_ID_PASSWORD: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
         run: node .offstage/mac.mjs
       - name: Wait for the matching Cloud release
         if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')

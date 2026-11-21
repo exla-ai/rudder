@@ -223,7 +223,9 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
 
   // Phone requests become RPCs to the supervisor, scoped to that project.
   const sent = await (await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "yes, allow it" }) })).json();
-  assert.deepEqual(sent, { ok: true, echo: "send", params: { workspaceId: "libra-test", runId: "r1", text: "yes, allow it" } });
+  assert.deepEqual(sent, { ok: true, echo: "send", params: { workspaceId: "libra-test", runId: "r1", text: "yes, allow it", interrupt: false } });
+  const interrupted = await (await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "change direction", interrupt: true }) })).json();
+  assert.deepEqual(interrupted, { ok: true, echo: "send", params: { workspaceId: "libra-test", runId: "r1", text: "change direction", interrupt: true } });
   const task = await (await fetch(`${base}/api/app/task`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", text: "add a health check" }) })).json();
   assert.equal(task.echo, "task");
   const action = await (await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "merge" }) })).json();

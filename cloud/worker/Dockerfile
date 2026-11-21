@@ -191,8 +191,8 @@ ENV OPENCODE_DISABLE_AUTOUPDATE=1
 # list Rudder reads; its own updater is off. The tarballs and sha512s are the
 # ones agy's per-platform manifest names (what antigravity.google/cli/install.sh
 # would fetch for this version).
-ARG AGY_VERSION=1.5.13
-ARG AGY_BUILD=5999302598852608
+ARG AGY_VERSION=1.5.14
+ARG AGY_BUILD=5302690847260672
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=1
 WORKDIR /home/rudder
 USER rudder
@@ -201,8 +201,8 @@ RUN export NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
   && curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
   && case "${TARGETARCH:-amd64}" in \
-       amd64) AGY_PKG=linux-x64/cli_linux_x64.tar.gz AGY_SHA512=014b37387703acab1f47cd532c8bb60167a6a3537b0f9891de03f1b1ffa9614307bc83c4b2f7551273b0877d722716b0cd9e26782f6b2a50705db4f05e18c68f ;; \
-       arm64) AGY_PKG=linux-arm/cli_linux_arm64.tar.gz AGY_SHA512=dccea2eb455099f5175f0c87cc47b38fcefe4cb0cb44dea3927469bb4bbf68ac3c0b30fc04affb24c17e90959386a93c3785e8e4b8b1a3338ca4e4d57b80057b ;; \
+       amd64) AGY_PKG=linux-x64/cli_linux_x64.tar.gz AGY_SHA512=83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9 ;; \
+       arm64) AGY_PKG=linux-arm/cli_linux_arm64.tar.gz AGY_SHA512=c9b29bba475f63a1a80161ae93ba72b221c7a586d9851e4d0061546704bab66d6b2760b25d716d191724fc7564f3246456ee151e28aa37af48dbcd72bdc6c463 ;; \
        *) echo "unsupported TARGETARCH=${TARGETARCH}"; exit 1 ;; \
      esac \
   && curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}-${AGY_BUILD}/${AGY_PKG}" -o /tmp/agy.tar.gz \

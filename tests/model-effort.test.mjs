@@ -23,3 +23,17 @@ test("the Antigravity picker groups advertised efforts and submits their actual 
   });
   assert.deepEqual(modelRequest(sonnet, "auto"), { model: "claude-sonnet-4-6", effort: "auto", name: sonnet.label });
 });
+
+test("Gemini 4 Neon exposes the CLI's four selectable thinking levels", () => {
+  const rows = groupAntigravityEfforts(["low", "medium", "high", "xhigh"].map((effort) => ({
+    value: `gemini-4-neon-${effort}`,
+    label: `Gemini 4 Neon (${effort === "xhigh" ? "Extra" : effort[0].toUpperCase() + effort.slice(1)})`,
+    efforts: [],
+  })));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].label, "Gemini 4 Neon");
+  assert.deepEqual(rows[0].efforts, ["low", "medium", "high", "xhigh"]);
+  assert.deepEqual(modelRequest(rows[0], "xhigh"), {
+    model: "gemini-4-neon-xhigh", effort: null, name: "Gemini 4 Neon (Extra)",
+  });
+});

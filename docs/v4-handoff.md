@@ -970,3 +970,8 @@ Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj
 workspaces are gone (`/workspace` 85%, 22G free). Old qualification `*.py`
 scripts moved to `/workspace/rudder-scratch/old-py/`. The shared cargo target
 `/workspace/rudder-build/target` (16G) is kept as the build cache.
+
+Antigravity models: the worker pins the current CLI release and builds its model
+picker from `agy models`, grouping Google thinking-level variants while keeping
+the IDs the CLI accepts. Google only lists models available to the signed-in
+account; Rudder does not invent plan-only models.

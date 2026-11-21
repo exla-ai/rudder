@@ -1047,9 +1047,8 @@ function parseOpencodeId(id: string): ParsedModelId {
 }
 
 /**
- * "gemini-3.8-flash-high" reads "Gemini 3.8 Flash High" when agy gives it no
- * label. agy's list spans
- * model makers, so each model is its own family, ranked in list order.
+ * An Antigravity model ID reads as words when agy gives it no label. agy's
+ * list spans model makers, so each model is its own family, ranked in list order.
  */
 function parseAntigravityId(id: string): ParsedModelId {
   const { base, context } = splitContext(id);

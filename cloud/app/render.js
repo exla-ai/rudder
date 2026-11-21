@@ -85,6 +85,20 @@ export function renderMarkdown(el, text, { fileRefs = false } = {}) {
   if (fileRefs) markFileRefs(el);
 }
 
+/** Convert Markdown to a single line for native notification banners. */
+export async function markdownPreview(text, limit) {
+  await loadMarkdown();
+  const preview = document.createElement("template");
+  if (libs) {
+    preview.innerHTML = libs.purify.sanitize(libs.marked.parse(text), { USE_PROFILES: { html: true } });
+  } else {
+    renderMarkdown(preview, text);
+  }
+  for (const br of preview.content.querySelectorAll("br")) br.replaceWith(" ");
+  for (const block of preview.content.querySelectorAll("p, li, th, td, pre, blockquote, h1, h2, h3, h4, h5, h6")) block.append(" ");
+  return preview.content.textContent.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
 function enhance(root) {
   for (const table of root.querySelectorAll("table")) {
     const wrap = document.createElement("div");

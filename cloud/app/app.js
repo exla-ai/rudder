@@ -1,7 +1,7 @@
 // Rudder phone app. Plain ES modules, no build step.
 import {
   icon, toolIcon, h, setText, reconcile, renderMarkdown, loadMarkdown, onMarkdownReady,
-  markdownReady, copyText, escapeHtml,
+  markdownReady, markdownPreview, copyText, escapeHtml,
 } from "/app/render.js";
 
 import {
@@ -181,8 +181,10 @@ function notifyNewNeeds(needs) {
       const path = `/app/p/${encodeURIComponent(p.workspaceId)}/a/${encodeURIComponent(a.id)}`;
       // Already looking at it: no need to be told.
       if (document.hasFocus() && location.pathname === path) continue;
-      const body = String(a.lastMessage || "Waiting for you").replace(/\s+/g, " ").slice(0, 160);
-      postNative({ type: "notify", title: `${a.title || "An agent"} needs you · ${p.name || p.repo || ""}`.replace(/ · $/, ""), body, path });
+      markdownPreview(String(a.lastMessage || "Waiting for you"), 160).then((body) => {
+        if (document.hasFocus() && location.pathname === path) return;
+        postNative({ type: "notify", title: `${a.title || "An agent"} needs you · ${p.name || p.repo || ""}`.replace(/ · $/, ""), body: body || "Waiting for you", path });
+      });
     }
   }
   notifiedNeeds = keys;

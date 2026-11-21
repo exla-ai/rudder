@@ -5,7 +5,7 @@ const CACHE = "rudder-app-v5";
 // module), so the app opens offline after its first visit. A module or
 // stylesheet added there belongs here too.
 const SHELL = [
-  "/app", "/app/theme.js", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js", "/app/harness-logos.js",
+  "/app", "/app/theme.js", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js", "/app/model-effort.js", "/app/harness-logos.js",
   "/app/org.js", "/app/select.js", "/app/team.js", "/app/tutorial.js", "/app/mac-local.js", "/app/prompt-suggest.js", "/app/quote-reply.js", "/app/quote-text.js",
   "/app/agent-stats.js", "/app/context-meter.js", "/app/compaction.js", "/app/goal-chip.js", "/app/agent-menu.js", "/app/command-palette.js", "/app/command-rank.js", "/app/closing.js", "/app/all-agents.js", "/app/home-update.js", "/app/canvas-panel.js", "/app/chat-edit.js",
   "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/side-panel.js", "/app/notes.js", "/app/file-link.js", "/app/file-refs.js", "/app/tool-files.js", "/app/pending.js", "/app/tailscale-step.js",

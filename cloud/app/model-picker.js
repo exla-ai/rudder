@@ -6,6 +6,7 @@ import { h, icon, setText } from "/app/render.js";
 import { app, api, coarse, ls, showError, toast, track, accountCanRun, accountUsageLabel } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
 import { UpdateNow } from "/app/home-update.js";
+import { groupAntigravityEfforts, matchesModel, variantEffort, modelRequest } from "./model-effort.js";
 
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 // Effort names. Which ones a model takes comes with the list: each row's
@@ -18,10 +19,14 @@ const EFFORTS = [
   { id: "xhigh", label: "Extra high", detail: "extended reasoning" },
   { id: "max", label: "Max", detail: "maximum reasoning" },
 ];
-/** The effort choices of a list row: Auto and the levels it takes, or none. */
-const effortsOf = (row) => (row?.efforts?.length ? EFFORTS.filter((e) => e.id === "auto" || row.efforts.includes(e.id)) : []);
+/** Antigravity offers only the concrete variants returned by its CLI. */
+const effortsOf = (row) => (row?.efforts?.length ? EFFORTS.filter((e) => (e.id === "auto" && !row.variants) || row.efforts.includes(e.id)) : []);
 /** `effort` when `row` takes it, else Auto. */
-const effortFor = (row, effort) => (effortsOf(row).some((e) => e.id === effort) ? effort : "auto");
+function effortFor(row, effort, model) {
+  if (effortsOf(row).some((e) => e.id === effort)) return effort;
+  if (!row?.variants) return "auto";
+  return variantEffort(row, model) ?? (row.variants.medium ? "medium" : row.efforts[0]);
+}
 const effortLabel = (e) => EFFORTS.find((x) => x.id === e)?.label || "";
 /** How an effort reads after a model's name ("high"); Auto and none read as nothing. */
 const effortWord = (e) => (e && e !== "auto" ? effortLabel(e).toLowerCase() : null);
@@ -54,10 +59,12 @@ function loadModels() {
   }).finally(() => { modelsFetch = null; });
   return modelsFetch;
 }
-const harnessesOf = (data) => data?.harnesses || [];
+const harnessesOf = (data) => (data?.harnesses || []).map((harness) => harness.id === "antigravity"
+  ? { ...harness, models: groupAntigravityEfforts(harness.models) }
+  : harness);
 const harnessOf = (data, id) => harnessesOf(data).find((x) => x.id === id) || null;
 const rowsOf = (data, backend) => harnessOf(data, backend)?.models || [];
-const rowFor = (backend, model) => rowsOf(modelsCache, backend).find((o) => o.value === model) || null;
+const rowFor = (backend, model) => rowsOf(modelsCache, backend).find((o) => matchesModel(o, model)) || null;
 
 /**
  * A harness's name ("Claude"), from the list; one the list does not have
@@ -113,7 +120,9 @@ const pickKey = (ws) => `rudder.model.${ws}`;
 function currentChoice(ws) {
   const mine = ls.get(pickKey(ws));
   if (mine?.backend && mine?.model && mine?.name) {
-    return { backend: mine.backend, model: mine.model, effort: mine.effort || null, name: rowFor(mine.backend, mine.model)?.label ?? mine.name };
+    const row = rowFor(mine.backend, mine.model);
+    const effort = variantEffort(row, mine.model);
+    return { backend: mine.backend, model: mine.model, effort: mine.effort || null, name: effort ? row.variants[effort].label : row?.label ?? mine.name };
   }
   const cur = modelsCache?.current;
   if (cur?.backend && cur?.model && cur?.name) return { backend: cur.backend, model: cur.model, effort: cur.effort || null, name: cur.name };
@@ -365,7 +374,8 @@ export function modelChip(ws, { compact = false } = {}) {
   if (compact) el.classList.add("compact");
   const refresh = () => {
     const c = currentChoice(ws);
-    paintChip(el, c ? { backend: c.backend, name: c.name, effort: compact ? null : c.effort } : { backend: null, name: "Choose model" });
+    const row = c && rowFor(c.backend, c.model);
+    paintChip(el, c ? { backend: c.backend, name: row?.label ?? c.name, effort: compact ? null : variantEffort(row, c.model) ?? c.effort } : { backend: null, name: "Choose model" });
     el.setAttribute("aria-label", `Model for new agents: ${choiceLabel(c)}. Change`);
     el.title = `New agents start on ${choiceLabel(c)}`;
   };
@@ -402,7 +412,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
   let data = modelsCache;
   const start = currentChoice(ws);
   let pick = start && { backend: start.backend, model: start.model };
-  let effort = start?.effort || "auto";
+  let effort = start?.effort || null;
   // The account picked per harness; until a pick, the harness's default.
   const picked = {};
   const accountFor = (backend) => picked[backend] ?? availableDefault(backend);
@@ -412,7 +422,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
   const search = modelSearch(dlg, modelsEl, () => render());
   const showTab = (id) => { tab = id; revealed = false; search.tab(id); render(); };
 
-  const pickedRow = () => (pick ? rowsOf(data, pick.backend).find((o) => o.value === pick.model) || null : null);
+  const pickedRow = () => (pick ? rowsOf(data, pick.backend).find((o) => matchesModel(o, pick.model)) || null : null);
   function render() {
     if (!data) return;
     // A model the list does not have starts on its harness's first model.
@@ -420,7 +430,9 @@ export function openModelPicker(ws, { onPicked } = {}) {
       const harness = harnessOf(data, pick?.backend) || harnessesOf(data)[0];
       pick = harness?.models.length ? { backend: harness.id, model: harness.models[0].value } : null;
     }
-    const current = data.current?.backend && data.current?.model ? data.current : null;
+    const current = data.current?.backend && data.current?.model ? {
+      ...data.current, model: rowsOf(data, data.current.backend).find((row) => matchesModel(row, data.current.model))?.value ?? data.current.model,
+    } : null;
     const harnesses = harnessesOf(data);
     // A tab the list no longer has opens on the picked model's harness.
     if (!harnessOf(data, tab)) tab = pick?.backend ?? harnesses[0]?.id ?? null;
@@ -429,11 +441,17 @@ export function openModelPicker(ws, { onPicked } = {}) {
       const harness = harnessOf(data, tab);
       paintAccounts(accountEl, harness, { selected: accountFor(harness.id), onPick: (id) => { picked[harness.id] = id; render(); } });
       search.paint(harness, harness.models.length);
-      paintModels(modelsEl, { harness, models: harness.models }, { selected: pick, current, onPick: (backend, model) => { pick = { backend, model }; render(); }, reveal: !revealed, query: search.query() });
+      paintModels(modelsEl, { harness, models: harness.models }, { selected: pick && { ...pick, model: pickedRow()?.value }, current, onPick: (backend, model) => {
+        if (backend !== pick?.backend || model !== pickedRow()?.value) {
+          const row = rowsOf(data, backend).find((entry) => entry.value === model);
+          pick = { backend, model: row?.variants?.medium?.value ?? model };
+        }
+        render();
+      }, reveal: !revealed, query: search.query() });
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
     const row = pickedRow();
-    const eff = effortFor(row, effort);
+    const eff = effortFor(row, effort, pick.model);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
     useBtn.disabled = !pick || Boolean(accountRefusal(pick.backend, accountFor(pick.backend)));
     setText(useBtn, pick ? `Use ${modelText(pick.backend, row.label, dial ? eff : null)}` : "Use this model");
@@ -441,9 +459,9 @@ export function openModelPicker(ws, { onPicked } = {}) {
 
   useBtn.addEventListener("click", async () => {
     if (!pick) return;
-    const { backend, model } = pick;
+    const { backend } = pick;
     const row = pickedRow();
-    const eff = effortsOf(row).length ? effortFor(row, effort) : null;
+    const eff = effortsOf(row).length ? effortFor(row, effort, pick.model) : null;
     useBtn.disabled = true;
     try {
       // New agents on a harness start on its default account (native reads
@@ -453,11 +471,11 @@ export function openModelPicker(ws, { onPicked } = {}) {
         await api("/api/app/agent-account", { method: "POST", body: { provider: backend, account, action: "default" } });
       }
       // Exactly the dashboard grammar: /model <harness> <model> [effort].
-      const text = `/model ${backend} ${model}${eff ? ` ${eff}` : ""}`;
+      const choice = { backend, ...modelRequest(row, eff) };
+      const text = `/model ${backend} ${choice.model}${choice.effort ? ` ${choice.effort}` : ""}`;
       await api("/api/app/task", { method: "POST", body: { workspace: ws, text } });
-      const choice = { backend, model, effort: eff, name: row.label };
       ls.set(pickKey(ws), choice);
-      track("model_picked", { backend, model, effort: eff || "none" });
+      track("model_picked", { backend, model: choice.model, effort: eff || "none" });
       dlg.close();
       const as = accountsOf(backend).length > 1 ? ` as ${accountName(backend, account)}` : "";
       toast(`New agents start on ${choiceLabel(choice)}${as}`);
@@ -512,11 +530,11 @@ export function mountChatModelControl(container, { workspace, run, agent }) {
     const row = el.hidden ? null : rowFor(a.backend, a.model);
     effortEl.hidden = !effortsOf(row).length;
     if (el.hidden) return;
-    paintChip(el, { backend: a.backend, name: a.modelName, effort: null });
+    paintChip(el, { backend: a.backend, name: row?.label ?? a.modelName, effort: null });
     el.setAttribute("aria-label", `This chat runs on ${chatLabel(a)}. Change`);
     el.title = a.model ? `This chat runs on ${chatLabel(a)} (${a.model})` : `This chat runs on ${chatLabel(a)}`;
     // As the model sheet reads it: an effort the model does not list is Auto.
-    if (!effortEl.hidden) paintEffortChip(effortEl, effortFor(row, a.effort || "auto"));
+    if (!effortEl.hidden) paintEffortChip(effortEl, effortFor(row, a.effort, a.model));
   };
   el.addEventListener("click", () => openChatModelPicker({ workspace, run, agent, onSwitched: refresh }));
   effortEl.addEventListener("click", () => {
@@ -537,14 +555,15 @@ export function mountChatModelControl(container, { workspace, run, agent }) {
  * both land here. Throws what the request threw.
  */
 async function switchChatModel({ workspace, run, agent, backend, row, effort, account }) {
-  const model = row.value;
-  const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort, account } });
+  const request = modelRequest(row, effort);
+  const { model } = request;
+  const res = await api("/api/app/agent-model", { method: "POST", body: { workspace, run, model, effort: request.effort ?? "auto", account } });
   track("chat_model_switched", { backend, model, effort });
   // The dashboard took it (or will within seconds): show it now, the next
   // state refresh carries the real row.
   const a = agent();
   const moved = a && (a.account ?? MAIN) !== account;
-  if (a) { a.model = model; a.modelName = row.label; a.effort = effort === "auto" ? null : effort; a.account = account; }
+  if (a) { a.model = model; a.modelName = request.name; a.effort = request.effort === "auto" ? null : request.effort; a.account = account; }
   const as = moved ? ` as ${accountName(backend, account)}` : "";
   toast(res?.status === "queued" ? "Switching when the cloud machine picks it up" : `This chat now runs on ${modelText(backend, row.label, effort)}${as}`);
   app.refreshState();
@@ -579,7 +598,7 @@ function openEffortMenu(chip, { workspace, run, agent, onSwitched }) {
   const row = a && rowFor(a.backend, a.model);
   const choices = effortsOf(row);
   if (!choices.length) return;
-  const current = effortFor(row, a.effort || "auto");
+  const current = effortFor(row, a.effort, a.model);
   const busy = a.status === "working";
   const composer = chip.closest(".composer");
   const menu = h(`<div class="menu effort-menu" role="menu" aria-label="Effort"></div>`);
@@ -674,7 +693,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   let data = modelsCache;
   // The picked row; until a pick, the row the agent runs on.
   let pick = { backend, model: start.model };
-  let effort = start.effort || "auto";
+  let effort = start.effort || null;
   // The account picked per harness: the chat's own for its harness, the
   // default for the others, until a pick.
   const own = start.account ?? MAIN;
@@ -691,10 +710,10 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   // hand, or one its CLI no longer lists), under the name the cloud machine
   // gave it. Picking a model of another harness moves the chat.
   const sections = () => harnessesOf(data).map((harness) => {
-    if (harness.id !== backend || !start.model || harness.models.some((o) => o.value === start.model)) return { harness, models: harness.models };
+    if (harness.id !== backend || !start.model || harness.models.some((o) => matchesModel(o, start.model))) return { harness, models: harness.models };
     return { harness, models: [{ value: start.model, label: start.modelName, detail: "", efforts: [] }, ...harness.models] };
   });
-  const rowOf = (p) => sections().find((x) => x.harness.id === p.backend)?.models.find((o) => o.value === p.model) || null;
+  const rowOf = (p) => sections().find((x) => x.harness.id === p.backend)?.models.find((o) => matchesModel(o, p.model)) || null;
   function render() {
     if (!data) return;
     const a = agent() || start;
@@ -703,7 +722,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const account = accountFor(pick.backend);
     const reaccount = !moving && account !== (a.account ?? MAIN);
     const row = rowOf(pick);
-    const eff = effortFor(row, effort);
+    const eff = effortFor(row, effort, pick.model);
     const all = sections();
     // A tab the list no longer has opens on the first harness it does.
     const section = all.find((x) => x.harness.id === tab) || all[0];
@@ -713,8 +732,14 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
       paintAccounts(accountEl, section.harness, { selected: accountFor(tab), onPick: (id) => { picked[section.harness.id] = id; render(); } });
       search.paint(section.harness, section.models.length);
       paintModels(modelsEl, section, {
-        selected: pick, current: { backend, model: a.model },
-        onPick: (b, v) => { pick = { backend: b, model: v }; render(); }, reveal: !revealed, query: search.query(),
+        selected: { ...pick, model: row?.value }, current: { backend, model: rowOf({ backend, model: a.model })?.value ?? a.model },
+        onPick: (backendId, model) => {
+          if (backendId !== pick.backend || model !== row?.value) {
+            const destination = rowOf({ backend: backendId, model });
+            pick = { backend: backendId, model: destination?.variants?.medium?.value ?? model };
+          }
+          render();
+        }, reveal: !revealed, query: search.query(),
       });
     } else paintNoModels(tabsEl, accountEl, modelsEl);
     revealed = true;
@@ -730,20 +755,23 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
       : reaccount ? `The conversation carries on as ${accountName(pick.backend, account)}. Its next reply uses that account.`
       : "The conversation carries on. Its next reply uses the new model.");
     note.classList.toggle("mp-blocked", Boolean(blocked));
-    const same = !moving && !reaccount && pick.model === a.model && (!dial || eff === (a.effort || "auto"));
+    const request = row && modelRequest(row, eff);
+    const sameModel = request?.model === a.model;
+    const same = !moving && !reaccount && sameModel && (!dial || (request.effort ?? "auto") === (a.effort || "auto"));
     const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
     useBtn.disabled = !row || same || (busy && !moving) || blocked;
-    setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : reaccount && pick.model === a.model ? `Switch to ${accountName(pick.backend, account)}` : `Switch to ${name}`);
+    setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : reaccount && sameModel ? `Switch to ${accountName(pick.backend, account)}` : `Switch to ${name}`);
   }
 
   useBtn.addEventListener("click", async () => {
     const row = rowOf(pick);
     if (!row) return;
-    const eff = effortFor(row, effort);
+    const eff = effortFor(row, effort, pick.model);
     if (pick.backend !== backend) {
+      const request = modelRequest(row, eff);
       openHandoffDialog({
         workspace, run, agent,
-        to: { backend: pick.backend, model: pick.model, name: row.label, effort: eff === "auto" ? null : eff, account: accountFor(pick.backend) },
+        to: { backend: pick.backend, ...request, effort: request.effort === "auto" ? null : request.effort, account: accountFor(pick.backend) },
         onMoved: () => { dlg.close(); onSwitched(); },
       });
       return;

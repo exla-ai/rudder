@@ -346,12 +346,12 @@ fn write_claude_session_command(signal: &Path) -> String {
 /// Like `write_signal_command`, but the hook's stdin JSON is scanned for
 /// `"<key>":"<value>"` and the value is carried as the signal's `detail`. Plain
 /// sed so the hook stays a `sh -c` one-liner with no jq/node dependency; the
-/// keys this is used for (Claude's `error_type`) are closed sets of simple
+/// keys this is used for (Claude's `error`) are closed sets of simple
 /// tokens, so the `[^"]*` capture cannot smuggle a quote into the JSON.
 fn write_signal_with_detail_command(signal: &Path, state: &str, key: &str) -> String {
     let path = signal.display();
     format!(
-        "d=$(sed -n 's/.*\"{key}\":\"\\([^\"]*\\)\".*/\\1/p' | head -n 1); mkdir -p '{dir}' && printf '{{\"state\":\"{state}\",\"detail\":\"%s\"}}' \"$d\" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}'",
+        "d=$(sed -n 's/.*\"{key}\":[[:space:]]*\"\\([a-z_][a-z_]*\\)\".*/\\1/p' | head -n 1); mkdir -p '{dir}' && printf '{{\"state\":\"{state}\",\"detail\":\"%s\"}}' \"$d\" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}'",
         dir = signal
             .parent()
             .map(|p| p.display().to_string())
@@ -437,7 +437,7 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
             // The turn ended on an API error (rate_limit, overloaded, billing...).
             // `Stop` does NOT fire for these, so without this the row spun forever.
             "StopFailure": [{
-                "hooks": [{ "type": "command", "command": write_signal_with_detail_command(signal, "error", "error_type") }]
+                "hooks": [{ "type": "command", "command": write_signal_with_detail_command(signal, "error", "error") }]
             }],
             // The human answered: back to work, clear the latch. Fires once per
             // human turn, so it costs one tiny write — unlike PreToolUse, which

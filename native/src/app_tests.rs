@@ -24778,7 +24778,7 @@ fn run_hook_command(command: &str, stdin: &str) {
 
 #[cfg(not(windows))]
 #[test]
-fn claude_stop_failure_hook_writes_the_error_type_into_the_signal() {
+fn account_rotation_reads_the_claude_stop_failure_error_field() {
     let dir = std::env::temp_dir().join(format!("rudder-sig-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let signal = dir.join("run.json");
@@ -24790,7 +24790,7 @@ fn claude_stop_failure_hook_writes_the_error_type_into_the_signal() {
         .to_string();
     run_hook_command(
         &command,
-        r#"{"session_id":"s","hook_event_name":"StopFailure","error_type":"rate_limit","error_message":"slow down"}"#,
+        r#"{"session_id":"s","hook_event_name":"StopFailure","error": "rate_limit","error_details":"429 Too Many Requests"}"#,
     );
     let body = std::fs::read_to_string(&signal).expect("signal written");
     assert_eq!(
@@ -24803,7 +24803,7 @@ fn claude_stop_failure_hook_writes_the_error_type_into_the_signal() {
         Some("rate_limit"),
         "{body}"
     );
-    // No error_type at all still yields a well-formed error signal.
+    // An absent error type still yields a well-formed error signal.
     run_hook_command(&command, r#"{"hook_event_name":"StopFailure"}"#);
     let body = std::fs::read_to_string(&signal).expect("signal written");
     assert_eq!(
@@ -32511,6 +32511,26 @@ fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
         assert_eq!(app.agents[index].account, None);
         assert!(app.agents[index].terminal.is_none());
         app.agents[index].needs_permission = false;
+
+        if backend == Backend::Codex {
+            let run = &mut app.agents[index];
+            run.status = AgentStatus::Running;
+            let mut terminal = TerminalPane::spawn_shell_or_command(
+                Some(TerminalCommand::with_args("/bin/sh", ["-c", "printf '%s\\r\\n' '› Ask Codex to do anything' '  gpt-5.5 low · /workspace/repo'; exec cat"])),
+                TerminalPaneOptions::default(),
+            ).unwrap();
+            let start = Instant::now();
+            while !codex_empty_composer_at_idle(&terminal.live_screen_lines()) {
+                assert!(start.elapsed() < Duration::from_secs(2), "Codex composer did not appear");
+                thread::sleep(Duration::from_millis(10));
+            }
+            run.terminal = Some(terminal);
+            run.last_worker_input_at = Some(Instant::now());
+            assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(_)));
+            assert_eq!(app.agents[index].account, None);
+            assert_eq!(app.agents[index].turns.len(), 1);
+            app.agents[index].last_worker_input_at = None;
+        }
 
         assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Delivered));
         let run = &mut app.agents[index];

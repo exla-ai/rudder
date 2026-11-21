@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  activeUsageLimit, accountReady, checkedAccount, claudeUsageLimit,
-  claudeUsageLimitText, codexUsageLimit, jsonEvents,
+  activeUsageLimit, accountReady, applyAccountChecks, checkedAccount, claudeUsageLimit,
+  claudeUsageLimitText, codexUsageLimit, jsonEvents, routingQuotaCheckFresh,
 } from "../cloud/worker/account-usage.mjs";
 import { handoffRefusal } from "../cloud/worker/handoff.mjs";
 import { parseClaudeQuota, parseCodexQuota } from "../dist/usage.js";
@@ -61,4 +61,26 @@ test("a confirmed cap survives inconclusive checks and expires at the reset boun
   assert.equal(activeUsageLimit(checkedAccount(confirmed, { ...temporarilyUnavailable, account: "another@example.com" }, 800), 800), null);
   assert.match(handoffRefusal({ claude: [capped("main", null)] }, "claude", "main", "Claude Code"), /weekly usage limit/);
   assert.equal(handoffRefusal({ claude: [confirmed] }, "claude", "main", "Claude Code"), null);
+});
+
+test("the routing probe is refreshed after more input or a provider failure", () => {
+  const record = { lastUserInputAt: "1000", updatedAt: "1200" };
+  assert.equal(routingQuotaCheckFresh(1100, record, 1300), true);
+  assert.equal(routingQuotaCheckFresh(1100, { ...record, lastUserInputAt: "1150" }, 1300), false);
+  assert.equal(routingQuotaCheckFresh(1100, { ...record, attention: "error" }, 1300), false);
+  assert.equal(routingQuotaCheckFresh(1201, { ...record, attention: "error" }, 1300), true);
+  assert.equal(routingQuotaCheckFresh(1100, record, 31100), false);
+});
+
+test("completed periodic probes preserve newer quota, sign-out and account changes", () => {
+  const main = { id: "main", default: true, ok: true };
+  const signedIn = { id: "work", default: false, ok: true };
+  const signedOut = { id: "work", default: false, ok: false, signedIn: false };
+  const removed = { id: "removed", default: false, ok: true };
+  const capped = { ...main, ok: false, signedIn: true, usageLimit: { window: "weekly", resetsAt: null } };
+  const checks = [main, signedIn, removed].map((previous) => ({ id: previous.id, previous, result: { ok: true } }));
+  const configured = [{ id: "main", default: false }, { id: "work", default: true }];
+  assert.deepEqual(applyAccountChecks(configured, [capped, signedOut, removed], checks), [
+    { ...capped, default: false }, { ...signedOut, default: true },
+  ]);
 });

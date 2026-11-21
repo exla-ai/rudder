@@ -26,7 +26,7 @@ import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
-import { activeUsageLimit, checkedAccount, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail } from "./account-usage.mjs";
+import { activeUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
@@ -1852,7 +1852,9 @@ function readAccountQuota(backend, id, env) {
   if (!pending) {
     const account = { backend, id, default: false, dir: accounts.accountDir(backend, id, baseChildEnv) };
     pending = import(fromDist("usage.js")).then(({ fetchAccountQuota }) => fetchAccountQuota(account, env, 2500))
-      .finally(() => accountQuotaChecks.delete(key));
+      .finally(() => {
+        if (accountQuotaChecks.get(key) === pending) accountQuotaChecks.delete(key);
+      });
     accountQuotaChecks.set(key, pending);
   }
   return pending;
@@ -1880,8 +1882,14 @@ async function refreshRoutingQuota(record) {
   // outage or a generic rate limit never becomes an account quota decision.
   const key = `${backend}:${id}`;
   const last = lastQuotaChecks.get(key);
-  if (last && Date.now() - last.at < 30_000) return await last.pending;
-  const entry = { at: Date.now(), pending: null };
+  if (last?.account === row) {
+    if (routingQuotaCheckFresh(last.at, record)) return await last.pending;
+    if (last.inFlight) {
+      await last.pending;
+      return await refreshRoutingQuota(record);
+    }
+  }
+  const entry = { at: Date.now(), account: row, inFlight: true, pending: null };
   entry.pending = (async () => {
     const env = loginEnv(backend, id);
     const quota = await readAccountQuota(backend, id, env);
@@ -1892,7 +1900,8 @@ async function refreshRoutingQuota(record) {
       ? { ...account, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) }
       : account);
     await publishAccountAvailability();
-  })().catch((error) => log(`account usage check failed for ${backend} ${id}: ${error.code || error.name}`));
+  })().catch((error) => log(`account usage check failed for ${backend} ${id}: ${error.code || error.name}`))
+    .finally(() => { entry.inFlight = false; });
   lastQuotaChecks.set(key, entry);
   await entry.pending;
 }
@@ -1911,20 +1920,18 @@ async function checkCredentials() {
     const all = await accounts.listAccounts(env);
     // Each agent harness is a list of accounts, main first: Claude Code and
     // Codex can hold several (src/accounts.ts), OpenCode and Antigravity one.
-    const each = (backend, check) => Promise.all(all[backend].map(async (account) => {
-      const { id } = account;
+    const each = (backend, check) => Promise.all(all[backend].map(async ({ id }) => {
       const previous = credentials?.[backend]?.find((row) => row.id === id);
       const accountEnv = accounts.accountEnv(backend, id, env);
-      const result = await check(accountEnv, id, previous);
-      const current = credentials?.[backend]?.find((row) => row.id === id);
-      // A live turn can confirm the cap while the periodic probe is running.
-      const status = current && current !== previous && activeUsageLimit(current) && result.signedIn !== false && result.account === current.account
-        ? current
-        : checkedAccount(previous, result);
-      return { ...status, id, default: account.default };
+      return { id, previous, result: await check(accountEnv, id, previous) };
     }));
     const only = async (check) => [{ id: accounts.MAIN_ACCOUNT, default: true, ...(await check(env)) }];
-    const [github, claude, codex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), each("claude", checkClaude), each("codex", checkCodex), only(checkOpencode), only(checkAntigravity), checkAws(env)]);
+    const [github, checkedClaude, checkedCodex, opencode, antigravity, aws] = await Promise.all([checkGithub(env), each("claude", checkClaude), each("codex", checkCodex), only(checkOpencode), only(checkAntigravity), checkAws(env)]);
+    // A probe can finish before another provider, while the live quota state
+    // or the chosen default changes. Publish against the current registry.
+    const configured = await accounts.listAccounts(env);
+    const claude = applyAccountChecks(configured.claude, credentials?.claude ?? [], checkedClaude);
+    const codex = applyAccountChecks(configured.codex, credentials?.codex ?? [], checkedCodex);
     credentials = { github, claude, codex, opencode, antigravity, aws, checkedAt: new Date().toISOString() };
     // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
     // look again shortly instead of reporting a broken login for 30 minutes.
@@ -1965,6 +1972,7 @@ async function credentialsAfterLogin(provider, account) {
       checkedAt: new Date().toISOString(),
     };
     lastQuotaChecks.delete(`${provider}:${account}`);
+    accountQuotaChecks.delete(`${provider}:${account}`);
     await publishAccountAvailability();
   }
   await checkCredentials();
@@ -1997,6 +2005,7 @@ async function changeAccount(provider, account, action) {
     }
     await signOut(provider, loginEnv(provider, account));
     lastQuotaChecks.delete(`${provider}:${account}`);
+    accountQuotaChecks.delete(`${provider}:${account}`);
     if (credentials?.[provider]) {
       credentials[provider] = action === "remove"
         ? credentials[provider].filter((row) => row.id !== account)

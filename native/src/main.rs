@@ -16686,9 +16686,6 @@ Address the objection directly. If you disagree, say why inside \
                     if run.session_id.as_deref().is_none_or(|session| session.trim().is_empty()) {
                         return SteerDelivery::Failed("This chat has no saved session to continue on another account.".to_string());
                     }
-                    if let Some(reason) = self.composer_blocked_at(index) {
-                        return SteerDelivery::Failed(format!("not sent: {reason}"));
-                    }
                     let run = &self.agents[index];
                     let spec = format!("{} {} {replacement}", run.model, run.effort.map_or("auto", EffortLevel::as_str));
                     return self.switch_model_request(task_id, &spec, Some(&instruction));
@@ -17039,7 +17036,33 @@ Address the objection directly. If you disagree, say why inside \
             return SteerDelivery::Failed(error.to_string());
         }
         let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
-        if live && run.status == AgentStatus::Running
+        let mut codex_idle = false;
+        if let Some(terminal) = run.terminal.as_mut().filter(|_| live && prompt.is_some()) {
+            if self.codex_waits.contains_key(&run.id) || run.codex_plan_menu || run.codex_goal_menu.is_some()
+                || run.codex_rate_limit_menu.is_some() || self.pending_enters.iter().any(|entry| entry.run_id == run.id)
+            {
+                return SteerDelivery::Failed("This chat has an open prompt or a message being submitted. Finish it before switching accounts.".to_string());
+            }
+            if !terminal.drain_output().is_empty() {
+                run.last_output_at = Instant::now();
+            }
+            let lines = terminal.live_lines_snapshot();
+            if let Some(reason) = terminal_composer_blocked(backend, &lines) {
+                return SteerDelivery::Failed(format!("not sent: {reason}"));
+            }
+            if backend == Backend::Codex && terminal.execution_profile().is_none_or(|profile| profile == "native") {
+                // Codex can return to its composer after a quota rejection
+                // without reporting a turn-end hook. An older screen is not
+                // proof of idleness if stdin has received newer input.
+                codex_idle = !terminal.is_output_only()
+                    && run.last_worker_input_at.is_none_or(|input| run.last_output_at > input)
+                    && codex_empty_composer_at_idle(&lines);
+                if !codex_idle {
+                    return SteerDelivery::Failed("Wait for the current turn to finish and clear any draft in the Terminal before switching accounts.".to_string());
+                }
+            }
+        }
+        if live && !codex_idle && run.status == AgentStatus::Running
             && !run.needs_user_input && !matches!(run.wait_signal, Some(WaitSignal::Error(_)))
         {
             return SteerDelivery::Failed(

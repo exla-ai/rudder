@@ -55,6 +55,14 @@ export function activeUsageLimit(account, now = Date.now()) {
   return limit && (limit.resetsAt === null || limit.resetsAt > now) ? limit : null;
 }
 
+export function routingQuotaCheckFresh(checkedAt, record, now = Date.now()) {
+  // The last send can have been rejected after a probe still showed capacity.
+  // Native records store both input and lifecycle times in epoch milliseconds.
+  const inputAt = Number(record.lastUserInputAt) || 0;
+  const failedAt = record.attention === "error" ? Number(record.updatedAt) || 0 : 0;
+  return now - checkedAt < 30_000 && checkedAt > Math.max(inputAt, failedAt);
+}
+
 export function accountReady(account, now = Date.now()) {
   return !activeUsageLimit(account, now) && (account?.ok === true || account?.signedIn === true && account.usageLimit != null);
 }
@@ -67,6 +75,17 @@ export function checkedAccount(previous, result, now = Date.now()) {
   const next = result.usageLimit;
   const usageLimit = next?.resetsAt != null && (confirmed.resetsAt === null || next.resetsAt >= confirmed.resetsAt) ? next : confirmed;
   return { ...result, usageLimit };
+}
+
+export function applyAccountChecks(configured, latest, checks) {
+  return configured.flatMap(({ id, default: preferred }) => {
+    const current = latest.find((row) => row.id === id);
+    const check = checks.find((probe) => probe.id === id);
+    if (!check || current !== check.previous) {
+      return current ? [{ ...current, default: preferred }] : [];
+    }
+    return [{ ...checkedAccount(current, check.result), id, default: preferred }];
+  });
 }
 
 export function quotaDetail(limit) {

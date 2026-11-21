@@ -898,3 +898,15 @@ pub(crate) fn terminal_at_idle_prompt(backend: Backend, lines: &[String]) -> boo
             .any(|line| looks_like_idle_chrome(backend, &line) || looks_like_agent_prompt(backend, &line)),
     }
 }
+
+/// Automatic account switches replace the pane. Require Codex's empty
+/// composer so a draft in that pane is never discarded by the switch.
+pub(crate) fn codex_empty_composer_at_idle(lines: &[String]) -> bool {
+    if !terminal_at_idle_prompt(Backend::Codex, lines) {
+        return false;
+    }
+    let rows: Vec<_> = lines.iter().map(|line| normalize_terminal_line(line)).collect();
+    codex_composer_row(&rows).is_some_and(|row| {
+        matches!(rows[row].strip_prefix('›').map(str::trim), Some("" | "Ask Codex to do anything"))
+    })
+}

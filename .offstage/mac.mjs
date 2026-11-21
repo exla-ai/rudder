@@ -30,7 +30,7 @@ const stageSecrets = {
   dmg: notarySecrets,
 }
 const stageEnvs = Object.fromEntries(stages.map(stage => {
-  const envs = { CI: "1" }
+  const envs = { CI: "1", MAC_RELEASE: signedBuild ? "1" : "0" }
   for (const name of stageSecrets[stage]) {
     if (!process.env[name]) throw new Error(`${name} is required for ${stage}`)
     envs[name] = process.env[name]

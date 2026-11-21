@@ -2030,7 +2030,8 @@ Cut a release from clean `main` after the feature changes are committed:
 npm version X.Y.Z          # create the FINAL version commit and local vX.Y.Z tag; keep the tag unpushed
 # For a prerelease, use the explicit target, such as npm version 4.0.0-alpha.N.
 git push origin HEAD:release-check/X.Y.Z # qualify the exact versioned SHA; no publish
-# After the complete Release qualification is green, push the SAME main/tag SHA:
+# For a stable Mac release, wait for both Release and Prepare Mac release.
+# Push the same qualified SHA to main and the version tag:
 git push origin main vX.Y.Z # push main and only the newly created release tag
 ```
 

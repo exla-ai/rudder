@@ -101,9 +101,13 @@ case "$stage" in
     run_logged test.log xcodebuild test -project Rudder.xcodeproj -scheme RudderCoreTests \
       -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
     grep -E "Executed [0-9]+ tests" test.log | tail -1
-    run_logged build.log xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Debug \
-      -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO build
-    echo "Debug build succeeded"
+    if [[ "${MAC_RELEASE:-0}" == "1" ]]; then
+      echo "Skipping Debug build; the signed Release archive compiles the app"
+    else
+      run_logged build.log xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Debug \
+        -destination 'generic/platform=macOS' CODE_SIGNING_ALLOWED=NO build
+      echo "Debug build succeeded"
+    fi
     ;;
   sign)
     use_tools

@@ -1,7 +1,7 @@
 // Rudder phone app. Plain ES modules, no build step.
 import {
   icon, toolIcon, h, setText, reconcile, renderMarkdown, loadMarkdown, onMarkdownReady,
-  markdownReady, markdownPreview, copyText, escapeHtml,
+  markdownReady, markdownPreview, renderMarkdownExcerpt, copyText, escapeHtml,
 } from "/app/render.js";
 
 import {
@@ -1946,9 +1946,14 @@ function updateAgentRow(el, { p, a }) {
   const lock = el.querySelector(".c-lock");
   lock.hidden = a.visibility !== "private" || !hasTeam(store.state);
   lock.title = "Only you can see this agent. Teammates see only its status.";
-  const msg = (a.lastMessage || a.summary || a.task || "").replace(/\s+/g, " ").trim();
+  const msg = (a.lastMessage || a.summary || a.task || "").trim();
   const m = el.querySelector(".a-msg");
-  setText(m, msg); m.hidden = !msg;
+  const previewSig = `${markdownReady()}|${msg}`;
+  if (m.dataset.sig !== previewSig) {
+    renderMarkdownExcerpt(m, msg);
+    m.hidden = !m.textContent.trim();
+    m.dataset.sig = previewSig;
+  }
   el.setAttribute("aria-label", `${a.title || "Agent"}, ${st.label}, ${p.name}${lock.hidden ? "" : ", private"}`);
 }
 
@@ -2964,7 +2969,8 @@ function HomeScreen() {
     renderAdd();
   }
 
-  return { el, update, destroy: () => usage?.destroy() };
+  const stopMarkdownReady = onMarkdownReady(update);
+  return { el, update, destroy: () => { stopMarkdownReady(); usage?.destroy(); } };
 }
 
 // A pin tapped on this phone wins until the server's state agrees: a poll
@@ -3664,7 +3670,8 @@ function ProjectScreen(ws) {
       }
     } else emptySlot.replaceChildren();
   }
-  return { el, update };
+  const stopMarkdownReady = onMarkdownReady(update);
+  return { el, update, destroy: stopMarkdownReady };
 }
 
 /* ------------------------------------------------------------------ */

@@ -85,18 +85,36 @@ export function renderMarkdown(el, text, { fileRefs = false } = {}) {
   if (fileRefs) markFileRefs(el);
 }
 
+const PREVIEW_BLOCKS = "blockquote, div, h1, h2, h3, h4, h5, h6, li, ol, p, pre, table, tbody, td, th, thead, tr, ul";
+
+function markdownExcerpt(text) {
+  const excerpt = libs.purify.sanitize(libs.marked.parse(text), {
+    ALLOWED_TAGS: ["a", "b", "br", "code", "del", "em", "hr", "i", "s", "strong", ...PREVIEW_BLOCKS.split(", ")],
+    ALLOWED_ATTR: [],
+    ALLOW_ARIA_ATTR: false,
+    ALLOW_DATA_ATTR: false,
+    RETURN_DOM_FRAGMENT: true,
+  });
+  for (const separator of excerpt.querySelectorAll("br, hr")) separator.replaceWith(" ");
+  for (const block of excerpt.querySelectorAll(PREVIEW_BLOCKS)) block.replaceWith(" ", ...block.childNodes, " ");
+  // The whole agent row is a link. Keep each label and its emphasis in the preview.
+  for (const link of excerpt.querySelectorAll("a")) link.replaceWith(...link.childNodes);
+  return excerpt;
+}
+
+/** Render a compact excerpt inside an agent row. */
+export function renderMarkdownExcerpt(el, text) {
+  if (libs) el.replaceChildren(markdownExcerpt(text));
+  else {
+    setText(el, text.replace(/\s+/g, " "));
+    if (text) loadMarkdown();
+  }
+}
+
 /** Convert Markdown to a single line for native notification banners. */
 export async function markdownPreview(text, limit) {
   await loadMarkdown();
-  const preview = document.createElement("template");
-  if (libs) {
-    preview.innerHTML = libs.purify.sanitize(libs.marked.parse(text), { USE_PROFILES: { html: true } });
-  } else {
-    renderMarkdown(preview, text);
-  }
-  for (const br of preview.content.querySelectorAll("br")) br.replaceWith(" ");
-  for (const block of preview.content.querySelectorAll("p, li, th, td, pre, blockquote, h1, h2, h3, h4, h5, h6")) block.append(" ");
-  return preview.content.textContent.replace(/\s+/g, " ").trim().slice(0, limit);
+  return (libs ? markdownExcerpt(text).textContent : text).replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
 function enhance(root) {

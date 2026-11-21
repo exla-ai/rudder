@@ -5,6 +5,9 @@ show the reset in Settings. New work and the next prompt in a saved,
 idle conversation use the first available configured account when the
 current account is confirmed exhausted. Each account keeps its own sign-in.
 
+Agent rows on the home and project pages render compact Markdown previews
+with readable link labels, emphasis and inline code.
+
 How to work: see "Development speed" in `AGENTS.md` (main only, targeted
 checks, CI only at release, no new status docs, no hardening waves).
 

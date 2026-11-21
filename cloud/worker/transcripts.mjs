@@ -21,6 +21,8 @@ import { CLAUDE_HARNESS_TEXT, activeClaudeLines, codexLineage, codexRolloutFile,
 
 const TAIL_BYTES = 6 * 1024 * 1024;
 const PREVIEW_TAIL_BYTES = 256 * 1024;
+// Leave room to close links and emphasis even past the visible two lines.
+const PREVIEW_SOURCE_LIMIT = 2_000;
 const TOOL_OUTPUT_LIMIT = 12_000;
 // A subagent's card carries its newest messages, with shorter tool output: the
 // chat is polled every few seconds and a turn can start dozens of subagents.
@@ -307,7 +309,7 @@ export function lastAssistantText(record, { home, cache, now = Date.now() }) {
   const offsets = branch ? window.offsets.filter((_, index) => branch.keep[index]) : window.offsets;
   const { messages } = parsePage(lines, offsets, { backend, stats: null }).reader;
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
-  const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
+  const preview = last ? last.text.trim().slice(0, PREVIEW_SOURCE_LIMIT) : null;
   const remoteUrl = backend === "claude" ? claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null : null;
   const entry = { file, mtimeMs: stat.mtimeMs, size: stat.size, readAt: now, text: preview, remoteUrl };
   return { text: preview, remoteUrl, cacheEntry: entry };
@@ -910,7 +912,7 @@ function opencodePreview(record, { home, cache, now }) {
   if (last === null) {
     return null;
   }
-  const text = last.replace(/\s+/g, " ").trim().slice(0, 280) || null;
+  const text = last.trim().slice(0, PREVIEW_SOURCE_LIMIT) || null;
   const entry = { file: key, readAt: now, text, remoteUrl: null };
   return { text, remoteUrl: null, cacheEntry: entry };
 }

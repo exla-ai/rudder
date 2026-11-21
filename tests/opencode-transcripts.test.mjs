@@ -119,6 +119,15 @@ test("OpenCode: the preview is the agent's newest words, and a handoff reads its
   assert.equal(JSON.parse(recent.lines[0]).state.input.filePath, "/repo/src/a.ts");
 });
 
+test("OpenCode: a preview preserves Markdown line breaks and complete links", (t) => {
+  const text = `## Update\n\n- **Ready** in [the guide](https://example.com/${"a".repeat(320)})\n- Run \`npm test\``;
+  const { home, repo } = setup(t, (_db, addMessage) => {
+    addMessage(SESSION, "msg_06", 8000, { role: "assistant", time: { created: 8000, completed: 8500 } }, { type: "text", text });
+  });
+  const record = JSON.parse(fs.readFileSync(path.join(repo, ".rudder", "runs", "run_o", "run.json"), "utf8"));
+  assert.equal(lastAssistantText(record, { home, cache: null, now: 10_000 }).text, text);
+});
+
 test("OpenCode: background Tasks show their own status, activity and nested sessions", (t) => {
   const running = "ses_Running";
   const done = "ses_Done";

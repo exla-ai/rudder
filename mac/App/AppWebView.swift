@@ -331,7 +331,7 @@ final class RudderWebView: WKWebView {
         // Zoom, as in Safari. Taken here, before the page and the menu, so
         // Cmd++ (Shift+= on most keyboards) zooms in as well as Cmd+=.
         if flags.subtracting(.shift) == .command {
-            switch event.charactersIgnoringModifiers {
+            switch event.charactersIgnoringModifiers ?? "" {
             case "=", "+":
                 AppModel.shared.zoomIn()
                 return true

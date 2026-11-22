@@ -720,6 +720,11 @@ function updateScreen() {
   screen?.update?.();
   desktop?.update(parseRoute(location.pathname));
 }
+function repaintAgentRename() {
+  if (screen?.updateKeepingView) screen.updateKeepingView();
+  else screen?.update?.();
+  desktop?.update(parseRoute(location.pathname), { preserveChat: true });
+}
 DESKTOP_MQ.addEventListener?.("change", () => mountScreen());
 PLAN_COLUMN_MQ.addEventListener?.("change", () => updateScreen());
 SPLIT_MQ.addEventListener?.("change", () => mountScreen());
@@ -1344,8 +1349,8 @@ function DesktopShell() {
     editInPlace(node, {
       value: find()?.title || a.title || "",
       label: "Agent name",
-      onSave: (text) => renameAgent({ ws, run, find, title: text, repaint: updateScreen }),
-      onEnd: (byKey) => { row.draggable = draggable; row.classList.remove("renaming"); if (byKey) row.focus(); },
+      onSave: (text) => renameAgent({ ws, run, find, title: text, repaint: repaintAgentRename }),
+      onEnd: (byKey) => { row.draggable = draggable; row.classList.remove("renaming"); if (byKey) row.focus({ preventScroll: true }); },
     });
   };
   // Closing the agent on screen leaves its page: the other pane's agent, or the project.
@@ -1414,7 +1419,7 @@ function DesktopShell() {
     renameRow(row);
   }, { signal: life.signal });
 
-  function update(r, { revealSidebar = false } = {}) {
+  function update(r, { revealSidebar = false, preserveChat = false } = {}) {
     if (r) route = r;
     const s = store.state;
     tabs.update(route);
@@ -1504,7 +1509,11 @@ function DesktopShell() {
 
     // The plan beside the screen, for the project on screen.
     const p = route?.ws ? findProject(route.ws) : null;
-    if (splitShown) panes[1 - focused].screen?.update?.();
+    if (splitShown) {
+      const other = panes[1 - focused].screen;
+      if (preserveChat && other?.updateKeepingView) other.updateKeepingView();
+      else other?.update?.();
+    }
     // Two agents side by side take the room the plan column would.
     const showPlan = hasPlanColumn() && !!planOf(p) && !splitShown;
     planCol.hidden = !showPlan;
@@ -2026,6 +2035,7 @@ function openSignInPage(url) {
 // sign-in (src/accounts.ts); OpenCode and Antigravity one. The machine checks
 // each: `home.credentials[provider]` is a list, "main" (the CLI's own) first.
 const MULTI_ACCOUNT = new Set(["claude", "codex"]);
+const SIGN_OUT_SUPPORTED = new Set(["claude", "codex", "antigravity"]);
 const MAIN = "main";
 /** A harness's accounts as last checked; before the first check, its main one, unchecked. */
 const agentAccounts = (home, provider) => home?.credentials?.[provider] ?? [{ id: MAIN, default: true }];
@@ -2188,7 +2198,7 @@ function openAccountMenu(agent, id, anchor) {
   if (!accountUsageLabel(account)) {
     items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
   }
-  if (MULTI_ACCOUNT.has(agent.id) && (account.ok || account.signedIn) && id === MAIN) {
+  if (SIGN_OUT_SUPPORTED.has(agent.id) && (account.ok || account.signedIn)) {
     items.push("divider", { label: "Sign out", icon: "power", danger: true, run: async () => {
       const ok = await confirmDialog({
         title: `Sign ${who} out?`,
@@ -3987,8 +3997,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       editInPlace(titleEl, {
         value: a.title || "",
         label: "Agent name",
-        onSave: (text) => renameAgent({ ws, run, find: agentNow, title: text, repaint: updateScreen }),
-        onEnd: (byKey) => { if (byKey) titleEl.focus(); },
+        onSave: (text) => renameAgent({ ws, run, find: agentNow, title: text, repaint: repaintAgentRename }),
+        onEnd: (byKey) => { if (byKey) titleEl.focus({ preventScroll: true }); },
       });
     };
     titleEl.addEventListener("click", startRename);
@@ -4899,6 +4909,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   return {
     el,
     update: paint,
+    updateKeepingView: paintKeepingView,
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     destroy() {

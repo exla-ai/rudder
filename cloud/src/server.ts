@@ -7671,7 +7671,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   // which one new agents start on.
   if (req.method === "GET" && url.pathname === "/api/app/models") {
     const live = await homeWithControl(account.accountId);
-    sendJson(res, 200, await homeRpc(live.id, "models", {}, 40_000));
+    sendJson(res, 200, await homeRpc(live.id, "models", { refresh: url.searchParams.get("refresh") === "true" }, 40_000));
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/app/repos") {
@@ -7731,7 +7731,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw badRequest("action must be default, signOut or remove");
     }
     const live = await homeWithControl(account.accountId);
-    sendJson(res, 200, await homeRpc(live.id, "agentAccount", { provider, account: agentAccount, action }, 240_000));
+    sendJson(res, 200, await homeRpc(live.id, "agentAccount", { provider, account: agentAccount, action }, 45_000));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/login/finish") {

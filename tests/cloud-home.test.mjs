@@ -237,6 +237,8 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // Add project: the repo list and creating a repo run on the home machine.
   const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();
   assert.equal(repoList.echo, "repos");
+  const refreshedModels = await (await fetch(`${base}/api/app/models?refresh=true`, { headers: auth })).json();
+  assert.deepEqual(refreshedModels, { ok: true, echo: "models", params: { refresh: true } }, "opening the model picker asks the home to refresh CLI model lists");
   const created = await (await fetch(`${base}/api/app/create`, { method: "POST", headers: auth, body: JSON.stringify({ owner: "exla-ai", name: "fresh", private: true }) })).json();
   assert.ok(created.workspace, `create opens the new repo on the home machine: ${JSON.stringify(created)}`);
   const createRpc = messages.find((m) => m.type === "rpc" && m.method === "createRepo");
@@ -875,9 +877,29 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
       });
     `);
     const loginExpiresAt = new Date(Date.now() + 5 * 86_400_000).toISOString();
-    fs.writeFileSync(path.join(bin, "agy"), `#!/bin/sh
-echo 'Error: Please sign in to view available models. Launch the CLI without arguments to sign in.' >&2
-exit 1
+    fs.writeFileSync(path.join(bin, "agy"), `#!/usr/bin/env node
+const fs = require("node:fs"), path = require("node:path");
+const profile = path.join(process.env.HOME, ".agy-ok");
+const [cmd] = process.argv.slice(2);
+if (cmd === "models") {
+  if (fs.existsSync(path.join(process.env.HOME, ".agy-models-error"))) {
+    console.error("Model service unavailable"); process.exit(1);
+  }
+  if (fs.existsSync(profile)) { console.log("Signed-in account models"); process.exit(0); }
+  console.error("Error: Please sign in to view available models."); process.exit(1);
+}
+if (cmd === "-p") { console.error("Daily model usage limit reached"); process.exit(1); }
+if (cmd || !process.stdin.isTTY || fs.readdirSync(process.cwd()).length) process.exit(2);
+process.stdin.setRawMode(true);
+let step = 0;
+const keys = ["\\r", "/logout", "\\r"];
+const output = ["? for shortcuts", "> /logout  Log out", "Select login method:"];
+console.log("> Yes, I trust this folder\\nNo, exit");
+process.stdin.on("data", (data) => {
+  if (data.toString() !== keys[step]) process.exit(2);
+  if (step === 2) fs.unlinkSync(profile);
+  console.log(output[step++]);
+});
 `, { mode: 0o755 });
     // Each account's sign-in is in its own config dir (CLAUDE_CONFIG_DIR).
     fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
@@ -900,6 +922,16 @@ esac
 `, { mode: 0o755 });
     const home = path.join(scratch, "home");
     fs.mkdirSync(home);
+    fs.writeFileSync(path.join(bin, "rudder"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+if (process.argv[2] !== "__models") process.exit(2);
+const neon = fs.existsSync(path.join(process.env.HOME, "models-changed"));
+const model = neon
+  ? { value: "gemini-4-neon-medium", label: "Gemini 4 Neon (Medium)", efforts: [] }
+  : { value: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)", efforts: [] };
+process.stdout.write(JSON.stringify({ current: null, harnesses: [{ id: "antigravity", label: "Antigravity", account: "Google", models: [model], default: null }] }) + "\\n");
+`, { mode: 0o755 });
     let log = "";
     const child = spawn(process.execPath, [path.join(workerDir, "home.mjs")], {
       cwd: workerDir,
@@ -937,6 +969,19 @@ esac
     assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
     assert.equal(state.home.credentials.antigravity[0].detail, "not logged in");
 
+    const listModels = async (refresh = false) => {
+      const suffix = refresh ? "?refresh=true" : "";
+      const response = await fetch(`${base}/api/app/models${suffix}`, { headers: auth });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const beforeSignIn = await listModels();
+    assert.equal(beforeSignIn.harnesses[0].models[0].value, "gemini-3.8-flash-medium");
+    fs.writeFileSync(path.join(home, "models-changed"), "signed in");
+    assert.equal((await listModels()).harnesses[0].models[0].value, "gemini-3.8-flash-medium", "ordinary reads keep the home cache");
+    assert.equal((await listModels(true)).harnesses[0].models[0].value, "gemini-4-neon-medium", "the picker refresh reads the newly available Antigravity model");
+    assert.equal((await listModels()).harnesses[0].models[0].value, "gemini-4-neon-medium", "the refreshed model list becomes the home cache");
+
     // The supervisor reports the failed update: Cloud stops waiting on its
     // token and keeps why, and the dashboards' status file shows it.
     const failedUpdate = await waitFor(async () => {
@@ -972,7 +1017,9 @@ esac
         return done(next.home?.credentials?.claude ?? []) ? next : null;
       }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
     };
+    fs.writeFileSync(path.join(home, ".agy-ok"), "1");
     const signedIn = await signIn("main", (rows) => rows[0]?.signedIn && !rows[0].checking);
+    assert.equal(signedIn.home.credentials.antigravity[0].signedIn, true, "an inference quota error leaves sign-out available");
     assert.deepEqual(signedIn.home.credentials.claude.map((row) => [row.id, row.account, row.plan]), [["main", "me@example.com", "max"]]);
     assert.equal(signedIn.home.credentials.claude[0].ok, false);
     assert.equal(signedIn.home.credentials.claude[0].detail, "Reached the weekly usage limit");
@@ -992,10 +1039,28 @@ esac
     const madeDefault = await post("/api/app/agent-account", { provider: "claude", account: extra.id, action: "default" });
     assert.deepEqual(madeDefault.credentials.claude.map((row) => row.default), [false, true]);
     assert.equal(JSON.parse(fs.readFileSync(path.join(home, ".rudder", "config.json"), "utf8")).backends.claude.account, extra.id);
+    const signedOutExtra = await post("/api/app/agent-account", { provider: "claude", account: extra.id, action: "signOut" });
+    assert.deepEqual(signedOutExtra.credentials.claude.map((row) => [row.id, row.default, row.ok, row.detail]), [
+      ["main", false, false, "Reached the weekly usage limit"],
+      [extra.id, true, false, "not signed in"],
+    ], "sign-out publishes the known local result without waiting for provider probes");
+    assert.ok(!fs.existsSync(path.join(extraDir, ".claude-ok")));
     const removed = await post("/api/app/agent-account", { provider: "claude", account: extra.id, action: "remove" });
     assert.deepEqual(removed.credentials.claude.map((row) => [row.id, row.default]), [["main", true]]);
     assert.ok(!fs.existsSync(extraDir));
     assert.ok(fs.existsSync(path.join(home, ".claude", "projects")), "removing an account leaves what it linked to");
+    const googleAction = { provider: "antigravity", account: "main", action: "signOut" };
+    fs.writeFileSync(path.join(home, ".agy-models-error"), "1");
+    const unverifiable = await fetch(`${base}/api/app/agent-account`, {
+      method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify(googleAction),
+    });
+    assert.equal(unverifiable.ok, false);
+    assert.match(await unverifiable.text(), /Could not verify Antigravity sign-out: Model service unavailable/);
+    fs.unlinkSync(path.join(home, ".agy-models-error"));
+    fs.writeFileSync(path.join(home, ".agy-ok"), "1");
+    const signedOutGoogle = await post("/api/app/agent-account", googleAction);
+    assert.equal(signedOutGoogle.credentials.antigravity[0].detail, "not signed in");
+    assert.ok(!fs.existsSync(path.join(home, ".agy-ok")), "Antigravity logout clears the CLI profile");
     await sleep(1500);
     assert.equal(exited, null, `the supervisor is still running:\n${log}`);
   },

@@ -228,7 +228,7 @@ export function editInPlace(node, { value, label, onSave, onEnd }) {
   // The field sits in a link: a click in it must not open the agent.
   input.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); });
   input.addEventListener("dblclick", (e) => e.stopPropagation());
-  input.focus();
+  input.focus({ preventScroll: true });
   input.select();
   // Selecting scrolls a long name to its end: show its start.
   input.scrollLeft = 0;

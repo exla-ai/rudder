@@ -116,4 +116,15 @@ jobs:
           wait "$dmg" || status=1
           wait "$feed" || status=1
           [[ "$status" == 0 ]] || exit 1
-          echo "Public DMG and Sparkle feed verified $(( $(date +%s) - MAC_READY_AT ))s after Cloud health confirmation." >> "$GITHUB_STEP_SUMMARY"
+          verified=$(date +%s)
+          promoted=$(( verified - MAC_READY_AT ))
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          elapsed=$(( verified - $(date -d "$started" +%s) ))
+          {
+            echo "Public DMG and Sparkle feed verified."
+            echo "- From workflow creation (includes queue and Cloud deployment): ${elapsed}s"
+            echo "- From matching Cloud health confirmation: ${promoted}s (target 60s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( promoted > 60 )); then
+            echo "::warning::Publishing and verifying the Mac update took ${promoted}s after Cloud health confirmation"
+          fi

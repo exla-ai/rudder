@@ -1369,7 +1369,8 @@ impl TerminalPane {
 
     /// Drain a bounded batch of process output into the terminal buffer.
     ///
-    /// The returned bytes are raw terminal output for logging/debugging. The
+    /// The returned bytes are raw terminal output for logging/debugging, at
+    /// most MAX_PTY_DRAIN_BYTES plus part of one read. The
     /// in-memory buffer is updated before this method returns. Remaining bytes
     /// stay queued in order; bounded reads let input and other panes progress
     /// even while a command continuously writes output.
@@ -2579,8 +2580,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let batch = pane.drain_output();
+            // The budget is checked before each read is taken, and reads
+            // come in whatever sizes the kernel hands back (Linux 7 splits
+            // them unevenly), so a drain may pass it by less than one read.
             assert!(
-                batch.len() <= MAX_PTY_DRAIN_BYTES,
+                batch.len() < MAX_PTY_DRAIN_BYTES + PTY_READ_CHUNK_BYTES,
                 "one drain exceeded its byte budget"
             );
             if !batch.is_empty() {

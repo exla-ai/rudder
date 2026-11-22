@@ -388,7 +388,7 @@ provider in with ChatGPT's device code; with no sign-in it runs OpenCode Zen's
 free models. Open: OpenCode subagents in the app's tray, the app's "/" list
 for it, and token use in the dashboard's timeline.
 
-Antigravity (`agy`, pinned at 1.5.13 in the worker image) is a fourth agent
+Antigravity (`agy`, pinned at 1.5.14 in the worker image) is a fourth agent
 backend. The dashboard, the CLI, Cloud homes and the phone app can start,
 resume and read it. Its turn state comes from hooks in
 `~/.gemini/config/hooks.json` (a `rudder` entry that does nothing unless

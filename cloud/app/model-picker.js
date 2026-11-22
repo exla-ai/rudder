@@ -46,17 +46,37 @@ let modelsCache = ls.get(MODELS_KEY);
 let modelsFresh = false; // fetched since this page loaded
 let modelsAsked = false; // a fetch started since this page loaded
 let modelsFetch = null;
-function loadModels() {
+let modelsRefreshFetch = null;
+let modelsRequestVersion = 0;
+function storeModels(data) {
+  const changed = JSON.stringify(data) !== JSON.stringify(modelsCache);
+  modelsCache = data;
+  modelsFresh = true;
+  ls.set(MODELS_KEY, modelsCache);
+  // Agent rows on screen read their model names from the list.
+  if (changed) app.updateScreen();
+  return modelsCache;
+}
+function loadModels({ refresh = false } = {}) {
   modelsAsked = true;
-  modelsFetch ??= api("/api/app/models").then((data) => {
-    const changed = JSON.stringify(data) !== JSON.stringify(modelsCache);
-    modelsCache = data;
-    modelsFresh = true;
-    ls.set(MODELS_KEY, modelsCache);
-    // Agent rows on screen read their model names from the list.
-    if (changed) app.updateScreen();
-    return modelsCache;
-  }).finally(() => { modelsFetch = null; });
+  if (refresh) {
+    modelsRefreshFetch ??= (() => {
+      const version = ++modelsRequestVersion;
+      return api("/api/app/models?refresh=true").then((data) => {
+        if (version === modelsRequestVersion) storeModels(data);
+        return data;
+      }).finally(() => { modelsRefreshFetch = null; });
+    })();
+    return modelsRefreshFetch;
+  }
+  if (modelsRefreshFetch) return modelsRefreshFetch;
+  modelsFetch ??= (() => {
+    const version = ++modelsRequestVersion;
+    return api("/api/app/models").then((data) => {
+      if (version === modelsRequestVersion) storeModels(data);
+      return data;
+    }).finally(() => { modelsFetch = null; });
+  })();
   return modelsFetch;
 }
 const harnessesOf = (data) => (data?.harnesses || []).map((harness) => harness.id === "antigravity"
@@ -491,7 +511,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
   document.body.appendChild(dlg);
   dlg.showModal();
   render();
-  loadModels().then((res) => {
+  loadModels({ refresh: true }).then((res) => {
     data = res;
     errEl.hidden = true;
     if (!start && data.current?.backend && data.current?.model) {
@@ -791,7 +811,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
   document.body.appendChild(dlg);
   dlg.showModal();
   render();
-  loadModels().then((res) => { data = res; errEl.hidden = true; render(); })
+  loadModels({ refresh: true }).then((res) => { data = res; errEl.hidden = true; render(); })
     .catch((err) => showListError(errEl, modelsEl, err, !!data));
 }
 

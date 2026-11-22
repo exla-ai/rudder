@@ -637,6 +637,13 @@ nodeTest("a compacted conversation shows one marker with its sizes, its duration
         compactMetadata: { trigger: "auto", preTokens: 367082, postTokens: 24989, cumulativeDroppedTokens: 342093, durationMs: 63301, preservedSegment: { headUuid: "h", anchorUuid: "s1", tailUuid: "t" } } },
       { type: "user", uuid: "s1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Fix the **webhook**.\n\nIf you need specific details from before compaction (like exact code snippets), read the full transcript at: /x.jsonl\nContinue the conversation from where it left off without asking the user any further questions." } },
       { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
+      // A prompt that sets off an auto-compaction is written before the
+      // boundary and again, with the same uuid, after the summary.
+      { type: "user", uuid: "u2", timestamp: "2026-10-16T11:30:00.000Z", message: { role: "user", content: "and the retries?" } },
+      { type: "system", subtype: "compact_boundary", uuid: "cb2", timestamp: "2026-10-16T11:30:00.100Z", content: "Conversation compacted", level: "info", version: "2.1.328", compactMetadata: { trigger: "auto", preTokens: 367000, postTokens: 27000 } },
+      { type: "user", uuid: "s2", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Retries." } },
+      { type: "user", uuid: "u2", timestamp: "2026-10-16T11:30:00.000Z", message: { role: "user", content: "and the retries?" } },
+      { type: "assistant", uuid: "a3", message: { role: "assistant", content: [{ type: "text", text: "Retries are in." }] } },
     ];
     fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
     // While a compaction runs, only the dashboard's reading of the pane says so:
@@ -651,6 +658,9 @@ nodeTest("a compacted conversation shows one marker with its sizes, its duration
       ["assistant", null, "On it."],
       ["system", "compact", "Context compacted"],
       ["assistant", null, "Picking up the webhook fix."],
+      ["user", null, "and the retries?"],
+      ["system", "compact", "Context compacted"],
+      ["assistant", null, "Retries are in."],
     ]);
     assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, postTokens: 24989, durationMs: 63301, summary: "1. Fix the **webhook**." });
     assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));

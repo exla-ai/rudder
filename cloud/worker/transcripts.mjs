@@ -1011,7 +1011,17 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     },
   };
   const messages = reader.messages;
-  const push = (message) => messages.push(message);
+  // A prompt that sets off an auto-compaction is written twice with one
+  // uuid: before the boundary and again after the summary. The chat is keyed
+  // by id, so the copy shows once, where it was first sent.
+  const userIds = new Set();
+  const push = (message) => {
+    if (message.role === "user") {
+      if (userIds.has(message.id)) return;
+      userIds.add(message.id);
+    }
+    messages.push(message);
+  };
   let promptSeen = false;
   function add(entry, offset) {
     stats?.add(entry);

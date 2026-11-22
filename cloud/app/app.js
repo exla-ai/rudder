@@ -4481,12 +4481,16 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paintTool(box, box._msg);
       return;
     }
-    const retry = e.target.closest(".retry");
+    // A bubble that was not sent: send it again, or take it away.
+    const retry = e.target.closest(".retry, .drop");
     if (retry) {
       const id = retry.closest(".msg").dataset.key;
       const list = store.pending.get(key) || [];
       const item = list.find((x) => x.id === id);
-      if (item) { store.pending.set(key, list.filter((x) => x !== item)); send(item.text, [], item); }
+      if (!item) return;
+      store.pending.set(key, list.filter((x) => x !== item));
+      if (retry.classList.contains("retry")) send(item.text, [], item);
+      else paint();
     }
   });
 
@@ -4888,7 +4892,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       else if (p.state === "sent") label = "Sent";
       else if (p.state === "uploading" && uploading) label = `Uploading ${p.files.length - uploading + 1} of ${p.files.length}`;
       const foot = node.querySelector(".m-foot");
-      const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button>` : `<span>${label}</span>`;
+      const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button><button type="button" class="drop">Remove</button>` : `<span>${label}</span>`;
       if (foot.dataset.h !== html) { foot.innerHTML = html; foot.dataset.h = html; }
       return;
     }

@@ -2195,7 +2195,7 @@ function openAccountMenu(agent, id, anchor) {
   if (MULTI_ACCOUNT.has(agent.id) && list.length > 1 && !account.default) {
     items.push({ label: "Make default", icon: "check", run: () => change("default", `New ${agent.label} agents start on ${who}`) });
   }
-  if (!accountUsageLabel(account)) {
+  if (!accountUsageLabel(account) && !(agent.id === "antigravity" && (account.ok || account.signedIn))) {
     items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
   }
   if (SIGN_OUT_SUPPORTED.has(agent.id) && (account.ok || account.signedIn)) {
@@ -2330,6 +2330,7 @@ function openAgentSignIn(provider, account) {
       }
     }
     if (closed) return;
+    if (session.status === "done") return succeeded();
     if (device) return showDevice();
     if (CODE_ONLY.has(provider)) return showCode();
     if (provider === "claude" && (mode === "code" || !NATIVE_LOGIN || !session.callback)) return showCode();

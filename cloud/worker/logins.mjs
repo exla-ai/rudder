@@ -136,7 +136,7 @@ export function lastLines(output, count = 3) {
  *   onChange?: (provider: string, session: object) => void,
  *   fetchImpl?: typeof fetch,
  *   commands?: Partial<Record<string, string>>,
- *   signedIn?: (provider: string, accountEnv: object) => Promise<boolean>,
+ *   signedIn?: (provider: string, accountEnv: object) => Promise<boolean | null>,
  * }} options
  *
  * `start` takes the account to sign in and the env it runs with
@@ -254,16 +254,24 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     delete childEnv.ANTHROPIC_API_KEY;
     delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
     let term;
+    const deadline = Date.now() + URL_WAIT_MS;
     try {
       // Only the empty directory created for this sign-in can be auto-trusted.
       if (provider === "antigravity") {
+        const authenticated = await signedIn(provider, accountEnv);
+        if (session.endedAt) throw new Error(session.error || "Sign-in cancelled");
+        if (authenticated === null) throw new Error("Could not check the current Google sign-in. Try again.");
+        if (authenticated) {
+          end(session, "done");
+          return publicStart(session);
+        }
         session.workspace = fs.mkdtempSync(path.join(dir, "agy-"));
       }
       // Wide, so a URL is never wrapped onto two lines by the CLI.
       term = spawnPty(file, args, { name: "xterm-256color", cols: 2000, rows: 50, cwd: session.workspace ?? cwd, env: childEnv });
     } catch (error) {
       end(session, "failed", `could not start ${file}: ${error.message}`);
-      throw new Error(session.error);
+      throw new Error(session.error || error.message);
     }
     session.term = term;
     term.onData((data) => {
@@ -283,7 +291,6 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
     session.ttl = setTimeout(() => end(session, "failed", "The sign-in took too long. Start it again."), LOGIN_TTL_MS);
     session.ttl.unref?.();
 
-    const deadline = Date.now() + URL_WAIT_MS;
     while (!session.endedAt && Date.now() < deadline) {
       if (readUrls(session)) {
         session.status = "waiting";

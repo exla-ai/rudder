@@ -340,6 +340,10 @@ test("Antigravity: the code from Google's page signs agy in, and its session is 
   const done = await runner.finish("antigravity", started.id, { code: " 4/0AbCdEf-good\n" });
   assert.equal(done.status, "done");
   await waitFor(() => !terms[0].alive());
+  const existing = await runner.start("antigravity", { ...MAIN, accountEnv: { HOME: home } });
+  assert.equal(existing.status, "done");
+  assert.equal(existing.codeUrl, null);
+  assert.equal(terms.length, 1);
   assert.equal(fs.readdirSync(path.join(dir, "l")).some((entry) => entry.startsWith("agy-")), false);
 });
 

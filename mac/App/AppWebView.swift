@@ -50,6 +50,7 @@ struct AppWebView: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
+        webView.pageZoom = model.savedZoom
         // The app's own background behind and under the page, never white:
         // the view stays hidden behind the loading screen until it has drawn.
         webView.setValue(false, forKey: "drawsBackground")
@@ -323,9 +324,26 @@ struct AppWebView: NSViewRepresentable {
 /// the menu.
 final class RudderWebView: WKWebView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.charactersIgnoringModifiers == "," {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command, event.charactersIgnoringModifiers == "," {
             return false
+        }
+        // Zoom, as in Safari. Taken here, before the page and the menu, so
+        // Cmd++ (Shift+= on most keyboards) zooms in as well as Cmd+=.
+        if flags.subtracting(.shift) == .command {
+            switch event.charactersIgnoringModifiers {
+            case "=", "+":
+                AppModel.shared.zoomIn()
+                return true
+            case "-":
+                AppModel.shared.zoomOut()
+                return true
+            case "0":
+                AppModel.shared.actualSize()
+                return true
+            default:
+                break
+            }
         }
         return super.performKeyEquivalent(with: event)
     }

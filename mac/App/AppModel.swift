@@ -119,6 +119,37 @@ final class AppModel {
     func goForward() { webView?.goForward() }
     func openSettings() { open(path: "/app/settings") }
 
+    // MARK: Zoom
+
+    /// View > Zoom In, Zoom Out and Actual Size, in Safari's steps. The page
+    /// zoom is kept across launches.
+    static let zoomKey = "pageZoom"
+    static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+    /// The zoom a new web view starts at: 1 until one is chosen.
+    var savedZoom: CGFloat {
+        let saved = UserDefaults.standard.double(forKey: Self.zoomKey)
+        return saved > 0 ? saved : 1
+    }
+
+    func zoomIn() {
+        guard let webView, let next = Self.zoomSteps.first(where: { $0 > webView.pageZoom + 0.001 }) else { return }
+        setZoom(next)
+    }
+
+    func zoomOut() {
+        guard let webView, let next = Self.zoomSteps.last(where: { $0 < webView.pageZoom - 0.001 }) else { return }
+        setZoom(next)
+    }
+
+    func actualSize() { setZoom(1) }
+
+    private func setZoom(_ zoom: CGFloat) {
+        guard let webView else { return }
+        webView.pageZoom = zoom
+        UserDefaults.standard.set(Double(zoom), forKey: Self.zoomKey)
+    }
+
     func setBadge(_ count: Int) {
         NSApp.dockTile.badgeLabel = count > 0 ? String(count) : nil
     }

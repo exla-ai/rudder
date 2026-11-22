@@ -63,6 +63,15 @@ struct RudderMacApp: App {
                 Button("Forward") { model.goForward() }
                     .keyboardShortcut("]", modifiers: .command)
                 Divider()
+                // The web view takes these keys first (RudderWebView); the
+                // items also work while the find bar has focus.
+                Button("Actual Size") { model.actualSize() }
+                    .keyboardShortcut("0", modifiers: .command)
+                Button("Zoom In") { model.zoomIn() }
+                    .keyboardShortcut("=", modifiers: .command)
+                Button("Zoom Out") { model.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                Divider()
             }
         }
 

@@ -126,13 +126,18 @@ function setup(t) {
   }
   const terms = [];
   const changes = [];
+  // The fake CLIs write where a real one keeps its sign-in. Run from an agent
+  // session, CLAUDE_CONFIG_DIR or CODEX_HOME name that agent's own account.
+  const outer = { ...process.env };
+  delete outer.CLAUDE_CONFIG_DIR;
+  delete outer.CODEX_HOME;
   const runner = createLoginRunner({
     spawnPty: (file, args, options) => {
       const term = pipePty(file, args, options);
       terms.push(term);
       return term;
     },
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, ANTHROPIC_API_KEY: "sk-should-not-leak" },
+    env: { ...outer, PATH: `${bin}:${process.env.PATH}`, HOME: home, ANTHROPIC_API_KEY: "sk-should-not-leak" },
     dir: path.join(dir, "logins"),
     cwd: home,
     onChange: (provider, session) => changes.push(`${provider}:${session.status}`),

@@ -10,7 +10,7 @@ async function load(entry) {
   const result = await build({ entryPoints: [new URL(entry, import.meta.url).pathname], bundle: true, write: false, platform: "node", format: "esm", target: "node22" });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
 }
-const { AgentSetup, setupPaths } = await load("../src/project-files/agent-setup.ts");
+const { AgentSetup, setupPaths, skillFrontmatter } = await load("../src/project-files/agent-setup.ts");
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 const scope = (id) => ({ projectId: "agent-setup", workspaceId: id, attemptId: id, ownerEpoch: 0 });
 
@@ -100,4 +100,12 @@ test("one instructions file and shared skills for both agents; sign-in files are
   assert.equal(guide.shared, true);
   await writeFile(path.join(project, "CLAUDE.md"), "Claude only\n");
   assert.equal((await setup.projectGuide(project)).shared, false);
+});
+
+test("a skill description written as YAML block text reads as its text, not the marker", () => {
+  const folded = "---\nname: leads\ndescription: |\n  Find companies that run macOS CI\n  and rank them.\nmetadata:\n  kind: x\n---\n# Leads\n";
+  assert.deepEqual(skillFrontmatter(folded), { name: "leads", description: "Find companies that run macOS CI\nand rank them." });
+  assert.equal(skillFrontmatter("---\nname: a\ndescription: >-\n  One\n  line.\n---\n").description, "One line.");
+  assert.equal(skillFrontmatter("---\nname: a\ndescription: Starts here\n  and goes on.\n---\n").description, "Starts here and goes on.");
+  assert.equal(skillFrontmatter("---\nname: a\ndescription: \"Quoted\"\n---\n").description, "Quoted");
 });

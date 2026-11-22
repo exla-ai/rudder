@@ -99,14 +99,34 @@ async function head(at: string, limit: number): Promise<Buffer> {
   } finally { await file.close(); }
 }
 
-/** name and description from SKILL.md frontmatter. */
+/** name and description from SKILL.md frontmatter. A long description is
+ * often YAML block text (`description: |` or `>`, then indented lines) or a
+ * plain value continued on indented lines: those lines are its value. */
 export function skillFrontmatter(text: string): { name: string; description: string } {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
   const fields: Record<string, string> = {};
+  let key = "";
+  let literal = false;
+  let block: string[] = [];
+  const finish = () => {
+    if (key && block.length) fields[key] = [fields[key], ...block].filter(Boolean).join(literal ? "\n" : " ");
+    block = [];
+  };
   for (const line of (match?.[1] ?? "").split(/\r?\n/)) {
+    if (key && /^\s+\S/.test(line)) {
+      block.push(line.trim());
+      continue;
+    }
+    finish();
+    key = "";
     const field = /^([A-Za-z_-]+):\s*(.*)$/.exec(line);
-    if (field) fields[field[1].toLowerCase()] = field[2].trim().replace(/^(["'])(.*)\1$/, "$2");
+    if (!field) continue;
+    key = field[1].toLowerCase();
+    const value = field[2].trim();
+    literal = /^\|[-+]?$/.test(value);
+    fields[key] = /^[|>][-+]?$/.test(value) ? "" : value.replace(/^(["'])(.*)\1$/, "$2");
   }
+  finish();
   return { name: fields.name ?? "", description: fields.description ?? "" };
 }
 

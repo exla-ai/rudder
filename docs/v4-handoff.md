@@ -211,7 +211,12 @@ starts over in the same agent and workspace: Claude `--session-id <new>`, Codex
 a new thread (`thread/start` plus `thread/name/set`, which is what makes Codex
 save it), with the edited text as the task in the framing it launched with
 (goal, discussion scope). Mid-turn, the edit first writes Esc (the app's Stop)
-and waits up to 20 seconds for the turn to end. The chat shows a discussion's
+and waits up to 20 seconds for the turn to end; a row whose last turn ended on
+an API error (StopFailure: rate limit, refusal) is not mid-turn. An edit the
+home answers "queued" says "Sending the edited message" on the message until
+its receipt comes with the transcript; a failed one is a toast with the
+reason. Prompts on pages loaded with "Load earlier messages" are editable too,
+and a prompt written twice around an auto-compaction is one edit. The chat shows a discussion's
 or main agent's first message as the user's text. Checked with native filter
 `chat_edit` and for real (11-19): a scratch dashboard with a Claude haiku and
 a Codex luna agent, first-message and mid-turn edits; both forgot the dropped

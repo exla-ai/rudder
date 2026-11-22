@@ -56,7 +56,7 @@ const store = {
   stateError: null,
   signedOut: false,
   transcripts: new Map(),   // `${ws}|${run}` -> transcript
-  earlier: new Map(),       // `${ws}|${run}` -> {conversation,pin,cursor,messages,loading}: pages loaded above it
+  earlier: new Map(),       // `${ws}|${run}` -> {conversation,pin,cursor,messages,edits,loading}: pages loaded above it
   pending: new Map(),       // `${ws}|${run}` -> [{id,text,ts,state}]
   expanded: new Set(),      // tool message keys
   showMore: new Set(),
@@ -4151,6 +4151,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const chatMarkdown = { fileRefs: fileLinks };
   if (!ro) mountFileRefs(msgsEl, { ws, run });
   const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript({ replace: true }), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
+  // The prompts it goes on, as of the last paint.
+  let chatEdits = [];
   // Read only: whose agent this is, where the composer would be.
   const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
   if (ro) {
@@ -4614,6 +4616,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       for (const p of store.pending.get(key) || []) {
         if (p.state === "queued" && p.requestId) page.append("pending", p.requestId);
       }
+      // Edits the home answered "queued" (chat-edit.js): their receipts too.
+      for (const id of editAction.queued()) page.append("pending", id);
       const query = page.toString();
       const t = await api(transcriptUrl(query ? `&${query}` : ""), { signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -4625,6 +4629,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       lastErr = null;
       waking = false;
       reconcilePending(t);
+      editAction.settle(t.receipts);
     } catch (err) {
       if (controller.signal.aborted) return;
       // A sleeping home is being woken by the server: say so in place, no toast.
@@ -4678,7 +4683,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // above it. The first one pins the newest page's start (loadTranscript).
   async function loadEarlier() {
     const t = store.transcripts.get(key);
-    const e = store.earlier.get(key) || { conversation: t?.conversation, pin: t?.earlier, cursor: t?.earlier, messages: [], loading: false };
+    const e = store.earlier.get(key) || { conversation: t?.conversation, pin: t?.earlier, cursor: t?.earlier, messages: [], edits: [], loading: false };
     if (!e.cursor || e.loading) return;
     e.loading = true;
     store.earlier.set(key, e);
@@ -4687,6 +4692,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const page = await api(transcriptUrl(`&before=${encodeURIComponent(e.cursor)}`));
       if (store.earlier.get(key) !== e || page.conversation !== e.conversation) return;
       e.messages = [...page.messages, ...e.messages];
+      e.edits = [...(page.edits || []), ...e.edits];
       e.cursor = page.earlier;
     } catch (err) {
       if (!destroyed && store.earlier.get(key) === e && err.status !== 401) toast(err.message, { error: true });
@@ -4768,6 +4774,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return;
     }
     const earlier = store.earlier.get(key);
+    // The prompts Edit goes on (chat-edit.js): those of the pages loaded above
+    // the newest one, then its own. The pages follow on from each other, so
+    // the last is the chat's latest prompt, which every edit names.
+    chatEdits = [...(earlier?.edits || []), ...(t.edits || [])];
     const items = [];
     let lastDay = null;
     // A run of tool calls between two things the agent SAYS is one collapsed
@@ -4909,7 +4919,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       text = paintQuote(node, text);
       md.hidden = !text;
       paintAttachments(node.querySelector(".atts"), (m.attachments || []).map((path) => ({ path })));
-      editAction(node, m, store.transcripts.get(key));
+      editAction(node, m, chatEdits);
     }
     const sig = `${text}|${markdownReady()}`;
     if (md.dataset.sig !== sig) { renderMarkdown(md, text, chatMarkdown); md.dataset.sig = sig; }

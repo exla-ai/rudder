@@ -18,28 +18,42 @@ const BUSY = new Set(["starting", "working"]);
 const LONG_PRESS_MS = 450;
 
 /**
- * One chat's Edit action. Returns `paint(node, message, transcript)` for the
+ * One chat's Edit action. Returns `paint(node, message, edits)` for the
  * transcript renderer to call on every user message it paints: a message
- * the transcript's `edits` lists gets the action, every other one loses it.
+ * `edits` lists (the transcript's, those of earlier pages first; the last is
+ * the chat's latest prompt) gets the action, every other one loses it.
  * `paint.editing()` says whether a message is open for editing, so the chat
  * does not scroll it away. `agent` returns the chat's agent row now;
  * `onSent` reloads the transcript. `onReply(text)`, when given, adds Reply to
  * a phone's message menu: there the bubble's text can't be selected to quote.
+ *
+ * An edit the dashboard has not done when the home answers (a turn it stops
+ * first, a rewind that takes longer than the home waits) is answered
+ * "queued". `paint.queued()` lists those requests for the transcript to ask
+ * after (its `pending`) and `paint.settle(receipts)` takes the answers: until
+ * then the message says its edit is on the way, and one that failed says why.
  */
 export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = null }) {
   // The message open for editing: one at a time.
   let open = null;
+  // Request id -> the id of the message its edit replaces.
+  const queued = new Map();
   const busy = () => BUSY.has(agent()?.status);
 
-  function paint(node, message, transcript) {
-    const edits = transcript?.edits || [];
+  function paint(node, message, edits) {
     const target = edits.find((edit) => edit.messageId === message.id);
     const a = agent();
-    const show = !readOnly && !!a && !a.pending && !!target;
+    const sending = [...queued.values()].includes(message.id);
+    const show = !readOnly && !!a && !a.pending && !!target && !sending;
     // The request names the chat's latest prompt (the list's last) so a
     // chat that got newer messages since is refused, not cut short unseen.
-    node._edit = show ? { entry: target.entry, latest: edits[edits.length - 1].entry, text: message.text || "", attachments: message.attachments || [] } : null;
+    node._edit = show ? { messageId: message.id, entry: target.entry, latest: edits[edits.length - 1].entry, text: message.text || "", attachments: message.attachments || [] } : null;
     node.classList.toggle("editable", show);
+    // The turns after it fade, as while it was open: they are being dropped.
+    node.classList.toggle("edit-sending", sending);
+    const wait = node.querySelector(":scope > .edit-wait");
+    if (sending && !wait) node.appendChild(h(`<div class="m-foot edit-wait" role="status">Sending the edited message</div>`));
+    if (!sending) wait?.remove();
     node._editor?.note(busy());
     let foot = node.querySelector(":scope > .edit-foot");
     if (!show) {
@@ -56,6 +70,13 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = nu
     }
   }
   paint.editing = () => !!open?.isConnected;
+  paint.queued = () => [...queued.keys()];
+  paint.settle = (receipts) => {
+    for (const receipt of receipts || []) {
+      if (!queued.delete(receipt.requestId)) continue;
+      if (receipt.status === "failed") toast(`Couldn't edit the message: ${receipt.error}`, { error: true });
+    }
+  };
 
   // A phone's message menu: a long press on the message. Selecting its text is
   // off there (styles.css), so the menu copies it too.
@@ -111,7 +132,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = nu
     if (!node._edit) return;
     open?._editor?.close();
     // Taken now: a newer prompt arriving while this is open refuses the edit.
-    const { entry, latest, text, attachments } = node._edit;
+    const { messageId, entry, latest, text, attachments } = node._edit;
     const form = h(`<form class="msg-edit">
       <textarea rows="1" aria-label="Edit your message"></textarea>
       <p class="me-note"></p>
@@ -166,8 +187,9 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = nu
       try {
         const res = await api("/api/app/agent-edit", { method: "POST", body: { workspace, run, entry, latest, text: withAttachments(value, attachments) } });
         editor.close();
-        const queued = stopping ? "Stopping the turn, then sending the edited message" : "Editing when the cloud machine picks it up";
-        toast(res?.status === "queued" ? queued : "Sent the edited message");
+        if (res?.status === "queued") queued.set(res.requestId, messageId);
+        const later = stopping ? "Stopping the turn, then sending the edited message" : "Editing when the cloud machine picks it up";
+        toast(res?.status === "queued" ? later : "Sent the edited message");
         onSent();
         app.refreshState();
       } catch (err) {

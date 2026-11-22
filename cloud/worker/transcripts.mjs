@@ -45,7 +45,7 @@ function subagentsLive(record) {
  * `after` (one too) every message from that point on. A page reads back at
  * most TAIL_BYTES of the session and keeps about `limit` messages; `earlier`
  * is the cursor for the page before it, null at the start of the session.
- * Pages read before a cursor carry only their messages.
+ * Pages read before a cursor carry only their messages and their `edits`.
  */
 export function readTranscript(repoDir, runId, { limit = 300, home, before = null, after = null }) {
   const record = readRunRecord(repoDir, runId);
@@ -105,12 +105,14 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   } else if (backend === "claude") {
     attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
   }
+  // The prompts the app may offer to edit (chat-edit.js), an earlier page's
+  // too: the app adds them to the newest page's, whose last is the latest.
+  // agy cannot branch a conversation from an earlier turn, so an Antigravity
+  // chat offers none.
+  base.edits = backend === "antigravity" ? [] : editablePrompts(page.lines, backend);
   if (end) {
     return base;
   }
-  // The prompts the app may offer to edit (chat-edit.js). agy cannot branch a
-  // conversation from an earlier turn, so an Antigravity chat offers none.
-  base.edits = backend === "antigravity" ? [] : editablePrompts(page.lines, backend);
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
   base.suggestion = promptSuggestion(home, record.id);
   // A compaction under way. Its session gets nothing until it ends, so this
@@ -689,12 +691,12 @@ function opencodeTranscript(record, { home, limit, before, after }) {
   attachOpencodeSubagents(page.spawns, { home, parentId: conversation, live: subagentsLive(record), depth: 1 });
   base.messages = showAttachments(showUserTask(page.messages, record));
   base.earlier = page.start > 0 ? `${conversation}:${page.start}:` : null;
-  if (end) {
-    return base;
-  }
   // An OpenCode chat is not edited from an earlier turn (the dashboard's
   // chat edit forks Claude and Codex conversations only).
   base.edits = [];
+  if (end) {
+    return base;
+  }
   base.suggestion = promptSuggestion(home, record.id);
   base.stats = page.stats;
   base.context = page.context;

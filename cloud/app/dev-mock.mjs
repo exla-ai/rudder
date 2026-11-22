@@ -26,7 +26,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { digestRun } from "../worker/digest.mjs";
 import { readTranscript, showAttachments } from "../worker/transcripts.mjs";
 
@@ -273,6 +273,8 @@ const LONG_OUTPUT = Array.from({ length: 140 }, (_, i) => `test app_tests::case_
 // The prompts a transcript offers to edit (worker/session-lineage.mjs
 // editablePrompts): here every user message.
 const mockEdits = (msgs) => msgs.filter((m) => m.role === "user").map((m) => ({ messageId: m.id, entry: m.id, text: m.text }));
+// Request id -> { status, error }: what the dashboard did with a queued edit.
+const steerReceipts = new Map();
 
 function baseTranscript(a) {
   const t = a.createdAt;
@@ -1215,7 +1217,9 @@ const server = http.createServer(async (req, res) => {
       const page = { runId: t.a.id, conversation: t.a.id, earlier: start > 0 ? `${t.a.id}:${start}:` : null, messages: t.msgs.slice(start, end) };
       if (url.searchParams.has("before")) return json(res, 200, page);
       const compacting = t.a.id === "run_a1" && compactMode === "live" ? { since: compactSince } : null;
-      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), context: mockContext(t.a), compacting, suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null });
+      // Receipts of the requests the app asks after (home.mjs transcript), once there is one.
+      const receipts = url.searchParams.getAll("pending").filter((id) => steerReceipts.has(id)).map((id) => ({ requestId: id, ...steerReceipts.get(id) }));
+      return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), context: mockContext(t.a), compacting, suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null, receipts });
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {
@@ -1292,7 +1296,10 @@ const server = http.createServer(async (req, res) => {
     }
     // Edit a sent prompt (chat-edit.js; native chat_edit.rs on a real home):
     // the chat goes back to just before it and the new text runs instead.
-    // "fail" in the text answers with an error.
+    // "fail" in the text answers with an error. A working agent's edit is
+    // answered "queued", as a home answers when stopping the turn takes
+    // longer than it waits; its receipt comes with the transcript 4 seconds
+    // later, failed when the text says "stuck".
     if (p === "/api/app/agent-edit") {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
@@ -1301,13 +1308,29 @@ const server = http.createServer(async (req, res) => {
       const at = t.msgs.findIndex((m) => m.id === body.entry);
       if (at < 0) return json(res, 502, { error: "That message is no longer in this chat. Reload the chat and try again" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "could not relaunch run_a1: the agent's terminal is gone" });
-      await delay(t.a.status === "working" ? 1200 : 400);
-      t.msgs.splice(at, t.msgs.length - at, ...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
-      t.a.status = "working"; t.a.updatedAt = now();
-      setTimeout(() => {
-        t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: "Starting from your edited message." });
-        t.a.status = "review"; t.a.updatedAt = now(); t.a.lastMessage = "Starting from your edited message.";
-      }, 5000);
+      const rewind = () => {
+        const from = t.msgs.findIndex((m) => m.id === body.entry);
+        t.msgs.splice(from, t.msgs.length - from, ...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
+        t.a.status = "working"; t.a.updatedAt = now();
+        setTimeout(() => {
+          t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: "Starting from your edited message." });
+          t.a.status = "review"; t.a.updatedAt = now(); t.a.lastMessage = "Starting from your edited message.";
+        }, 5000);
+      };
+      if (t.a.status === "working") {
+        const requestId = randomUUID();
+        setTimeout(() => {
+          if (/stuck/i.test(body.text || "")) {
+            steerReceipts.set(requestId, { status: "failed", error: "Its turn did not stop within 20 seconds; nothing changed" });
+            return;
+          }
+          rewind();
+          steerReceipts.set(requestId, { status: "delivered" });
+        }, 4000);
+        return json(res, 200, { ok: true, status: "queued", requestId });
+      }
+      await delay(400);
+      rewind();
       return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/coordinator") {

@@ -32945,6 +32945,50 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
     app.agents[0].terminal = None;
 }
 
+#[cfg(not(windows))]
+#[test]
+fn chat_edit_after_a_turn_that_failed_goes_back_at_once() {
+    // Seen live: a turn ended on a rate limit (Claude StopFailure), so the row
+    // stayed Running, and the edit pressed Esc at an idle composer and waited
+    // 20 seconds for a turn that was not running.
+    let mut env = env_guard();
+    let dir = unique_test_repo("chat-edit-failed-turn");
+    let (home, args_file) = chat_edit_env(&mut env, &dir);
+    let workspace = dir.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let old = "33333333-3333-4333-8333-333333333333";
+    let source = chat_edit_claude_session(&home, &workspace, old);
+    crate::signals::prepare_worker_signals("edit-failed", Backend::Claude).unwrap();
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "sleep 30"])),
+        TerminalPaneOptions { size: TerminalSize { rows: 12, cols: 80 }, cwd: Some(workspace.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("edit-failed", "first ask");
+    run.cwd = workspace.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.wait_signal = Some(WaitSignal::Error(Some("rate_limit".to_string())));
+    run.session_id = Some(old.to_string());
+    run.terminal = Some(pane);
+    app.agents.push(run);
+
+    assert!(app.deliver_edit_request("edit-failed", "u2 u2\nsecond ask, said better", "edit-failed-0001").is_none());
+    assert!(app.chat_edits_waiting.is_empty(), "no turn to stop");
+    let receipt = chat_edit_receipt(&mut app, "edit-failed-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
+    let new = app.agents[0].session_id.clone().unwrap();
+    assert_ne!(new, old);
+    assert!(source.with_file_name(format!("{new}.jsonl")).is_file());
+    let args = chat_edit_launch_args(&args_file);
+    assert_eq!(args[args.len() - 2..], ["--".to_string(), "second ask, said better".to_string()]);
+    assert_eq!(app.agents[0].wait_signal, None, "the relaunch clears the failed turn");
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn needs_you_groups_what_waits_on_you_like_the_app_does() {
     // The app's "Needs you": blocked prompts, failed turns and runs, conflicts

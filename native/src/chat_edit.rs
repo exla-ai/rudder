@@ -817,9 +817,16 @@ fn edit_refusal(run: &AgentRun) -> Option<String> {
     None
 }
 
+/// A turn is running. A row whose last turn ended on an API error (Claude
+/// `StopFailure`: a rate limit, a refusal) stays Running without needing
+/// input, but no turn runs: Esc changes nothing there, so an edit that
+/// waited for it gave up after `TURN_STOP_DEADLINE`.
 fn mid_turn(run: &mut AgentRun) -> bool {
     let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
-    live && run.status == AgentStatus::Running && !run.needs_user_input
+    live
+        && run.status == AgentStatus::Running
+        && !run.needs_user_input
+        && !matches!(run.wait_signal, Some(WaitSignal::Error(_)))
 }
 
 fn valid_entry_id(entry: &str) -> bool {

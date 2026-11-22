@@ -613,6 +613,10 @@ a { color: var(--accent); }
    bubble's place, and the turns after it fade until it is sent or closed. */
 .msg.user.editing > .bubble, .msg.user.editing > .atts, .msg.user.editing > .edit-foot { display: none; }
 .msg.user.editing ~ * { opacity: 0.35; transition: opacity 0.15s; }
+/* An edited message the dashboard has not sent yet (it stops the turn
+   first): it says so, and the turns it drops stay faded. */
+.msg.user .edit-wait { justify-content: flex-end; color: var(--muted); }
+.msg.user.edit-sending ~ * { opacity: 0.35; transition: opacity 0.15s; }
 .msg-edit { width: min(100%, 620px); display: flex; flex-direction: column; gap: 8px; }
 .msg-edit textarea {
   display: block; width: 100%; box-sizing: border-box; resize: none; overflow-y: auto; max-height: 50vh;

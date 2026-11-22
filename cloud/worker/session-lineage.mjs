@@ -359,7 +359,16 @@ function claudeEditable(lines) {
       byUuid.set(entry.uuid, entry);
     }
   }
-  const prompts = entries.filter((entry) => entry && claudeTypedPrompt(entry) && !claudeMidTurn(byUuid.get(entry.parentUuid)));
+  // A prompt that sets off an auto-compaction is written twice with one
+  // uuid, before the boundary and after the summary: one prompt, listed once.
+  const listed = new Set();
+  const prompts = entries.filter((entry) => {
+    if (!entry || !claudeTypedPrompt(entry) || claudeMidTurn(byUuid.get(entry.parentUuid)) || listed.has(entry.uuid)) {
+      return false;
+    }
+    listed.add(entry.uuid);
+    return true;
+  });
   return prompts.map((prompt) => {
     const content = prompt.message.content;
     if (typeof content === "string") {

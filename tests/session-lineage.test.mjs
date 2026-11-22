@@ -60,6 +60,29 @@ test("Claude shows only the branch it is on, with parallel tool results and hist
     { messageId: "u3", entry: "u3", text: "third" },
   ]);
   assert.deepEqual(editablePrompts(blocks.slice(0, 2), "claude"), [{ messageId: "u1", entry: "u1", text: "first" }]);
+
+  // A prompt that sets off an auto-compaction is written before the boundary
+  // and again, with the same uuid, after the summary (Claude Code 2.1.3xx).
+  // The chat shows it once, so it is one prompt to edit.
+  const compacted = jsonl([
+    user("u1", null, "first ask"),
+    assistant("a1", "u1", [{ type: "text", text: "ok" }]),
+    { type: "system", subtype: "turn_duration", uuid: "d1", parentUuid: "a1" },
+    { type: "file-history-snapshot", messageId: "u2" },
+    user("u2", "d1", "second ask"),
+    { type: "system", subtype: "compact_boundary", uuid: "c1", parentUuid: null, logicalParentUuid: "u2" },
+    { type: "attachment", uuid: "x1", parentUuid: "c1", attachment: { type: "file" } },
+    { type: "user", uuid: "s1", parentUuid: "x1", isCompactSummary: true, message: { role: "user", content: "This session is being continued from a previous conversation." } },
+    user("u2", "s1", "second ask"),
+    assistant("a2", "u2", [{ type: "text", text: "on it" }]),
+    user("u3", "a2", "third ask"),
+  ]).split("\n");
+  const kept = activeClaudeLines(compacted).keep;
+  assert.deepEqual(editablePrompts(compacted.filter((_, index) => kept[index]), "claude"), [
+    { messageId: "u1", entry: "u1", text: "first ask" },
+    { messageId: "u2", entry: "u2", text: "second ask" },
+    { messageId: "u3", entry: "u3", text: "third ask" },
+  ]);
 });
 
 test("a Codex fork reads its base rollout up to the fork point, then its own lines", () => {
@@ -175,7 +198,15 @@ test("a chat reads back page by page to the session's start, past the tail read,
       const { newest, pages, messages } = pageBack(record.id, limit);
       assert.ok(pages.length > 4);
       assert.ok(newest.messages.length >= limit && newest.stats && newest.edits, "the newest page is the full one");
-      assert.deepEqual(Object.keys(pages[0]).sort(), ["conversation", "earlier", "messages", "runId"], "an earlier page carries only its messages");
+      assert.deepEqual(Object.keys(pages[0]).sort(), ["conversation", "earlier", "edits", "messages", "runId"], "an earlier page carries only its messages and edits");
+      // The first ask is editable from the page that shows it, which the
+      // newest page's read does not reach. All pages' edits, oldest first,
+      // end with the latest prompt (chat-edit.js). The reworded ask hangs
+      // off a tool result: sent mid-turn, not editable.
+      const edits = pages.flatMap((page) => page.edits);
+      assert.deepEqual(newest.edits, []);
+      assert.ok(pages[0].edits.some((edit) => edit.messageId === "u0"), `${limit} a page`);
+      assert.equal(edits.at(-1).messageId, "u0");
       const said = messages.filter((m) => m.role !== "tool").map((m) => m.text);
       assert.deepEqual(said, ["first ask", ...Array.from({ length: 60 }, (_, i) => [`reply ${i}`, ...(i === 5 ? ["the ask, reworded"] : [])]).flat()]);
       const tools = messages.filter((m) => m.role === "tool");

@@ -395,7 +395,9 @@ resume and read it. Its turn state comes from hooks in
 `RUDDER_AGY_HOOK` is set). Permission prompts and questions come from its OSC
 7501 terminal status (`AGY_CLI_OSC7501=on`). Transcripts are read from
 `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`,
-and the folder is trusted through `trustedWorkspaces` in its `settings.json`.
+and each agent's own workspace folder is trusted through `trustedWorkspaces`
+in its `settings.json` (agy asks again in any subfolder of a trusted one, and
+that dialog swallowed the first follow-up).
 Rudder refuses with a plain reason where agy has no way in: fork, branch and
 handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global

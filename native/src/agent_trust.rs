@@ -7,10 +7,12 @@
 //! itself, so it records the same decision the user would have made, once per
 //! repository, before every launch.
 //!
-//! The CLIs key trust by the Git repository root (a Rudder workspace inside a
-//! repo inherits the repo's decision), so the root is what gets trusted. An
-//! explicit `trust_level` the user already chose in Codex is never changed, and
-//! a file this code cannot read safely is left alone.
+//! Claude and Codex key trust by the Git repository root (a Rudder workspace
+//! inside a repo inherits the repo's decision), so for them the root is what
+//! gets trusted. Antigravity keys it by the exact folder it runs in, so an agy
+//! agent gets its own workspace trusted. An explicit `trust_level` the user
+//! already chose in Codex is never changed, and a file this code cannot read
+//! safely is left alone.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -68,7 +70,12 @@ pub(crate) fn trust_for(name: &str, config: &Path, cwd: &Path) {
         "agy" => trust_antigravity,
         _ => return,
     };
-    for root in trust_roots(cwd) {
+    // agy 1.5.0 and 1.5.14 both ask again in a folder inside a trusted
+    // repository. Behind that dialog the `-i` prompt still runs and its turn
+    // ends, so the next message typed into the pane was lost: the dialog
+    // dropped the paste and its Enter answered "Yes, I trust this folder".
+    let roots = if name == "agy" { vec![canonical(cwd)] } else { trust_roots(cwd) };
+    for root in roots {
         if let Some(root) = root.to_str() {
             let _ = trust(config, root);
         }
@@ -85,11 +92,16 @@ fn antigravity_settings_path() -> Option<PathBuf> {
     home().map(|home| home.join(".gemini").join("antigravity-cli").join("settings.json"))
 }
 
-/// The repository root the CLIs record trust for: the nearest ancestor with a
-/// `.git` (a jj workspace inside the user's checkout resolves to the checkout),
-/// plus the main checkout of a Git worktree. Outside a repository, the folder.
+fn canonical(cwd: &Path) -> PathBuf {
+    fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
+}
+
+/// The repository root Claude and Codex record trust for: the nearest
+/// ancestor with a `.git` (a jj workspace inside the user's checkout resolves
+/// to the checkout), plus the main checkout of a Git worktree. Outside a
+/// repository, the folder.
 pub(crate) fn trust_roots(cwd: &Path) -> Vec<PathBuf> {
-    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = canonical(cwd);
     let Some(root) = cwd.ancestors().find(|dir| dir.join(".git").exists()) else {
         return vec![cwd];
     };
@@ -561,5 +573,25 @@ mod tests {
         let plain = fs::canonicalize(temp.path()).unwrap().join("plain");
         fs::create_dir_all(&plain).unwrap();
         assert_eq!(trust_roots(&plain), vec![plain]);
+    }
+
+    #[test]
+    fn antigravity_trusts_the_workspace_itself_not_the_checkout() {
+        // agy showed its trust dialog in every Rudder workspace because only
+        // the checkout was trusted, and the first follow-up went into it.
+        let temp = tempdir();
+        let repo = fs::canonicalize(temp.path()).unwrap().join("repo");
+        let workspace = repo.join(".rudder-workspaces/project/agent-1");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(workspace.join(".jj")).unwrap();
+        let settings = temp.path().join("settings.json");
+        fs::write(&settings, r#"{"trustedWorkspaces":["/elsewhere"]}"#).unwrap();
+        trust_for("agy", &settings, &workspace);
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            value["trustedWorkspaces"],
+            serde_json::json!(["/elsewhere", workspace.to_str().unwrap()])
+        );
     }
 }

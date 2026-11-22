@@ -28,11 +28,16 @@ export const ls = {
   remove(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
 };
 export const coarse = matchMedia("(pointer: coarse)").matches;
-// Size a text box to its content. Measuring needs height:auto, and collapsing
-// the box for that read lays out the page around it: the chat above the
-// composer grows and its scroll clamps. WebKit has no scroll anchoring to undo
-// that, so the transcript jumped off the bottom on every keystroke. The box's
-// parent holds its height while the box collapses, so nothing outside moves.
+// Size a text box to its content. Measuring collapses the box, and that lays
+// out the page around it: the chat above the composer grows and its scroll
+// clamps. WebKit has no scroll anchoring to undo that, so the transcript jumped
+// off the bottom on every keystroke. The box's parent holds its height while
+// the box collapses, so nothing outside moves. The box collapses to height 0,
+// not auto: a parent that stretches its children (the chat's .slash-input, a
+// flex row) stretches an auto box to the height it holds, so the box measured
+// its old height and never shrank. It measures without a scrollbar: a classic
+// one (a Mac with a mouse) narrows the text, which then wraps a line early.
+// scrollHeight leaves out the border, which a border-box height includes.
 // `resized(grew)` runs before the parent lets go, with how many pixels taller
 // the box got (negative: shorter). The page is then laid out with the taller
 // of the two boxes, so a chat above can follow it before it ever shrinks.
@@ -40,8 +45,10 @@ export function fitTextarea(ta, resized) {
   const box = ta.parentElement;
   const was = ta.offsetHeight;
   box.style.minHeight = `${box.offsetHeight}px`;
-  ta.style.height = "auto";
-  ta.style.height = `${ta.scrollHeight}px`;
+  ta.style.height = "0";
+  ta.style.overflowY = "hidden";
+  ta.style.height = `${ta.scrollHeight + ta.offsetHeight - ta.clientHeight}px`;
+  ta.style.overflowY = "";
   const grew = resized ? ta.offsetHeight - was : 0;
   if (grew) resized(grew);
   box.style.minHeight = "";

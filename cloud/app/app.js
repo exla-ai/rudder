@@ -720,11 +720,6 @@ function updateScreen() {
   screen?.update?.();
   desktop?.update(parseRoute(location.pathname));
 }
-function repaintAgentRename() {
-  if (screen?.updateKeepingView) screen.updateKeepingView();
-  else screen?.update?.();
-  desktop?.update(parseRoute(location.pathname), { preserveChat: true });
-}
 DESKTOP_MQ.addEventListener?.("change", () => mountScreen());
 PLAN_COLUMN_MQ.addEventListener?.("change", () => updateScreen());
 SPLIT_MQ.addEventListener?.("change", () => mountScreen());
@@ -1349,7 +1344,7 @@ function DesktopShell() {
     editInPlace(node, {
       value: find()?.title || a.title || "",
       label: "Agent name",
-      onSave: (text) => renameAgent({ ws, run, find, title: text, repaint: repaintAgentRename }),
+      onSave: (text) => renameAgent({ ws, run, find, title: text, repaint: updateScreen }),
       onEnd: (byKey) => { row.draggable = draggable; row.classList.remove("renaming"); if (byKey) row.focus({ preventScroll: true }); },
     });
   };
@@ -1419,7 +1414,7 @@ function DesktopShell() {
     renameRow(row);
   }, { signal: life.signal });
 
-  function update(r, { revealSidebar = false, preserveChat = false } = {}) {
+  function update(r, { revealSidebar = false } = {}) {
     if (r) route = r;
     const s = store.state;
     tabs.update(route);
@@ -1509,11 +1504,7 @@ function DesktopShell() {
 
     // The plan beside the screen, for the project on screen.
     const p = route?.ws ? findProject(route.ws) : null;
-    if (splitShown) {
-      const other = panes[1 - focused].screen;
-      if (preserveChat && other?.updateKeepingView) other.updateKeepingView();
-      else other?.update?.();
-    }
+    if (splitShown) panes[1 - focused].screen?.update?.();
     // Two agents side by side take the room the plan column would.
     const showPlan = hasPlanColumn() && !!planOf(p) && !splitShown;
     planCol.hidden = !showPlan;
@@ -1719,12 +1710,22 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   let files = []; // [{ file, name, url }]
   ta.value = store.drafts[draftKey] || "";
   // Sizes the box to its text, or to `text` shown in its place (prompt-suggest.js).
+  let sizedFor = null;
+  let sizedWidth = 0;
   const fit = (text = null) => {
+    sizedFor = text;
     const value = ta.value;
     if (text !== null) ta.value = text;
     fitTextarea(ta, onResize);
     if (text !== null) ta.value = value;
+    sizedWidth = ta.clientWidth;
   };
+  // The text wraps again when the box's width changes: the window or pane
+  // resizes, Stop shows beside it while the agent works, or the chat is shown
+  // after being sized while hidden or not yet on the page.
+  new ResizeObserver(() => {
+    if (ta.clientWidth && ta.clientWidth !== sizedWidth) fit(sizedFor);
+  }).observe(ta);
   const grow = () => {
     fit();
     btn.disabled = busy || (!ta.value.trim() && !files.length);
@@ -3998,7 +3999,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       editInPlace(titleEl, {
         value: a.title || "",
         label: "Agent name",
-        onSave: (text) => renameAgent({ ws, run, find: agentNow, title: text, repaint: repaintAgentRename }),
+        onSave: (text) => renameAgent({ ws, run, find: agentNow, title: text, repaint: updateScreen }),
         onEnd: (byKey) => { if (byKey) titleEl.focus({ preventScroll: true }); },
       });
     };
@@ -4251,10 +4252,20 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let lastCount = 0;
   // When the running compaction's card last left (compaction.js).
   let compactEndedAt = 0;
-  // A paint that keeps what is on screen in place (paintKeepingView).
-  let holdScroll = false;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
   const toBottom = (smooth) => scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  // The items on screen now and where each one is: a paint puts the first
+  // one it keeps back in its place.
+  function onScreen() {
+    const box = scroller.getBoundingClientRect();
+    const seen = [];
+    for (const node of msgsEl.children) {
+      const r = node.getBoundingClientRect();
+      if (r.top >= box.bottom) break;
+      if (r.bottom > box.top) seen.push({ node, top: r.top });
+    }
+    return seen;
+  }
   // A new line in the composer raises the bottom of the chat. At the bottom,
   // the conversation rises with it. Scrolling it up by the line did that, but
   // WebKit (the Mac app, iPhone) paints a scroll a frame apart from the layout
@@ -4549,22 +4560,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       if (!destroyed && store.earlier.get(key) === e && err.status !== 401) toast(err.message, { error: true });
     } finally {
       e.loading = false;
-      if (!destroyed) paintKeepingView();
+      // Even at the bottom of a short chat: they go in above, out of the way.
+      if (!destroyed) paint({ hold: true });
     }
   }
   el.querySelector(".load-earlier").addEventListener("click", loadEarlier);
-
-  // Messages put in above stay out of the way: the first message in view
-  // keeps its place on screen.
-  function paintKeepingView() {
-    const top = scroller.getBoundingClientRect().top;
-    const anchor = [...msgsEl.children].find((n) => n.matches(".msg, .tool, .compact, .turn-time") && n.getBoundingClientRect().bottom > top);
-    const was = anchor?.getBoundingClientRect().top;
-    holdScroll = true;
-    try { paint(); } finally { holdScroll = false; }
-    if (anchor?.isConnected) scroller.scrollTop += anchor.getBoundingClientRect().top - was;
-    atBottom = isAtBottom();
-  }
 
   function paintEarlier(t, e) {
     const cursor = e ? e.cursor : t.earlier;
@@ -4606,7 +4606,16 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     return status;
   }
 
-  function paint() {
+  function paint({ hold = false } = {}) {
+    // Unless the chat follows its newest message, what is on screen stays
+    // where it is, measured before anything here changes. Messages go in and
+    // out above it: earlier pages, and the newest page's oldest ones as the
+    // agent writes more (the worker reads a bounded tail of the session).
+    // WebKit (the Mac app, iPhone) has no scroll anchoring, and Chrome's
+    // misses these. A message open for editing stays put too, and `hold`
+    // keeps the view even at the bottom.
+    const follow = !hold && (firstPaint || (atBottom && !editAction.editing()));
+    const seen = follow ? [] : onScreen();
     const status = header();
     paintAsk();
     interruptBtn.hidden = ro || !isRunning(status);
@@ -4626,9 +4635,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       return;
     }
-    // A message open for editing stays where it is, and so does what is on
-    // screen while earlier messages go in above (paintKeepingView).
-    const wasBottom = !holdScroll && (firstPaint || (atBottom && !editAction.editing()));
     const earlier = store.earlier.get(key);
     const items = [];
     let lastDay = null;
@@ -4674,16 +4680,26 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       items.push({ kind: "error", id: "error", text: t.error, ...(ro ? { ic: t.roNotice?.includes("private") ? "lock" : "power", title: t.roNotice?.includes("private") ? "Not visible to you" : "Their cloud machine is asleep" } : {}) });
     }
 
+    // A message holds the view: a day's line or a run of steps moves as
+    // messages go in above it.
+    const kept = new Set(items.filter((x) => x.kind === "msg").map((x) => String(x.id)));
+    const anchor = seen.find((s) => kept.has(s.node.dataset.key));
     paintEarlier(t, earlier);
     reconcile(msgsEl, items, (x) => x.id, createItem, updateItem);
     typing.hidden = status !== "working" || !!t.compacting;
 
     const count = (t.messages || []).length;
-    if (wasBottom) { toBottom(false); requestAnimationFrame(() => toBottom(false)); }
-    else if (count > lastCount && lastCount > 0) pill.classList.add("show");
+    if (follow) { toBottom(false); requestAnimationFrame(() => toBottom(false)); }
+    else {
+      // Only when it moved: in WebKit a write to scrollTop can stop a scroll
+      // the trackpad is still making.
+      const shift = anchor ? Math.round(anchor.node.getBoundingClientRect().top - anchor.top) : 0;
+      if (shift) scroller.scrollTop += shift;
+      if (count > lastCount && lastCount > 0) pill.classList.add("show");
+    }
     lastCount = count;
     firstPaint = false;
-    atBottom = isAtBottom() || wasBottom;
+    atBottom = isAtBottom() || follow;
   }
 
   function createItem(x) {
@@ -4910,7 +4926,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   return {
     el,
     update: paint,
-    updateKeepingView: paintKeepingView,
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     destroy() {

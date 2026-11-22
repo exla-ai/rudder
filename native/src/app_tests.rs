@@ -28460,6 +28460,25 @@ fn an_open_menu_blocks_typed_messages_but_the_composer_and_a_running_turn_do_not
         None,
         "a message to a busy agent queues in its composer, which is fine"
     );
+    // Antigravity 1.5.14 mid-turn: its status bar says "esc to cancel", and a
+    // message typed now queues ("Press up to edit queued messages").
+    let agy_busy: Vec<String> = [
+        "> Write a 300 word essay about rivers.",
+        "⣾  I'm thinking through how to approach this....",
+        "──────────────────────────────────────────",
+        ">",
+        "──────────────────────────────────────────",
+        "esc to cancel                                            auto · Gemini 4 Neon · high",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert_eq!(terminal_composer_blocked(Backend::Antigravity, &agy_busy), None);
+    let agy_panel: Vec<String> = ["  Select a model", "> Gemini 4 Neon", "  Gemini 4 Flash", "  esc to cancel"]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(terminal_composer_blocked(Backend::Antigravity, &agy_panel).is_some());
 }
 
 #[cfg(not(windows))]

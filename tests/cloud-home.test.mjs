@@ -697,23 +697,33 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
   fs.mkdirSync(logs, { recursive: true });
   const steps = [
     { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-19T05:10:00Z", content: "Objective: run the tests\nDone when: they pass\n\nRudder-specific context injected by Rudder:\n- use jj\n\nrun the tests" },
-    { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2233, output_tokens: 69, content: "Running them." },
-    { step_index: 3, source: "MODEL", type: "RUN_COMMAND", status: "DONE", content: "npm test" },
-    { step_index: 4, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2344, output_tokens: 5, content: "All tests pass." },
+    // agy 1.5 logs a response's tool calls on it (arg values JSON-encoded)
+    // and each call's result as a GENERIC step after it, in order.
+    { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2233, output_tokens: 69, content: "Running them.", tool_calls: [
+      { name: "read_file", args: { Path: '"/repo/package.json"', StartLine: "1", EndLine: "20" } },
+      { name: "run_command", args: { CommandLine: '"npm test"', WaitMsBeforeAsync: "5000", toolSummary: '"Run the tests"' } },
+    ] },
+    { step_index: 3, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-19T05:10:02Z", content: "Created At: 2026-11-19T05:10:02Z\nCompleted At: 2026-11-19T05:10:02Z\nShowing lines 1-20 of 20\n1: {" },
+    { step_index: 4, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-19T05:10:03Z", content: "Created At: 2026-11-19T05:10:03Z\nCompleted At: 2026-11-19T05:10:09Z\nCreated At: 2026-11-19T05:10:03Z\nCompleted At: 2026-11-19T05:10:09Z\nCommand exited with code 1.\n\nCommand output:\n1 failing" },
+    { step_index: 5, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2344, output_tokens: 5, content: "One test fails." },
   ];
-  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":5,"sou`);
+  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":6,"sou`);
   const record = { id: "run-agy", backend: "antigravity", task: "Objective: run the tests\nDone when: they pass\n\nrun the tests", session: { nativeSessionId: conversation } };
   const transcript = readTranscript(fixtureRepo(record), "run-agy", { limit: 50, home });
   assert.deepEqual(transcript.messages.map((m) => [m.role, m.text || m.tool?.name]), [
     ["user", "run the tests"],
     ["assistant", "Running them."],
+    ["tool", "read_file"],
     ["tool", "run_command"],
-    ["assistant", "All tests pass."],
+    ["assistant", "One test fails."],
   ]);
-  assert.equal(transcript.messages[2].tool.input, "npm test");
+  assert.equal(transcript.messages[2].tool.input, "/repo/package.json:1-20");
+  assert.equal(transcript.messages[2].tool.output, "Showing lines 1-20 of 20\n1: {");
+  assert.deepEqual([transcript.messages[3].tool.input, transcript.messages[3].tool.isError], ["npm test", true]);
+  assert.equal(transcript.messages[3].tool.output, "Command exited with code 1.\n\nCommand output:\n1 failing");
   assert.deepEqual(transcript.edits, []);
   assert.equal(transcript.stats.model, "gemini-3.8-flash");
-  assert.equal(lastAssistantText(record, { home }).text, "All tests pass.");
+  assert.equal(lastAssistantText(record, { home }).text, "One test fails.");
 });
 
 nodeTest("agent stats: output speed over the last five responses and context left, through a compaction", () => {

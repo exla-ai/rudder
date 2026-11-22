@@ -565,15 +565,20 @@ const STATS = { claude: claudeStats, codex: codexStats, antigravity: antigravity
 // ---------------------------------------------------------------------------
 // Antigravity (agy) transcript.jsonl: one step per line,
 //   {"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE",
-//    "model":"…","input_tokens":…,"cache_read_tokens":…,"output_tokens":…,"content":"…"}
-// USER_INPUT steps are prompts, PLANNER_RESPONSE steps the model's replies, and
-// every other MODEL step a tool call (RUN_COMMAND, …).
+//    "model":"…","input_tokens":…,"cache_read_tokens":…,"output_tokens":…,"content":"…",
+//    "tool_calls":[{"name":"run_command","args":{"CommandLine":"\"npm test\"",…}}]}
+// USER_INPUT steps are prompts and PLANNER_RESPONSE steps the model's replies
+// and tool calls (each arg value JSON-encoded). The MODEL steps after a
+// response (type GENERIC as of agy 1.5) are its calls' results, in order,
+// each under a "Created At: …" / "Completed At: …" header.
 // ---------------------------------------------------------------------------
 
 function antigravityReader({ stats = null } = {}) {
+  // The newest response's calls still waiting for their result steps.
+  let pending = [];
   const reader = {
     messages: [],
-    // As claudeReader's; a tool step carries its own result.
+    // As claudeReader's: called as each result step lands on its call.
     onResult: null,
     addLine(line) {
       if (!line.trim()) {
@@ -597,17 +602,42 @@ function antigravityReader({ stats = null } = {}) {
         if (content) {
           reader.messages.push({ id, role: "assistant", ts, text: content });
         }
-      } else if (step.source === "MODEL" && typeof step.type === "string") {
-        reader.messages.push({
-          id,
-          role: "tool",
-          ts,
-          tool: { name: step.type.toLowerCase(), input: oneLine(content), output: null, isError: step.status === "ERROR" },
+        pending = (step.tool_calls ?? []).map((call, index) => {
+          const message = { id: `${id}.${index}`, role: "tool", ts, tool: { name: call.name, input: antigravityCallInput(call.args ?? {}), output: null, isError: false } };
+          reader.messages.push(message);
+          return message;
         });
+      } else if (step.source === "MODEL") {
+        const target = pending.shift() ?? null;
+        reader.onResult?.(target);
+        if (target) {
+          const output = content.replace(/^(?:(?:Created|Completed) At: \S+\n?)+/, "");
+          target.tool.output = clip(output);
+          target.tool.isError = step.status === "ERROR" || /^Command exited with code [1-9]/.test(output);
+        }
       }
     },
   };
   return reader;
+}
+
+// The row's one line for an agy tool call: the command or path it acts on,
+// else agy's own summary of the call.
+function antigravityCallInput(args) {
+  const value = (key) => {
+    if (typeof args[key] !== "string") return "";
+    try {
+      return String(JSON.parse(args[key]));
+    } catch {
+      return args[key];
+    }
+  };
+  const target = value("CommandLine") || value("Path") || value("TargetFile") || value("AbsolutePath") || value("Query") || value("Url");
+  if (target) {
+    const lines = value("StartLine") && value("EndLine") ? `:${value("StartLine")}-${value("EndLine")}` : "";
+    return oneLine(`${target}${lines}`);
+  }
+  return oneLine(value("toolSummary") || Object.keys(args).map((key) => `${key} ${value(key)}`).join(", "));
 }
 
 // The model agy answered with last. agy names no context window and its steps

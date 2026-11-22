@@ -875,8 +875,19 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
         .map(|line| normalize_terminal_line(line).to_lowercase())
         .filter(|line| !line.is_empty())
         .take(6)
+        .filter(|line| !(backend == Backend::Antigravity && is_antigravity_turn_footer(line)))
         .any(|line| MENU_HINTS.iter().any(|hint| line.contains(hint)));
     menu_open.then_some("a menu is open in its pane (Esc closes it)")
+}
+
+/// Antigravity's status bar during a turn: `esc to cancel` where `? for
+/// shortcuts` sits when idle, then its `auto · <model> · <effort>` block. The
+/// composer stays open under a running turn and queues what is typed, so this
+/// is not a menu. Full-screen panels hide the status bar. Takes a normalized,
+/// lowercased row.
+fn is_antigravity_turn_footer(line: &str) -> bool {
+    line.strip_prefix("esc to cancel")
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace) && rest.contains(" · "))
 }
 
 /// True when the pane shows the backend parked at its composer, with no

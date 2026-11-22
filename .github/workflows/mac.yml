@@ -1,44 +1,19 @@
-# The Mac app on an offstage Mac, driven from Linux through the offstage API
-# (.offstage/mac.mjs; the job's runner never builds anything). Every change
-# under mac/ is compiled and its core tested (the Linux home machine cannot),
-# and every Rudder version tag (v*), or a manual run with `release: true`,
-# archives, signs with Developer ID,
-# notarizes and staples the app, wraps it in Rudder.dmg (notarized and stapled
-# too). When Cloud serves the matching release, the job publishes it as the
-# latest GitHub release, which https://rudder.exla.ai/download/mac serves. The steps are
-# mac/scripts/ci.sh (check, sign, notarize, dmg).
-#
-# Secrets: OFFSTAGE_API_KEY (the offstage team key), and for a release the
-# App Store Connect key (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 for
-# notarytool) and the Developer ID certificate
-# (MAC_DEVELOPER_ID_P12: base64 of the exported "Developer ID Application"
-# certificate with its key; MAC_DEVELOPER_ID_PASSWORD). Apple refuses
-# cloud-managed Developer ID signing for this key. They reach the Mac only as
-# the environment of the commands that need them, and the sandbox account is
-# wiped when the job ends. The Mac app carries Rudder's version
-# (scripts/mac-version.mjs), and the release commit bumps mac/project.yml, so
-# the tag's push releases the Mac app with npm. A manual run with
-# `release: true` on main repeats a failed one.
-#
-# A release then runs mac/scripts/publish.sh: it stages Rudder.dmg in a draft
-# release and runs mac-publish.yml, which signs it into appcast.xml (the feed
-# installed apps update from) with SPARKLE_ED_PRIVATE_KEY (the Sparkle EdDSA
-# private key, base64 of its 32-byte seed) and publishes the release.
 name: Mac
 
 on:
   push:
-    branches: ["**"]
+    branches-ignore: ["release-check/[0-9]*"]
     # Path filters do not apply to tags: every version tag releases.
     tags: ["v*"]
     paths:
       - "mac/**"
       - ".offstage/**"
       - ".github/workflows/mac.yml"
+      - ".github/workflows/mac-prepare.yml"
   workflow_dispatch:
     inputs:
       release:
-        description: "Sign, notarize and publish Rudder.dmg"
+        description: "Publish the prepared Mac release for this version tag"
         type: boolean
         default: false
       signing_check:
@@ -46,111 +21,110 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: mac-${{ github.ref }}-${{ inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v') }}
-  cancel-in-progress: true
-
 permissions:
-  contents: write
-  # publish.sh dispatches mac-publish.yml and watches it.
-  actions: write
+  contents: read
 
 jobs:
-  build:
+  check:
+    if: inputs.release != true && !startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/mac-prepare.yml
+    secrets:
+      OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
+      ASC_KEY_ID: ${{ inputs.signing_check == true && secrets.ASC_KEY_ID || '' }}
+      ASC_ISSUER_ID: ${{ inputs.signing_check == true && secrets.ASC_ISSUER_ID || '' }}
+      ASC_KEY_P8: ${{ inputs.signing_check == true && secrets.ASC_KEY_P8 || '' }}
+      MAC_DEVELOPER_ID_P12: ${{ inputs.signing_check == true && secrets.MAC_DEVELOPER_ID_P12 || '' }}
+      MAC_DEVELOPER_ID_PASSWORD: ${{ inputs.signing_check == true && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
+    with:
+      mode: ${{ inputs.signing_check == true && 'signing-check' || 'check' }}
+  publish:
+    if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: mac-publish
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Signing check secrets
-        if: inputs.signing_check == true && inputs.release != true && !startsWith(github.ref, 'refs/tags/v')
-        env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
-          MAC_DEVELOPER_ID_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
-        run: |
-          missing=""
-          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_PASSWORD; do
-            [ -n "${!name}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "Repository secrets not set:$missing"
-            exit 1
-          fi
-      # Before the Mac build, not after it: a release missing any of these
-      # stops here in seconds instead of after the build. SPARKLE_ED_PRIVATE_KEY
-      # signs appcast.xml in mac-publish.yml.
-      - name: Release secrets
-        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
-        env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-          MAC_DEVELOPER_ID_P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
-          MAC_DEVELOPER_ID_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
-        run: |
-          missing=""
-          for name in SPARKLE_ED_PRIVATE_KEY ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 MAC_DEVELOPER_ID_P12 MAC_DEVELOPER_ID_PASSWORD; do
-            [ -n "${!name}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "Repository secrets not set:$missing"
-            exit 1
-          fi
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - name: offstage SDK
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /package.json
+            /cloud/fly.toml
+            /mac/App/Info.plist
+            /mac/project.yml
+            /mac/scripts/prepared-release.sh
+            /mac/scripts/appcast.mjs
+      - name: Fetch the successful preparation for this tag and commit
         run: |
-          sdk="$RUNNER_TEMP/offstage-cloud-0.3.1.tgz"
-          curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
-          echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
-          npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
-      - name: Build on an offstage Mac
-        env:
-          OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
-          OFFSTAGE_API_URL: https://api.offstage.cloud
-          RELEASE: ${{ inputs.release == true || startsWith(github.ref, 'refs/tags/v') }}
-          SIGNING_CHECK: ${{ inputs.signing_check == true && inputs.release != true && !startsWith(github.ref, 'refs/tags/v') }}
-          ASC_KEY_ID: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_ID || '' }}
-          ASC_ISSUER_ID: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_ISSUER_ID || '' }}
-          ASC_KEY_P8: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.ASC_KEY_P8 || '' }}
-          MAC_DEVELOPER_ID_P12: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_P12 || '' }}
-          MAC_DEVELOPER_ID_PASSWORD: ${{ (inputs.release == true || inputs.signing_check == true || startsWith(github.ref, 'refs/tags/v')) && secrets.MAC_DEVELOPER_ID_PASSWORD || '' }}
-        run: node .offstage/mac.mjs
+          version="$(node -p 'require("./package.json").version')"
+          [[ "$GITHUB_REF" == "refs/tags/v$version" ]] || { echo "Run against the v$version tag"; exit 1; }
+          run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/mac-prepare.yml/runs" \
+            -f head_sha="$GITHUB_SHA" -f branch="release-check/$version" -f event=push -f status=success \
+            --jq '.workflow_runs[0] | select(. != null) | [.id, .run_attempt] | @tsv')"
+          [[ -n "$run" ]] || { echo "Prepare release-check/$version at $GITHUB_SHA first"; exit 1; }
+          read -r id attempt <<< "$run"
+          gh run download "$id" -n "mac-release-$GITHUB_SHA-$attempt" -D prepared
+          bash mac/scripts/prepared-release.sh verify prepared
       - name: Wait for the matching Cloud release
-        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
         run: |
           image="$(sed -n 's/^ *RUDDER_WORKER_IMAGE = "\([^"]*\)"$/\1/p' cloud/fly.toml)"
-          version="$(sed -n 's/^VERSION=//p' offstage-out/mac/build/release.env)"
+          version="$(sed -n 's/^VERSION=//p' prepared/release.env)"
           if [[ -z "$version" || "$image" != *":$version" ]]; then
             echo "::error::The signed Mac version does not match the worker image in cloud/fly.toml"
             exit 1
           fi
           echo "Waiting for Cloud to serve $image"
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS --max-time 10 -H 'Cache-Control: no-cache' https://rudder.exla.ai/health \
               | jq -e --arg image "$image" '.ok == true and .workerImage == $image' >/dev/null \
               && curl -fsSL --max-time 10 https://rudder.exla.ai/app -o /dev/null; then
+              echo "MAC_READY_AT=$(date +%s)" >> "$GITHUB_ENV"
               echo "Cloud is healthy on $image"
               exit 0
             fi
-            sleep 30
+            sleep 10
           done
           echo "::error::Cloud did not report a healthy deployment of $image. The Mac release is held."
           exit 1
-      - name: Publish the release
-        if: inputs.release == true || startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Release mac-v<version>-<build> with Rudder.dmg and appcast.xml, through mac-publish.yml.
-        run: mac/scripts/publish.sh offstage-out/mac/build "$GITHUB_SHA"
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mac-logs
-          path: offstage-out
-          if-no-files-found: ignore
+      - name: Publish the verified download and update feed
+        run: bash mac/scripts/prepared-release.sh publish prepared
+      - name: Measure availability on the public download and Sparkle feed
+        run: |
+          verify_public() {
+            local url="$1" file="$2"
+            for attempt in {1..6}; do
+              if curl -fsSL --max-time 20 "$url" -o "$RUNNER_TEMP/$file" && cmp -s "prepared/$file" "$RUNNER_TEMP/$file"; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::$url does not serve the prepared $file"
+            return 1
+          }
+          verify_public https://rudder.exla.ai/download/mac Rudder.dmg &
+          dmg=$!
+          verify_public "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/appcast.xml" appcast.xml &
+          feed=$!
+          status=0
+          wait "$dmg" || status=1
+          wait "$feed" || status=1
+          [[ "$status" == 0 ]] || exit 1
+          verified=$(date +%s)
+          promoted=$(( verified - MAC_READY_AT ))
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          elapsed=$(( verified - $(date -d "$started" +%s) ))
+          {
+            echo "Public DMG and Sparkle feed verified."
+            echo "- From workflow creation (includes queue and Cloud deployment): ${elapsed}s"
+            echo "- From matching Cloud health confirmation: ${promoted}s (target 60s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if (( promoted > 60 )); then
+            echo "::warning::Publishing and verifying the Mac update took ${promoted}s after Cloud health confirmation"
+          fi

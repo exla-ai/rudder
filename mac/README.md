@@ -177,7 +177,7 @@ ID export instead, which re-signs Sparkle's helpers itself.
 venv; needs Python 3.10+, so Homebrew's `python3`, not Xcode's 3.9). Settings are
 in `mac/dmg/settings.py`: 660x420, 128pt icons, Rudder at (170, 196) and
 Applications at (490, 196), LZFSE-compressed, the app icon as the volume icon.
-The release workflow (`.github/workflows/mac.yml`) uses the same script.
+The Offstage candidate build uses the same script.
 
 Applications is a Finder alias to `/Applications` that carries the folder's
 icon as its own custom icon (`mac/dmg/applications.js`, run by make-dmg.sh with
@@ -217,7 +217,16 @@ Both live on the repo's **latest** GitHub release, `mac-v<version>-<build>`:
   `releases/download/mac-v<version>-<build>/Rudder.dmg` with its length and
   EdDSA signature, so it stays right however "latest" moves.
 
-Publish both from any machine with `gh` signed in to an account that can push
+For a stable release, push the versioned commit to `release-check/X.Y.Z`.
+`mac-prepare.yml` tests the app on Offstage, signs and notarizes the app and
+DMG, and signs the Sparkle feed on Linux. Wait for that workflow and Release
+qualification to pass, then tag the same commit. The tag workflow retrieves
+the verified files from that exact preparation, waits for Cloud to serve the
+matching worker image, and publishes both files together. It records the time
+from Cloud health confirmation until both public URLs serve the prepared
+bytes. Prepared artifacts are retained for 14 days.
+
+To publish a manually built DMG, publish both files from any machine with `gh` signed in to an account that can push
 to the repo, once `mac/build/Rudder.dmg` and `mac/build/release.env` are there
 (copied from the Mac that packaged them) and the commit they were built from is
 pushed. No key is needed there:
@@ -229,7 +238,7 @@ mac/scripts/publish.sh mac/build <commit>
 `publish.sh` uploads `Rudder.dmg` and `release.env` to a draft release
 `mac-v<version>-<build>` that targets `<commit>`, runs
 `.github/workflows/mac-publish.yml` on it (`gh workflow run`) and waits for it
-(`gh run watch`). That job is the only place the Sparkle private key is used:
+(`gh run watch`). For a manual release, that job handles Sparkle signing:
 
 1. It downloads both files from the draft and checks that the tag matches
    `release.env`.
@@ -271,7 +280,7 @@ and `SUEnableDownloaderService` are off), and no entitlement is needed.
 Updates are signed with an Ed25519 key in Sparkle's format. `SUPublicEDKey` is
 base64 of the raw 32-byte public key. The private key is base64 of the 32-byte
 seed, what Sparkle's `generate_keys -x` exports. It is the
-`SPARKLE_ED_PRIVATE_KEY` repo secret, which only `mac-publish.yml` reads;
+`SPARKLE_ED_PRIVATE_KEY` repo secret, read only by the GitHub Actions signing steps;
 no machine needs a key file. Keep a backup somewhere safe, never in a Rudder
 machine's home directory (a machine update recreates it): losing the key means
 no installed app accepts another update until users download a new DMG by

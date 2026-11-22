@@ -31,7 +31,7 @@ import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
-import { createLoginRunner } from "./logins.mjs";
+import { createLoginRunner, stripAnsi } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
@@ -123,6 +123,7 @@ const PORT_SCAN_INTERVAL_MS = 5000;
 let credentials = null;
 let credentialsRunning = false;
 let credentialsAgain = false;
+let credentialsRevision = 0;
 let vaultRefreshedAt = 0;
 // The vault as last applied, as JSON: a re-sent repo list re-checks the logins
 // only when it brought different secrets.
@@ -753,7 +754,7 @@ async function handleRpc(method, params) {
     return await listGithubRepos();
   }
   if (method === "models") {
-    return await listModels();
+    return await listModels(params);
   }
   if (method === "usage") {
     // Plan usage for the app's sidebar: the providers' own meters for this
@@ -1291,8 +1292,8 @@ function refreshModels() {
   })().finally(() => { modelsRun = null; });
   return modelsRun;
 }
-async function listModels() {
-  if (!models || models.error || models.stamp !== modelSourcesStamp()) {
+async function listModels({ refresh = false } = {}) {
+  if (refresh || !models || models.error || models.stamp !== modelSourcesStamp()) {
     await refreshModels();
   }
   if (models.error) {
@@ -1915,6 +1916,7 @@ async function checkCredentials() {
   }
   credentialsRunning = true;
   credentialsAgain = false;
+  const revision = credentialsRevision;
   try {
     const env = { ...baseChildEnv };
     const all = await accounts.listAccounts(env);
@@ -1930,6 +1932,10 @@ async function checkCredentials() {
     // A probe can finish before another provider, while the live quota state
     // or the chosen default changes. Publish against the current registry.
     const configured = await accounts.listAccounts(env);
+    if (revision !== credentialsRevision) {
+      credentialsAgain = true;
+      return;
+    }
     const claude = applyAccountChecks(configured.claude, credentials?.claude ?? [], checkedClaude);
     const codex = applyAccountChecks(configured.codex, credentials?.codex ?? [], checkedCodex);
     credentials = { github, claude, codex, opencode, antigravity, aws, checkedAt: new Date().toISOString() };
@@ -1963,6 +1969,7 @@ async function credentialsAfterLogin(provider, account) {
       : provider === "antigravity"
         ? await antigravityStatus(env)
         : await codexStatus(env);
+  credentialsRevision += 1;
   if (quick.loggedIn) {
     const list = credentials?.[provider] ?? [];
     const entry = { id: account, default: list.find((row) => row.id === account)?.default ?? false, ok: true, account: quick.account, plan: quick.plan, loginExpiresAt: quick.loginExpiresAt, detail: null, checking: true };
@@ -1992,33 +1999,56 @@ function loginEnv(provider, account) {
 
 // Settings' account menu: make an account the one new agents start on, sign
 // one out, or remove an added one (signed out first: on macOS the CLI's
-// keychain item outlives its dir).
+// keychain item outlives its dir). Account changes publish their known result
+// immediately; re-running every provider's live model probe here made a local
+// settings action wait on unrelated network calls.
 async function changeAccount(provider, account, action) {
-  if (!accounts.isAccountBackend(provider)) {
+  const multipleAccounts = accounts.isAccountBackend(provider);
+  if (!multipleAccounts && !(provider === "antigravity" && account === accounts.MAIN_ACCOUNT && action === "signOut")) {
     throw new Error(`${harnessLabel(provider)} has one account per machine`);
   }
+  credentials ??= {};
   if (action === "default") {
     await accounts.setDefaultAccount(provider, account, baseChildEnv);
+    credentialsRevision += 1;
+    const configured = await accounts.listAccounts(baseChildEnv);
+    credentials[provider] = configured[provider].map(({ id, default: isDefault }) => ({
+      ...(credentials?.[provider]?.find((row) => row.id === id) ?? { id }),
+      id,
+      default: isDefault,
+    }));
   } else if (action === "signOut" || action === "remove") {
+    if (!multipleAccounts && action === "remove") {
+      throw new Error(`${harnessLabel(provider)} has one account per machine and cannot be removed.`);
+    }
     if (action === "remove" && account === accounts.MAIN_ACCOUNT) {
       throw new Error(`The main ${harnessLabel(provider)} account can be signed out, not removed.`);
     }
     await signOut(provider, loginEnv(provider, account));
     lastQuotaChecks.delete(`${provider}:${account}`);
     accountQuotaChecks.delete(`${provider}:${account}`);
-    if (credentials?.[provider]) {
-      credentials[provider] = action === "remove"
-        ? credentials[provider].filter((row) => row.id !== account)
-        : credentials[provider].map((row) => row.id === account ? { id: row.id, default: row.default, ok: false, detail: "not signed in" } : row);
-      await publishAccountAvailability();
-    }
     if (action === "remove") {
       await accounts.removeAccount(provider, account, baseChildEnv);
+    }
+    credentialsRevision += 1;
+    if (multipleAccounts) {
+      const configured = await accounts.listAccounts(baseChildEnv);
+      const previous = credentials?.[provider] ?? [];
+      credentials[provider] = configured[provider].map(({ id, default: isDefault }) => {
+        if (id === account && action === "signOut") {
+          const old = previous.find((row) => row.id === id);
+          return { id, default: isDefault, account: old?.account ?? null, plan: old?.plan ?? null, ok: false, signedIn: false, detail: "not signed in" };
+        }
+        return { ...(previous.find((row) => row.id === id) ?? { id }), id, default: isDefault };
+      });
+    } else {
+      const old = credentials?.[provider]?.find((row) => row.id === account);
+      credentials[provider] = [{ id: account, default: true, account: old?.account ?? null, plan: old?.plan ?? null, ok: false, signedIn: false, detail: "not signed in" }];
     }
   } else {
     throw new Error(`unknown account action ${action}`);
   }
-  await checkCredentials();
+  await publishAccountAvailability();
   return { ok: true, credentials };
 }
 
@@ -2027,10 +2057,62 @@ const SIGN_OUT = {
   codex: ["codex", ["logout"]],
 };
 async function signOut(provider, env) {
+  if (provider === "antigravity") {
+    await signOutAntigravity(env);
+    const status = await antigravityStatus(env, 10_000);
+    if (status.loggedIn === null) throw new Error(`Could not verify Antigravity sign-out: ${status.detail}`);
+    if (status.loggedIn !== false) {
+      throw new Error("Antigravity still has an active login after /logout.");
+    }
+    return;
+  }
   const command = SIGN_OUT[provider];
+  if (!command) throw new Error(`${harnessLabel(provider)} does not support signing out from Rudder yet`);
   const result = await capture(command[0], command[1], { env, cwd: HOME, timeoutMs: 30_000 });
   if (result.code !== 0) {
     throw new Error(`${command[0]} ${command[1].join(" ")} failed: ${firstLine(result.stderr || result.stdout) || `exit ${result.code}`}`);
+  }
+}
+
+// agy 1.5 accepts /logout only from its prompt. Print mode rejects it and
+// --prompt-interactive sends it as a model request instead of a slash command.
+async function signOutAntigravity(env) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-agy-logout-"));
+  let term;
+  let timeout;
+  try {
+    term = pty.spawn("agy", [], { name: "xterm-256color", cols: 160, rows: 35, cwd, env: { ...env, TERM: "xterm-256color" } });
+    await new Promise((resolve, reject) => {
+      let output = "";
+      let step = "prompt";
+      timeout = setTimeout(() => reject(new Error("Timed out waiting for Antigravity to sign out.")), 30_000);
+      term.onExit(({ exitCode }) => {
+        if (exitCode === 0) resolve();
+        else reject(new Error(`Antigravity exited with code ${exitCode} during sign-out.`));
+      });
+      term.onData((chunk) => {
+        output = (output + stripAnsi(chunk)).slice(-8192);
+        if (/Select login method/.test(output)) {
+          resolve();
+        } else if (/Choose your color scheme|Terms of Service & Data Use/.test(output)) {
+          reject(new Error("Finish Antigravity’s first-run setup in the machine terminal, then sign out."));
+        } else if (step === "prompt" && />\s*Yes, I trust this folder/.test(output) && /No, exit/.test(output)) {
+          output = "";
+          term.write("\r"); // Only this fresh, empty directory is being trusted.
+        } else if (step === "prompt" && output.includes("? for shortcuts")) {
+          step = "command";
+          output = "";
+          term.write("/logout");
+        } else if (step === "command" && /\/logout\s+Log out\b/i.test(output)) {
+          step = "submitted";
+          term.write("\r");
+        }
+      });
+    });
+  } finally {
+    clearTimeout(timeout);
+    term?.kill();
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 }
 
@@ -2103,11 +2185,11 @@ async function checkOpencode(env) {
 }
 
 // agy explicitly asks for sign-in when its model list needs a Google account.
-async function antigravityStatus(env) {
-  const models = await capture("agy", ["models"], { env, timeoutMs: 20_000 });
+async function antigravityStatus(env, timeoutMs = 20_000) {
+  const models = await capture("agy", ["models"], { env, timeoutMs });
   const text = `${models.stdout}\n${models.stderr}`;
   const signedOut = /please sign in to view available models/i.test(text);
-  const loggedIn = models.code === 0 && !signedOut;
+  const loggedIn = signedOut ? false : models.code === 0 ? true : null;
   const detail = signedOut ? "not logged in" : loggedIn ? null : firstLine(text) || `exit ${models.code}`;
   return { loggedIn, account: null, plan: null, detail };
 }
@@ -2208,16 +2290,20 @@ async function checkCodex(env, id, previous) {
 // Signed in (antigravityStatus), then one real request proves it works.
 async function checkAntigravity(env) {
   const status = await antigravityStatus(env);
+  if (status.loggedIn === null) {
+    return unknownSignIn(credentials?.antigravity?.[0], status.detail);
+  }
   if (!status.loggedIn) {
-    return { ok: false, account: null, plan: null, detail: status.detail };
+    return { ok: false, signedIn: false, account: null, plan: null, detail: status.detail };
   }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
     return { ok: true, account: null, plan: null, detail: null };
   }
   const text = `${probe.stdout}\n${probe.stderr}`;
-  const detail = /sign in|unauthenticated|401|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, account: null, plan: null, detail };
+  const expired = /please sign in|unauthenticated|\b401\b|(?:token|login|session)(?: has)? expired/i.test(text);
+  const detail = expired ? "login expired" : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, signedIn: !expired, account: null, plan: null, detail };
 }
 
 // The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API

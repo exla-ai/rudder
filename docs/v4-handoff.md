@@ -425,9 +425,16 @@ account of a backend is `backends.<backend>.account` in config.json. A run
 keeps its account in run.json, and the model and harness steers name it.
 Cloud homes sign in each account (`login/start` with `account`: main, an id or
 "new"), and `/api/app/agent-account` makes one the default, signs it out or
-removes it. Settings and Home list a row per account. The Add account button
-at the bottom opens sign-in for Claude Code or Codex, even while existing
-accounts are still checking. The Claude Code sign-in sheet has a full-width
+removes it. Settings and Home group accounts under each agent: a row names
+the account, its state, plan and usage, with Sign in or Sign out as a button
+on it, and Make default and Remove under its "...". Each Claude Code or Codex
+group has its own Add another account button, and the default is tagged. The
+Antigravity row shows the Google account from the `applyAuthResult` line of
+its own `agy --log-file <tmp> models` run (agy never logs its plan tier), and
+"Use another Google account" signs out and reopens sign-in, since agy offers
+its login only when signed out. Gemini 4 Neon needs a paid Google AI Pro or
+Ultra account; a free account lists only Gemini 3.8 Flash and the partner
+models. The Claude Code sign-in sheet has a full-width
 field for pasting the sign-in code. The model pickers choose the account when
 a harness has more than one. Plan usage is per account. On macOS, Claude's
 keychain entry for an added dir is `Claude Code-credentials-<sha256(dir)[:8]>`.

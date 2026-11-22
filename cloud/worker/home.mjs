@@ -2185,13 +2185,23 @@ async function checkOpencode(env) {
 }
 
 // agy explicitly asks for sign-in when its model list needs a Google account.
+// The same run logs who it is signed in as (agy 1.5's applyAuthResult line),
+// so its own log names the Google account. agy shows its plan tier only on
+// the interactive banner, so the plan stays unknown.
 async function antigravityStatus(env, timeoutMs = 20_000) {
-  const models = await capture("agy", ["models"], { env, timeoutMs });
-  const text = `${models.stdout}\n${models.stderr}`;
-  const signedOut = /please sign in to view available models/i.test(text);
-  const loggedIn = signedOut ? false : models.code === 0 ? true : null;
-  const detail = signedOut ? "not logged in" : loggedIn ? null : firstLine(text) || `exit ${models.code}`;
-  return { loggedIn, account: null, plan: null, detail };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-agy-status-"));
+  try {
+    const logFile = path.join(dir, "cli.log");
+    const models = await capture("agy", ["--log-file", logFile, "models"], { env, timeoutMs });
+    const text = `${models.stdout}\n${models.stderr}`;
+    const signedOut = /please sign in to view available models/i.test(text);
+    const loggedIn = signedOut ? false : models.code === 0 ? true : null;
+    const detail = signedOut ? "not logged in" : loggedIn ? null : firstLine(text) || `exit ${models.code}`;
+    const account = loggedIn ? /applyAuthResult: email=([^,\s]+)/.exec(fs.readFileSync(logFile, "utf8"))?.[1] ?? null : null;
+    return { loggedIn, account, plan: null, detail };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 // "max", "pro", ... for a subscription; "API" for a Console login.
 function claudePlan(status) {
@@ -2298,12 +2308,12 @@ async function checkAntigravity(env) {
   }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account: null, plan: null, detail: null };
+    return { ok: true, account: status.account, plan: null, detail: null };
   }
   const text = `${probe.stdout}\n${probe.stderr}`;
   const expired = /please sign in|unauthenticated|\b401\b|(?:token|login|session)(?: has)? expired/i.test(text);
   const detail = expired ? "login expired" : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, signedIn: !expired, account: null, plan: null, detail };
+  return { ok: false, signedIn: !expired, account: status.account, plan: null, detail };
 }
 
 // The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API

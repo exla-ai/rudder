@@ -258,13 +258,52 @@ a { color: var(--accent); }
 .acct .a-sub.err { color: var(--failed); white-space: normal; }
 .acct .a-btn { flex: none; margin-right: 4px; }
 .acct .a-more { width: 40px; height: 40px; color: var(--faint); }
-.acct-add {
-  width: 100%; border: 0; border-top: 1px solid var(--line); background: none;
-  color: var(--accent); font-size: 15px; font-weight: 600; text-align: left;
+
+/* Agent accounts (app.js AccountsCard): a group per agent, a row per account,
+   indented under the agent's name. Phones drop the indent to keep emails whole. */
+.agent-accounts { --aa-indent: 60px; }
+.ag + .ag { border-top: 1px solid var(--line); }
+.ag-head { display: flex; align-items: center; gap: 12px; padding: 14px 14px 2px 16px; }
+.ag-head .m-icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); flex: none; }
+.ag-head .m-icon svg { width: 17px; height: 17px; }
+.ag-names { min-width: 0; }
+.ag-name { font-weight: 600; font-size: 15px; }
+.ag-sub { font-size: 12.5px; color: var(--muted); margin-top: 1px; }
+.ag-list { padding-bottom: 6px; }
+.aa {
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; align-items: center;
+  min-height: 54px; padding: 8px 8px 8px var(--aa-indent); box-sizing: border-box;
 }
-.acct-add .m-icon { background: var(--accent-soft); color: inherit; }
-.acct-add:hover, .acct-add:active { background: var(--surface-2); }
-.acct-add:focus-visible { outline-offset: -2px; }
+.aa + .aa::before { content: ""; position: absolute; top: 0; left: var(--aa-indent); right: 0; border-top: 1px solid var(--line); }
+.aa-who { grid-area: 1 / 1; display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; min-width: 0; }
+.aa-name { min-width: 0; font-size: 14.5px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.aa.signed-out .aa-name { color: var(--muted); font-weight: 500; }
+.aa-def { height: 19px; padding: 0 7px; font-size: 11.5px; }
+.aa-state { grid-area: 2 / 1; display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 13px; color: var(--muted); }
+.aa-state .dot { width: 7px; height: 7px; }
+.aa-st { color: var(--c); font-weight: 500; }
+.aa-state.s-idle .aa-st { color: var(--muted); }
+.aa-plan { white-space: nowrap; }
+.aa-note { grid-area: 3 / 1; align-self: start; margin-top: 2px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.aa-note.warn { color: var(--needs); }
+.aa-note.err { color: var(--failed); }
+.aa-acts { grid-area: 1 / 2 / 4 / 3; display: flex; align-items: center; gap: 2px; }
+.aa-btn { min-width: 84px; }
+.aa-more { width: 36px; height: 36px; color: var(--faint); }
+.aa-more svg { width: 20px; height: 20px; }
+.ag-add {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; margin: 0 0 12px var(--aa-indent); padding: 0 12px 0 9px;
+  border: 1px dashed var(--line-strong); border-radius: 10px; background: none;
+  color: var(--accent); font: 600 13.5px/1 var(--font);
+}
+.ag-add svg { width: 16px; height: 16px; }
+.ag-add:hover, .ag-add:active { background: var(--accent-soft); border-color: transparent; }
+/* Phones: the name and the note get whole lines; the buttons sit by the state. */
+@media (max-width: 520px) {
+  .agent-accounts { --aa-indent: 16px; }
+  .aa-who, .aa-note { grid-column: 1 / -1; }
+  .aa-acts { grid-area: 2 / 2; }
+}
 
 /* Signing an agent in */
 .login-sheet .add-head { margin-bottom: 14px; }

@@ -2060,8 +2060,9 @@ function accountLoginState(home, provider, account) {
     if (expiring) {
       const date = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(expiration);
       bits.push(`Sign-in ends by ${date}`);
+      return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · "), expiring, endsBy: date };
     }
-    return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in", expiring };
+    return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in" };
   }
   if (account.ok === false) {
     const detail = account.detail || "";
@@ -2091,55 +2092,94 @@ function agentLoginTrouble(home) {
   return !states.some((st) => st.kind === "ok" || st.kind === "busy") || states.some((st) => st.expired);
 }
 
+// "Max plan", "Pro plan"; an API key login is just that.
+const planText = (plan) => (!plan ? "" : plan === "API" ? planLabel(plan) : `${planLabel(plan)} plan`);
+
+// What an account's row says: who it is, its state (an s-* colour), the plan
+// while signed in, and a note for a usage limit, an ending sign-in or an
+// error. `action` is the button on the row: "in" signs it in, "out" signs it out.
+function accountView(home, agent, account) {
+  const st = accountLoginState(home, agent.id, account);
+  const signedIn = !!(account.ok || account.signedIn);
+  const view = {
+    kind: st.kind, signedIn, name: account.account || `${agent.account} account`,
+    state: "", cls: "s-idle", plan: "", note: "", noteCls: "", action: null, actionLabel: "",
+  };
+  if (st.kind === "busy") {
+    // A sign-in left half done (the app closed mid-way) can be started over
+    // from here; the machine drops the old one.
+    Object.assign(view, { state: "Signing in", cls: "s-accent", note: st.sub, action: "in", actionLabel: "Sign in" });
+  } else if (st.kind === "ok" || st.kind === "error") {
+    const usage = accountUsageLabel(account);
+    Object.assign(view, { state: "Signed in", cls: "s-done", plan: planText(account.plan) });
+    if (st.kind === "error") Object.assign(view, { cls: "s-failed", note: account.detail || "The last sign-in check failed.", noteCls: "err" });
+    else if (usage) Object.assign(view, { cls: "s-needs", note: usage, noteCls: "warn" });
+    else if (st.endsBy) Object.assign(view, { cls: "s-needs", note: `Sign-in ends by ${st.endsBy}`, noteCls: "warn" });
+    if (st.expiring) Object.assign(view, { action: "in", actionLabel: "Sign in again" });
+    else if (SIGN_OUT_SUPPORTED.has(agent.id)) Object.assign(view, { action: "out", actionLabel: "Sign out" });
+  } else if (st.kind === "out") {
+    if (st.expired) Object.assign(view, { state: "Sign-in expired", cls: "s-failed", action: "in", actionLabel: "Sign in again" });
+    else if (!home?.connected) Object.assign(view, { state: "Not checked yet" });
+    else Object.assign(view, { state: "Signed out", action: "in", actionLabel: "Sign in" });
+    if (st.err && !st.expired) Object.assign(view, { note: st.sub, noteCls: "err" });
+  } else {
+    view.state = "Checking";
+  }
+  return view;
+}
+
 /**
- * A row per account, with an action at the end to add a Claude Code or Codex
- * account. An account's menu makes it the default for new agents, signs it
- * in again, signs the main one out, or removes an added one.
+ * Each agent's accounts on the cloud machine, grouped under the agent: who
+ * each one is, its state and plan, and Sign in or Sign out right on the row.
+ * Claude Code and Codex can hold several; their group says which one new
+ * agents start on and can add another. Less common actions sit in "...".
  */
 function AccountsCard() {
-  const el = h(`<div class="card accounts">
-    <div role="list" aria-label="Agent sign-in"></div>
-    <button type="button" class="acct acct-add" aria-haspopup="menu">
-      <span class="m-icon" aria-hidden="true">${icon("plus")}</span>
-      <span>Add account</span>
-    </button>
-  </div>`);
-  const accountList = el.querySelector('[role="list"]');
-  const add = el.querySelector(".acct-add");
-  add.addEventListener("click", () => showAgentMenu({
-    anchor: add,
-    label: "Add account",
-    items: AGENTS.filter((agent) => MULTI_ACCOUNT.has(agent.id)).map((agent) => ({
-      label: agent.label,
-      icon: agent.ic,
-      run: () => {
-        add.focus({ preventScroll: true });
-        openAgentSignIn(agent.id, "new");
-      },
-    })),
-    returnFocus: add,
-  }));
+  const el = h(`<div class="card accounts agent-accounts"></div>`);
   let shape = "";
-  let rows = [];
+  let groups = [];
+  const current = (agent, id) => agentAccounts(store.state?.home, agent.id).find((a) => a.id === id);
 
   function accountRow(agent, account) {
-    const row = h(`<div class="acct" role="listitem">
-      <div class="m-icon">${icon(agent.ic)}</div>
-      <div class="a-body"><div class="a-title"><span></span><span class="pill st" hidden><span class="dot"></span><span class="pl"></span></span><span class="pill a-def" hidden>Default</span></div>
-      <div class="a-sub"></div></div>
-      <button type="button" class="btn small accent a-btn" hidden>Sign in</button>
-      <button type="button" class="icon-btn a-more" hidden>${icon("more")}</button>
+    const row = h(`<div class="aa" role="listitem">
+      <div class="aa-who"><span class="aa-name"></span><span class="pill s-accent aa-def" hidden>Default</span></div>
+      <div class="aa-state"><span class="dot"></span><span class="aa-st"></span><span class="aa-plan"></span></div>
+      <div class="aa-note" hidden></div>
+      <div class="aa-acts">
+        <button type="button" class="btn small aa-btn" hidden></button>
+        <button type="button" class="icon-btn aa-more" aria-haspopup="menu" hidden>${icon("more")}</button>
+      </div>
     </div>`);
-    setText(row.querySelector(".a-title span"), agent.label);
-    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id, account.id));
-    const more = row.querySelector(".a-more");
+    const btn = row.querySelector(".aa-btn");
+    btn.addEventListener("click", () => {
+      const now = current(agent, account.id);
+      if (!now) return;
+      if (btn.dataset.act === "out") void confirmSignOut(agent, now);
+      else openAgentSignIn(agent.id, account.id);
+    });
+    const more = row.querySelector(".aa-more");
     more.addEventListener("click", () => openAccountMenu(agent, account.id, more));
-    return { el: row, agent, id: account.id };
+    return { el: row, id: account.id };
   }
 
-  function build(home) {
-    rows = AGENTS.flatMap((agent) => agentAccounts(home, agent.id).map((account) => accountRow(agent, account)));
-    accountList.replaceChildren(...rows.map((row) => row.el));
+  function agentGroup(agent, list) {
+    const group = h(`<div class="ag" role="group">
+      <div class="ag-head"><span class="m-icon" aria-hidden="true">${icon(agent.ic)}</span>
+        <div class="ag-names"><div class="ag-name"></div><div class="ag-sub" hidden>New agents start on the default account</div></div></div>
+      <div class="ag-list" role="list"></div>
+    </div>`);
+    group.setAttribute("aria-label", agent.label);
+    setText(group.querySelector(".ag-name"), agent.label);
+    const rows = list.map((account) => accountRow(agent, account));
+    group.querySelector(".ag-list").replaceChildren(...rows.map((row) => row.el));
+    let add = null;
+    if (MULTI_ACCOUNT.has(agent.id)) {
+      add = h(`<button type="button" class="ag-add">${icon("plus")}<span>Add another account</span></button>`);
+      add.setAttribute("aria-label", `Add another ${agent.label} account`);
+      add.addEventListener("click", () => openAgentSignIn(agent.id, "new"));
+      group.appendChild(add);
+    }
+    return { el: group, agent, rows, add };
   }
 
   function update(home) {
@@ -2147,79 +2187,122 @@ function AccountsCard() {
     const next = AGENTS.map((agent) => `${agent.id}:${agentAccounts(home, agent.id).map((a) => a.id).join(",")}`).join(" ");
     if (next !== shape) {
       shape = next;
-      build(home);
+      groups = AGENTS.map((agent) => agentGroup(agent, agentAccounts(home, agent.id)));
+      el.replaceChildren(...groups.map((group) => group.el));
     }
-    for (const { el: row, agent, id } of rows) {
+    for (const { el: group, agent, rows, add } of groups) {
       const list = agentAccounts(home, agent.id);
-      const account = list.find((a) => a.id === id);
-      const st = accountLoginState(home, agent.id, account);
-      const pill = row.querySelector(".pill.st");
-      pill.hidden = !st.pill;
-      if (st.pill) {
-        pill.className = `pill st ${st.cls}`;
-        pill.querySelector(".dot").classList.toggle("live", st.kind === "busy");
-        setText(pill.querySelector(".pl"), st.pill);
+      group.querySelector(".ag-sub").hidden = list.length < 2;
+      // Another account makes sense once there is one; until then the row's Sign in.
+      if (add) add.hidden = !list.some((a) => a.ok || a.signedIn);
+      for (const { el: row, id } of rows) {
+        const account = list.find((a) => a.id === id);
+        const v = accountView(home, agent, account);
+        row.classList.toggle("signed-out", !v.signedIn && v.kind !== "busy");
+        const name = row.querySelector(".aa-name");
+        if (name.textContent !== v.name) {
+          // A long email wraps before its @, not mid-word.
+          const at = v.name.indexOf("@");
+          if (at > 0) name.replaceChildren(v.name.slice(0, at), document.createElement("wbr"), v.name.slice(at));
+          else setText(name, v.name);
+        }
+        row.querySelector(".aa-def").hidden = !(list.length > 1 && account.default);
+        const state = row.querySelector(".aa-state");
+        state.className = `aa-state ${v.cls}`;
+        state.querySelector(".dot").classList.toggle("live", v.kind === "busy");
+        setText(state.querySelector(".aa-st"), v.state);
+        setText(state.querySelector(".aa-plan"), v.plan ? `· ${v.plan}` : "");
+        const note = row.querySelector(".aa-note");
+        note.hidden = !v.note;
+        note.className = `aa-note ${v.noteCls}`;
+        setText(note, v.note);
+        const btn = row.querySelector(".aa-btn");
+        btn.hidden = !v.action;
+        btn.dataset.act = v.action || "";
+        btn.classList.toggle("accent", v.action === "in");
+        setText(btn, v.actionLabel);
+        btn.setAttribute("aria-label", `${v.actionLabel} ${v.name}`);
+        const more = row.querySelector(".aa-more");
+        more.hidden = v.kind === "busy" || v.kind === "checking" || accountMenuItems(agent, list, account, v).length === 0;
+        more.setAttribute("aria-label", `More for ${v.name}`);
       }
-      // With more than one, the row says which one new agents start on.
-      row.querySelector(".a-def").hidden = !(list.length > 1 && account.default);
-      const sub = row.querySelector(".a-sub");
-      setText(sub, st.sub);
-      sub.classList.toggle("err", !!st.err);
-      // A sign-in left half done (the app closed mid-way) can be started
-      // over from here; the machine drops the old one.
-      const signIn = row.querySelector(".a-btn");
-      signIn.hidden = !(st.kind === "out" || st.kind === "busy" || st.expiring);
-      setText(signIn, st.expiring ? "Sign in again" : "Sign in");
-      const more = row.querySelector(".a-more");
-      more.hidden = st.kind === "busy" || st.kind === "checking" || (st.kind === "out" && id === MAIN);
-      more.setAttribute("aria-label", `${agent.label} account ${account.account || ""}`.trim());
     }
   }
   return { el, update };
 }
 
-// An account row's "...": make it the default for new agents, sign it in
-// again, sign the main one out or remove an added one.
-function openAccountMenu(agent, id, anchor) {
-  const list = agentAccounts(store.state?.home, agent.id);
-  const account = list.find((a) => a.id === id);
-  if (!account) return;
+async function changeAgentAccount(agent, id, action, done) {
+  try {
+    await api("/api/app/agent-account", { method: "POST", body: { provider: agent.id, account: id, action } });
+    toast(done);
+    await refreshState();
+    return true;
+  } catch (err) {
+    showError(err);
+    return false;
+  }
+}
+
+async function confirmSignOut(agent, account) {
   const who = account.account || `this ${agent.label} account`;
-  const change = async (action, done) => {
-    try {
-      await api("/api/app/agent-account", { method: "POST", body: { provider: agent.id, account: id, action } });
-      toast(done);
-      await refreshState();
-    } catch (err) { showError(err); }
-  };
+  const ok = await confirmDialog({
+    title: `Sign ${who} out?`,
+    body: `Agents on this account stop working until it is signed in again.`,
+    confirm: "Sign out", danger: true,
+  });
+  return ok && changeAgentAccount(agent, account.id, "signOut", `${account.account || agent.label} is signed out`);
+}
+
+// An account row's "...": the actions the row's own button leaves out. Make
+// it the default for new agents, sign it in again, switch Antigravity to
+// another Google account (agy signs in only when signed out), sign out when
+// the row's button is Sign in again, or remove an added one.
+function accountMenuItems(agent, list, account, view) {
+  const who = account.account || `this ${agent.label} account`;
   const items = [];
   if (MULTI_ACCOUNT.has(agent.id) && list.length > 1 && !account.default) {
-    items.push({ label: "Make default", icon: "check", run: () => change("default", `New ${agent.label} agents start on ${who}`) });
+    items.push({ label: "Make default", icon: "check", run: () => changeAgentAccount(agent, account.id, "default", `New ${agent.label} agents start on ${who}`) });
   }
-  if (!accountUsageLabel(account) && !(agent.id === "antigravity" && (account.ok || account.signedIn))) {
-    items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, id) });
+  if (view.signedIn && view.action !== "in" && agent.id !== "antigravity" && !accountUsageLabel(account)) {
+    items.push({ label: "Sign in again", icon: "refresh", run: () => openAgentSignIn(agent.id, account.id) });
   }
-  if (SIGN_OUT_SUPPORTED.has(agent.id) && (account.ok || account.signedIn)) {
-    items.push("divider", { label: "Sign out", icon: "power", danger: true, run: async () => {
+  if (view.signedIn && agent.id === "antigravity") {
+    items.push({ label: "Use another Google account", icon: "refresh", run: async () => {
       const ok = await confirmDialog({
-        title: `Sign ${who} out?`,
-        body: `Agents on this account stop working until it is signed in again.`,
-        confirm: "Sign out", danger: true,
+        title: "Use another Google account?",
+        body: `Antigravity signs ${who} out, then you sign in with the account you want. Antigravity agents stop working until you do.`,
+        confirm: "Switch account",
       });
-      if (ok) void change("signOut", `${agent.label} is signed out`);
+      if (ok && await changeAgentAccount(agent, account.id, "signOut", `${account.account || agent.label} is signed out`)) {
+        openAgentSignIn(agent.id, account.id);
+      }
     } });
   }
-  if (id !== MAIN) {
-    items.push("divider", { label: "Remove", icon: "trash", danger: true, run: async () => {
+  if (view.signedIn && view.action !== "out" && SIGN_OUT_SUPPORTED.has(agent.id)) {
+    if (items.length) items.push("divider");
+    items.push({ label: "Sign out", icon: "power", danger: true, run: () => void confirmSignOut(agent, account) });
+  }
+  if (account.id !== MAIN) {
+    if (items.length) items.push("divider");
+    items.push({ label: "Remove", icon: "trash", danger: true, run: async () => {
       const ok = await confirmDialog({
         title: `Remove ${who}?`,
         body: `It is signed out and removed from your cloud machine. Chats on it switch to another account before they continue.`,
         confirm: "Remove", danger: true,
       });
-      if (ok) void change("remove", `${who} is removed`);
+      if (ok) void changeAgentAccount(agent, account.id, "remove", `${who} is removed`);
     } });
   }
-  showAgentMenu({ anchor, label: `${agent.label} account`, items, returnFocus: anchor });
+  return items;
+}
+
+function openAccountMenu(agent, id, anchor) {
+  const home = store.state?.home;
+  const list = agentAccounts(home, agent.id);
+  const account = list.find((a) => a.id === id);
+  if (!account) return;
+  const items = accountMenuItems(agent, list, account, accountView(home, agent, account));
+  showAgentMenu({ anchor, label: `${account.account || agent.label} account`, items, returnFocus: anchor });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

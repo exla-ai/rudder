@@ -3,7 +3,7 @@
 // Serves /app/* from this folder and mocks /api/app/*.
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
-// /app/__mock/creds/<out|claude|both|expired|two> (Claude Code / Codex sign-in; two: a second Claude account),
+// /app/__mock/creds/<out|claude|both|expired|two|three> (agent sign-ins; two, three: more Claude accounts),
 // /app/__mock/usage/<ok|old> (plan usage, or the error of a home too old to report it),
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/compact/<live|done|off> (run_a1 compacting its context now, then the marker it leaves),
@@ -49,17 +49,33 @@ let closeMode = "ok";
 let harnessMode = "ok";
 let notesMode = "ok";
 let fileRefMode = "ok";
-// Who the machine's Claude Code and Codex accounts sign in as (each harness a
-// list, "main" first, as home.mjs checkCredentials reports), and sign-ins in flight.
+// Who the machine's agent accounts sign in as (each harness a list, "main"
+// first, as home.mjs checkCredentials reports), and sign-ins in flight.
+const PLANS = { claude: "max", codex: "pro" };
 const signedIn = (provider, id = "main", email = "viraat@example.com") =>
-  ({ id, default: id === "main", ok: true, account: email, plan: provider === "claude" ? "max" : "pro", detail: null });
-const OUT = [{ id: "main", default: true, ok: false, account: null, detail: "not logged in" }];
+  ({ id, default: id === "main", ok: true, account: email, plan: PLANS[provider] ?? null, detail: null });
+const OUT = [{ id: "main", default: true, ok: false, signedIn: false, account: null, detail: "not logged in" }];
+// OpenCode lists the providers it holds; Antigravity reports its Google account, no plan.
+const OTHERS = () => ({
+  opencode: [{ id: "main", default: true, ok: true, account: "ChatGPT, OpenCode Zen", plan: null, detail: null }],
+  antigravity: [signedIn("antigravity", "main", "viraat.personal@example.com")],
+});
 const CREDS = {
-  out: () => ({ claude: OUT, codex: OUT }),
-  claude: () => ({ claude: [signedIn("claude")], codex: OUT }),
-  both: () => ({ claude: [signedIn("claude")], codex: [signedIn("codex")] }),
-  expired: () => ({ claude: [{ id: "main", default: true, ok: false, account: "viraat@example.com", plan: "max", detail: "login expired" }], codex: [signedIn("codex")] }),
-  two: () => ({ claude: [signedIn("claude"), { ...signedIn("claude", "mi6x2k3a", "work@example.com"), plan: "pro" }], codex: [signedIn("codex")] }),
+  out: () => ({ claude: OUT, codex: OUT, opencode: [{ ...OUT[0], ok: true, account: "Free models only", detail: null }], antigravity: OUT }),
+  claude: () => ({ claude: [signedIn("claude")], codex: OUT, ...OTHERS() }),
+  both: () => ({ claude: [signedIn("claude")], codex: [signedIn("codex")], ...OTHERS() }),
+  expired: () => ({ claude: [{ id: "main", default: true, ok: false, signedIn: false, account: "viraat@example.com", plan: "max", detail: "login expired" }], codex: [signedIn("codex")], ...OTHERS() }),
+  two: () => ({ claude: [signedIn("claude"), { ...signedIn("claude", "mi6x2k3a", "work@example.com"), plan: "pro" }], codex: [signedIn("codex")], ...OTHERS() }),
+  // Three Claude accounts: the default, one at its weekly limit, one whose sign-in expired.
+  three: () => ({
+    claude: [
+      signedIn("claude"),
+      { ...signedIn("claude", "mi6x2k3a", "work.account@example.com"), plan: "team", ok: false, signedIn: true, usageLimit: { window: "weekly", resetsAt: now() + 2 * 24 * 60 * MIN }, detail: "Reached the weekly usage limit" },
+      { ...signedIn("claude", "mj7y3l4b", "side.project@example.com"), plan: "pro", ok: false, signedIn: false, detail: "login expired" },
+    ],
+    codex: [signedIn("codex")],
+    ...OTHERS(),
+  }),
 };
 // One account of a harness, signed in (or added) on the mock machine.
 const putAccount = (provider, row) => {
@@ -1516,7 +1532,7 @@ const server = http.createServer(async (req, res) => {
       if (!accountRow(provider, account)) return json(res, 400, { error: "That account is no longer on your cloud machine." });
       await delay(400);
       if (action === "default") creds = { ...creds, [provider]: creds[provider].map((a) => ({ ...a, default: a.id === account })) };
-      else if (action === "signOut") putAccount(provider, { ...accountRow(provider, account), ok: false, account: null, plan: null, detail: "not logged in" });
+      else if (action === "signOut") putAccount(provider, { ...accountRow(provider, account), ok: false, signedIn: false, usageLimit: null, detail: "not signed in" });
       else if (action === "remove") {
         const left = creds[provider].filter((a) => a.id !== account);
         creds = { ...creds, [provider]: left.some((a) => a.default) ? left : left.map((a) => ({ ...a, default: a.id === "main" })) };

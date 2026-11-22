@@ -880,12 +880,18 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
     fs.writeFileSync(path.join(bin, "agy"), `#!/usr/bin/env node
 const fs = require("node:fs"), path = require("node:path");
 const profile = path.join(process.env.HOME, ".agy-ok");
-const [cmd] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const logAt = args.indexOf("--log-file");
+const logFile = logAt === -1 ? null : args.splice(logAt, 2)[1];
+const [cmd] = args;
 if (cmd === "models") {
   if (fs.existsSync(path.join(process.env.HOME, ".agy-models-error"))) {
     console.error("Model service unavailable"); process.exit(1);
   }
-  if (fs.existsSync(profile)) { console.log("Signed-in account models"); process.exit(0); }
+  if (fs.existsSync(profile)) {
+    fs.writeFileSync(logFile, "I1122 21:10:53.314322 1 server_oauth.go:221] applyAuthResult: email=me@gmail.example, authMethod=consumer, quotaProject=\\n");
+    console.log("Signed-in account models"); process.exit(0);
+  }
   console.error("Error: Please sign in to view available models."); process.exit(1);
 }
 if (cmd === "-p") { console.error("Daily model usage limit reached"); process.exit(1); }
@@ -1020,6 +1026,7 @@ process.stdout.write(JSON.stringify({ current: null, harnesses: [{ id: "antigrav
     fs.writeFileSync(path.join(home, ".agy-ok"), "1");
     const signedIn = await signIn("main", (rows) => rows[0]?.signedIn && !rows[0].checking);
     assert.equal(signedIn.home.credentials.antigravity[0].signedIn, true, "an inference quota error leaves sign-out available");
+    assert.equal(signedIn.home.credentials.antigravity[0].account, "me@gmail.example", "agy's own log names its Google account");
     assert.deepEqual(signedIn.home.credentials.claude.map((row) => [row.id, row.account, row.plan]), [["main", "me@example.com", "max"]]);
     assert.equal(signedIn.home.credentials.claude[0].ok, false);
     assert.equal(signedIn.home.credentials.claude[0].detail, "Reached the weekly usage limit");

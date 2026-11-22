@@ -4379,6 +4379,51 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (lift > 0 && scroller.scrollTop <= 0) setLift(0);
   }, { passive: true });
   pill.addEventListener("click", () => { toBottom(true); pill.classList.remove("show"); });
+  if (!coarse) {
+    pill.title = `Newest message (${/Mac/.test(navigator.platform) ? "Option" : "Alt"}+B)`;
+    pill.setAttribute("aria-keyshortcuts", "Alt+B");
+  }
+
+  // Alt+V and Alt+B, as on the dashboard. Alt+V puts the start of the message
+  // above the top of the view at the top, so each press goes one further
+  // back; from the first message shown, the page before it loads first. Alt+B
+  // goes to the newest and follows it again. Jumps are instant, so a press
+  // always starts where the last one landed, and they set atBottom at once,
+  // so a paint before the scroll event cannot pull the chat back down.
+  const MSG_MARGIN = 10;
+  // The newest press: a later one drops an Alt+V still waiting on a page.
+  let press = 0;
+  function messageAbove() {
+    const line = scroller.getBoundingClientRect().top + MSG_MARGIN - 2;
+    let found = null;
+    for (const node of msgsEl.querySelectorAll(":scope > .msg")) {
+      if (node.getBoundingClientRect().top >= line) break;
+      found = node;
+    }
+    return found;
+  }
+  async function previousMessage() {
+    const mine = ++press;
+    let node = messageAbove();
+    if (!node) {
+      const e = store.earlier.get(key);
+      if (e?.loading) return;
+      if (e ? e.cursor : store.transcripts.get(key)?.earlier) {
+        await loadEarlier();
+        if (destroyed || mine !== press) return;
+        node = messageAbove();
+      }
+    }
+    if (node) scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top - MSG_MARGIN;
+    else scroller.scrollTop = 0;
+    atBottom = isAtBottom();
+  }
+  function newestMessage() {
+    press += 1;
+    toBottom(false);
+    atBottom = true;
+    pill.classList.remove("show");
+  }
   // Keep the bottom pinned when the keyboard resizes the viewport.
   const resizeObs = new ResizeObserver(() => { if (atBottom) toBottom(false); });
   resizeObs.observe(scroller);
@@ -5011,6 +5056,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     update: paint,
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
+    // Alt+V and Alt+B (the keydown listener after mountCommandPalette).
+    chat: { previous: previousMessage, newest: newestMessage },
     destroy() {
       destroyed = true;
       clearTimeout(timer);
@@ -5125,6 +5172,18 @@ document.addEventListener("keydown", (e) => {
   if (!term || document.querySelector("dialog[open]")) return;
   e.preventDefault();
   term.set(!term.isOpen());
+}, { capture: true });
+// Alt+V and Alt+B walk the open chat (AgentScreen), the composer focused or
+// not: back a message per press, and down to the newest. They match e.code,
+// as Option+V and Option+B arrive in e.key as "√" and "∫". The terminal keeps
+// them: Option is Meta there, and Meta+B moves back a word.
+document.addEventListener("keydown", (e) => {
+  if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || (e.code !== "KeyV" && e.code !== "KeyB")) return;
+  const chat = screen?.chat;
+  if (!chat || document.querySelector("dialog[open]") || document.activeElement?.closest(".tp")) return;
+  e.preventDefault();
+  if (e.code === "KeyV") chat.previous();
+  else chat.newest();
 }, { capture: true });
 
 // The iOS shell's 9:01 notification, tapped: open the newest digest.

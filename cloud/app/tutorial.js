@@ -290,8 +290,8 @@ const STEPS = [
     id: "keys",
     title: TAB_KEYS ? "Jump between agents and tabs" : "Jump between agents",
     body: TAB_KEYS
-      ? `${ALT}+[ and ${ALT}+] step through agents. The first Cmd+T opens a second tab and reveals the tab bar. Control+Tab moves to the next tab and Control+Shift+Tab moves back. Cmd+1 to Cmd+8 pick a tab, and Cmd+9 jumps to the last.`
-      : `${ALT}+[ and ${ALT}+] go to the previous and next agent, even while you type.`,
+      ? `${ALT}+[ and ${ALT}+] step through agents. In a chat, ${ALT}+V goes back a message and ${ALT}+B jumps to the newest. The first Cmd+T opens a second tab and reveals the tab bar. Control+Tab moves to the next tab and Control+Shift+Tab moves back. Cmd+1 to Cmd+8 pick a tab, and Cmd+9 jumps to the last.`
+      : `${ALT}+[ and ${ALT}+] go to the previous and next agent, even while you type. In a chat, ${ALT}+V goes back a message and ${ALT}+B jumps to the newest.`,
     scene: keysScene,
     // A keyboard shortcut: only where there is a keyboard to press it.
     when: () => !coarse,

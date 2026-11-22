@@ -10,6 +10,7 @@ import { DOWNLOAD_MAC_URL, openTour } from "/app/tutorial.js";
 import { dropdown } from "/app/select.js";
 import { planUsageShown, setPlanUsageShown } from "/app/agent-stats.js";
 import { TailscaleCard } from "/app/tailscale-step.js";
+import { UpdateNow } from "/app/home-update.js";
 
 const ROLE_LABEL = { admin: "Admin", member: "Member" };
 const SCOPE_KEY = "rudder.org";
@@ -137,6 +138,15 @@ export function SettingsScreen() {
     else if (connectError) toast(oauthErrorText(connectError, params.get("provider")), { error: true });
   }
 
+  // A newer Rudder for the cloud machine, first on the page while Cloud offers
+  // one (home.updateTo) or one is on its way. Update now is the same update as
+  // Alt+r in the machine's terminal dashboard (home-update.js). Once shown it
+  // stays, so its last line says how the update ended.
+  const updateSec = section("Update");
+  updateSec.el.hidden = true;
+  const updateCard = h(`<div class="card set-update"><div class="su-title"></div><div class="su-sub"></div></div>`);
+  updateSec.body.appendChild(updateCard);
+  let updateNow = null;
   const account = section("Account");
   // Appearance: this device follows the system, or stays light or dark (theme.js).
   // Each choice is a card with a small drawing of the app in that theme.
@@ -193,7 +203,7 @@ export function SettingsScreen() {
   const orgSec = section("Organization");
   const intSec = section("Integrations");
   const more = h(`<div class="section set-foot"></div>`);
-  body.append(account.el, look.el, agentsSec.el, tailscaleSec.el, scopeSec.el, orgSec.el, intSec.el, more);
+  body.append(updateSec.el, account.el, look.el, agentsSec.el, tailscaleSec.el, scopeSec.el, orgSec.el, intSec.el, more);
 
   // Account: who, where the agents run, sign-in helpers.
   const kvs = h(`<div class="card set-kvs"></div>`);
@@ -222,7 +232,19 @@ export function SettingsScreen() {
     const home = s.home;
     agentsCard?.update(home);
     tailscaleCard.update(home);
+    if (!updateNow && (home?.updateTo || home?.updating)) {
+      updateNow = UpdateNow({ state: s, onDone: () => void app.refreshState?.() });
+      updateCard.appendChild(updateNow.el);
+      updateSec.el.hidden = false;
+    } else {
+      updateNow?.update(s);
+    }
+    if (updateNow) {
+      setText(updateCard.querySelector(".su-title"), home?.updateTo ? `Rudder ${home.updateTo} is ready` : "Updating your cloud machine");
+      setText(updateCard.querySelector(".su-sub"), home?.version ? `Your cloud machine runs Rudder ${home.version}.` : "");
+    }
     const rows = [["Account", s.email || "Signed in"], ["Cloud machine", home ? app.machineLabel?.(home)?.label || home.status : "None"]];
+    if (home?.version) rows.push(["Rudder", home.updateTo ? `${home.version}, ${home.updateTo} is ready` : home.version]);
     const gh = app.githubState?.(s);
     if (gh) rows.push(["GitHub", gh.kind === "ok" ? gh.sub.replace(/^Connected as /, "") : "Not connected"]);
     if (PLATFORM) rows.push(["App", PLATFORM === "mac" ? "Mac" : "iOS"]);
@@ -587,7 +609,7 @@ export function SettingsScreen() {
   };
   window.addEventListener("focus", onFocus);
   document.addEventListener("visibilitychange", onFocus);
-  return { el, update, destroy() { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); } };
+  return { el, update, destroy() { updateNow?.destroy(); window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); } };
 }
 
 function openCreateOrg(onCreated) {

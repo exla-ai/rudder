@@ -28,3 +28,12 @@
 /* Update now on an error toast. */
 .toast-act { flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
 .toast-act:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Settings: the Update section's card, left aligned like the rest of Settings. */
+.set-update { padding: 14px 16px; }
+.set-update .su-title { font-size: 15px; font-weight: 600; color: var(--ink); }
+.set-update .su-sub { margin-top: 2px; font-size: 13.5px; color: var(--muted); }
+.set-update .su-sub:empty { display: none; }
+.set-update .hu { align-items: flex-start; }
+.set-update .hu-line { justify-content: flex-start; text-align: left; max-width: none; }
+.set-update .hu-fail { text-align: left; max-width: none; }

@@ -621,6 +621,32 @@ nodeTest("a discussion's, main agent's or All agents chat's first message shows 
   }
 });
 
+nodeTest("Claude Code's error notes name the chat's controls, not its terminal keys", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  try {
+    const cwd = "/workspace/code/libra";
+    const sessionId = "44444444-2222-3333-4444-555555555555";
+    const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+    fs.mkdirSync(projectDir, { recursive: true });
+    const note = "API Error: Fable 5.2's safeguards flagged this message.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nRequest ID: req_1";
+    const lines = [
+      { type: "user", uuid: "u1", message: { role: "user", content: "disable the alerts" } },
+      { type: "assistant", uuid: "a1", isApiErrorMessage: true, message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: note }] } },
+      // The agent's own words are never changed.
+      { type: "user", uuid: "u2", message: { role: "user", content: "what did it say?" } },
+      { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "It said: Double press esc to edit your last message, or try a different model with /model." }] } },
+    ];
+    fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    const repo = fixtureRepo({ id: "run-7", backend: "claude", task: "disable the alerts", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
+    const [, error, , reply] = readTranscript(repo, "run-7", { limit: 50, home }).messages;
+    assert.equal(error.text, "API Error: Fable 5.2's safeguards flagged this message.\n\nEdit your last message, or pick a different model under the message box.\n\nRequest ID: req_1");
+    assert.match(reply.text, /Double press esc/);
+    fs.rmSync(repo, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 nodeTest("a compacted conversation shows one marker with its sizes, its duration and the summary, not a message from the user", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
   const repos = [];

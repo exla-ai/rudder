@@ -1243,6 +1243,8 @@ fn every_agent_prompt_asks_for_parallel_work() {
         assert!(prompt.contains(PARALLEL_WORK_RULE), "{prompt}");
         assert!(prompt.contains(WAIT_AND_READ_RULE), "{prompt}");
     }
+    // The main owner is who the user chats with in the app.
+    assert!(main_task_prompt("x").contains(CHAT_APP_RULE));
     assert!(PARALLEL_WORK_RULE.contains("never let two edit the same file"));
     assert!(oneoff_prompt("q").contains(PARALLEL_WORK_RULE));
     assert!(WAIT_AND_READ_RULE.contains("Cap long output"));

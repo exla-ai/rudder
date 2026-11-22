@@ -951,6 +951,15 @@ function opencodePreview(record, { home, cache, now }) {
 // Claude Code JSONL.
 // ---------------------------------------------------------------------------
 
+// Claude Code's own error notes (isApiErrorMessage) say which keys to press
+// in its terminal. The chat has its own controls for the same things.
+const TERMINAL_HINTS = [
+  [/Double press esc to edit your last message, or try a different model with \/model\./, "Edit your last message, or pick a different model under the message box."],
+];
+function inAppWords(text) {
+  return TERMINAL_HINTS.reduce((out, [terminal, app]) => out.replace(terminal, app), text);
+}
+
 // The tool Claude Code starts a subagent with.
 const CLAUDE_SUBAGENT_TOOL = "Agent";
 
@@ -1173,7 +1182,8 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     content.forEach((block, index) => {
       const id = `${uuid}:${index}`;
       if (block?.type === "text") {
-        say(id, entry.type === "user" ? userText(block.text) : String(block.text || "").trim());
+        const text = entry.type === "user" ? userText(block.text) : String(block.text || "").trim();
+        say(id, entry.isApiErrorMessage ? inAppWords(text) : text);
       } else if (block?.type === "thinking" && entry.type === "assistant" && entry.thinkingDisplay === "updates") {
         // Claude Code's "updates" display stores the notes the agent writes
         // to the user between tool calls as thinking; its terminal shows them.

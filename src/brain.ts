@@ -102,6 +102,11 @@ export const PARALLEL_WORK_RULE =
 export const WAIT_AND_READ_RULE =
   "Run one targeted check; add tests for bugs or tricky logic. Full suites only when asked. Wait on commands directly (Codex: write_stdin up to 300000 ms when supported); avoid sleeps and repeated polls. Size builds from CPU, memory and container limits; honor explicit budgets and shared build locks. Cap long output (`| tail -50`). Read targeted ranges. No CI babysitting unless delivery requires it; no git archaeology.";
 
+// Where the user reads the agent. Mirrors the Rust `chat_app_rule!` in
+// native/src/tasks.rs; keep the text in parity.
+export const CHAT_APP_RULE =
+  "The user may follow this chat in Rudder's app rather than a terminal: name the app's controls (Edit on a sent message, the model picker, Stop) instead of terminal keys like Esc or Ctrl+C.";
+
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles
     .map((file) => file.path)
@@ -115,6 +120,7 @@ export function renderContract(spec: SpecContract): string {
       : "",
     `- ${PARALLEL_WORK_RULE}`,
     `- ${WAIT_AND_READ_RULE}`,
+    spec.runtimeRole === "main-owner" ? `- ${CHAT_APP_RULE}` : "",
     ...PROPAGATION_RULES.map((rule) => `- ${rule}`),
     "- End with a short summary of what changed and anything unfinished.",
     instructions ? `Repository rules: ${instructions}.` : "",

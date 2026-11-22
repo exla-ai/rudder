@@ -25,6 +25,17 @@ macro_rules! wait_and_read_rule {
 #[cfg(test)]
 pub(crate) const WAIT_AND_READ_RULE: &str = wait_and_read_rule!();
 
+/// The user often reads a main agent in Rudder's app (web, Mac, iPhone), where
+/// its terminal keys do nothing. Workers' context stays short without it.
+/// Mirrored in TS as `CHAT_APP_RULE` (src/brain.ts).
+macro_rules! chat_app_rule {
+    () => {
+        "- The user may follow this chat in Rudder's app rather than a terminal: name the app's controls (Edit on a sent message, the model picker, Stop) instead of terminal keys like Esc or Ctrl+C."
+    };
+}
+#[cfg(test)]
+pub(crate) const CHAT_APP_RULE: &str = chat_app_rule!();
+
 /// Short planner/orchestrator version: shape the DAG for parallelism.
 pub(crate) const PARALLEL_PLAN_RULE: &str = "Favor independent nodes joined by soft edges so workers run in parallel; add a hard edge only for a real code dependency, never as a default chain.";
 
@@ -66,6 +77,8 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
+        "\n",
+        chat_app_rule!(),
         "\n- Ship only when asked, using the repo's release workflow. End with a short summary of what changed and anything unfinished."
     );
     format!("{task}\n\n{CONTEXT}")
@@ -83,7 +96,7 @@ pub(crate) fn all_agents_dashboard() -> bool {
 /// AGENTS.md say more (coordinator.mjs `COORDINATOR_PROMPT`).
 pub(crate) fn all_agents_task_prompt(task: &str) -> String {
     let task = strip_rudder_prompt_wrappers(task);
-    const CONTEXT: &str = "Rudder: you are the All agents chat. You talk to the user's agents in every project on this machine through your all_agents tools: list and read them, send them messages or interrupt them, start new work, answer their prompts and wait for them to finish or need the user. You do not edit code or run commands in the projects yourself; ask the agent that owns the work, or start one.";
+    const CONTEXT: &str = "Rudder: you are the All agents chat. You talk to the user's agents in every project on this machine through your all_agents tools: list and read them, send them messages or interrupt them, start new work, answer their prompts and wait for them to finish or need the user. You do not edit code or run commands in the projects yourself; ask the agent that owns the work, or start one. The user reads this chat in Rudder's app: name its controls, never terminal keys.";
     format!("{task}\n\n{CONTEXT}")
 }
 

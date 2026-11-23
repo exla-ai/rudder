@@ -1708,6 +1708,22 @@ function pastedImages(m) {
   return (m.images || []).map((image) => ({ path: image.path || undefined, name: "Image", image: true }));
 }
 
+// "Running for 12s" on a call that is still running (worker/transcripts.mjs
+// markRunning). One timer keeps every such line current each second while
+// any shows, also when a poll finds the chat unchanged and paints nothing.
+let runTimer = null;
+function runningFor(since) {
+  const el = document.createElement("span");
+  el.dataset.runSince = String(since);
+  el.textContent = `Running for ${duration(Date.now() - since)}`;
+  runTimer ??= setInterval(() => {
+    const shown = document.querySelectorAll("[data-run-since]");
+    if (!shown.length) { clearInterval(runTimer); runTimer = null; return; }
+    for (const line of shown) line.textContent = `Running for ${duration(Date.now() - Number(line.dataset.runSince))}`;
+  }, 1000);
+  return el;
+}
+
 // A small note in the chat that is nobody's words (worker/transcripts.mjs
 // noticeMessage): what the agent's CLI said, a stopped turn, an error.
 const NOTICE_HTML = `<div class="notice" role="note"><span class="n-icon" hidden></span><span class="n-text"></span></div>`;
@@ -5261,8 +5277,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const last = toolShown(x.tools[x.tools.length - 1].tool || {});
     const running = x.tools.findLast((m) => m.tool?.running);
     paintToolIcon(row.querySelector(".t-icon"), running ? "running" : failed ? "alert" : "check");
-    const did = running ? `Running for ${duration(Date.now() - running.ts)}` : "Worked";
-    setText(row.querySelector(".t-name"), `${did} · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`);
+    const rest = ` · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`;
+    if (running) row.querySelector(".t-name").replaceChildren(runningFor(running.ts), rest);
+    else setText(row.querySelector(".t-name"), `Worked${rest}`);
     setText(row.querySelector(".t-input"), open ? "" : `${last.name} ${last.input}`);
     const list = node.querySelector(".steps-list");
     list.hidden = !open;
@@ -5275,9 +5292,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const tool = m.tool || {};
     const k = `${key}|${box.dataset.key}`;
     const open = store.expanded.has(k);
-    // A running call (worker/transcripts.mjs markRunning) repaints each poll for its time.
-    const ran = tool.running ? duration(Date.now() - m.ts) : "";
-    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${ran}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
+    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${!!tool.running}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.classList.toggle("error", !!tool.isError);
@@ -5294,7 +5309,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     let out = box.querySelector(".tool-out");
     if (!open) { out?.remove(); return; }
     if (!out) { out = h(`<div class="tool-out"></div>`); box.appendChild(out); }
-    if (tool.running) { out.innerHTML = `<div class="t-empty"></div>`; setText(out.firstChild, `Running for ${ran}`); return; }
+    if (tool.running) { out.innerHTML = `<div class="t-empty"></div>`; out.firstChild.appendChild(runningFor(m.ts)); return; }
     const text = tool.output ?? "";
     if (!text) { out.innerHTML = `<div class="t-empty">No output</div>`; return; }
     const full = store.showMore.has(k);

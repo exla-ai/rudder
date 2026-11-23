@@ -609,7 +609,7 @@ nodeTest("an idle update waits for the home's own agents and is taken back if on
   t.after(() => fs.rmSync(volume, { recursive: true, force: true }));
   let busy = 1;
   const withdrawn = [];
-  const updates = createHostUpdates({ volume, busyAgents: () => busy, withdrawn: (hash, n) => withdrawn.push([hash, n]) });
+  const updates = createHostUpdates({ volume, busyAgents: () => busy, withdrawn: (hash, why) => withdrawn.push([hash, why]) });
   const token = "rdrw_idle_update_token_0123456789";
   const file = hostUpdatePath(volume);
 
@@ -624,23 +624,32 @@ nodeTest("an idle update waits for the home's own agents and is taken back if on
   busy = 2;
   updates.check();
   assert.ok(!fs.existsSync(file), "an agent started during the pull");
-  assert.deepEqual(withdrawn, [[workerTokenHash(token), 2]]);
+  assert.deepEqual(withdrawn, [[workerTokenHash(token), "2 agents started working"]]);
   updates.check();
   assert.equal(withdrawn.length, 1, "told once");
 
-  // The host took the request first: nothing to take back, Cloud is not told.
+  // A message or task for an agent, before any row shows it working.
   busy = 0;
+  updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: true });
+  updates.beforeRequest();
+  assert.ok(!fs.existsSync(file));
+  assert.deepEqual(withdrawn[1], [workerTokenHash(token), "a request came in for an agent"]);
+  updates.beforeRequest();
+  assert.equal(withdrawn.length, 2, "nothing left to take back");
+
+  // The host took the request first: nothing to take back, Cloud is not told.
   updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: true });
   fs.rmSync(file);
   busy = 1;
   updates.check();
-  assert.equal(withdrawn.length, 1);
+  assert.equal(withdrawn.length, 2);
 
   // Update now restarts busy agents as the user asked, and stays requested.
   updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: false });
   updates.check();
+  updates.beforeRequest();
   assert.ok(fs.existsSync(file));
-  assert.equal(withdrawn.length, 1);
+  assert.equal(withdrawn.length, 2);
 });
 
 // A stand-in docker that logs its argv and answers from FAKE_* variables.

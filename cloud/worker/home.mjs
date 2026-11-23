@@ -147,8 +147,8 @@ let hostFailureReported = null;
 const hostUpdates = createHostUpdates({
   volume: VOLUME,
   busyAgents: () => agentsHoldingRestart(),
-  withdrawn: (tokenHash, busy) => {
-    log(`update: taken back before the host applied it; ${busy === 1 ? "1 agent" : `${busy} agents`} started working`);
+  withdrawn: (tokenHash, why) => {
+    log(`update: taken back before the host applied it; ${why}`);
     sendControl({ type: "update-withdrawn", tokenHash });
   },
 });
@@ -536,10 +536,10 @@ class Project {
     try { this.ws?.close(1000, "closed"); } catch { /* ignore */ }
   }
 
-  agents() {
+  agents(summarize = agentSummary) {
     // Only a running dashboard hosts agents: while it is down (restarting,
     // stopped by SIGTERM, failed) no row is working, whatever run.json says.
-    return readAgents(this.dir, { dashboardRunning: this.status === "running" && !!this.term && !this.stopped });
+    return readAgents(this.dir, { dashboardRunning: this.status === "running" && !!this.term && !this.stopped }, summarize);
   }
 }
 
@@ -739,13 +739,25 @@ function checkHostUpdateFailure() {
   }
 }
 
-// Agents a restart now would cut off (agent-status.mjs holdsRestart).
+// Agents a restart now would cut off (agent-status.mjs holdsRestart). Checked
+// every second while an idle update waits on the host, so it reads only what
+// that rule reads: no previews, which read transcripts.
 function agentsHoldingRestart() {
   let busy = 0;
   for (const project of projects.values()) {
-    if (project.status !== "cloning") busy += project.agents().filter(holdsRestart).length;
+    if (project.status !== "cloning") busy += project.agents(restartFields).filter(holdsRestart).length;
   }
   return busy;
+}
+
+function restartFields(record, options) {
+  return {
+    id: record.id,
+    status: phoneStatus(record, options),
+    attention: record.attention ?? null,
+    asks: agentAsks(record),
+    updatedAt: toMillis(record.updatedAt) ?? toMillis(record.createdAt),
+  };
 }
 
 function sendControl(message) {
@@ -1604,6 +1616,9 @@ async function deliver(project, { kind, taskId, instruction }) {
   if (!project.term) {
     throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
   }
+  // Someone is using this machine's agents: an idle update the host has not
+  // applied yet waits until it is quiet again.
+  hostUpdates.beforeRequest();
   // A message to an idle agent starts a turn, which its row shows only once
   // the agent takes it. A local slash command starts none.
   const startsTurn = (kind === "steer" && !instruction.trim().startsWith("/")) || kind === "opencode-prompt";
@@ -1676,7 +1691,7 @@ function scheduleStateSoon() {
   setTimeout(() => void publishState().catch((error) => log(`state: ${error.message}`)), 150).unref();
 }
 
-function readAgents(repoDir, options = {}) {
+function readAgents(repoDir, options = {}, summarize = agentSummary) {
   const runsDir = path.join(repoDir, ".rudder", "runs");
   let entries = [];
   try {
@@ -1693,7 +1708,7 @@ function readAgents(repoDir, options = {}) {
     if (!record || typeof record !== "object" || record.id !== id) {
       continue;
     }
-    agents.push(agentSummary(record, options, repoDir));
+    agents.push(summarize(record, options, repoDir));
   }
   // A task typed a moment ago has no run record until its workspace is named;
   // dashboards before 3.9.6 list those here so the phone shows them at once.

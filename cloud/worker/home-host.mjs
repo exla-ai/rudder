@@ -86,14 +86,21 @@ export function withdrawHostUpdate(volume, tokenHash) {
 /**
  * The `update` RPC on an external host, held to this machine's own agents.
  * Cloud's idle update goes by the last state it got, and the host pulls the
- * image (minutes) before it restarts the machine. So an idle request
- * (`whenIdle`) is refused while `busyAgents()` counts one, and `check()`
- * (every second) takes it back if one gets busy before the host applies it,
- * then `withdrawn(tokenHash, busy)` tells Cloud. A user's Update now
- * (`whenIdle` false) restarts busy agents as they asked.
+ * image (minutes) before it restarts the machine; its apply script reads
+ * desired.json again after the pull and stops if the request is gone. So an
+ * idle request (`whenIdle`) is refused while `busyAgents()` counts one, and
+ * taken back while the host pulls if an agent gets busy (`check()`, every
+ * second) or the home is about to hand one a message or task
+ * (`beforeRequest()`); `withdrawn(tokenHash, why)` tells Cloud. A user's
+ * Update now (`whenIdle` false) restarts busy agents as they asked.
  */
 export function createHostUpdates({ volume, busyAgents, withdrawn }) {
   let idle = null; // the token hash of an idle request the host may not have applied yet
+  const takeBack = (why) => {
+    const tokenHash = idle;
+    idle = null;
+    if (withdrawHostUpdate(volume, tokenHash)) withdrawn(tokenHash, why);
+  };
   return {
     request({ image, workerToken, whenIdle }) {
       const busy = whenIdle ? busyAgents() : 0;
@@ -106,10 +113,10 @@ export function createHostUpdates({ volume, busyAgents, withdrawn }) {
     check() {
       if (!idle) return;
       const busy = busyAgents();
-      if (!busy) return;
-      const tokenHash = idle;
-      idle = null;
-      if (withdrawHostUpdate(volume, tokenHash)) withdrawn(tokenHash, busy);
+      if (busy) takeBack(`${busy === 1 ? "1 agent" : `${busy} agents`} started working`);
+    },
+    beforeRequest() {
+      if (idle) takeBack("a request came in for an agent");
     },
   };
 }

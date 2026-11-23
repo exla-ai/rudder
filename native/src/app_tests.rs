@@ -18725,6 +18725,14 @@ fn a_reloaded_row_whose_workspace_is_gone_is_flagged_not_resurrected() {
         !app.rows_missing_workspace.contains("here"),
         "a row whose workspace is still on disk must not be flagged"
     );
+
+    // The next start flags the row again but does not report it again (one
+    // row's report fired on every boot, 21 times).
+    let mut again = harness.reload();
+    again.reconcile_rows();
+    assert!(again.rows_missing_workspace.contains("gone"));
+    let log = fs::read_to_string(harness.repo.join(".rudder/activity.jsonl")).unwrap_or_default();
+    assert_eq!(log.lines().filter(|line| line.contains("\"workspace-missing\"")).count(), 1, "{log}");
 }
 
 #[test]

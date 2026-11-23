@@ -1705,6 +1705,26 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     write_run_record(&record_path, &record)
 }
 
+/// run.json key holding the workspace path a row was reported missing at, so
+/// a vanished workspace is reported once rather than on every dashboard start.
+const WORKSPACE_MISSING_REPORTED: &str = "workspaceMissingReported";
+
+pub(crate) fn workspace_missing_reported(repo_root: &Path, run_id: &str) -> Option<String> {
+    let raw = fs::read_to_string(native_run_dir(repo_root, run_id).join("run.json")).ok()?;
+    let record = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    record.get(WORKSPACE_MISSING_REPORTED)?.as_str().map(ToOwned::to_owned)
+}
+
+pub(crate) fn note_workspace_missing_reported(repo_root: &Path, run_id: &str, workspace: &str) -> Result<()> {
+    let path = native_run_dir(repo_root, run_id).join("run.json");
+    let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    record
+        .as_object_mut()
+        .context("run.json is not an object")?
+        .insert(WORKSPACE_MISSING_REPORTED.to_string(), serde_json::json!(workspace));
+    write_run_record(&path, &record)
+}
+
 fn write_run_record(record_path: &Path, record: &serde_json::Value) -> Result<()> {
     let temp = record_path.with_extension(format!(
         "json.{}.{}.tmp",

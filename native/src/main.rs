@@ -21864,14 +21864,18 @@ What to do\n\
                 continue;
             }
             missing_now.insert(run.id.clone());
-            if !self.rows_missing_workspace.contains(&run.id) {
-                vanished.push((
-                    run.id.clone(),
-                    run.workspace_path
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default(),
-                ));
+            if self.rows_missing_workspace.contains(&run.id) {
+                continue;
+            }
+            let path = run
+                .workspace_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            // Reported once per vanished workspace, not on every start: the
+            // record remembers which path it reported.
+            if workspace_missing_reported(&self.cwd, &run.id).as_deref() != Some(path.as_str()) {
+                vanished.push((run.id.clone(), path));
             }
         }
         self.rows_missing_workspace = missing_now;
@@ -21881,6 +21885,9 @@ What to do\n\
                 "a row's workspace is gone from disk",
                 serde_json::json!({ "run": run_id, "workspace": path }),
             );
+            if let Err(error) = note_workspace_missing_reported(&self.cwd, &run_id, &path) {
+                self.notice = Some(format!("{run_id}: could not record its missing workspace: {error:#}"));
+            }
             self.dirty = true;
         }
     }

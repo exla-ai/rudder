@@ -589,7 +589,12 @@ export type AccountQuota = {
 export type QuotaReport = { accounts: AccountQuota[]; fetchedAt: string; ttlSeconds: number };
 
 const QUOTA_TTL_MS = 5 * 60 * 1000;
-let quotaCache: { at: number; report: QuotaReport } | null = null;
+const ANTIGRAVITY_ASSIST_TTL_MS = 30 * 60 * 1000;
+const ANTIGRAVITY_RENEW_COOLDOWN_MS = 60 * 1000;
+const quotaAccountCache = new Map<string, { at: number; quota: AccountQuota | null }>();
+const agyVersionCache = new Map<string, string>();
+const agyAssistCache = new Map<string, { at: number; project: string; codeAssist: any }>();
+const agyRenewAttemptAt = new Map<string, number>();
 
 type ClaudeCredentials = { accessToken: string; expiresAt: number | null; subscriptionType: string | null };
 
@@ -873,7 +878,7 @@ async function fetchCodexQuota(account: AgentAccount, timeoutMs = 15_000): Promi
 // installed agy's own version.
 const ANTIGRAVITY_API = "https://daily-cloudcode-pa.googleapis.com/v1internal";
 
-type AntigravityCredentials = { accessToken: string; expiresAt: number; authMethod: string; email: string | null };
+type AntigravityCredentials = { accessToken: string; expiresAt: number; authMethod: string; email: string | null; hasRefreshToken: boolean };
 
 /** agy's stored sign-in: `{ token: { access_token, expiry }, auth_method, id_token_email }`. */
 export function parseAntigravityToken(raw: string): AntigravityCredentials {
@@ -888,6 +893,7 @@ export function parseAntigravityToken(raw: string): AntigravityCredentials {
     expiresAt,
     authMethod: parsed.auth_method,
     email: typeof parsed.id_token_email === "string" && parsed.id_token_email ? parsed.id_token_email : null,
+    hasRefreshToken: typeof token.refresh_token === "string" && token.refresh_token.length > 0,
   };
 }
 
@@ -895,14 +901,13 @@ export function parseAntigravityToken(raw: string): AntigravityCredentials {
  * agy keeps its sign-in in the OS keyring when there is one (go-keyring:
  * service "gemini", account "antigravity", value prefixed with its encoding),
  * and in `~/.gemini/antigravity-cli/antigravity-oauth-token` when there is
- * none, as on a Linux home. Rudder only reads it: agy renews it whenever it
- * runs. Null when agy holds no sign-in.
+ * none, as on a Linux home. Null when agy holds no sign-in.
  */
-async function readAntigravityCredentials(): Promise<AntigravityCredentials | null> {
+async function readAntigravityCredentials(env: NodeJS.ProcessEnv): Promise<AntigravityCredentials | null> {
   let raw: string;
   if (process.platform === "darwin") {
     try {
-      const { stdout } = await execFileAsync("security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { timeout: 5000 });
+      const { stdout } = await execFileAsync("security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { timeout: 5000, env });
       raw = stdout.trim();
     } catch (error) {
       // `security` exits 44 when the keychain has no such item.
@@ -912,8 +917,9 @@ async function readAntigravityCredentials(): Promise<AntigravityCredentials | nu
     if (raw.startsWith("go-keyring-base64:")) raw = Buffer.from(raw.slice("go-keyring-base64:".length), "base64").toString("utf8");
     else if (raw.startsWith("go-keyring-encoded:")) raw = Buffer.from(raw.slice("go-keyring-encoded:".length), "hex").toString("utf8");
   } else {
+    const home = env.HOME?.trim() || os.homedir();
     try {
-      raw = await fsp.readFile(path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token"), "utf8");
+      raw = await fsp.readFile(path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -922,17 +928,41 @@ async function readAntigravityCredentials(): Promise<AntigravityCredentials | nu
   return parseAntigravityToken(raw);
 }
 
-/** The installed agy's version, or null when agy is not installed. */
-async function agyVersion(): Promise<string | null> {
-  return await new Promise((resolve, reject) => {
-    const child = execFile(agyBin(), ["--version"], { timeout: 10_000 }, (error, stdout) => {
+function agyBinFor(env: NodeJS.ProcessEnv): string {
+  return env.RUDDER_AGY_BIN?.trim() || agyBin();
+}
+
+/** The installed agy's version, or null when agy is not installed. Cached per binary path. */
+async function agyVersion(env: NodeJS.ProcessEnv): Promise<string | null> {
+  const bin = agyBinFor(env);
+  const cached = agyVersionCache.get(bin);
+  if (cached) return cached;
+  const version = await new Promise<string | null>((resolve, reject) => {
+    const child = execFile(bin, ["--version"], { timeout: 10_000, env }, (error, stdout) => {
       if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return resolve(null);
       if (error) return reject(error);
-      const version = String(stdout).trim();
-      if (!/^\d+\.\d+\.\d+$/.test(version)) return reject(new Error(`agy --version printed ${JSON.stringify(version.slice(0, 60))}`));
-      resolve(version);
+      const raw = String(stdout).trim();
+      const match = /^(\d+\.\d+\.\d+)/.exec(raw);
+      if (!match) return reject(new Error(`agy --version printed ${JSON.stringify(raw.slice(0, 60))}`));
+      resolve(match[1]);
     });
     // agy waits on an open stdin pipe it inherits (src/models.ts).
+    child.stdin?.end();
+  });
+  if (version) agyVersionCache.set(bin, version);
+  return version;
+}
+
+/** Ask agy itself to refresh an expired OAuth access token via a read-only models query. */
+async function renewAntigravityToken(env: NodeJS.ProcessEnv): Promise<void> {
+  const bin = agyBinFor(env);
+  const home = env.HOME?.trim() || os.homedir();
+  const key = `${bin}|${home}`;
+  const last = agyRenewAttemptAt.get(key) ?? 0;
+  if (Date.now() - last < ANTIGRAVITY_RENEW_COOLDOWN_MS) return;
+  agyRenewAttemptAt.set(key, Date.now());
+  await new Promise<void>((resolve) => {
+    const child = execFile(bin, ["--output-format", "json", "models"], { cwd: home, env, timeout: 15_000, maxBuffer: 16 * 1024 * 1024 }, () => resolve());
     child.stdin?.end();
   });
 }
@@ -945,7 +975,7 @@ export function antigravityUserAgent(version: string, authMethod: string, platfo
 const ANTIGRAVITY_WINDOWS: Record<string, string> = { "5h": "Session (5h)", weekly: "Weekly" };
 
 /**
- * Pure: agy's `retrieveUserQuotaSummary` body and `loadCodeAssist` body →
+ * Pure: agy's `retrieveUserQuotaSummary` body and `loadCodeAssist` body ->
  * meters. Each group is a pool of models with its own limits (Gemini 4 Neon
  * shares "Gemini Models" with Hydrogen and Flash), each bucket a window with
  * the exact fraction left. A pool is named without its " models" suffix, so
@@ -955,11 +985,13 @@ const ANTIGRAVITY_WINDOWS: Record<string, string> = { "5h": "Session (5h)", week
 export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<AccountQuota, "fetchedAt" | "provider" | "account" | "default" | "email"> {
   const windows: QuotaWindow[] = [];
   const unread: string[] = [];
+  let primaryBlocked = false;
   const groups: { name: string | null; buckets: any[] }[] = [
     ...(Array.isArray(summary?.groups) ? summary.groups : []).map((g: any) => ({ name: typeof g?.displayName === "string" ? g.displayName.replace(/\s+models$/i, "") : null, buckets: Array.isArray(g?.buckets) ? g.buckets : [] })),
     { name: null, buckets: Array.isArray(summary?.buckets) ? summary.buckets : [] },
   ];
   for (const group of groups) {
+    const isPrimary = group.name === null || group.name === "Gemini";
     for (const bucket of group.buckets) {
       if (bucket?.disabled === true) continue;
       const span = ANTIGRAVITY_WINDOWS[bucket?.window] ?? String(bucket?.displayName || bucket?.window || bucket?.bucketId);
@@ -970,6 +1002,7 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
         continue;
       }
       const fraction = Math.max(0, Math.min(1, left));
+      if (isPrimary && fraction <= 0) primaryBlocked = true;
       windows.push({
         label,
         percent: Math.round((1 - fraction) * 100),
@@ -981,31 +1014,38 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
   const error = unread.length
     ? `Antigravity did not say how much is left of ${unread.join(", ")}`
     : windows.length ? null : "Antigravity sent no quota for this account";
-  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked: null, usageLimit: null, error };
+  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked: primaryBlocked ? "usage limit reached" : null, usageLimit: null, error };
 }
 
 /**
- * Null when agy is not installed or holds no sign-in: nothing to meter, and
- * not an error, which would make fetchQuota ask every provider again in 20s.
+ * Null when agy is not installed or holds no sign-in: nothing to meter.
  */
-async function fetchAntigravityQuota(timeoutMs = 15_000): Promise<AccountQuota | null> {
+async function fetchAntigravityQuota(env: NodeJS.ProcessEnv, { force = false, timeoutMs = 15_000 } = {}): Promise<AccountQuota | null> {
   const fetchedAt = new Date().toISOString();
   const base = { provider: "antigravity" as const, account: MAIN_ACCOUNT, default: true, email: null, plan: null, windows: [], blocked: null, usageLimit: null, fetchedAt };
   const reason = (error: unknown) => String((error as Error)?.message ?? error);
   let version: string | null;
   try {
-    version = await agyVersion();
+    version = await agyVersion(env);
   } catch (error) {
     return { ...base, error: `could not run agy --version (${reason(error)})` };
   }
   if (version === null) return null;
   let creds: AntigravityCredentials | null;
   try {
-    creds = await readAntigravityCredentials();
+    creds = await readAntigravityCredentials(env);
   } catch (error) {
     return { ...base, error: `could not read agy's sign-in (${reason(error)})` };
   }
   if (!creds) return null;
+  if (creds.expiresAt <= Date.now() && creds.hasRefreshToken) {
+    await renewAntigravityToken(env);
+    try {
+      creds = (await readAntigravityCredentials(env)) ?? creds;
+    } catch {
+      // Keep the prior credentials to report the expiry cleanly below.
+    }
+  }
   const signedIn = { ...base, email: creds.email };
   if (creds.expiresAt <= Date.now()) return { ...signedIn, error: "sign-in expired: start an Antigravity agent or run `agy` once to renew it" };
   const headers = {
@@ -1015,15 +1055,33 @@ async function fetchAntigravityQuota(timeoutMs = 15_000): Promise<AccountQuota |
   };
   const post = (method: string, body: unknown) =>
     fetch(`${ANTIGRAVITY_API}:${method}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+  const assistKey = `${creds.email || ""}|${creds.authMethod}`;
   try {
-    const assistRes = await post("loadCodeAssist", { metadata: { ideType: "ANTIGRAVITY" } });
-    if (assistRes.status === 401) return { ...signedIn, error: "sign-in rejected: run `agy` once to renew it" };
-    if (!assistRes.ok) return { ...signedIn, error: `Antigravity's account lookup returned ${assistRes.status}` };
-    const codeAssist: any = await assistRes.json();
-    const project = codeAssist?.cloudaicompanionProject;
-    if (typeof project !== "string" || !project) return { ...signedIn, error: "Antigravity named no quota project for this account" };
+    const cachedAssist = !force ? agyAssistCache.get(assistKey) : undefined;
+    let project: string;
+    let codeAssist: any;
+    if (cachedAssist && Date.now() - cachedAssist.at < ANTIGRAVITY_ASSIST_TTL_MS) {
+      project = cachedAssist.project;
+      codeAssist = cachedAssist.codeAssist;
+    } else {
+      const assistRes = await post("loadCodeAssist", { metadata: { ideType: "ANTIGRAVITY" } });
+      if (assistRes.status === 401) {
+        agyAssistCache.delete(assistKey);
+        return { ...signedIn, error: "sign-in rejected: run `agy` once to renew it" };
+      }
+      if (!assistRes.ok) return { ...signedIn, error: `Antigravity's account lookup returned ${assistRes.status}` };
+      codeAssist = await assistRes.json();
+      project = codeAssist?.cloudaicompanionProject;
+      if (typeof project !== "string" || !project) return { ...signedIn, error: "Antigravity named no quota project for this account" };
+      agyAssistCache.set(assistKey, { at: Date.now(), project, codeAssist });
+    }
     const summaryRes = await post("retrieveUserQuotaSummary", { project });
+    if (summaryRes.status === 401) {
+      agyAssistCache.delete(assistKey);
+      return { ...signedIn, error: "sign-in rejected: run `agy` once to renew it" };
+    }
     if (!summaryRes.ok) {
+      agyAssistCache.delete(assistKey);
       // Google's own message says why, in words a person can act on.
       const message = ((await summaryRes.json().catch(() => null)) as any)?.error?.message;
       return { ...signedIn, error: `Antigravity does not report usage for this account (${summaryRes.status}${typeof message === "string" && message ? `: ${message}` : ""})` };
@@ -1037,28 +1095,47 @@ async function fetchAntigravityQuota(timeoutMs = 15_000): Promise<AccountQuota |
 /** A failed lookup is retried soon, not cached for the full five minutes. */
 const QUOTA_ERROR_TTL_MS = 20 * 1000;
 
+function quotaEnvScope(env: NodeJS.ProcessEnv): string {
+  return [env.HOME ?? "", env.RUDDER_HOME ?? "", env.CLAUDE_CONFIG_DIR ?? "", env.CODEX_HOME ?? "", env.RUDDER_AGY_BIN ?? ""].join("|");
+}
+
+async function cachedAccountQuota(
+  key: string,
+  force: boolean,
+  load: () => Promise<AccountQuota | null>,
+): Promise<AccountQuota | null> {
+  const hit = quotaAccountCache.get(key);
+  if (!force && hit) {
+    const ttl = hit.quota?.error ? QUOTA_ERROR_TTL_MS : QUOTA_TTL_MS;
+    if (Date.now() - hit.at < ttl) return hit.quota;
+  }
+  const quota = await load();
+  quotaAccountCache.set(key, { at: Date.now(), quota });
+  return quota;
+}
+
 /**
  * Every account's meters, main first within each provider. `env` is the one
- * agents run with (src/accounts.ts says why the home passes its own).
+ * agents run with (src/accounts.ts says why the home passes its own). Each
+ * account has its own cache TTL so a failed lookup on one provider retries in
+ * 20s without re-fetching healthy providers before their 5-minute TTL.
  */
 export async function fetchQuota(opts: { force?: boolean; env: NodeJS.ProcessEnv }): Promise<QuotaReport> {
-  if (!opts.force && quotaCache) {
-    const ttl = quotaCache.report.accounts.some((a) => a.error) ? QUOTA_ERROR_TTL_MS : QUOTA_TTL_MS;
-    if (Date.now() - quotaCache.at < ttl) return quotaCache.report;
-  }
   const env = opts.env;
+  const force = Boolean(opts.force);
+  const scope = quotaEnvScope(env);
   const all = await listAccounts(env);
   const [accounts, antigravity] = await Promise.all([
     Promise.all([
-      ...all.claude.map((account) => fetchClaudeQuota(account, env)),
-      ...all.codex.map((account) => fetchCodexQuota(account)),
+      ...all.claude.map((account) => cachedAccountQuota(`${scope}|claude:${account.id}`, force, () => fetchClaudeQuota(account, env))),
+      ...all.codex.map((account) => cachedAccountQuota(`${scope}|codex:${account.id}`, force, () => fetchCodexQuota(account))),
     ]),
-    fetchAntigravityQuota(),
+    cachedAccountQuota(`${scope}|antigravity:${MAIN_ACCOUNT}`, force, () => fetchAntigravityQuota(env, { force })),
   ]);
-  if (antigravity) accounts.push(antigravity);
-  const report: QuotaReport = { accounts, fetchedAt: new Date().toISOString(), ttlSeconds: QUOTA_TTL_MS / 1000 };
-  quotaCache = { at: Date.now(), report };
-  return report;
+  const list = accounts.filter((a): a is AccountQuota => a !== null);
+  if (antigravity) list.push(antigravity);
+  const latest = list.reduce((max, a) => (a.fetchedAt > max ? a.fetchedAt : max), "");
+  return { accounts: list, fetchedAt: latest || new Date().toISOString(), ttlSeconds: QUOTA_TTL_MS / 1000 };
 }
 
 // ---------------------------------------------------------------------------

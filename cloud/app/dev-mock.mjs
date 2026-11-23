@@ -1320,10 +1320,12 @@ const server = http.createServer(async (req, res) => {
         { provider: "codex", account: "main", default: true, email: "viraat@example.com", plan: "Pro", blocked: null, error: null, fetchedAt,
           windows: [win("Session (5h)", 18, 251), win("Weekly", 33, 5 * 24 * 60 + 30)] },
         // agy's quota summary: one pool per model group; a full bucket has no reset.
+        // Matches real Google AI Pro where Gemini 4 Argon has 0 remaining (100% used)
+        // while the primary Gemini pool (Neon/Hydrogen/Flash) still has quota.
         { provider: "antigravity", account: "main", default: true, email: "viraat.personal@example.com", plan: "Google AI Pro", blocked: null, error: null, fetchedAt,
           windows: [win("Gemini · Weekly", 15, 6 * 24 * 60 + 800), win("Gemini · Session (5h)", 21, 263),
             { label: "Claude and GPT · Weekly", percent: 0, resetsAt: null }, { label: "Claude and GPT · Session (5h)", percent: 0, resetsAt: null },
-            { label: "Gemini 4 Argon · Weekly", percent: 0, resetsAt: null }] },
+            win("Gemini 4 Argon · Weekly", 100, 6 * 24 * 60 + 800)] },
       ] });
     }
     if (p === "/api/app/upload" && req.method === "POST") {

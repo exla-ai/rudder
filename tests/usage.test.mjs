@@ -367,6 +367,7 @@ test("Antigravity's quota summary becomes one meter per model pool and window, u
   const quota = parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { currentTier: { name: "Antigravity" }, paidTier: { id: "g1-pro-tier", name: "Google AI Pro" } });
   assert.equal(quota.plan, "Google AI Pro");
   assert.equal(quota.error, null);
+  assert.equal(quota.blocked, null, "Argon at 0 remaining does not block the primary Gemini pool");
   assert.deepEqual(quota.windows, [
     { label: "Gemini · Weekly", percent: 12, resetsAt: "2026-11-29T22:45:25Z" },
     { label: "Gemini · Session (5h)", percent: 13, resetsAt: "2026-11-23T13:45:25Z" },
@@ -376,6 +377,11 @@ test("Antigravity's quota summary becomes one meter per model pool and window, u
     { label: "Gemini 4 Argon · Weekly", percent: 100, resetsAt: "2026-11-30T09:22:06Z" },
   ]);
   assert.equal(parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { currentTier: { name: "Antigravity" } }).plan, "Antigravity");
+  assert.equal(
+    parseAntigravityQuota({ groups: [{ displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0, resetTime: "2026-11-23T13:45:25Z" }] }] }, {}).blocked,
+    "usage limit reached",
+    "a depleted primary Gemini bucket marks the account blocked",
+  );
 
   // A bucket with no fraction is named, not dropped; disabled ones are skipped.
   const partial = parseAntigravityQuota({ groups: [{ displayName: "Gemini Models", buckets: [
@@ -387,9 +393,19 @@ test("Antigravity's quota summary becomes one meter per model pool and window, u
   assert.equal(parseAntigravityQuota({}, {}).error, "Antigravity sent no quota for this account");
 });
 
+test("sidebar bindingWindow picks the primary Gemini pool on Antigravity, not Argon at 100%", async () => {
+  const src = await fsp.readFile(new URL("../cloud/app/agent-stats.js", import.meta.url), "utf8");
+  const fnMatch = /export function bindingWindow\([\s\S]*?\n\}/.exec(src);
+  assert.ok(fnMatch, "bindingWindow exported from agent-stats.js");
+  const bindingWindow = new Function(`${fnMatch[0].replace(/^export /, "")}; return bindingWindow;`)();
+  const quota = parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { paidTier: { name: "Google AI Pro" } });
+  const top = bindingWindow({ provider: "antigravity", ...quota });
+  assert.deepEqual(top, { label: "Gemini · Session (5h)", percent: 13, resetsAt: "2026-11-23T13:45:25Z" });
+});
+
 test("agy's stored sign-in and User-Agent are read the way agy writes and sends them", () => {
   const raw = JSON.stringify({ token: { access_token: "ya29.x", token_type: "Bearer", refresh_token: "1//r", expiry: "2026-11-23T09:39:26.86518533Z", expires_in: 3599 }, auth_method: "consumer", id_token_email: "me@example.com" });
-  assert.deepEqual(parseAntigravityToken(raw), { accessToken: "ya29.x", expiresAt: Date.parse("2026-11-23T09:39:26.865Z"), authMethod: "consumer", email: "me@example.com" });
+  assert.deepEqual(parseAntigravityToken(raw), { accessToken: "ya29.x", expiresAt: Date.parse("2026-11-23T09:39:26.865Z"), authMethod: "consumer", email: "me@example.com", hasRefreshToken: true });
   assert.throws(() => parseAntigravityToken(JSON.stringify({ token: {}, auth_method: "consumer" })), /no access token/);
   assert.throws(() => parseAntigravityToken(JSON.stringify({ token: { access_token: "a" }, auth_method: "consumer" })), /no expiry/);
   // agy 1.5.15 on a Linux home sends the same, plus a build number.

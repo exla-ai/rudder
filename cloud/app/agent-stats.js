@@ -362,10 +362,18 @@ function reportedAccounts(report, signedIn) {
 }
 
 // The window closest to its limit decides when the account is blocked.
-// Extra usage is paid overage, not a limit, so it never decides.
-function bindingWindow(account) {
+// Extra usage is paid overage, not a limit, so it never decides. For
+// Antigravity, the sidebar's "Gemini" bar tracks the primary Gemini pool
+// (Neon/Hydrogen/Flash), not specialized or 3P pools like Gemini 4 Argon
+// (which reports 0 remaining on Google AI Pro) or Claude and GPT; the popover
+// still shows every pool.
+export function bindingWindow(account) {
   const windows = (account?.windows || []).filter((w) => w.label !== "Extra usage");
-  return windows.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
+  const scoped = account?.provider === "antigravity"
+    ? windows.filter((w) => w.label.startsWith("Gemini · ") || !w.label.includes(" · "))
+    : windows;
+  const pool = scoped.length ? scoped : windows;
+  return pool.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
 }
 
 function renderUsagePop({ report, problem, updater, signedIn, refresh, hide }) {

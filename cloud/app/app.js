@@ -1694,11 +1694,32 @@ function paintAttachments(box, files) {
       img.src = url; img.alt = name; img.loading = "lazy";
       chip.appendChild(img);
     } else {
-      chip.innerHTML = `${icon("file")}<span class="att-name"></span>`;
+      chip.innerHTML = `${icon(f.image ? "image" : "file")}<span class="att-name"></span>`;
       chip.querySelector(".att-name").textContent = name;
     }
     return chip;
   }));
+}
+
+// The images pasted into a user's message (worker/transcripts.mjs): a chip
+// each, with the picture when this device sent it. The agents keep them in
+// their sessions or under .rudder/uploads, which no route serves.
+function pastedImages(m) {
+  return (m.images || []).map((image) => ({ path: image.path || undefined, name: "Image", image: true }));
+}
+
+// A small note in the chat that is nobody's words (worker/transcripts.mjs
+// noticeMessage): what the agent's CLI said, a stopped turn, an error.
+const NOTICE_HTML = `<div class="notice" role="note"><span class="n-icon" hidden></span><span class="n-text"></span></div>`;
+
+function paintNotice(node, m) {
+  node.classList.toggle("n-error", m.level === "error");
+  node.classList.toggle("n-warning", m.level === "warning");
+  const ic = m.stopped ? "stop" : m.level === "info" ? "" : "alert";
+  const box = node.querySelector(".n-icon");
+  if (box.dataset.ic !== ic) { box.innerHTML = ic ? icon(ic) : ""; box.dataset.ic = ic; }
+  box.hidden = !ic;
+  setText(node.querySelector(".n-text"), m.text);
 }
 
 async function uploadAttachment(ws, file) {
@@ -5096,7 +5117,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       if (fresh) node.addEventListener("animationend", () => node.classList.remove("c-new"), { once: true });
       return node;
     }
-    if (role === "system" && (x.m.kind === "handoff" || x.m.kind === "scheduled" || x.m.kind === "goal")) {
+    if (role === "system" && x.m.kind === "notice") return h(NOTICE_HTML);
+    if (role === "system" && (x.m.kind === "handoff" || x.m.kind === "scheduled" || x.m.kind === "goal" || x.m.kind === "rudder")) {
       return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
     }
     if (role === "system" && x.m.kind === "turn") return h(`<div class="turn-time"></div>`);
@@ -5135,7 +5157,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "compacting") return paintCompacting(node, x.since, x.before);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
-    if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled" || m.kind === "goal") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled" || m.kind === "goal" || m.kind === "rudder") { node._msg = m; return paintCompact(node, m); }
+    if (m.kind === "notice") return paintNotice(node, m);
     if (m.kind === "peer") { node._msg = m; return paintPeer(node, m); }
     if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
     const md = node.querySelector(".md");
@@ -5143,7 +5166,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (m.role === "user") {
       text = paintQuote(node, text);
       md.hidden = !text;
-      paintAttachments(node.querySelector(".atts"), (m.attachments || []).map((path) => ({ path })));
+      paintAttachments(node.querySelector(".atts"), [...(m.attachments || []).map((path) => ({ path })), ...pastedImages(m)]);
       editAction(node, m, chatEdits);
     }
     const sig = `${text}|${markdownReady()}`;
@@ -5152,13 +5175,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
 
   // A compacted context (compaction.js), a chat moved here from another
   // harness ("Moved from Claude · Opus 5.5", cloud/worker/handoff.mjs), a
-  // scheduled task's turn or a note about the goal (a check-in): one marker
-  // with what the agent continued from, the prompt it ran or the check-in
-  // behind it.
+  // scheduled task's turn, a note about the goal (a check-in) or a prompt
+  // Rudder itself sent (worker/transcripts.mjs rudderPrompt): one marker
+  // with what the agent continued from, the prompt it ran, the check-in or
+  // what Rudder sent behind it.
   function paintCompact(node, m) {
     if (m.kind === "compact") return paintCompactMarker(node, m.compact || {});
     const moved = m.kind === "handoff";
-    const c = (moved ? m.handoff : { summary: m.kind === "goal" ? m.goal.detail : m.scheduled.prompt }) || {};
+    const c = (moved ? m.handoff : { summary: m.kind === "goal" ? m.goal.detail : m.kind === "rudder" ? m.rudder.prompt : m.scheduled.prompt }) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
     const row = node.querySelector(".compact-row");
     node.classList.toggle("open", open);
@@ -5166,7 +5190,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.disabled = !c.summary;
     row.setAttribute("aria-expanded", String(open));
     setText(row.querySelector(".c-text"), m.text);
-    const behind = moved ? "what it was handed" : m.kind === "goal" ? "the details" : "the prompt it ran";
+    const behind = moved ? "what it was handed" : m.kind === "goal" ? "the details" : m.kind === "rudder" ? "what Rudder sent" : "the prompt it ran";
     row.setAttribute("aria-label", `${m.text}.${c.summary ? ` ${open ? "Hide" : "Show"} ${behind}.` : ""}`);
     const sum = node.querySelector(".compact-sum");
     sum.hidden = !open;

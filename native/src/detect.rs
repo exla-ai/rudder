@@ -885,25 +885,42 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
         "enter to confirm",
         "type to filter",
     ];
-    let menu_open = lines
+    let rows: Vec<String> = lines
         .iter()
-        .rev()
         .map(|line| normalize_terminal_line(line).to_lowercase())
         .filter(|line| !line.is_empty())
+        .collect();
+    let turn_status = backend == Backend::Antigravity && antigravity_turn_status_showing(&rows);
+    let menu_open = rows
+        .iter()
+        .rev()
         .take(6)
-        .filter(|line| !(backend == Backend::Antigravity && is_antigravity_turn_footer(line)))
-        .any(|line| MENU_HINTS.iter().any(|hint| line.contains(hint)));
+        .skip(usize::from(turn_status))
+        .any(|line| {
+            MENU_HINTS.iter().any(|hint| line.contains(hint))
+                // Every Antigravity picker and panel has this hint row:
+                // `↑/↓ Navigate · enter Select`, `enter Select  esc Go Back`.
+                || (backend == Backend::Antigravity && line.contains("↑/↓ navigate"))
+        });
     menu_open.then_some("a menu is open in its pane (Esc closes it)")
 }
 
-/// Antigravity's status bar during a turn: `esc to cancel` where `? for
-/// shortcuts` sits when idle, then its `auto · <model> · <effort>` block. The
-/// composer stays open under a running turn and queues what is typed, so this
-/// is not a menu. Full-screen panels hide the status bar. Takes a normalized,
-/// lowercased row.
-fn is_antigravity_turn_footer(line: &str) -> bool {
-    line.strip_prefix("esc to cancel")
-        .is_some_and(|rest| rest.starts_with(char::is_whitespace) && rest.contains(" · "))
+/// Antigravity's status bar during a turn: `esc to cancel` on the row right
+/// under its composer box, where `? for shortcuts` sits when idle. Its
+/// `auto · <model> · <effort>` block shares the row only when the pane is
+/// wide enough (about 45 columns; a phone is narrower). The composer stays
+/// open under a running turn and queues what is typed, so this is not a menu.
+/// Menus and panels replace the composer's bottom rule or hide the status
+/// bar. Takes normalized, lowercased, non-empty rows.
+fn antigravity_turn_status_showing(rows: &[String]) -> bool {
+    let [.., rule, status] = rows else {
+        return false;
+    };
+    let rule = rule.chars().count() >= 2 && rule.chars().all(|ch| ch == '\u{2500}');
+    let turn = status
+        .strip_prefix("esc to cancel")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    rule && turn
 }
 
 /// True when the pane shows the backend parked at its composer, with no

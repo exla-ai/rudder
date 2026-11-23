@@ -28887,6 +28887,33 @@ fn an_open_menu_blocks_typed_messages_but_the_composer_and_a_running_turn_do_not
         .map(|line| line.to_string())
         .collect();
     assert!(terminal_composer_blocked(Backend::Antigravity, &agy_panel).is_some());
+
+    // 11-23 00:43, test-zb4o1: on a phone-width pane (40 columns or less)
+    // agy 1.5.15 drops the model block, and a running turn's status bar is
+    // `esc to cancel` alone. It still sits under the open composer.
+    let screen = |rows: &[&str]| rows.iter().map(|row| row.to_string()).collect::<Vec<String>>();
+    let rule = "──────────────────────────────────────";
+    let narrow_busy = screen(&["> count from 1 to 30 in one line", "⢿  Working...", rule, "> then say done", rule, "esc to cancel"]);
+    assert_eq!(terminal_composer_blocked(Backend::Antigravity, &narrow_busy), None);
+    // The slash-command popup takes the composer's bottom rule, and every
+    // agy panel has its `↑/↓ Navigate` hint row.
+    let slash_popup = screen(&[
+        rule,
+        "> /model               Set a model...",
+        "  /remote-control      Turn on rem...",
+        "  ↑/↓ Navigate · enter Select · tab Co",
+        "esc to cancel",
+    ]);
+    assert!(terminal_composer_blocked(Backend::Antigravity, &slash_popup).is_some());
+    let model_panel = screen(&[
+        "  Gemini 4 Carbon",
+        "  Effort  ◂     ◉────────○────────○",
+        "               low    medium    high",
+        "Keyboard: ↑/↓ Navigate  ←/→ Effort",
+        "  enter Select  esc Go Back",
+        "           auto · Gemini 4 Argon · low",
+    ]);
+    assert!(terminal_composer_blocked(Backend::Antigravity, &model_panel).is_some());
 }
 
 #[cfg(not(windows))]

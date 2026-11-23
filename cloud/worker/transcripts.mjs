@@ -1338,6 +1338,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           tool: { name: block.name || "tool", input: summarizeClaudeInput(block.name, block.input), output: null, isError: false },
         };
         setToolFiles(message.tool, { files: claudeCallFiles(block.name, block.input) });
+        setToolAsk(message.tool, block.name, block.input);
         tools.set(block.id, message);
         inputs.set(block.id, block.input);
         reader.toolCalls += 1;
@@ -1364,6 +1365,7 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           target.tool.output = clip(text, outputLimit);
           target.tool.isError = Boolean(block.is_error);
           setToolFiles(target.tool, claudeResultFiles(target.tool.name, inputs.get(block.tool_use_id), { isError: target.tool.isError, result: entry.toolUseResult, text, limit: outputLimit }));
+          answerToolAsk(target.tool, entry.toolUseResult);
           // A followed subagent's reader lives across polls: a call is let go
           // once its result is in, so a long subagent does not pile them up.
           tools.delete(block.tool_use_id);
@@ -1595,6 +1597,9 @@ function summarizeClaudeInput(name, input) {
   if (!input || typeof input !== "object") {
     return "";
   }
+  if (name === "AskUserQuestion" && Array.isArray(input.questions)) {
+    return oneLine(input.questions.map((q) => q?.question).filter((q) => typeof q === "string").join(" "));
+  }
   const pick =
     input.command ??
     input.file_path ??
@@ -1613,6 +1618,47 @@ function summarizeClaudeInput(name, input) {
     return `${input.todos.length} todo(s)`;
   }
   return oneLine(JSON.stringify(input));
+}
+
+/**
+ * A question Claude asked the user (AskUserQuestion), as `tool.ask`: the
+ * questions and their options, and once answered, `answers` (question ->
+ * the chosen labels, or what the user wrote). The app shows it in the chat as
+ * a question and its answer rather than a tool card.
+ */
+function setToolAsk(tool, name, input) {
+  if (name !== "AskUserQuestion" || !Array.isArray(input?.questions)) {
+    return;
+  }
+  const questions = input.questions
+    .filter((q) => typeof q?.question === "string" && q.question)
+    .slice(0, 10)
+    .map((q) => ({
+      question: q.question.slice(0, 2000),
+      options: (Array.isArray(q.options) ? q.options : []).map((o) => String(o?.label ?? "").slice(0, 200)).filter(Boolean).slice(0, 10),
+    }));
+  if (questions.length) {
+    tool.ask = { questions, answers: null };
+  }
+}
+
+// The answers Claude Code records with the question's result, keyed by the
+// question: a label or written text, several labels for a multiple choice, or
+// a number.
+function answerToolAsk(tool, result) {
+  const given = result?.answers;
+  if (!tool.ask || !given || typeof given !== "object") {
+    return;
+  }
+  const answers = {};
+  for (const { question } of tool.ask.questions) {
+    const value = given[question];
+    const text = Array.isArray(value) ? value.map(String).join(", ") : typeof value === "number" ? String(value) : value;
+    if (typeof text === "string" && text) {
+      answers[question] = text.slice(0, 4000);
+    }
+  }
+  tool.ask.answers = answers;
 }
 
 // ---------------------------------------------------------------------------

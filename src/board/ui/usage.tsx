@@ -16,7 +16,7 @@ type Mode = "tokens" | "machine";
 type Metric = "cost" | "tokens";
 type Provider = "claude" | "codex";
 
-const PROVIDER_LABEL: Record<Provider, string> = { claude: "Claude Code", codex: "Codex" };
+const PROVIDER_LABEL: Record<AccountQuota["provider"], string> = { claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
 
 function fmtUsd(n: number): string {
   if (n >= 100) return `$${n.toFixed(0)}`;

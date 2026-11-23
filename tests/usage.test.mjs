@@ -8,10 +8,13 @@ import "./board-source.mjs";
 const { startBoardDaemon } = await import("../src/board/daemon.ts");
 const { requestBoardBootstrap } = await import("../src/board/host-access.ts");
 const {
+  antigravityUserAgent,
   claudeKeychainService,
   classifyCommand,
   localDay,
   parseClaudeLog,
+  parseAntigravityQuota,
+  parseAntigravityToken,
   parseClaudeQuota,
   parseCodexLog,
   parseCodexQuota,
@@ -332,6 +335,66 @@ test("a Codex account that has hit its rate limit reports why, without hiding th
 
   const clear = parseCodexQuota({ plan_type: "plus", rate_limit: { allowed: true, limit_reached: false } });
   assert.equal(clear.blocked, null);
+});
+
+// agy 1.5.15's retrieveUserQuotaSummary answer for a Google AI Pro account
+// (2026-11-23), whose agy `/usage` read 87.87% and 87.07% left for Gemini.
+const ANTIGRAVITY_SUMMARY = {
+  groups: [
+    {
+      displayName: "Gemini Models",
+      description: "Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash",
+      buckets: [
+        { bucketId: "gemini-weekly", displayName: "Weekly Limit Remaining", window: "weekly", resetTime: "2026-11-29T22:45:25Z", remainingFraction: 0.87866485 },
+        { bucketId: "gemini-5h", displayName: "Five Hour Limit Remaining", window: "5h", resetTime: "2026-11-23T13:45:25Z", remainingFraction: 0.8706959 },
+      ],
+    },
+    {
+      displayName: "Claude and GPT models",
+      buckets: [
+        { bucketId: "3p-weekly", displayName: "Weekly Limit Remaining", window: "weekly", resetTime: "2026-11-30T09:22:06Z", remainingFraction: 1 },
+        { bucketId: "3p-5h", displayName: "Five Hour Limit Remaining", window: "5h", resetTime: "2026-11-23T14:22:06Z", remainingFraction: 1 },
+      ],
+    },
+    {
+      displayName: "Gemini 4 Argon",
+      buckets: [{ bucketId: "gemini-argon-wtu-weekly", displayName: "Gemini 4 Argon Weekly Limit", window: "weekly", resetTime: "2026-11-30T09:22:06Z", remainingFraction: 0 }],
+    },
+  ],
+};
+
+test("Antigravity's quota summary becomes one meter per model pool and window, used = 1 - remaining fraction", () => {
+  const quota = parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { currentTier: { name: "Antigravity" }, paidTier: { id: "g1-pro-tier", name: "Google AI Pro" } });
+  assert.equal(quota.plan, "Google AI Pro");
+  assert.equal(quota.error, null);
+  assert.deepEqual(quota.windows, [
+    { label: "Gemini · Weekly", percent: 12, resetsAt: "2026-11-29T22:45:25Z" },
+    { label: "Gemini · Session (5h)", percent: 13, resetsAt: "2026-11-23T13:45:25Z" },
+    // A full bucket's reset time only rolls with the clock: none, as agy shows.
+    { label: "Claude and GPT · Weekly", percent: 0, resetsAt: null },
+    { label: "Claude and GPT · Session (5h)", percent: 0, resetsAt: null },
+    { label: "Gemini 4 Argon · Weekly", percent: 100, resetsAt: "2026-11-30T09:22:06Z" },
+  ]);
+  assert.equal(parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { currentTier: { name: "Antigravity" } }).plan, "Antigravity");
+
+  // A bucket with no fraction is named, not dropped; disabled ones are skipped.
+  const partial = parseAntigravityQuota({ groups: [{ displayName: "Gemini Models", buckets: [
+    { bucketId: "gemini-weekly", window: "weekly", resetTime: "2026-11-29T22:45:25Z" },
+    { bucketId: "gemini-5h", window: "5h", remainingFraction: 0.5, disabled: true },
+  ] }] }, {});
+  assert.deepEqual(partial.windows, []);
+  assert.equal(partial.error, "Antigravity did not say how much is left of Gemini · Weekly");
+  assert.equal(parseAntigravityQuota({}, {}).error, "Antigravity sent no quota for this account");
+});
+
+test("agy's stored sign-in and User-Agent are read the way agy writes and sends them", () => {
+  const raw = JSON.stringify({ token: { access_token: "ya29.x", token_type: "Bearer", refresh_token: "1//r", expiry: "2026-11-23T09:39:26.86518533Z", expires_in: 3599 }, auth_method: "consumer", id_token_email: "me@example.com" });
+  assert.deepEqual(parseAntigravityToken(raw), { accessToken: "ya29.x", expiresAt: Date.parse("2026-11-23T09:39:26.865Z"), authMethod: "consumer", email: "me@example.com" });
+  assert.throws(() => parseAntigravityToken(JSON.stringify({ token: {}, auth_method: "consumer" })), /no access token/);
+  assert.throws(() => parseAntigravityToken(JSON.stringify({ token: { access_token: "a" }, auth_method: "consumer" })), /no expiry/);
+  // agy 1.5.15 on a Linux home sends the same, plus a build number.
+  assert.equal(antigravityUserAgent("1.5.15", "consumer", "linux", "x64"), "antigravity/cli/1.5.15 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)");
+  assert.equal(antigravityUserAgent("1.5.15", "consumer", "darwin", "arm64"), "antigravity/cli/1.5.15 (aidev_client; os_type=darwin; arch=arm64; auth_method=consumer)");
 });
 
 test("ps output is reduced to agent processes, classified and sorted by cpu", () => {

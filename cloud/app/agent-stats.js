@@ -217,7 +217,8 @@ function renderAgentPop(stats, problem) {
 
 /* Plan usage: sidebar meter + popover ------------------------------------ */
 
-const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }];
+// Antigravity's meters are its Gemini plan's, and the sidebar has room for a short name.
+const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }, { id: "antigravity", label: "Gemini" }];
 const POLL_MS = 60_000;
 
 // The meter can be hidden on this device: "Hide" in its popover, and
@@ -233,8 +234,8 @@ export function setPlanUsageShown(shown) {
 }
 
 /**
- * Plan usage for the cloud machine's signed-in Claude and Codex accounts (a
- * harness can hold several, src/accounts.ts): one row each in the sidebar
+ * Plan usage for the cloud machine's signed-in Claude, Codex and Antigravity
+ * accounts (a harness can hold several, src/accounts.ts): one row each in the sidebar
  * footer (the window closest to its limit), and every
  * window with its reset time in the popover. Usage belongs to the machine's
  * sign-ins, not to a project. When it cannot load, the meter says so and the

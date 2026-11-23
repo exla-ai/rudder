@@ -1298,6 +1298,11 @@ const server = http.createServer(async (req, res) => {
           windows: [win("Session (5h)", 8, 212), win("Weekly", 12, 4 * 24 * 60)] })),
         { provider: "codex", account: "main", default: true, email: "viraat@example.com", plan: "Pro", blocked: null, error: null, fetchedAt,
           windows: [win("Session (5h)", 18, 251), win("Weekly", 33, 5 * 24 * 60 + 30)] },
+        // agy's quota summary: one pool per model group; a full bucket has no reset.
+        { provider: "antigravity", account: "main", default: true, email: "viraat.personal@example.com", plan: "Google AI Pro", blocked: null, error: null, fetchedAt,
+          windows: [win("Gemini · Weekly", 15, 6 * 24 * 60 + 800), win("Gemini · Session (5h)", 21, 263),
+            { label: "Claude and GPT · Weekly", percent: 0, resetsAt: null }, { label: "Claude and GPT · Session (5h)", percent: 0, resetsAt: null },
+            { label: "Gemini 4 Argon · Weekly", percent: 0, resetsAt: null }] },
       ] });
     }
     if (p === "/api/app/upload" && req.method === "POST") {

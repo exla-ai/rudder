@@ -1603,6 +1603,9 @@ button:focus-visible {
 .provider-opencode {
   background: #7c3aed;
 }
+.provider-antigravity {
+  background: #1a73e8;
+}
 .provider-rudder {
   background: var(--accent);
 }

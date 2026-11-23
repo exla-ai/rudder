@@ -494,7 +494,12 @@ models. The Claude Code sign-in sheet has a full-width
 field for pasting the sign-in code. The model pickers choose the account when
 a harness has more than one. Plan usage is per account. On macOS, Claude's
 keychain entry for an added dir is `Claude Code-credentials-<sha256(dir)[:8]>`.
-Antigravity has one account because agy has no config dir setting. Open work
+Antigravity has one account because agy has no config dir setting. Its plan
+usage ("Gemini" in the sidebar meter) is agy's own `/usage` data:
+`retrieveUserQuotaSummary` on daily-cloudcode-pa with agy's sign-in and an
+`antigravity/cli/<installed version>` User-Agent (an older version gets no
+Gemini group), one meter per model pool and window. The macOS keychain read
+of agy's sign-in is untested. Open work
 includes verifying a real sign-in into an added account on a Cloud home and on
 macOS, resuming a Codex chat on another account, and adding accounts from the
 Mac dashboard.

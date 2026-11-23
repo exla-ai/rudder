@@ -278,7 +278,7 @@ async function readOpencodeConfiguredModel(): Promise<string | null> {
 const AGY_TIMEOUT_MS = 20_000;
 
 /** The Antigravity CLI; RUDDER_AGY_BIN points tests at a stub, as in the dashboard. */
-function agyBin(): string {
+export function agyBin(): string {
   return process.env.RUDDER_AGY_BIN?.trim() || "agy";
 }
 

@@ -46,7 +46,7 @@ mac/
     ├── publish.sh           stages the GitHub release, runs .github/workflows/mac-publish.yml
     ├── appcast.mjs          the Sparkle appcast: write (EdDSA-signed) and verify
     ├── make-dmg.sh          the DMG window (dmgbuild)
-    └── ci.sh                the same steps on an offstage Mac for .github/workflows/mac.yml
+    └── ci.sh                the same steps on an offstage Mac (release.yml, mac.yml)
 ```
 
 ## The bridge (for the web app)
@@ -201,7 +201,7 @@ for s in 1 2; do
 done
 ```
 
-The Mac app carries Rudder's version: `npm version` runs `scripts/mac-version.mjs`, which sets `MARKETING_VERSION` and the derived build number in `project.yml`. Never bump them by hand.
+The Mac app carries Rudder's version: `npm version` runs `scripts/version.mjs`, which sets `MARKETING_VERSION` and the derived build number in `project.yml` (and the Cloud worker image pin). Never bump them by hand.
 
 ## Releasing: the DMG and the appcast
 
@@ -217,14 +217,14 @@ Both live on the repo's **latest** GitHub release, `mac-v<version>-<build>`:
   `releases/download/mac-v<version>-<build>/Rudder.dmg` with its length and
   EdDSA signature, so it stays right however "latest" moves.
 
-For a stable release, push the versioned commit to `release-check/X.Y.Z`.
-`mac-prepare.yml` tests the app on Offstage, signs and notarizes the app and
-DMG, and signs the Sparkle feed on Linux. Wait for that workflow and Release
-qualification to pass, then tag the same commit. The tag workflow retrieves
-the verified files from that exact preparation, waits for Cloud to serve the
-matching worker image, and publishes both files together. It records the time
-from Cloud health confirmation until both public URLs serve the prepared
-bytes. Prepared artifacts are retained for 14 days.
+Every Rudder version ships the Mac app (`.github/workflows/release.yml`, the
+rudder-ship skill). Pushing the version commit to `release-check/X.Y.Z` tests
+the app on an Offstage Mac, signs and notarizes the app and DMG, signs the
+Sparkle feed on the Linux runner and stages the three files in the draft
+release `vX.Y.Z`. The `vX.Y.Z` tag at the same commit checks them against
+their hashes and `App/Info.plist`, waits for Cloud to serve the matching worker
+image, publishes `mac-v<version>-<build>` as the latest release and checks
+both public URLs.
 
 To publish a manually built DMG, publish both files from any machine with `gh` signed in to an account that can push
 to the repo, once `mac/build/Rudder.dmg` and `mac/build/release.env` are there

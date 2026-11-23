@@ -121,11 +121,16 @@ An explicit push/ship/publish/install/deploy request authorizes the documented
 workflow; preserve that authorization across turns. Ordinary edits alone do not
 authorize unrelated deployment. Never force-push.
 
-Pushing `main` needs no release. A release is: run the full checks below
-once, commit, `npm version`, then push main and the created tag. Tag CI
-publishes; do not manually `npm publish`. v4 prereleases use `next`;
-stable uses `latest`. Verify CI and actual registry availability. Docs-only
-pushes do not require a product version bump.
+Pushing `main` needs no release. A release ships one version to npm, Cloud
+and the Mac app from one commit, and GitHub builds and tests nothing. In
+order: `npm version X.Y.Z --no-git-tag-version` (it also pins `mac/` and
+`cloud/fly.toml`), commit, push that commit to `release-check/X.Y.Z` (Offstage
+builds darwin and the signed Mac app), run the checks below once in a clean
+clone of that branch, `node scripts/release.mjs stage` there, build the worker
+image and deploy Cloud, then tag the same commit and push `main` and the tag.
+The tag run only checks hashes and publishes; never `npm publish` by hand.
+The `rudder-ship` skill has the exact commands. Docs-only pushes need no
+version.
 
 ```sh
 npm run check
@@ -136,11 +141,9 @@ npm run build
 RUDDER_NATIVE_BIN="$PWD/target/release/rudder-native" npm run test:tui
 ```
 
-Cloud also needs the worker image and Fly control-plane deployment. Verify
-`https://rudder.exla.ai/app`, revision/image/deployment, UTC time and smoke checks.
-Let active homes update when idle; never restart live agents to force adoption.
-Filter provider output so worker tokens stay private. Mac installation/release
-has separate build, install/launch and signing gates; see reference §§9, 11.
+Verify `https://rudder.exla.ai/app`, revision/image/deployment, UTC time and
+smoke checks. Let active homes update when idle; never restart live agents to
+force adoption. Filter provider output so worker tokens stay private.
 
 End with a short final message: what changed, what was checked, what is left.
 `rudder done` still exists until the ceremony removal lands; when a run's prompt asks for

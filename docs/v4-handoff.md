@@ -8,6 +8,14 @@ current account is confirmed exhausted. Each account keeps its own sign-in.
 Agent rows on the home and project pages render compact Markdown previews
 with readable link labels, emphasis and inline code.
 
+Releases build and test nothing on GitHub (from 5.0.34). The
+`release-check/X.Y.Z` push builds the darwin pair and the signed Mac app on
+Offstage into a draft release, the home runs the checks once and stages the
+npm tarball (`node scripts/release.mjs stage`), the worker image builds from
+that tarball and Cloud deploys before the tag, and the tag only verifies
+hashes and publishes npm and the Mac app, at every version. The GHCR worker
+image copy is gone; external hosts pull `rudder-worker-images`.
+
 How to work: see "Development speed" in `AGENTS.md` (main only, targeted
 checks, CI only at release, no new status docs, no hardening waves).
 

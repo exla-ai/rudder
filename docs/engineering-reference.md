@@ -916,9 +916,9 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     (`cloud/worker/home-host.mjs`). When idle on another image, `updateExternalHome`
     sets a next token and sends the `update` RPC `{image, workerToken}`. The image is
     `RUDDER_WORKER_IMAGE`'s tag in the repository the home reports
-    (`externalHomeImage`): `registry.fly.io/rudder-workers-exla` stays there,
-    `ghcr.io/exla-ai/rudder-worker` and `registry.fly.io/rudder-worker-images` stay
-    there, anything else (and a new host) gets `rudder-worker-images`; the Alt+r offer
+    (`externalHomeImage`): `registry.fly.io/rudder-workers-exla` and
+    `registry.fly.io/rudder-worker-images` stay there, anything else (and a new
+    host) gets `rudder-worker-images`; the Alt+r offer
     uses the same target. A worker image outside these repositories (a dev Cloud) is
     sent unchanged. Fly homes keep `RUDDER_WORKER_IMAGE`.
     `home.mjs` writes `/workspace/.rudder-host/desired.json` (0600) and acks; the host's
@@ -952,10 +952,8 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     never on the volume. Hosts set up before this run `rudder-workers-exla` with a
     hand-made login that expires; move one once with `docker login`, then
     `echo registry.fly.io/rudder-worker-images:<version> | sudo tee /etc/rudder/image`
-    and `sudo rudder-home-start`. CI also pushes a GHCR copy
-    (`ghcr.io/exla-ai/rudder-worker`, `.github/workflows/worker-image.yml`); the package
-    is private, so it needs a login too. The apply script refuses a repository change,
-    so Cloud never moves a host between registries.
+    and `sudo rudder-home-start`. The apply script refuses a repository change, so Cloud
+    never moves a host between registries.
 
 ### 9.6.1 Deleting cloud things (request + reaper)
 Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
@@ -1017,16 +1015,16 @@ agents (`migration.json`), spawns `rudder` (workspace) or `rudder codex --worksp
 reports a final heartbeat on exit. On restart it checks `.rudder-staged.json` and
 re-fetches a fresh signed URL from the snapshot-url endpoint.
 
-Release images: `node scripts/worker-image.mjs <version>` after npm publish pushes
+Release images: `node scripts/worker-image.mjs <version>`, run after
+`scripts/release.mjs stage` and before the tag, pushes
 `registry.fly.io/rudder-workers-exla:<version>` for Fly homes and copies it to
-`registry.fly.io/rudder-worker-images:<version>` for external hosts. CI pushes the same
-build to the private `ghcr.io/exla-ai/rudder-worker:<version>`
-(`.github/workflows/worker-image.yml`: on each `v*` tag once npm serves it, or
-`gh workflow run worker-image.yml -f version=X`). With
-`RUDDER_SOURCE=release` the builder fetches `@exla/rudder@RUDDER_VERSION` and takes its
-`dist` and linux-x64 `rudder-native`/`rudder-jj`, so the image matches the release and
-skips the Rust stage. The default `RUDDER_SOURCE=checkout` compiles from the checkout
-(its native stage needs `package.json`: the header version is embedded). The worker
+`registry.fly.io/rudder-worker-images:<version>` for external hosts. With
+`RUDDER_SOURCE=release` the builder takes `dist` and the linux-x64
+`rudder-native`/`rudder-jj` from the staged npm tarball
+(`.release/exla-rudder-<version>.tgz`, the bytes the tag publishes), so the
+image matches the release and skips the Rust stage. The default
+`RUDDER_SOURCE=checkout` compiles from the checkout (its native stage needs
+`package.json`: the header version is embedded). The worker
 account and agent CLIs sit in `worker-tools`, cached across releases.
 
 ### 9.8.1 The home machine (2.16.0) and the phone app
@@ -1957,7 +1955,7 @@ From `package.json`:
   and copies the native/dashboard pair. `scripts/build-native.mjs` uses one
   locked workspace Cargo graph for `rudder-native` and `rudder-jj`, with the
   bridge CLI feature enabled. `prepack` runs this build.
-- Release CI supplies all three platform pairs with manifests bound to the
+- A release's stage supplies both platform pairs with manifests bound to the
   checked-out revision and each executable's SHA256/size. Only a complete,
   reverified artifact set skips Cargo during packaging. Invalid explicit
   prebuilts fail; they never fall back to a stale local build. Ordinary local
@@ -2016,70 +2014,50 @@ Always, before shipping a source change:
    `dist/native/rudder-native`) is current. `prepack` does this automatically;
    `dist/` is not committed, so there is nothing to stage.
 
-### Releasing (tag-driven, drift-proof)
+### Releasing (one version everywhere, GitHub only publishes)
 
-Releases publish to npm from CI when a `vX.Y.Z` tag is pushed
-(`.github/workflows/release.yml`), so the published version is always pinned to a
-committed git tag. The workflow refuses to publish if the tag does not match
-`package.json` `version`, so the repo and the registry can never drift apart (the
-failure mode that left `1.0.70`–`1.0.73` on npm but never in git).
+A release ships one version to npm, Cloud and the Mac app from one commit.
+GitHub builds and tests nothing; `scripts/release.mjs` (its header has the
+design) and `.github/workflows/release.yml` do the rest, and the `rudder-ship`
+skill has the commands.
 
-Cut a release from clean `main` after the feature changes are committed:
+1. `npm version X.Y.Z` runs `scripts/version.mjs`, which also sets the Mac
+   app's version and build number (`mac/project.yml`) and the worker image pin
+   (`cloud/fly.toml`). Commit them together and push the commit to
+   `release-check/X.Y.Z`.
+2. That push runs Release on the branch: it creates the draft GitHub release
+   `vX.Y.Z` targeting the commit, builds the darwin-arm64 pair on an Offstage
+   Mac (`.offstage/native.mjs`), and tests, signs, notarizes and packages the
+   Mac app on another (`.offstage/mac.mjs`) with the Sparkle feed signed on the
+   runner. Both are uploaded to the draft with a `<part>.json` naming the
+   version, the revision and each file's sha256.
+3. On the home, in a clean clone of the branch: the full checks once, then
+   `node scripts/release.mjs stage`. It builds the linux-x64 pair, downloads
+   and verifies the darwin pair, packs the npm tarball with both
+   (`RUDDER_NATIVE_PREBUILTS`), checks it and uploads it.
+4. `node scripts/worker-image.mjs X.Y.Z` builds the worker image from that
+   tarball and Cloud is deployed, before the tag.
+5. The `vX.Y.Z` tag at the same commit runs Release again. It checks the
+   staged files against their manifests, the tag's `package.json` and the
+   Offstage darwin pair, publishes the tarball with trusted publishing
+   (`npm publish <tarball> --provenance`, OIDC, no token), publishes the Mac
+   release once `rudder.exla.ai/health` reports the pinned image, then deletes
+   the draft and the branch.
 
-```bash
-npm version X.Y.Z          # create the FINAL version commit and local vX.Y.Z tag; keep the tag unpushed
-# For a prerelease, use the explicit target, such as npm version 4.0.0-alpha.N.
-git push origin HEAD:release-check/X.Y.Z # qualify the exact versioned SHA; no publish
-# For a stable Mac release, wait for both Release and Prepare Mac release.
-# Push the same qualified SHA to main and the version tag:
-git push origin main vX.Y.Z # push main and only the newly created release tag
-```
+The tag job refuses a tag that differs from `package.json`, so the repo and
+the registry never drift apart (the failure mode that left `1.0.70`-`1.0.73`
+on npm but never in git). A failed tag job can be re-run: the npm job checks
+the registry first and accepts only the staged tarball's integrity there, so
+it never publishes twice or publishes different bytes. Do not amend, retag or
+force-push; a code fix needs the next version. Every release is a plain
+`MAJOR.MINOR.PATCH` on `latest`, because every release ships the Mac app.
 
-Do not amend, add another commit, force-push or retag between qualification and
-publication. A changed SHA requires fresh complete qualification. Existing
-published versions/tags remain immutable.
+Do NOT run `npm publish` by hand. Hand-publishing caused the drift, and the
+registry's provenance must point at the Release run.
 
-The `release-check/<package-version>` branch always runs all three native builds
-and macOS JS, native, jj and TUI tests, with both npm publishes disabled. A later
-tag run may reuse only the single completed successful same-repository Release
-push run for the exact versioned SHA, with complete job/step and immutable
-artifact evidence. It verifies source revisions and all native hashes again and
-records the originating run/artifact identities. Missing, expired, ambiguous or
-unavailable reuse evidence runs the full pipeline. Reuse never substitutes a
-branch name or a skipped/failed test job for qualification.
-
-Before 4.0.0-alpha.18 the only way to run the macOS tests was to tag, so several
-alphas between alpha.9 and alpha.17 were spent on platform-only failures.
-
-A failed or lost npm response is not proof that publication did not happen.
-Reconcile both package versions, provenance and dist-tags against the registry
-before retrying; do not move an existing tag or publish a replacement version
-under the same version number.
-
-Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the
-`next` dist-tag; stable versions publish to `latest`. Both package names use the
-same channel. A v4 foundation alpha is not completion of the full rewrite;
-the plan and [implementation record](architecture/implementation.md) track
-remaining launch gates. The updater follows `latest`, compares prerelease
-precedence correctly, and does not downgrade an installed v4 alpha to stable v3.
-
-`npm publish` runs in CI via `prepack` (tsc + `cargo build --release` +
-copy-native), with `--provenance` (hence the `repository` field and
-`id-token: write` permission). One-time setup: add an npm "Automation" token as
-the repo secret `NPM_TOKEN`. The workflow installs jj itself (`brew install jj`)
-before `npm ci`: the native tests drive real jj, and Rudder's postinstall no
-longer puts one on the system PATH (it keeps a private copy). 3.1.17 failed to
-publish on exactly that.
-
-Do NOT run `npm publish` by hand anymore. Hand-publishing is exactly what caused
-the drift, and it also ties the bundled native binary to whatever machine you
-publish from.
-
-Platforms: the release builds `rudder-native` on darwin-arm64 and linux-x64
-runners (`native-artifacts` matrix) and `copy-native` folds both into
-`dist/native/<platform>-<arch>/`, so one package serves Apple Silicon Macs and
-Linux x64. Intel Macs, Windows and linux-arm64 are not built; the Mac app is
-arm64 only too.
+Platforms: one package serves Apple Silicon Macs and Linux x64:
+`copy-native` folds both pairs into `dist/native/<platform>-<arch>/`. Intel
+Macs, Windows and linux-arm64 are not built; the Mac app is arm64 only too.
 
 **Old package name retired (4.2.12).** The project moved from `viraatdas/rudder`
 to `exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from

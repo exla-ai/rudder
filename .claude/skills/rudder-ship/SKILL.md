@@ -1,37 +1,98 @@
 ---
 name: rudder-ship
-description: Ship a Rudder release end to end. Release checks, version bump and tag (tag CI publishes npm and the ghcr worker image), the Fly worker image and Cloud deploy, the signed Mac app built on an Offstage Mac, and the rudder.exla.ai site on Vercel. Use when asked to ship, release, deploy, publish, cut a version, build the Mac app or DMG, or deploy the site.
+description: Ship a Rudder release end to end, one version everywhere from one commit. Offstage Macs build the darwin pair and the signed Mac app, the home runs the release checks and builds linux-x64 and the npm tarball, then the Fly worker image and Cloud deploy, then the version tag publishes npm and the Mac app. Also the rudder.exla.ai site on Vercel. Use when asked to ship, release, deploy, publish, cut a version, build the Mac app or DMG, or deploy the site.
 ---
 
 # Ship Rudder
 
 An explicit ship, release or deploy request authorizes these steps (AGENTS.md,
-Shipping). Run only the parts the request covers. "Ship it" or "deploy and
-ship" means all of them: npm, Cloud, the Mac app when `mac/` changed since the
-last `mac-v*` release, and the site when `site/` changed.
+Shipping). "Ship it" means all of them: npm, Cloud and the Mac app, always at
+the same version, and the site when `site/` changed.
 
 Never force-push. Never `npm publish` Rudder by hand. Never restart the live
 home or its agents: homes adopt a new image when idle, or the user presses
 Alt+r.
 
-## 1. Release checks (once per release)
+GitHub builds and tests nothing (the user's rule). `scripts/release.mjs` has
+the design in its header; `.github/workflows/release.yml` only moves files,
+checks their hashes and publishes.
 
-Scratch goes in `/workspace/rudder-scratch/release/`; delete it at the end.
-Unset `RUDDER_*` (a Cloud home's env breaks native tests) and use a separate
-cargo target dir.
+| Step | Where | Takes |
+|---|---|---|
+| 1. Version commit, push `release-check/X.Y.Z` | Release run: draft release `vX.Y.Z`, darwin-arm64 pair on Offstage, Mac app tested, signed and notarized on Offstage, Sparkle feed signed | about 5 min, during step 2 |
+| 2. Checks, then `release.mjs stage` | the home: clean clone, full checks once, linux-x64 pair, npm tarball into the draft | checks, then about 2 min |
+| 3. Worker image, Cloud deploy | Fly's builder, from the staged tarball | about 10 to 15 min |
+| 4. Tag `vX.Y.Z` | Release run: npm publish (OIDC), Mac release once Cloud runs X.Y.Z, draft and branch removed | about 3 min |
+
+## 1. Version commit and release-check push
+
+Release from a scratch jj workspace, never the user's checkout or an isolated
+worker's workspace. Commit whole files.
+
+```sh
+v=X.Y.Z
+jj workspace add /workspace/rudder-scratch/release/ws -r main   # once
+cd /workspace/rudder-scratch/release/ws
+npm version $v --no-git-tag-version
+jj commit package.json package-lock.json mac/project.yml cloud/fly.toml -m "$v"
+jj bookmark set main -r @-
+jj git export
+sha="$(jj log -r main --no-graph -T commit_id)"
+git -C /workspace/code/exla-ai-rudder -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+  push origin "$sha:refs/heads/release-check/$v"
+```
+
+- `npm version` runs `scripts/version.mjs`: it sets the Mac app's
+  `MARKETING_VERSION` and build number in `mac/project.yml` and the worker
+  image pin `registry.fly.io/rudder-workers-exla:X.Y.Z` in `cloud/fly.toml`.
+  Never set them by hand. The Mac release waits for Cloud to run that pin, so
+  it must be in the tagged commit.
+- The push starts **Release** on the branch. Its first job checks every
+  release secret and version line and creates the draft release `vX.Y.Z`
+  (seconds). Then, in parallel, `.offstage/native.mjs` builds the darwin-arm64
+  pair and `.offstage/mac.mjs` tests, signs and notarizes `Rudder.dmg`, and the
+  feed is signed with `SPARKLE_ED_PRIVATE_KEY`. Watch with
+  `gh run list --workflow release.yml --limit 2`.
+- The plain `git push` can hit a bot token that gets 403; the `gh` helper
+  uses the user's own token.
+- A fix after this push: commit it on top (the version commit stays below
+  it), move `main` and push the new head to `release-check/$v` again. That
+  cancels the staging in flight and stages the new commit. The tag goes on the
+  last commit pushed there.
+- Offstage holds credit for work in flight: up to 20 minutes for the native
+  task and 80 for the Mac sandbox. If a job fails with "The credit has $X
+  left", ask the user to top up at console.offstage.cloud (Billing).
+
+## 2. Release checks and stage, on the home
+
+Run the checks once, in a clean clone of the pushed branch. Unset `RUDDER_*`
+(a Cloud home's env breaks native tests) and use a separate cargo target dir.
 
 ```sh
 unset $(env | grep -o '^RUDDER_[A-Z_]*')
 export CARGO_TARGET_DIR=/workspace/rudder-scratch/release/target
+rm -rf /workspace/rudder-scratch/release/src
+git clone --depth 1 --branch "release-check/$v" https://github.com/exla-ai/rudder.git /workspace/rudder-scratch/release/src
+cd /workspace/rudder-scratch/release/src
+npm ci && npm --prefix cloud ci
 npm run check
 npm test
 npm --prefix cloud run build
 cargo test --workspace --no-fail-fast
 npm run build
-RUDDER_NATIVE_BIN="$PWD/target/release/rudder-native" npm run test:tui
+RUDDER_NATIVE_BIN="$CARGO_TARGET_DIR/release/rudder-native" npm run test:tui
+node scripts/release.mjs stage
 ```
 
-- Use the `rudder-burst` skill for the heavy ones when it is on PATH.
+`stage` refuses a dirty clone, a version line that is not `$v`, a tag that
+exists, and a branch on GitHub that is not this commit. It builds the
+linux-x64 pair (a no-op after `npm run build`), waits for the darwin pair,
+packs `.release/exla-rudder-$v.tgz` with both pairs, checks it the way the tag
+run will, uploads it, waits for the signed Mac app, verifies its feed and
+prints exactly what the tag will publish. Re-run it after any failure; it
+starts over from an empty `.release/`.
+
+- Use the `rudder-burst` skill for the heavy checks when it is on PATH.
 - Never run `npm test` and `npm run build` at the same time: both write `dist/`.
 - Re-run a failing test alone before treating it as real. Timing-sensitive
   terminal tests such as `worker_wheel_at_edge_does_not_flash_notice` can flake
@@ -40,181 +101,128 @@ RUDDER_NATIVE_BIN="$PWD/target/release/rudder-native" npm run test:tui
   TMPDIR is probably gone. Recreate it, or run with `RUSTC_WRAPPER=`.
 - TUI color assertions follow `native/src/theme.rs`. Update the tests when the
   palette changes on purpose.
-
-## 2. Version, tag, push
-
-jj is the history authority. Commit whole files, move `main`, tag the commit
-with Git.
-
-```sh
-npm version X.Y.Z --no-git-tag-version
-jj commit package.json package-lock.json mac/project.yml -m "X.Y.Z"
-jj bookmark set main -r @-
-sha="$(jj log -r main --no-graph -T commit_id)"
-git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin "$sha:refs/heads/release-check/X.Y.Z"
-# wait for that Release run to pass; on a failure, fix, commit and push the branch again
-git tag -a vX.Y.Z -m X.Y.Z "$sha"
-git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin main vX.Y.Z
-git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin --delete release-check/X.Y.Z
-```
-
-Qualify on `release-check/X.Y.Z` first: a failure there costs a push, not a
-version. The tag run then reuses that qualification for the same SHA and only
-verifies and publishes.
-
-The plain `git push` can hit a bot token that gets 403; the `gh` helper uses
-the user's own token.
-
-The tag starts two workflows:
-
-- **Release** builds every platform and publishes `@exla/rudder` to npm.
-- **Worker image** waits for npm, then pushes `ghcr.io/exla-ai/rudder-worker:X.Y.Z`
-  for external home hosts.
-
-Watch with `gh run list --limit 4` and `gh run watch <id> --exit-status` in the
-background. Done when
-`curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/@exla%2frudder/X.Y.Z`
-prints 200. npm processes a trusted publish before serving it: 5.0.5 took
-about 4 minutes after CI printed `+ @exla/rudder@X.Y.Z`, 5.0.7 more than 15.
-A 404 then is not a failure; npm emails "Successfully published" to the
-account when it is served. Check https://status.npmjs.org before digging.
-
-Release CI trusts only the first attempt of a tag run. `gh run rerun` stops
-at "Release qualification evidence rejected", so a failed tag run cannot
-publish. Fix the cause, commit, bump the patch version and tag again (5.0.2
-and 5.0.3 were skipped this way). Never move a pushed tag. The macOS
-qualification runner is slower than a Cloud home (the native suite took 95s
-against 59s here), so a test that waits on another process's timing can pass
-locally and fail there: re-run it alone, then fix the wait, not the product.
+- A failing check needs a fix commit: see the last notes of step 1, then
+  `git fetch --depth 1 origin "release-check/$v" && git checkout --detach FETCH_HEAD`
+  in the clone.
 
 Before a release that depends on a new npm dependency version (vibeprint in
 `cloud/worker/package.json`, for example), confirm the registry serves it. The
 worker image runs `npm install` against the registry.
 
-## 3. Cloud: Fly worker image and control plane
+## 3. Cloud: worker image and control plane, before the tag
 
-Only after npm serves the version.
+The image takes dist and the linux-x64 pair from the staged tarball, so it
+does not wait for npm, and Cloud can run the release before the tag. The
+clone is clean, so it is the build context for both.
 
 ```sh
 export FLY_NO_UPDATE_CHECK=1
 flyctl auth whoami          # must print an account
-# Both builds below use the checkout as their context, and the user's checkout
-# holds other agents' uncommitted edits. Build from a clean export instead.
-mkdir -p /workspace/rudder-scratch/release/src && git archive --format=tar "$(jj log -r main --no-graph -T commit_id)" | tar -x -C /workspace/rudder-scratch/release/src
-cd /workspace/rudder-scratch/release/src && node scripts/worker-image.mjs X.Y.Z
+cd /workspace/rudder-scratch/release/src
+node scripts/worker-image.mjs $v
+(cd cloud && flyctl deploy --remote-only)
 ```
 
-This builds on Fly's builder from the published package. It pushes
-`registry.fly.io/rudder-workers-exla:X.Y.Z` and copies it to
-`registry.fly.io/rudder-worker-images`.
+`worker-image.mjs` checks the tarball against `.release/npm.json`, builds on
+Fly's builder, pushes `registry.fly.io/rudder-workers-exla:$v` and copies it to
+`registry.fly.io/rudder-worker-images` for external home hosts. The clone's
+`cloud/fly.toml` already pins that image.
 
-If `flyctl` says the session expired, the laptop's stale `~/.fly/config.yml`
-was synced over the login. Log in with
-`script -qfec "flyctl auth login" /dev/null </dev/null` in the background, give
-the user the `https://fly.io/app/auth/cli/...` link, then save
-`flyctl auth token > ~/.fly-token` (mode 600) and use
-`FLY_API_TOKEN=$(cat ~/.fly-token)` from then on.
-
-Then pin the image and deploy the control plane:
-
-1. Set `RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:X.Y.Z"` in
-   `cloud/fly.toml`.
-2. Commit it.
-3. Export that commit as above and run `flyctl deploy --remote-only` in the
-   export's `cloud/`, never in the user's checkout.
-4. Push `main`.
+- If `flyctl` says the session expired, the laptop's stale `~/.fly/config.yml`
+  was synced over the login. Log in with
+  `script -qfec "flyctl auth login" /dev/null </dev/null` in the background,
+  give the user the `https://fly.io/app/auth/cli/...` link, then save
+  `flyctl auth token > ~/.fly-token` (mode 600) and use
+  `FLY_API_TOKEN=$(cat ~/.fly-token)` from then on.
+- A `~/.fly-token` deploy token can get 404 from registry.fly.io manifests, so
+  `worker-image.mjs` times out after the push. The token
+  `FLY_API_TOKEN=$(cat ~/.fly-token) flyctl auth token` prints reads the
+  registry; finish the copy with it.
 
 Verify:
 
 - `https://rudder.exla.ai/app` loads. It redirects to
   `rudder-cloud-control.fly.dev/app`; check a changed app file there
   (rudder.exla.ai/app/<file> is the Vercel site, always 404).
-- `flyctl releases -a rudder-cloud-control | head -3` shows the new release with the expected
-  image and a current UTC time.
+- `flyctl releases -a rudder-cloud-control | head -3` shows the new release
+  with the expected image and a current UTC time.
+- `curl -s https://rudder.exla.ai/health` reports `workerImage` as the new pin.
+  The tag's Mac release waits for exactly this.
 - A signed-in smoke check of the app passes (projects list, one agent's chat).
 
-Report the verified deploy separately from the npm publish. They are separate
-facts.
+## 4. Tag and publish
 
-## 4. Mac app on an Offstage Mac
+```sh
+git -C /workspace/code/exla-ai-rudder tag -a "v$v" -m "$v" "$sha"
+git -C /workspace/code/exla-ai-rudder -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+  push origin main "v$v"
+```
 
-`.github/workflows/mac.yml` runs on a Linux runner and drives an Offstage
-cloud Mac through its API (`.offstage/mac.mjs`, stages in `mac/scripts/ci.sh`).
-Signing needs the `MAC_DEVELOPER_ID_P12` and `MAC_DEVELOPER_ID_PASSWORD` repo
-secrets (the exported Developer ID Application certificate); the job checks
-every release secret first and stops in seconds if one is missing.
+The tag starts **Release** again, which only checks and publishes:
 
-1. The Mac app has Rudder's version: `npm version` (step 2) runs
-   `scripts/mac-version.mjs`, which sets `MARKETING_VERSION` and the derived
-   build number in `mac/project.yml`. Never give it its own number.
-2. The version tag's push (step 2) starts the Mac release with npm. Watch it
-   with `gh run list --workflow mac.yml --limit 2`.
-3. To repeat a failed Mac release for the same version, run
-   `gh workflow run mac.yml --ref main -f release=true`.
+- **Publish npm** downloads the staged tarball, checks it against `npm.json`,
+  the tag's `package.json` and the darwin pair Offstage built, then runs
+  `npm publish <tarball> --provenance` through trusted publishing.
+- **Publish the Mac app** checks the DMG and the signed feed against
+  `mac/App/Info.plist`, waits until `rudder.exla.ai/health` reports the pinned
+  image (at most 30 minutes), publishes `mac-v<version>-<build>` as the latest
+  release with `Rudder.dmg` and `appcast.xml`, and checks both public URLs.
+- **Remove the draft** deletes the draft release and `release-check/$v`.
 
-The job archives and signs with the Developer ID secrets, notarizes, staples and
-builds `Rudder.dmg`. `mac/scripts/publish.sh` then uploads `Rudder.dmg` and
-`release.env` to a draft GitHub release `mac-v<version>-<build>`, runs
-`.github/workflows/mac-publish.yml` on it and waits. That job signs
-`appcast.xml` (the Sparkle feed) with the `SPARKLE_ED_PRIVATE_KEY` secret,
-verifies it against `SUPublicEDKey` in `mac/App/Info.plist` at the build commit,
-and publishes the release as latest with both files.
-`https://rudder.exla.ai/download/mac` redirects to
-`releases/latest/download/Rudder.dmg`, and installed apps (1.2.0 and later)
-update from `releases/latest/download/appcast.xml`. Rudder's npm releases
-create no GitHub release, so the Mac release stays "latest". A latest release
-without `appcast.xml` stops every installed app's updates: never publish a Mac
-release with a bare `gh release create`.
+Watch it with `gh run watch <id> --exit-status` in the background. A failed
+job can be re-run with `gh run rerun <id> --failed`: the npm job compares the
+registry's integrity with the staged tarball and never publishes twice, and
+the Mac job reuses an existing `mac-v` tag at the same commit. Fix the cause
+first (`gh run view <id> --log-failed`); a code fix needs the next version.
+Never move a pushed tag.
 
-The Sparkle private key (base64 of the Ed25519 seed) exists only as the
-`SPARKLE_ED_PRIVATE_KEY` repo secret, which only `mac-publish.yml` reads. No
-machine needs a key file: `~/.rudder-sparkle-ed25519` was lost in a machine
-update on 2026-11-19. Never print the secret. If it is missing, `mac.yml`
-(release) stops at its first step and `mac-publish.yml` at signing; only the
-user can set it again, from their own backup.
+npm is done when
+`curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/@exla%2frudder/$v`
+prints 200. npm processes a trusted publish before serving it: 5.0.5 took
+about 4 minutes after CI printed `+ @exla/rudder@X.Y.Z`, 5.0.7 more than 15.
+A 404 then is not a failure; npm emails "Successfully published" to the
+account when it is served. Check https://status.npmjs.org before digging.
+Re-running the npm job in that window fails on npm's "cannot publish over"
+answer; wait for the 200 instead.
 
-Signing needs the Developer ID Application identity. Its private key exists
-only in the user's MacBook Pro keychain. Without the `MAC_DEVELOPER_ID_P12`
-and `MAC_DEVELOPER_ID_PASSWORD` repo secrets, the job fails at
-`exportArchive` with "No signing certificate "Developer ID Application"
-found" (a push-triggered build without `release=true` still passes). Either
-the user exports that identity as a .p12 into those secrets, or the build
-runs on the MacBook Pro itself over the tailnet, while the laptop is open; the
-first codesign there needs "Always Allow" on the keychain prompt:
+Report the verified deploy, npm and the Mac release separately. They are
+separate facts.
 
-- `mac/scripts/build.sh` builds, signs (Sparkle's helpers first), notarizes
-  and packages in `mac/build`. If Xcode hangs there, build the unsigned
-  Release archive on an Offstage Mac (`CODE_SIGNING_ALLOWED=NO`), copy its
-  `Rudder.app` over and run `mac/scripts/package.sh <Rudder.app>` instead. Never
-  sign the app alone with a bare `codesign`: `Sparkle.framework` and its
-  helpers need this team's signature first.
-- Copy `Rudder.dmg` and `release.env` back to the Linux home, push the commit
-  they were built from, and publish from there with
-  `mac/scripts/publish.sh <dir> <commit>`. It needs no key, only `gh` with
-  push access and `mac-publish.yml` on GitHub's `main`. It stages the draft,
-  runs `mac-publish.yml` and waits. If that job fails, the draft stays: fix
-  the cause and run
-  `gh workflow run mac-publish.yml --ref main -f tag=mac-v<version>-<build>`.
-  `publish.sh` refuses a tag that already has a release or draft.
+### The Mac release
 
-If the job sits in "Queued" with no runner, the exla-ai org is not connected to
-Offstage's GitHub App (console, CI page). Tell the user; do not move the job
-back to GitHub's Macs without asking.
-
-To pin a tool update, use a release at least two weeks old. Put its sha256 next
-to the URL in the Tools step.
+- The Mac app ships at every version, whether or not `mac/` changed, so the
+  versions always match.
+- Its build number is derived from the version, so Sparkle always sees the
+  newer build as an update.
+- Signing uses the `MAC_DEVELOPER_ID_P12` and `MAC_DEVELOPER_ID_PASSWORD`
+  secrets (the exported Developer ID Application certificate), notarization
+  `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`.
+- The Sparkle private key (base64 of the Ed25519 seed) exists only as the
+  `SPARKLE_ED_PRIVATE_KEY` repo secret. No machine has a key file:
+  `~/.rudder-sparkle-ed25519` was lost in a machine update on 2026-11-19.
+  Never print the secret. If it is missing, the branch run stops at its first
+  step; only the user can set it again, from their own backup.
+- `https://rudder.exla.ai/download/mac` redirects to
+  `releases/latest/download/Rudder.dmg`, and installed apps (1.2.0 and later)
+  update from `releases/latest/download/appcast.xml`. Rudder's npm releases
+  create no GitHub release, and the staging draft is never published, so the
+  Mac release stays "latest". A latest release without `appcast.xml` stops
+  every installed app's updates: never publish a release with a bare
+  `gh release create`, and never publish the `vX.Y.Z` draft.
+- `gh workflow run mac.yml` (optionally `-f signing_check=true`) checks the
+  Mac app on Offstage without publishing.
+- A DMG built by hand on the MacBook Pro (`mac/scripts/build.sh`) is published
+  with `mac/scripts/publish.sh <dir> <commit>`, which stages a draft
+  `mac-v<version>-<build>` and runs `mac-publish.yml` to sign the feed and
+  publish it. `publish.sh` refuses a tag that already has a release or draft.
 
 Verify:
 
 - `gh release view mac-v<version>-<build>` lists `Rudder.dmg` and `appcast.xml`
   (no `release.env`).
-- The published feed verifies against the shipped key: download both assets
-  and run `node mac/scripts/appcast.mjs verify --appcast appcast.xml --dmg Rudder.dmg
-  --version <version> --build <build> --minimum-system 14.0 --info-plist mac/App/Info.plist`.
-- The download URL serves the new asset with `filename=Rudder.dmg`.
 - `curl -sL https://github.com/exla-ai/rudder/releases/latest/download/appcast.xml`
   shows the new version and build, and its enclosure's `length` equals the
-  DMG's size.
+  DMG's size. The Mac job checks that both public URLs serve the staged bytes.
 - On a Mac running the previous Sparkle build, Rudder > Check for Updates…
   offers the new version and installs it.
 
@@ -243,7 +251,8 @@ under a longer name.
 
 ## 6. Finish
 
-- Delete `/workspace/rudder-scratch/release/`.
+- Delete `/workspace/rudder-scratch/release/` (the clone, its target dir and
+  the jj workspace: `jj workspace forget` it first).
 - Update `docs/v4-handoff.md` if the release changes what is open.
 - Send a short final message covering:
   - what shipped, with versions;

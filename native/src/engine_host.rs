@@ -788,6 +788,34 @@ struct ControlEvent {
     response: mpsc::SyncSender<serde_json::Value>,
 }
 
+/// Answer one control connection: read its request, hand it to the App loop,
+/// and write back the App's response.
+fn serve_control_stream(
+    mut stream: UnixStream,
+    tx: &mpsc::SyncSender<ControlEvent>,
+    waker: Option<&PtyOutputWaker>,
+) {
+    if prepare_control_stream(&stream).is_err() {
+        return;
+    }
+    let Ok(request) = read_control(&stream) else {
+        return;
+    };
+    let (response, response_rx) = mpsc::sync_channel(1);
+    if tx.try_send(ControlEvent { request, response }).is_err() {
+        return;
+    }
+    if let Some(waker) = waker {
+        waker();
+    }
+    if let Ok(value) = response_rx.recv_timeout(Duration::from_secs(3)) {
+        if let Ok(bytes) = serde_json::to_vec(&value) {
+            let _ = stream.write_all(&bytes);
+            let _ = stream.write_all(b"\n");
+        }
+    }
+}
+
 fn prepare_control_stream(stream: &UnixStream) -> io::Result<()> {
     // Darwin inherits a nonblocking listener's flag. The background control
     // worker uses bounded blocking IO for complete request/response frames.
@@ -802,6 +830,8 @@ pub(crate) struct EngineControl {
     rx: mpsc::Receiver<ControlEvent>,
     stopping: bool,
     stop: Arc<AtomicBool>,
+    /// Wakes the accept thread out of its blocking poll so Drop can join it.
+    stop_waker: mio::Waker,
     thread: Option<thread::JoinHandle<()>>,
     observations: crate::engine_observations::EngineObservations,
 }
@@ -837,7 +867,17 @@ impl EngineControl {
         let metadata = fs::symlink_metadata(&path).with_context(at)?;
         let identity = (metadata.dev(), metadata.ino());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).with_context(at)?;
+        // The thread sleeps in poll until a client connects or Drop wakes it:
+        // an idle dashboard pays no wakeups for its control socket.
         listener.set_nonblocking(true)?;
+        let mut listener = mio::net::UnixListener::from_std(listener);
+        let mut poll = mio::Poll::new().with_context(at)?;
+        const LISTENER: mio::Token = mio::Token(0);
+        const STOP: mio::Token = mio::Token(1);
+        poll.registry()
+            .register(&mut listener, LISTENER, mio::Interest::READABLE)
+            .with_context(at)?;
+        let stop_waker = mio::Waker::new(poll.registry(), STOP).with_context(at)?;
         let (tx, rx) = mpsc::sync_channel(32);
         let observations=crate::engine_observations::EngineObservations::new(waker.clone())?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -845,34 +885,23 @@ impl EngineControl {
         let thread = thread::Builder::new()
             .name("rudder-engine-control".into())
             .spawn(move || {
-                while !thread_stop.load(Ordering::Acquire) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            if prepare_control_stream(&stream).is_err() {
-                                continue;
-                            }
-                            let request = read_control(&stream).ok();
-                            let Some(request) = request else {
-                                continue;
-                            };
-                            let (response, response_rx) = mpsc::sync_channel(1);
-                            if tx.try_send(ControlEvent { request, response }).is_err() {
-                                continue;
-                            }
-                            if let Some(waker) = &waker {
-                                waker();
-                            }
-                            if let Ok(value) = response_rx.recv_timeout(Duration::from_secs(3)) {
-                                if let Ok(bytes) = serde_json::to_vec(&value) {
-                                    let _ = stream.write_all(&bytes);
-                                    let _ = stream.write_all(b"\n");
-                                }
-                            }
+                let mut events = mio::Events::with_capacity(4);
+                'serve: while !thread_stop.load(Ordering::Acquire) {
+                    if let Err(error) = poll.poll(&mut events, None) {
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
                         }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10))
-                        }
-                        Err(_) => break,
+                        break;
+                    }
+                    // Readiness is edge-triggered: drain every pending connection.
+                    while !thread_stop.load(Ordering::Acquire) {
+                        let stream = match listener.accept() {
+                            Ok((stream, _)) => UnixStream::from(stream),
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(_) => break 'serve,
+                        };
+                        serve_control_stream(stream, &tx, waker.as_ref());
                     }
                 }
             })?;
@@ -882,6 +911,7 @@ impl EngineControl {
             rx,
             stopping: false,
             stop,
+            stop_waker,
             thread: Some(thread),
             observations,
         })
@@ -993,6 +1023,9 @@ impl Drop for EngineControl {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            // Without the wake the thread would sleep in poll forever and the
+            // join would hang dashboard shutdown.
+            self.stop_waker.wake().expect("wake the engine control thread to stop it");
             let _ = thread.join();
         }
         // A retired owner may still hold the old listener after another epoch

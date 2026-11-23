@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createNodeWorkspace, forgetWorkspace } from "../dist/jj.js";
-import { buildWarmSnapshot, createForkWorkspace, currentBaseCommit, inFork, pruneWarmSnapshots, readySnapshots, seedFromPrevious, warmBuildSkipReason, warmCommands, warmDir } from "../dist/warm-snapshot.js";
+import { buildWarmSnapshot, createForkWorkspace, currentBaseCommit, forkStateDir, inFork, pruneWarmSnapshots, readySnapshots, seedFromPrevious, warmBuildSkipReason, warmCommands, warmDir } from "../dist/warm-snapshot.js";
 import { rudderJjPath } from "../dist/util.js";
 
 const FILES = 3000;
@@ -421,6 +421,61 @@ test("a refresh reinstalls only when a dependency file changed", { skip: process
   sh(repo, "jj", ["commit", "-m", "deps"]);
   assert.ok(await buildWarmSnapshot(repo, await currentBaseCommit(repo)), "dependency refresh built");
   assert.deepEqual(ran(), ["ci", "ci"]);
+});
+
+const hasTool = (name) => spawnSync("sh", ["-c", `command -v ${name}`], { stdio: "ignore" }).status === 0;
+test("Rust compiles through sccache in a warm build and a fork while a server runs outside them", {
+  skip: process.platform !== "linux" || !rudderJjPath() || !hasTool("sccache") || !hasTool("rustc"),
+}, async (t) => {
+  const scratch = process.env.RUDDER_TEST_DISK ?? (fs.existsSync("/workspace/rudder-scratch") ? "/workspace/rudder-scratch" : os.tmpdir());
+  const root = fs.mkdtempSync(path.join(scratch, "rudder-warm-sccache-"));
+  const repo = path.join(root, "repo");
+  const saved = { SCCACHE_SERVER_UDS: process.env.SCCACHE_SERVER_UDS, RUDDER_TOOL_CACHE_DIR: process.env.RUDDER_TOOL_CACHE_DIR };
+  // The machine's shared server, outside every namespace: it cannot see a
+  // build view or fork, and compiles sent to it failed with "couldn't find file".
+  process.env.SCCACHE_SERVER_UDS = `\\x00rudder-test-outside-${process.pid}`;
+  process.env.RUDDER_TOOL_CACHE_DIR = path.join(root, "cache");
+  const stop = (name) => spawnSync("sccache", ["--stop-server"], { env: { ...process.env, SCCACHE_SERVER_UDS: `\\x00${name}` }, stdio: "ignore" });
+  const listening = () => fs.readFileSync("/proc/net/unix", "utf8").match(/@rudder-sccache-[0-9-]+/g) ?? [];
+  const before = new Set(listening());
+  let fork = null;
+  t.after(async () => {
+    try {
+      stop(`rudder-test-outside-${process.pid}`);
+      if (fork && fs.existsSync(forkStateDir(fork.path))) {
+        const sum = execFileSync("sh", ["-c", 'printf %s "$1" | cksum | cut -d" " -f1', "sh", fs.realpathSync(forkStateDir(fork.path))], { encoding: "utf8" }).trim();
+        stop(`rudder-sccache-${sum}`);
+      }
+      if (fork) await forgetWorkspace({ repoRoot: repo, workspaceName: fork.workspaceName, workspacePath: fork.path }).catch(() => undefined);
+      await waitForBuilders(repo);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      removeRoot(root);
+    }
+  });
+  assert.equal(spawnSync("sccache", ["--start-server"], { env: process.env, stdio: "ignore" }).status, 0, "outside server started");
+  const compile = (out) => `mkdir -p ${out} && sccache rustc --crate-name l --edition=2021 l.rs --crate-type lib --emit=link -C metadata=${process.pid} --out-dir ${out}`;
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(repo, "l.rs"), "pub fn seven() -> u32 { 7 }\n");
+  fs.writeFileSync(path.join(repo, ".gitignore"), "out\n.rudder-workspaces\n");
+  fs.writeFileSync(path.join(repo, "rudder.toml"), `[warm]\ncommands = [${JSON.stringify(compile("out"))}]\n`);
+  sh(repo, "git", ["init", "-q"]);
+  sh(repo, "git", ["add", "."]);
+  sh(repo, "git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  sh(repo, "jj", ["git", "init", "--colocate"]);
+
+  const snapshot = await buildWarmSnapshot(repo, await currentBaseCommit(repo));
+  assert.ok(snapshot, fs.readFileSync(path.join(warmDir(repo), fs.readdirSync(warmDir(repo)).find((n) => n.endsWith(".log"))), "utf8"));
+  assert.ok(fs.existsSync(path.join(snapshot.dir, "out", "libl.rlib")), "the warm command compiled in the build view");
+  assert.deepEqual(listening().filter((name) => !before.has(name)), [], "each build step stops its own server");
+
+  fork = await createNodeWorkspace({ repoRoot: repo, runId: "sccache-fork", task: "compile" });
+  const { command, args } = inFork(fork.path, "sh", ["-c", compile("out2")]);
+  const run = spawnSync(command, args, { cwd: fork.path, env: process.env, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
 });
 
 // macOS: forks are APFS clones of the warm snapshot (rudder-jj rudder-clone-add).

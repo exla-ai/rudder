@@ -23,6 +23,22 @@ OpenCode parents get no per-run MCP, so they cannot start helpers yet.
 Agent rows on the home and project pages render compact Markdown previews
 with readable link labels, emphasis and inline code.
 
+Agents start and branch faster (2026-11-23). Opening a project's dashboard
+starts its warm builder when the base has no snapshot, a first or far base
+builds at once, and launches watch `.warm` instead of polling it.
+`__launch-node` and `__warm-start` load only the jj and warm snapshot code.
+Warm commands do dev work only (installs and `cargo build`; a project's
+`build` script is no longer one), and an install is skipped when its lockfile
+and manifest did not change. Each warm build step and each fork gets its own
+sccache server: the machine's shared one cannot see their private mounts, so
+every Rust compile in them failed. Branching hard-links the Claude transcript
+where Claude only reads it (`--fork-session`) and streams the copy that `b`
+appends to. The task title runs after the agent's first output, and graph
+mirroring and the models.dev parse are off the App loop. Express with haiku
+low: cold first token 5.1-5.9 s to 2.2-2.4 s; branching a 1.15 GB chat 1.33 s
+to 0.53 s with no dashboard memory growth; a Rudder trunk refresh about 6 s
+(was 96 s).
+
 Releases build and test nothing on GitHub (from 5.0.34). The
 `release-check/X.Y.Z` push builds the darwin pair and the signed Mac app on
 Offstage into a draft release, the home runs the checks once and stages the

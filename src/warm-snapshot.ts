@@ -7,10 +7,12 @@
  * of it instead of a full checkout.
  *
  * Snapshots follow trunk. One detached builder per project (`startWarmBuild`
- * spawns this file; launches and integrations start it) watches the base new
- * workers start from (`currentBaseCommit`) and builds a snapshot for it
- * whenever it moves, coalescing quick moves to the latest. A refresh starts
- * from the nearest ready snapshot, so install and build reuse its outputs:
+ * spawns this file; a dashboard opening the project, launches and
+ * integrations start it) watches the base new workers start from
+ * (`currentBaseCommit`) and builds a snapshot for it whenever it moves,
+ * coalescing quick moves to the latest. A refresh starts from the nearest
+ * ready snapshot, so install and build reuse its outputs (an install whose
+ * dependency files did not change is skipped):
  * - Linux: the new snapshot is a thin OverlayFS layer on top of the previous
  *   snapshot's layers. The builder mounts the stack at the fixed path
  *   `.warm/build`, applies the base change with one Git two-tree checkout and
@@ -42,7 +44,8 @@
  * `.fork/enter` through it.
  *
  * Pruning keeps the newest snapshot, every layer a fork or a kept snapshot
- * mounts, and deletes the rest.
+ * mounts, and deletes the rest, including folders of builds that never
+ * finished.
  */
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -298,16 +301,31 @@ const MOVE_TO_BASE = `${CHECKOUT_DIFF}jj rebase -r @ -d "$B"\n`;
 // - stack: the layers $L, read-only (needs two or more);
 // - bind: the plain directory $L.
 // Every step mounts afresh; nothing outside the namespace sees $B change.
+// $N names the step's own sccache server (see SCCACHE_IN_NAMESPACE); the step
+// stops it when the command is done.
 const BUILD_ENTER = `
-B="$1"; MODE="$2"; L="$3"; UP="$4"; WK="$5"; U="$6"; G="$7"; shift 7
+B="$1"; MODE="$2"; L="$3"; UP="$4"; WK="$5"; U="$6"; G="$7"; N="$8"; shift 8
 case "$MODE" in
   overlay) mount -t overlay overlay -o "lowerdir=$L,upperdir=$UP,workdir=$WK,userxattr" "$B" ;;
   stack) mount -t overlay overlay -o "lowerdir=$L,userxattr" "$B" ;;
   *) mount --bind "$L" "$B" ;;
 esac
 cd "$B"
-exec unshare -U --map-user="$U" --map-group="$G" -- "$@"
+[ -z "$N" ] || { SCCACHE_SERVER_UDS="\\x00$N"; export SCCACHE_SERVER_UDS; }
+if unshare -U --map-user="$U" --map-group="$G" -- "$@"; then s=0; else s=$?; fi
+if [ -n "$N" ] && grep -q "@$N\$" /proc/net/unix; then sccache --stop-server >/dev/null; fi
+exit "$s"
 `;
+
+/**
+ * sccache compiles in its server, and the machine's shared server runs outside
+ * the private mount namespace, where a build view or fork path is an empty
+ * folder: every crate failed with "couldn't find file". A namespace gets a
+ * server of its own instead, started inside it by the first compile, on an
+ * abstract socket (network namespaces are shared, so it needs a unique name).
+ */
+const SCCACHE_IN_NAMESPACE = "rudder-sccache";
+let buildSteps = 0;
 
 type BuildView = { mount: string; mode: "overlay" | "stack" | "bind"; lowers: string; upper?: string; work?: string };
 
@@ -321,11 +339,12 @@ function namespacesWork(): boolean {
 
 /** One build step: `command` in `view` (or in `cwd` without one), output to the log. */
 function runStep(log: number, env: NodeJS.ProcessEnv, view: BuildView | null, cwd: string, command: string, args: string[]): boolean {
+  const sccache = env.RUSTC_WRAPPER === "sccache" ? `${SCCACHE_IN_NAMESPACE}-${process.pid}-${(buildSteps += 1)}` : "";
   const [program, argv] = view
     ? ["unshare", [
         "-rm", "--propagation", "private", "sh", "-ec", BUILD_ENTER, "sh",
         view.mount, view.mode, view.lowers, view.upper ?? "", view.work ?? "",
-        String(process.getuid?.() ?? 0), String(process.getgid?.() ?? 0), command, ...args,
+        String(process.getuid?.() ?? 0), String(process.getgid?.() ?? 0), sccache, command, ...args,
       ]]
     : [command, args];
   return spawnSync(program, argv, { cwd, env, stdio: ["ignore", log, log] }).status === 0;
@@ -858,6 +877,8 @@ for d in $(printf %s "$PATH" | tr : " ") /usr/local/bin /usr/bin "$HOME/.local/b
 done
 cd "$M"
 PATH="$F/bin:$PATH"; export PATH
+# A sccache server for this fork alone (see SCCACHE_IN_NAMESPACE); it exits when idle.
+SCCACHE_SERVER_UDS="\\x00${SCCACHE_IN_NAMESPACE}-$(printf %s "$F" | cksum | cut -d" " -f1)"; export SCCACHE_SERVER_UDS
 exec unshare -U --map-user="$U" --map-group="$G" -- "$@"' sh "$F" "$M" "$U" "$G" "$@"
 `;
 

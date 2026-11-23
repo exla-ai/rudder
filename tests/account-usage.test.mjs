@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  activeUsageLimit, accountReady, applyAccountChecks, checkedAccount, claudeUsageLimit,
-  claudeUsageLimitText, codexUsageLimit, jsonEvents, routingQuotaCheckFresh,
+  activeUsageLimit, accountReady, antigravityError, antigravityUsageLimit, applyAccountChecks, checkedAccount,
+  claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh,
 } from "../cloud/worker/account-usage.mjs";
 import { handoffRefusal } from "../cloud/worker/handoff.mjs";
 import { parseClaudeQuota, parseCodexQuota } from "../dist/usage.js";
@@ -83,4 +83,26 @@ test("completed periodic probes preserve newer quota, sign-out and account chang
   assert.deepEqual(applyAccountChecks(configured, [capped, signedOut, removed], checks), [
     { ...capped, default: false }, { ...signedOut, default: true },
   ]);
+});
+
+test("a spent Antigravity quota becomes a usage limit with its reset, not the raw AGY_ERROR line", () => {
+  const now = 1_800_000_000_000;
+  const agy = (fields) => `Loading...\nAGY_ERROR: ${JSON.stringify({ code_kind: "http", retryable: true, error_id: "e-1", ...fields })}\n`;
+  const quota = antigravityError(agy({
+    short_error: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h29m59s.",
+    status: "RESOURCE_EXHAUSTED", error_code: 429,
+  }));
+  assert.equal(quota.message, "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h29m59s.");
+  const limit = antigravityUsageLimit(quota, now);
+  assert.deepEqual(limit, { window: null, resetsAt: now + (2 * 3600 + 29 * 60 + 59) * 1000 });
+  assert.equal(quotaDetail(limit), "Reached the usage limit");
+  assert.deepEqual(antigravityUsageLimit({ ...quota, message: "Individual quota reached. Resets in 45s." }, now), { window: null, resetsAt: now + 45_000 });
+  assert.deepEqual(antigravityUsageLimit({ ...quota, message: "Individual quota reached." }, now), { window: null, resetsAt: null });
+
+  // Capacity errors and plain rate limits leave the account usable.
+  const capacity = antigravityError(agy({ short_error: "UNAVAILABLE (code 503): No capacity available for model gemini-4-neon on the server", status: "UNAVAILABLE", error_code: 503 }));
+  assert.equal(capacity.message, "No capacity available for model gemini-4-neon on the server");
+  assert.equal(antigravityUsageLimit(capacity, now), null);
+  assert.equal(antigravityUsageLimit(antigravityError(agy({ short_error: "RESOURCE_EXHAUSTED (code 429): Too many requests.", status: "RESOURCE_EXHAUSTED", error_code: 429 })), now), null);
+  assert.equal(antigravityError("Error: something else"), null);
 });

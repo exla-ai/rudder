@@ -217,8 +217,9 @@ function renderAgentPop(stats, problem) {
 
 /* Plan usage: sidebar meter + popover ------------------------------------ */
 
-// Antigravity's meters are its Gemini plan's, and the sidebar has room for a short name.
-const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }, { id: "antigravity", label: "Gemini" }];
+// The sidebar has room for a short name: Antigravity's bar is its Gemini
+// pool's. The popover names the harness and shows every pool.
+const PROVIDERS = [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }, { id: "antigravity", label: "Gemini", title: "Antigravity" }];
 const POLL_MS = 60_000;
 
 // The meter can be hidden on this device: "Hide" in its popover, and
@@ -327,7 +328,9 @@ export function PlanUsage() {
     const creds = state?.home?.credentials;
     // An asleep machine sends no credentials: keep what was last shown.
     if (creds) {
-      const next = PROVIDERS.flatMap((p) => (creds[p.id] ?? []).filter((a) => a.ok).map((a) => `${p.id}:${a.id}`));
+      // An account at its limit fails its sign-in check but is still signed
+      // in, and its meter matters most then.
+      const next = PROVIDERS.flatMap((p) => (creds[p.id] ?? []).filter((a) => a.ok || a.signedIn).map((a) => `${p.id}:${a.id}`));
       if (next.join() !== signedIn.join()) { signedIn = next; paint(); }
     }
   }
@@ -354,10 +357,8 @@ const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 function reportedAccounts(report, signedIn) {
   return PROVIDERS.flatMap((p) => {
     const mine = (report.accounts ?? []).filter((a) => a.provider === p.id && signedIn.includes(`${p.id}:${a.account}`));
-    return mine.map((account) => ({
-      label: mine.length > 1 && account.email ? `${p.label} · ${account.email.split("@")[0]}` : p.label,
-      account,
-    }));
+    const name = (label, account) => (mine.length > 1 && account.email ? `${label} · ${account.email.split("@")[0]}` : label);
+    return mine.map((account) => ({ label: name(p.label, account), title: name(p.title ?? p.label, account), account }));
   });
 }
 
@@ -373,7 +374,9 @@ export function bindingWindow(account) {
     ? windows.filter((w) => w.label.startsWith("Gemini · ") || !w.label.includes(" · "))
     : windows;
   const pool = scoped.length ? scoped : windows;
-  return pool.reduce((top, w) => (!top || w.percent > top.percent ? w : top), null);
+  // Two spent windows: the later reset is when it works again.
+  const later = (a, b) => (Date.parse(a.resetsAt) || 0) > (Date.parse(b.resetsAt) || 0);
+  return pool.reduce((top, w) => (!top || w.percent > top.percent || (w.percent === top.percent && later(w, top)) ? w : top), null);
 }
 
 function renderUsagePop({ report, problem, updater, signedIn, refresh, hide }) {
@@ -384,19 +387,21 @@ function renderUsagePop({ report, problem, updater, signedIn, refresh, hide }) {
     box.appendChild(e);
     if (updater) box.appendChild(updater.el);
   }
-  for (const { label, account } of report ? reportedAccounts(report, signedIn) : []) {
+  for (const { title, account } of report ? reportedAccounts(report, signedIn) : []) {
     const sec = h(`<section class="st-sec">
       <div class="st-h"><span class="pu-acct"></span><b class="pu-plan"></b></div>
       <div class="pu-email"></div>
       <div class="pu-wins"></div>
     </section>`);
-    setText(sec.querySelector(".pu-acct"), label);
+    setText(sec.querySelector(".pu-acct"), title);
     setText(sec.querySelector(".pu-plan"), account.plan || "");
     setText(sec.querySelector(".pu-email"), account.email || "");
     const wins = sec.querySelector(".pu-wins");
     if (account.blocked) {
       const b = h(`<div class="pu-blocked"></div>`);
-      setText(b, sentence(account.blocked));
+      const top = bindingWindow(account);
+      const until = top?.percent >= 100 ? resetText(top.resetsAt) : "";
+      setText(b, [sentence(account.blocked), until].filter(Boolean).join(" · "));
       wins.appendChild(b);
     }
     for (const w of account.windows || []) {

@@ -27,7 +27,7 @@ import { writeTerminalColors } from "./theme.mjs";
 import { lastAssistantText, userTask, transcriptFile, recentConversation, transcriptDetail, transcriptEtag, transcriptPoll } from "./transcripts.mjs";
 import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
-import { activeUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
+import { activeUsageLimit, antigravityError, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { holdsRestart, phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
@@ -2444,21 +2444,33 @@ async function checkCodex(env, id, previous) {
 
 // Signed in (antigravityStatus), then one real request proves it works.
 async function checkAntigravity(env) {
+  const previous = credentials?.antigravity?.[0];
   const status = await antigravityStatus(env);
   if (status.loggedIn === null) {
-    return unknownSignIn(credentials?.antigravity?.[0], status.detail);
+    return unknownSignIn(previous, status.detail);
   }
   if (!status.loggedIn) {
     return { ok: false, signedIn: false, account: null, plan: null, detail: status.detail };
   }
+  const identity = { account: status.account, plan: null };
+  // A spent quota stays spent until the reset agy gave: no probe before it.
+  const known = activeUsageLimit(previous);
+  if (known?.resetsAt != null && status.account === previous.account) {
+    return { ...identity, ok: false, signedIn: true, usageLimit: known, detail: quotaDetail(known) };
+  }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account: status.account, plan: null, detail: null };
+    return { ...identity, ok: true, detail: null };
   }
   const text = `${probe.stdout}\n${probe.stderr}`;
+  const error = antigravityError(text);
+  const usageLimit = antigravityUsageLimit(error);
+  if (usageLimit) {
+    return { ...identity, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) };
+  }
   const expired = /please sign in|unauthenticated|\b401\b|(?:token|login|session)(?: has)? expired/i.test(text);
-  const detail = expired ? "login expired" : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, signedIn: !expired, account: status.account, plan: null, detail };
+  const detail = expired ? "login expired" : error?.message || firstLine(text) || `exit ${probe.code}`;
+  return { ...identity, ok: false, signedIn: !expired, detail };
 }
 
 // The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API

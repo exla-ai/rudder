@@ -985,7 +985,7 @@ const ANTIGRAVITY_WINDOWS: Record<string, string> = { "5h": "Session (5h)", week
 export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<AccountQuota, "fetchedAt" | "provider" | "account" | "default" | "email"> {
   const windows: QuotaWindow[] = [];
   const unread: string[] = [];
-  let primaryBlocked = false;
+  const spent = new Set<string>();
   const groups: { name: string | null; buckets: any[] }[] = [
     ...(Array.isArray(summary?.groups) ? summary.groups : []).map((g: any) => ({ name: typeof g?.displayName === "string" ? g.displayName.replace(/\s+models$/i, "") : null, buckets: Array.isArray(g?.buckets) ? g.buckets : [] })),
     { name: null, buckets: Array.isArray(summary?.buckets) ? summary.buckets : [] },
@@ -1002,7 +1002,7 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
         continue;
       }
       const fraction = Math.max(0, Math.min(1, left));
-      if (isPrimary && fraction <= 0) primaryBlocked = true;
+      if (isPrimary && fraction <= 0) spent.add(group.name ?? "Gemini");
       windows.push({
         label,
         percent: Math.round((1 - fraction) * 100),
@@ -1014,7 +1014,9 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
   const error = unread.length
     ? `Antigravity did not say how much is left of ${unread.join(", ")}`
     : windows.length ? null : "Antigravity sent no quota for this account";
-  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked: primaryBlocked ? "usage limit reached" : null, usageLimit: null, error };
+  // Which pool ran out: the other pools' models still work.
+  const blocked = spent.size ? `${[...spent].join(" and ")} models used up` : null;
+  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked, usageLimit: null, error };
 }
 
 /**

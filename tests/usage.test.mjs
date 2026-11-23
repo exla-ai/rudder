@@ -379,8 +379,8 @@ test("Antigravity's quota summary becomes one meter per model pool and window, u
   assert.equal(parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { currentTier: { name: "Antigravity" } }).plan, "Antigravity");
   assert.equal(
     parseAntigravityQuota({ groups: [{ displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", remainingFraction: 0, resetTime: "2026-11-23T13:45:25Z" }] }] }, {}).blocked,
-    "usage limit reached",
-    "a depleted primary Gemini bucket marks the account blocked",
+    "Gemini models used up",
+    "a depleted primary Gemini bucket marks the account blocked and names the pool",
   );
 
   // A bucket with no fraction is named, not dropped; disabled ones are skipped.
@@ -401,6 +401,13 @@ test("sidebar bindingWindow picks the primary Gemini pool on Antigravity, not Ar
   const quota = parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { paidTier: { name: "Google AI Pro" } });
   const top = bindingWindow({ provider: "antigravity", ...quota });
   assert.deepEqual(top, { label: "Gemini · Session (5h)", percent: 13, resetsAt: "2026-11-23T13:45:25Z" });
+  // Both Gemini windows spent: it works again at the later reset.
+  const spent = { provider: "antigravity", windows: [
+    { label: "Gemini · Weekly", percent: 100, resetsAt: "2026-11-30T20:17:35Z" },
+    { label: "Gemini · Session (5h)", percent: 100, resetsAt: "2026-11-24T01:17:35Z" },
+  ] };
+  assert.equal(bindingWindow(spent).label, "Gemini · Weekly");
+  assert.equal(bindingWindow({ ...spent, windows: [...spent.windows].reverse() }).label, "Gemini · Weekly");
 });
 
 test("agy's stored sign-in and User-Agent are read the way agy writes and sends them", () => {

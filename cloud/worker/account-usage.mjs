@@ -50,6 +50,29 @@ export function codexUsageLimit(events) {
     : null;
 }
 
+// agy prints a failed request as one line:
+//   AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota
+//   reached. Please upgrade your subscription to increase your limits. Resets
+//   in 2h29m59s.","status":"RESOURCE_EXHAUSTED","error_code":429,...}
+// `message` is the short error without its "STATUS (code N): " prefix.
+export function antigravityError(text) {
+  const line = /^AGY_ERROR: (\{.*\})$/m.exec(text);
+  if (!line) return null;
+  const error = JSON.parse(line[1]);
+  const short = String(error.short_error ?? "");
+  return { status: error.status ?? null, code: error.error_code ?? null, message: short.replace(/^[A-Z_]+ \(code \d+\): /, "") || short };
+}
+
+// A spent Antigravity quota ("Individual quota reached") with the reset agy
+// gives as a duration. A capacity error or a plain rate limit is not one.
+export function antigravityUsageLimit(error, now = Date.now()) {
+  if (error?.status !== "RESOURCE_EXHAUSTED" || !/\bquota reached\b/i.test(error.message)) return null;
+  const reset = /\bresets in (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/i.exec(error.message);
+  const [, h, m, s] = reset ?? [];
+  const ms = h || m || s ? ((Number(h ?? 0) * 60 + Number(m ?? 0)) * 60 + Number(s ?? 0)) * 1000 : null;
+  return { window: null, resetsAt: ms === null ? null : now + ms };
+}
+
 export function activeUsageLimit(account, now = Date.now()) {
   const limit = account?.usageLimit;
   return limit && (limit.resetsAt === null || limit.resetsAt > now) ? limit : null;

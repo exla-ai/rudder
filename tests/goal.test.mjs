@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DEFAULT_SUCCESS, deriveGoal, deriveSuccess, extractSuccess, formatGoalPrompt } from "../dist/goal.js";
-import { CHAT_APP_RULE, PARALLEL_WORK_RULE, renderContract, WAIT_AND_READ_RULE } from "../dist/brain.js";
+import { CHAT_APP_RULE, HELPER_RULE, PARALLEL_WORK_RULE, renderContract, WAIT_AND_READ_RULE } from "../dist/brain.js";
 import { nativeAgentCommand } from "../dist/native-agents.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -217,6 +217,8 @@ test("renderContract asks the worker to parallelize, in parity with the native p
   assert.ok(tasksRs.includes(`"- ${PARALLEL_WORK_RULE}"`), "native parallel_work_rule! drifted from TS");
   assert.ok(contract.includes(`- ${WAIT_AND_READ_RULE}`));
   assert.ok(tasksRs.includes(`"- ${WAIT_AND_READ_RULE}"`), "native wait_and_read_rule! drifted from TS");
+  assert.ok(contract.includes(`- ${HELPER_RULE}`));
+  assert.ok(tasksRs.includes(`"- ${HELPER_RULE}"`), "native helper_rule! drifted from TS");
   // The main owner, who the user chats with in the app, is told where they read it.
   assert.ok(!contract.includes(CHAT_APP_RULE));
   const main = renderContract({ runId: "r2", runtimeRole: "main-owner", task: "add a toggle", goal: "", success: "", createdAt: "2026-01-01T00:00:00.000Z",

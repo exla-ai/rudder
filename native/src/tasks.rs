@@ -25,6 +25,17 @@ macro_rules! wait_and_read_rule {
 #[cfg(test)]
 pub(crate) const WAIT_AND_READ_RULE: &str = wait_and_read_rule!();
 
+/// A second opinion from another model goes through a helper agent, which
+/// reads the files itself (helpers.rs). Pasting files into a print-mode CLI
+/// lost most of a review: `agy -p` keeps about 200 KB of one message.
+macro_rules! helper_rule {
+    () => {
+        "- For a review or second opinion from another model, start a helper with the agents_start tool and give it file paths, never pasted file contents: `agy -p` and other print modes keep only about 200 KB of one message."
+    };
+}
+#[cfg(test)]
+pub(crate) const HELPER_RULE: &str = helper_rule!();
+
 /// The user often reads a main agent in Rudder's app (web, Mac, iPhone), where
 /// its terminal keys do nothing. Workers' context stays short without it.
 /// Mirrored in TS as `CHAT_APP_RULE` (src/brain.ts).
@@ -50,6 +61,8 @@ pub(crate) fn execution_prompt(task: &str) -> String {
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
+        "\n",
+        helper_rule!(),
         "\n- Never write secrets into files. End with a short summary of what changed and anything unfinished."
     );
     // Keep the objective block as the very first lines, but do NOT launch with a
@@ -77,6 +90,8 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
+        "\n",
+        helper_rule!(),
         "\n",
         chat_app_rule!(),
         "\n- Ship only when asked, using the repo's release workflow. End with a short summary of what changed and anything unfinished."

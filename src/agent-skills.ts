@@ -87,5 +87,5 @@ export async function installAgentSkills(options: { sourceDir?: string; targets?
 /** Best effort: a read-only home or odd permissions must never block a run. */
 export async function ensureAgentSkills(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (env.RUDDER_DISABLE_AGENT_SKILLS === "1") return;
-  await installAgentSkills().catch(() => undefined);
+  await installAgentSkills({ targets: agentSkillTargets(os.homedir(), env) }).catch(() => undefined);
 }

@@ -63,6 +63,14 @@ const { modelName } = await import(fromDist("models.js"));
 // Paths resolve from the agents' env: RUDDER_HOME here is a flag.
 const accounts = await import(fromDist("accounts.js"));
 const { writeJson } = await import(fromDist("util.js"));
+// Each project's dashboard is rudder-native, started here with the env `rudder`
+// would give it. Not `rudder` itself: that left a ~70 MB Node process above
+// every dashboard for a board daemon nothing on a home reads (one bound its
+// port, the rest failed to), and added ~200 ms to each start.
+const { nativeDashboardEnv } = await import(fromDist("native-dashboard-env.js"));
+const nativeDashboard = (await import(fromDist("native-binary.js"))).resolveNativeBinaryPath();
+if (!nativeDashboard) throw new Error(`rudder-native is not in ${rudderDist}/native: the home cannot start dashboards`);
+const { ensureAgentSkills } = await import(fromDist("agent-skills.js"));
 
 let projectFiles;
 async function fileService() {
@@ -206,6 +214,9 @@ const tailscale = createTailscale({
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 const accountAvailabilityFile = path.join(PERSIST_HOME, ".rudder", "account-availability.json");
 baseChildEnv.RUDDER_ACCOUNT_AVAILABILITY = accountAvailabilityFile;
+// Rudder's own skills (rudder-burst and the rest) for every agent on this
+// home, from this image: once per start, where `rudder` did it per dashboard.
+await ensureAgentSkills(baseChildEnv);
 const accountQuotaChecks = new Map();
 const lastQuotaChecks = new Map();
 
@@ -420,7 +431,9 @@ class Project {
       // The All agents chat starts with its own framing (native all_agents_task_prompt).
       ...(this.coordinator ? { RUDDER_ALL_AGENTS: "1" } : {}),
     };
-    this.term = pty.spawn("rudder", [], { name: "xterm-256color", cols: this.cols, rows: this.rows, cwd: this.dir, env });
+    this.term = pty.spawn(nativeDashboard, [], {
+      name: "xterm-256color", cols: this.cols, rows: this.rows, cwd: this.dir, env: nativeDashboardEnv(env),
+    });
     this.status = "running";
     this.error = null;
     const term = this.term;

@@ -622,16 +622,15 @@ a { color: var(--accent); }
 /* Edit under a sent message (chat-edit.js) shows on hover or focus, in the
    space under the message rather than adding to it, so a message with Edit
    stands as far from the next as any other. A phone has no hover, so Edit
-   always shows there with room to tap, and a long press opens the message's
-   menu instead of selecting text. */
+   always shows there, in the same space: its tap area reaches past the line
+   it takes. A long press opens the message's menu instead of selecting text. */
 .msg.user.editable { margin-bottom: 0; }
 .msg.user .edit-foot { opacity: 0; transition: opacity 0.12s; justify-content: flex-end; height: 16px; margin-top: 2px; }
 .msg.user .edit-foot > button { padding: 0 4px; line-height: 16px; }
 .msg.user:hover .edit-foot, .msg.user:focus-within .edit-foot { opacity: 1; }
 @media (pointer: coarse) {
-  .msg.user.editable { margin-bottom: 14px; }
-  .msg.user .edit-foot { opacity: 1; height: auto; margin-top: 4px; }
-  .msg.user .edit-foot > button { padding: 4px; line-height: normal; }
+  .msg.user .edit-foot { opacity: 1; height: 18px; }
+  .msg.user .edit-foot > button { padding: 9px 10px; margin: -9px -6px; line-height: 18px; }
   .msg.user.editable .bubble { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 }
 /* Editing a sent message in place (chat-edit.js): a text box takes the

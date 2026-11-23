@@ -5,6 +5,18 @@ show the reset in Settings. New work and the next prompt in a saved,
 idle conversation use the first available configured account when the
 current account is confirmed exhausted. Each account keeps its own sign-in.
 
+Helper agents: Claude and Codex agents have `agents_start` and
+`agents_result` (native `helpers.rs`, `agent_mcp.rs`). A helper is a real
+isolated worker on exactly the harness, model and effort it names, checked
+against the model catalog; the defaults for new agents do not move. Its row
+carries run.json `parentRunId` and shows as the parent's helper in the list
+and the app. At each helper turn end the dashboard reads its final message
+from the backend's session record into `.rudder/helpers/<id>.json`, which
+`agents_result` returns. The rule in the prompts: send a helper file paths,
+never pasted contents (`agy -p` keeps about 200 KB of one message). Legacy
+owners now attach a helpers-only `rudder_agents` server. Antigravity and
+OpenCode parents get no per-run MCP, so they cannot start helpers yet.
+
 Agent rows on the home and project pages render compact Markdown previews
 with readable link labels, emphasis and inline code.
 

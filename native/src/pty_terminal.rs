@@ -92,7 +92,8 @@ impl PtyReaderWork {
                 }
                 match ready {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    // The stop pipe fired: a stop, or the pane is gone.
+                    Ok(false) => break,
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
@@ -375,11 +376,64 @@ impl Drop for OwnedPtyChild {
     }
 }
 
-/// Wait only on the reader thread, with a bounded timeout so an inherited slave
-/// cannot keep a stopped pane's reader alive. Darwin's poll does not reliably
-/// support terminal devices; kqueue also avoids select's FD_SETSIZE limit.
+/// Stops a pane's reader thread: sets the flag the reader checks and writes
+/// to the pipe its readiness wait watches, so that wait needs no timeout. An
+/// idle pane's reader sleeps until output or stop; it used to wake every
+/// 50 ms to look at the flag.
+struct ReaderStop {
+    flag: Arc<AtomicBool>,
+    #[cfg(unix)]
+    wake: std::os::fd::OwnedFd,
+}
+
+impl ReaderStop {
+    fn stop(&self) {
+        self.flag.store(true, Ordering::Release);
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // Nonblocking, and one byte per stop: it cannot fill the pipe. A
+            // failed write means the reader has already exited and closed its
+            // end, which is what stop asks for.
+            let byte = 1_u8;
+            unsafe { libc::write(self.wake.as_raw_fd(), (&raw const byte).cast(), 1) };
+        }
+    }
+}
+
+/// The pipe a `ReaderStop` writes and its reader's `PtyReadiness` watches:
+/// (read end, write end). Both close on exec so no agent inherits them.
+#[cfg(unix)]
+fn reader_stop_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut fds = [0 as libc::c_int; 2];
+    #[cfg(target_os = "macos")]
+    let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    #[cfg(not(target_os = "macos"))]
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    if created < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(target_os = "macos")]
+    for fd in [&read, &write] {
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    if unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((read, write))
+}
+
+/// Wait only on the reader thread, for PTY output or its `ReaderStop`, so an
+/// inherited slave cannot keep a stopped pane's reader alive. Darwin's poll
+/// does not reliably support terminal devices; kqueue also avoids select's
+/// FD_SETSIZE limit.
 #[cfg(unix)]
 struct PtyReadiness {
+    stop: std::os::fd::OwnedFd,
     #[cfg(not(target_os = "macos"))]
     fd: Option<std::os::fd::RawFd>,
     #[cfg(target_os = "macos")]
@@ -388,7 +442,7 @@ struct PtyReadiness {
 
 #[cfg(unix)]
 impl PtyReadiness {
-    fn new(fd: Option<std::os::fd::RawFd>) -> std::io::Result<Self> {
+    fn new(fd: Option<std::os::fd::RawFd>, stop: std::os::fd::OwnedFd) -> std::io::Result<Self> {
         #[cfg(target_os = "macos")]
         {
             use std::os::fd::{AsRawFd, FromRawFd};
@@ -403,14 +457,14 @@ impl PtyReadiness {
                 if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                let change = libc::kevent {
-                    ident: fd as _,
+                let changes = [fd, stop.as_raw_fd()].map(|ident| libc::kevent {
+                    ident: ident as _,
                     filter: libc::EVFILT_READ,
                     flags: libc::EV_ADD | libc::EV_ENABLE,
                     fflags: 0,
                     data: 0,
                     udata: std::ptr::null_mut(),
-                };
+                });
                 let timeout = libc::timespec {
                     tv_sec: 0,
                     tv_nsec: 0,
@@ -418,8 +472,8 @@ impl PtyReadiness {
                 if unsafe {
                     libc::kevent(
                         queue.as_raw_fd(),
-                        &change,
-                        1,
+                        changes.as_ptr(),
+                        changes.len() as libc::c_int,
                         std::ptr::null_mut(),
                         0,
                         &timeout,
@@ -432,25 +486,22 @@ impl PtyReadiness {
             } else {
                 None
             };
-            Ok(Self { queue })
+            Ok(Self { stop, queue })
         }
         #[cfg(not(target_os = "macos"))]
-        Ok(Self { fd })
+        Ok(Self { stop, fd })
     }
 
+    /// True once the PTY has output (or EOF) to read; false once the pane's
+    /// `ReaderStop` fired or the pane itself is gone (its end of the pipe closed).
     fn wait(&self) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
         #[cfg(target_os = "macos")]
         {
-            use std::os::fd::AsRawFd;
-
             let Some(queue) = self.queue.as_ref() else {
                 return Ok(true);
             };
             let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
-            let timeout = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 50_000_000,
-            };
             let ready = unsafe {
                 libc::kevent(
                     queue.as_raw_fd(),
@@ -458,18 +509,18 @@ impl PtyReadiness {
                     0,
                     event.as_mut_ptr(),
                     1,
-                    &timeout,
+                    std::ptr::null(),
                 )
             };
             if ready < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            if ready == 0 {
-                return Ok(false);
-            }
             // kevent initialized one event. EV_EOF still permits reading buffered
             // tail bytes; only an actual registration/runtime error ends the reader.
             let event = unsafe { event.assume_init() };
+            if event.ident == self.stop.as_raw_fd() as libc::uintptr_t {
+                return Ok(false);
+            }
             if event.flags & libc::EV_ERROR != 0 && event.data != 0 {
                 return Err(std::io::Error::from_raw_os_error(event.data as i32));
             }
@@ -480,17 +531,14 @@ impl PtyReadiness {
             let Some(fd) = self.fd else {
                 return Ok(true);
             };
-            let mut poll = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut poll, 1, 50) };
-            if ready < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(ready > 0)
+            let mut polls = [
+                libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: self.stop.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            ];
+            if unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, -1) } < 0 {
+                return Err(std::io::Error::last_os_error());
             }
+            Ok(polls[1].revents == 0)
         }
     }
 }
@@ -643,7 +691,7 @@ pub struct TerminalPane {
     output_only: bool,
     terminated: bool,
     reader_thread: Option<JoinHandle<()>>,
-    reader_stop: Arc<AtomicBool>,
+    reader_stop: ReaderStop,
     parser: vt100::Parser,
     pub(crate) screen_exporter: crate::terminal_stream::ScreenExporter,
     size: TerminalSize,
@@ -1183,7 +1231,10 @@ impl TerminalPane {
             .openpty(options.size.pty_size())
             .context("failed to open PTY")?;
         #[cfg(unix)]
-        let reader_readiness = PtyReadiness::new(pair.master.as_raw_fd())
+        let (stop_read, stop_write) =
+            reader_stop_pipe().context("failed to create the PTY reader stop pipe")?;
+        #[cfg(unix)]
+        let reader_readiness = PtyReadiness::new(pair.master.as_raw_fd(), stop_read)
             .context("failed to initialize PTY reader readiness")?;
 
         // Answer Claude's and Codex's folder-trust prompt before it appears:
@@ -1236,8 +1287,12 @@ impl TerminalPane {
         let reader_queued_output = queued_output_bytes.clone();
         let output_waker: Arc<Mutex<Option<PtyOutputWaker>>> = Arc::new(Mutex::new(None));
         let reader_waker = Arc::clone(&output_waker);
-        let reader_stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&reader_stop);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let reader_stop = ReaderStop {
+            flag: Arc::clone(&stopped),
+            #[cfg(unix)]
+            wake: stop_write,
+        };
         let reader_work = PtyReaderWork { reader, #[cfg(unix)] reader_readiness, reply_writer,
             reader_wants_theme_reports, output_tx, reader_queued_output, reader_waker, stopped };
         let reader_thread = thread::Builder::new().name("rudder-pty-reader".to_string())
@@ -2266,9 +2321,9 @@ impl TerminalPane {
 impl Drop for TerminalPane {
     fn drop(&mut self) {
         self.terminate_child();
-        self.reader_stop.store(true, Ordering::Release);
+        self.reader_stop.stop();
         // An inherited slave can delay EOF. Never join a reader on the App
-        // actor. Its bounded readiness wait closes the remaining master handles;
+        // actor. The stop ends its readiness wait, which closes the remaining master handles;
         // Darwin can then finish ttywait and the reserved reaper proves exit.
         self.reader_thread.take();
     }
@@ -2814,7 +2869,7 @@ mod tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(5));
         }
-        pane.reader_stop.store(true, Ordering::Release);
+        pane.reader_stop.stop();
         while !pane.reader_thread.as_ref().unwrap().is_finished() {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(5));
@@ -2898,7 +2953,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        pane.reader_stop.store(true, Ordering::Release);
+        pane.reader_stop.stop();
         let reader = pane.reader_thread.take().unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while !reader.is_finished() {

@@ -39,6 +39,7 @@ import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
+import { RUN_WATCH_MS, createRunWatch, runSignature } from "./run-watch.mjs";
 import { queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
@@ -126,6 +127,9 @@ const STATE_INTERVAL_MS = 1500;
 // it answers (steer). A resumed agent that starts its process first takes
 // the longest.
 const TURN_START_WAIT_MS = 2000;
+// The run records the app is waiting on, published the moment they change
+// (run-watch.mjs).
+const runWatch = createRunWatch(() => void publishState().catch((error) => log(`state: ${error.message}`)));
 
 // Set by configureGitCredentials, which runs during boot: declared up here so
 // boot never reaches it uninitialized (2.16.5 crashed on exactly that).
@@ -277,6 +281,13 @@ void ensureRustToolchain().then(() => ensureGoToolchain());
 void ensureAwsTooling().then(() => checkCredentials());
 setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
+setInterval(() => {
+  try {
+    runWatch.check();
+  } catch (error) {
+    log(`state: ${error.message}`);
+  }
+}, RUN_WATCH_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
 setInterval(reportHeartbeat, 30_000);
 setHomeUpdate({ current: hostInfo(process.env).image, target: null, state: "current", error: null });
@@ -1655,6 +1666,9 @@ async function deliver(project, { kind, taskId, instruction }) {
   const requestId = queueSteer(project.dir, { kind, taskId, instruction });
   const receipt = await waitSteerReceipt(project.dir, requestId, 12_000);
   if (receipt?.status === "delivered") {
+    if (idle) {
+      runWatch.sent(path.join(project.dir, ".rudder", "runs", taskId, "run.json"));
+    }
     // The answer waits for the row to turn Working (about 200 ms after the
     // receipt), so the state the app reads on it already shows the turn.
     // Published with the receipt alone, Working showed 3.3 s after a send on
@@ -1685,7 +1699,16 @@ async function publishState() {
     return;
   }
   const list = [];
+  const watched = new Map();
   for (const project of projects.values()) {
+    const agents = project.status === "cloning" ? [] : project.agents();
+    for (const agent of agents) {
+      const file = path.join(project.dir, ".rudder", "runs", agent.id, "run.json");
+      if (runWatch.wants(file, agent.status)) {
+        // As this state read it: a change after the read is caught.
+        watched.set(file, runSignature(runJsonCache.get(file)));
+      }
+    }
     list.push({
       workspaceId: project.workspaceId,
       name: project.name,
@@ -1695,7 +1718,7 @@ async function publishState() {
       error: project.error,
       // Serving the All agents tools: Cloud refuses the chat on a home without them.
       ...(project.coordinator ? { coordinator: true } : {}),
-      agents: project.status === "cloning" ? [] : project.agents(),
+      agents,
       // Chats closed in the last day, for the app's Show closed and Reopen.
       closed: project.status === "cloning" ? [] : readClosedChats(project.dir).map((chat) => ({ ...chat, modelName: nameModel(chat.backend, chat.model) })),
       plan: project.status === "cloning" ? null : planWithModelNames(readProjectPlan(project.dir)),
@@ -1706,6 +1729,7 @@ async function publishState() {
         .map(({ port, url, id }) => ({ port, label: "Project preview", url, https: true, access: "tailnet", previewId: id })),
     });
   }
+  runWatch.watch(watched);
   const state = { type: "state", projects: list, tailnet: { ...tailscale.snapshot(), https: ports.length ? true : null }, credentials, logins: logins.snapshot(), host: hostInfo(process.env) };
   const json = JSON.stringify(state);
   if (json === lastStateJson) {

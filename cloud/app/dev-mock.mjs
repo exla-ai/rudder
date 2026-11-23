@@ -193,6 +193,11 @@ const projects = [
       agent({ id: "run_a7", title: "Port scanner for the home", task: "List listening ports per project", status: "working", backend: "codex", model: "gpt-6.1-sol", nodeId: "n1", planId: "plan_1", updatedAt: T0 - 2 * MIN, lastMessage: "Reading /proc/net/tcp6 for owner pids." }),
       agent({ id: "run_a6", title: "Explore opencode resume", task: "opencode session resume", status: "stopped", backend: "opencode", model: "anthropic/claude-sonnet", updatedAt: T0 - 50 * 60 * MIN, lastMessage: "Stopped by you." }),
     ],
+    // Show closed: chats deleted in the last day (worker closed-chats.mjs).
+    closed: [
+      named({ id: "run_c2", title: "Try the new search ranking", backend: "codex", model: "gpt-6.1-sol", effort: null, closedAt: T0 - 25 * MIN }),
+      named({ id: "run_c1", title: "general", backend: "claude", model: "opus", effort: null, closedAt: T0 - 2 * 60 * MIN }),
+    ],
     plan: {
       updatedAt: iso(T0 - 3 * MIN),
       awaitingApproval: true,
@@ -1437,6 +1442,16 @@ const server = http.createServer(async (req, res) => {
       for (const n of plan.nodes) if (n.status === "ready") n.status = "running";
       return json(res, 200, { ok: true, status: "delivered" });
     }
+    if (p === "/api/app/action" && body.action === "reopen") {
+      // Like a home: the dashboard moves the record back and resumes it.
+      const proj = (freshProjects ?? projects).find((x) => x.workspaceId === body.workspace);
+      const at = (proj?.closed || []).findIndex((c) => c.id === body.run);
+      if (at < 0) return json(res, 400, { error: `could not reopen it: no closed chat ${body.run}` });
+      await delay(600);
+      const [c] = proj.closed.splice(at, 1);
+      proj.agents.unshift(agent({ id: c.id, title: c.title, task: c.title, status: "done", backend: c.backend, model: c.model, updatedAt: now(), lastMessage: "Reopened from Show closed." }));
+      return json(res, 200, { ok: true, status: "delivered" });
+    }
     if (p === "/api/app/action") {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
@@ -1448,7 +1463,10 @@ const server = http.createServer(async (req, res) => {
         if (closeMode === "fail") return json(res, 400, { error: "could not stop it, so it was not deleted" });
         setTimeout(() => {
           const proj = projects.find((x) => x.agents.includes(t.a));
-          if (proj) proj.agents = proj.agents.filter((x) => x !== t.a);
+          if (!proj) return;
+          proj.agents = proj.agents.filter((x) => x !== t.a);
+          // Kept a day under Show closed.
+          proj.closed = [named({ id: t.a.id, title: t.a.title, backend: t.a.backend, model: t.a.model, effort: null, closedAt: now() }), ...(proj.closed || [])];
         }, 1000);
         return json(res, 200, { ok: true, status: "delivered" });
       }

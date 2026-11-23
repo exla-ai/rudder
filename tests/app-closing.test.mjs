@@ -35,6 +35,17 @@ test("a closed agent stays off the list until the state stops listing it", () =>
   assert.deepEqual(ids(state), ["a1", "a2"]);
 });
 
+test("once the state lists a close under Show closed, a Reopen right after shows the row", () => {
+  const now = Date.UTC(2026, 10, 23, 3, 0);
+  const closing = new Map([["ws1|a1", { title: "general", answered: now }]]);
+  let state = { projects: [{ workspaceId: "ws1", agents: [{ id: "a2" }], closed: [{ id: "a1" }] }] };
+  hideClosed(state, closing, now + 500);
+  assert.equal(closing.size, 0, "the close is done");
+  state = stateWith("a1", "a2");
+  hideClosed(state, closing, now + 1500);
+  assert.deepEqual(ids(state), ["a1", "a2"], "reopened within the minute, it is not hidden");
+});
+
 test("a close the state never agrees with shows the row again and reports it", () => {
   const now = Date.UTC(2026, 10, 19, 3, 0);
   const closing = new Map([["ws1|a1", { title: "Fix it", answered: now }]]);

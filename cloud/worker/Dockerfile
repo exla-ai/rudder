@@ -276,6 +276,7 @@ COPY cloud/worker/tailscale-login.mjs ./tailscale-login.mjs
 COPY cloud/worker/cache-env.sh ./cache-env.sh
 COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 COPY cloud/worker/steer-inbox.mjs ./steer-inbox.mjs
+COPY cloud/worker/closed-chats.mjs ./closed-chats.mjs
 COPY cloud/worker/cleanup.mjs ./cleanup.mjs
 COPY cloud/worker/telemetry.mjs ./telemetry.mjs
 COPY cloud/worker/burst-protocol.mjs ./burst-protocol.mjs

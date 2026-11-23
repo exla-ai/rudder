@@ -5440,6 +5440,8 @@ type HomeProject = {
   // The All agents chat's project, marked by a supervisor that serves its tools.
   coordinator?: boolean;
   agents?: HomeAgent[];
+  /** Chats closed in the last day (worker closed-chats.mjs), for Show closed. */
+  closed?: JsonRecord[];
   ports?: JsonRecord[];
   plan?: JsonRecord | null;
 };
@@ -7091,6 +7093,7 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       live: stateLive,
       stateAt: lastSeen,
       agents: agents as unknown as Json,
+      closed: (project?.closed ?? []) as unknown as Json,
       newAgentsPrivate: visibility.newAgentsPrivate,
       ports: (stateLive ? project?.ports ?? [] : []) as unknown as Json,
       plan: (project?.plan ?? null) as Json,
@@ -8117,14 +8120,14 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
-    // Dashboard actions the phone and web can take: stop, merge, delete, pin
-    // or unpin one agent, or approve a plan waiting for its go-ahead (`plan` =
-    // its id).
+    // Dashboard actions the phone and web can take: stop, merge, delete,
+    // reopen (a closed chat), pin or unpin one agent, or approve a plan
+    // waiting for its go-ahead (`plan` = its id).
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const action = stringField(body, "action") ?? "";
-    if (!["stop", "merge", "delete", "pin", "unpin", "approve"].includes(action)) {
-      throw badRequest("action must be stop, merge, delete, pin, unpin or approve");
+    if (!["stop", "merge", "delete", "reopen", "pin", "unpin", "approve"].includes(action)) {
+      throw badRequest("action must be stop, merge, delete, reopen, pin, unpin or approve");
     }
     const planId = stringField(body, "plan") ?? "";
     if (planId && !/^[A-Za-z0-9._-]{1,120}$/.test(planId)) {

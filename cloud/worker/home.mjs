@@ -35,6 +35,7 @@ import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner, stripAnsi } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
+import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
@@ -1037,7 +1038,7 @@ async function handleRpc(method, params) {
     return await pullRun(project, params);
   }
   if (method === "action") {
-    const kinds = { merge: "merge", stop: "cancel", delete: "delete", pin: "pin", unpin: "pin", approve: "approve" };
+    const kinds = { merge: "merge", stop: "cancel", delete: "delete", reopen: "reopen", pin: "pin", unpin: "pin", approve: "approve" };
     const kind = Object.hasOwn(kinds, params.action) ? kinds[params.action] : null;
     if (!kind) {
       throw new Error("unknown action");
@@ -1594,6 +1595,8 @@ async function publishState() {
       // Serving the All agents tools: Cloud refuses the chat on a home without them.
       ...(project.coordinator ? { coordinator: true } : {}),
       agents: project.status === "cloning" ? [] : project.agents(),
+      // Chats closed in the last day, for the app's Show closed and Reopen.
+      closed: project.status === "cloning" ? [] : readClosedChats(project.dir).map((chat) => ({ ...chat, modelName: nameModel(chat.backend, chat.model) })),
       plan: project.status === "cloning" ? null : planWithModelNames(readProjectPlan(project.dir)),
       // The engine-proven role, PID token and attempt travel with every URL.
       // Control-plane authorization binds these to this authenticated Home.

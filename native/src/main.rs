@@ -2012,6 +2012,10 @@ struct App {
     /// instead of a local one, and the task pane says so. Persisted to
     /// `.rudder/cloud-mode.json` (cloudio::read/write_cloud_mode).
     cloud_mode: bool,
+    /// Closed chats, newest first (agent_life.rs): `/closed` lists them.
+    closed_agents: Vec<agent_life::ClosedAgent>,
+    /// The `/closed` list, while it is open over the task pane.
+    closed_list: Option<agent_life::ClosedList>,
     delete_pending: Option<String>,
     /// Frame counter + the frame at which `delete_pending` was armed. The
     /// confirming `d` only counts once at least one frame has RENDERED after
@@ -3548,6 +3552,11 @@ impl App {
         } else {
             restore_persisted_state(&cwd)
         };
+        let closed_agents = if cfg!(test) {
+            Vec::new()
+        } else {
+            agent_life::load_closed_agents(&cwd)
+        };
         // Restore the ingested-run ledger so a worker handled before the last exit is not
         // re-ingested (or re-summarized) when its Done record reloads. Empty in tests.
         // Loaded before `cwd` moves into the struct below.
@@ -3692,6 +3701,8 @@ impl App {
             machine_notice_cursor: 0,
             cloud_prompt: None,
             cloud_mode,
+            closed_agents,
+            closed_list: None,
             delete_pending: None,
             frames_drawn: 0,
             repaint_all: false,
@@ -6914,6 +6925,9 @@ impl App {
 
     fn handle_task_key(&mut self, key: KeyEvent) -> bool {
         self.task_selection = None;
+        if self.handle_closed_list_key(key) {
+            return false;
+        }
         // `?` on an empty prompt opens the keys overlay; anywhere in a draft it
         // is just a question mark.
         if key.code == KeyCode::Char('?')
@@ -7754,6 +7768,11 @@ impl App {
                     return true;
                 }
             }
+        }
+
+        // Show closed draws over the panes above the task pane (agent_life.rs).
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.handle_closed_click(mouse.column, mouse.row) {
+            return true;
         }
 
         if let Some(agents_area) = self
@@ -12279,21 +12298,34 @@ Address the objection directly. If you disagree, say why inside \
             .as_deref()
             .map(str::trim)
             .filter(|prompt| !prompt.is_empty());
-        let mut command = if !entry.session_id.is_empty() && run.backend == Backend::Claude {
-            let mut command = claude_resume_command(run, &entry.session_id);
-            if let Some(prompt) = resume_prompt {
-                command.args.push(prompt.to_string());
-                // The managed Claude profile moves this positional into its
-                // first turn, the same contract as a fresh launch.
-                command = command.with_env("RUDDER_AGENT_INITIAL_PROMPT", prompt);
+        let mut command = if !entry.session_id.is_empty() {
+            match run.backend {
+                Backend::Claude => {
+                    let mut command = claude_resume_command(run, &entry.session_id);
+                    if let Some(prompt) = resume_prompt {
+                        command.args.push(prompt.to_string());
+                        // The managed Claude profile moves this positional into its
+                        // first turn, the same contract as a fresh launch.
+                        command = command.with_env("RUDDER_AGENT_INITIAL_PROMPT", prompt);
+                    }
+                    command
+                }
+                Backend::Codex => {
+                    let mut command = codex_resume_command(run, &entry.session_id);
+                    if let Some(prompt) = resume_prompt {
+                        command.args.push(prompt.to_string());
+                    }
+                    command
+                }
+                Backend::Opencode => match resume_prompt {
+                    Some(prompt) => opencode_continue_command(run, &entry.session_id, prompt),
+                    None => opencode_resume_command(run, &entry.session_id),
+                },
+                Backend::Antigravity => match resume_prompt {
+                    Some(prompt) => antigravity_continue_command(run, &entry.session_id, prompt),
+                    None => antigravity_resume_command(run, &entry.session_id),
+                },
             }
-            command
-        } else if !entry.session_id.is_empty() && run.backend == Backend::Codex {
-            let mut command = codex_resume_command(run, &entry.session_id);
-            if let Some(prompt) = resume_prompt {
-                command.args.push(prompt.to_string());
-            }
-            command
         } else {
             let session_id = mint_session_id_for(run.backend);
             // If the local CLI built a context-rich handoff prompt for this
@@ -14501,9 +14533,30 @@ Address the objection directly. If you disagree, say why inside \
         let Some(agent) = agent_from_run_record(&self.cwd, record) else {
             return SteerDelivery::Failed(format!("unreadable record for {run_id}"));
         };
+        let summary = agent.task_summary.clone();
+        if let Err(error) = self.resume_recorded_agent(agent, session_id, fresh_prompt) {
+            return SteerDelivery::Failed(error);
+        }
+        self.record_activity(format!("home: picked up \"{summary}\" from a laptop"));
+        self.notice = Some(format!("picked up \"{summary}\" from a laptop; it continues here"));
+        SteerDelivery::Delivered
+    }
+
+    /// Put a recorded agent on the dashboard as a row (replacing a dead row of
+    /// the same id) and continue `session_id` in it, with no new turn unless
+    /// `fresh_prompt` brings one; an empty `session_id` starts a fresh session.
+    /// Adopting a moved agent and reopening a closed chat both end here.
+    /// Returns the row's index; when the start fails the row stays, Failed.
+    fn resume_recorded_agent(
+        &mut self,
+        agent: AgentRun,
+        session_id: String,
+        fresh_prompt: Option<String>,
+    ) -> Result<usize, String> {
+        let run_id = agent.id.clone();
         let workspace_path = agent.workspace_path.clone().unwrap_or_else(|| agent.cwd.clone());
         let summary = agent.task_summary.clone();
-        let index = match existing {
+        let index = match self.agents.iter().position(|run| run.id == run_id) {
             Some(index) => {
                 self.agents[index] = agent;
                 index
@@ -14514,20 +14567,20 @@ Address the objection directly. If you disagree, say why inside \
             }
         };
         self.agent_row_map.clear();
+        self.dirty = true;
         let entry = MigratedAgent {
-            run_id: run_id.to_string(),
+            run_id,
             session_id,
             workspace_path,
             fresh_prompt,
         };
-        if !self.spawn_claude_resume_for(index, &entry) {
-            return SteerDelivery::Failed(format!("could not start {summary} here"));
-        }
-        self.record_activity(format!("home: picked up \"{summary}\" from a laptop"));
-        self.notice = Some(format!("picked up \"{summary}\" from a laptop; it continues here"));
-        self.dirty = true;
+        let started = self.spawn_claude_resume_for(index, &entry);
         let _ = self.write_rudder_context_timed(None);
-        SteerDelivery::Delivered
+        if started {
+            Ok(index)
+        } else {
+            Err(format!("could not start {summary} here"))
+        }
     }
 
     /// `rudder cloud` in another terminal of this checkout asked to take the
@@ -14550,8 +14603,9 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    /// The phone deleted an agent: delete it here exactly as `dd` would, which is
-    /// what makes it disappear from the phone too (the phone lists run records).
+    /// The phone deleted an agent: close it here exactly as `dd` would, which is
+    /// what makes it disappear from the phone too (the phone lists run records,
+    /// and a closed one's record is under `.rudder/closed`).
     fn deliver_delete_request(&mut self, task_id: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
@@ -14569,7 +14623,10 @@ Address the objection directly. If you disagree, say why inside \
         if self.delete_pending.as_deref() == Some(self.agents[index].id.as_str()) {
             self.delete_pending = None;
         }
-        let notice = self.delete_agent_now(index);
+        let notice = match self.close_agent_now(index) {
+            Ok(notice) => notice,
+            Err(error) => return SteerDelivery::Failed(format!("could not close it: {error}")),
+        };
         self.record_activity(format!("deleted \"{label}\" (from the phone)"));
         self.notice = Some(notice);
         self.dirty = true;
@@ -16439,6 +16496,8 @@ Address the objection directly. If you disagree, say why inside \
                 // The home machine staged an agent moved off a laptop: load
                 // its record and resume its conversation here.
                 "adopt" => self.deliver_adopt_request(&task_id),
+                // The app's Reopen on a closed chat (agent_life.rs).
+                "reopen" => self.deliver_reopen_request(&task_id),
                 // `rudder cloud` in another terminal: move every agent this
                 // dashboard is running to the home machine.
                 "move-home" => self.deliver_move_home_request(),
@@ -18667,7 +18726,8 @@ Address the objection directly. If you disagree, say why inside \
         let now = std::time::SystemTime::now();
         let repo = self.cwd.clone();
         // Everything a live agent row owns is off-limits (its own checkout path,
-        // or the main checkout for rows without a workspace).
+        // or the main checkout for rows without a workspace), and so is a
+        // closed chat's workspace: it is kept until the chat is deleted for good.
         let live_paths: HashSet<PathBuf> = self
             .agents
             .iter()
@@ -18676,11 +18736,13 @@ Address the objection directly. If you disagree, say why inside \
                     .clone()
                     .unwrap_or_else(|| run.cwd.clone())
             })
+            .chain(self.closed_agents.iter().filter_map(|closed| closed.workspace_path.clone()))
             .collect();
         let live_names: HashSet<String> = self
             .agents
             .iter()
             .filter_map(|run| run.workspace_name.clone())
+            .chain(self.closed_agents.iter().filter_map(|closed| closed.workspace_name.clone()))
             .collect();
 
         let live_roots: HashSet<PathBuf> = live_paths
@@ -19905,12 +19967,12 @@ Address the objection directly. If you disagree, say why inside \
             // Name WHAT is being deleted and spell out both outcomes; the bare
             // "press d again" read as a generic hint and was easy to act on with
             // the wrong row selected.
+            // Deleting closes: Show closed in the task pane brings it back.
+            let keep = agent_life::CLOSED_KEPT_COPY;
             self.notice = Some(if live_main {
-                format!("{label} is still running — press d again to stop it and delete the row · any other key cancels")
-            } else if selected.workspace_path.is_some() {
-                format!("delete {label} and remove its workspace? press d again to confirm · any other key cancels")
+                format!("{label} is still running: press d again to stop it and delete it · {keep} · any other key cancels")
             } else {
-                format!("delete {label}? press d again to confirm · any other key cancels")
+                format!("delete {label}? press d again to confirm · {keep} · any other key cancels")
             });
             return;
         }
@@ -19926,27 +19988,24 @@ Address the objection directly. If you disagree, say why inside \
         }
 
         let deleted = self.selected_agent;
-        let notice = self.delete_agent_now(deleted);
         self.delete_pending = None;
-        self.notice = Some(notice);
+        self.notice = Some(
+            self.close_agent_now(deleted)
+                .unwrap_or_else(|error| format!("could not delete it: {error}")),
+        );
         let _ = self.write_rudder_context_timed(None);
     }
 
-    /// Remove one row and everything local it owns: its record, signal files and
-    /// ledger entries, and (in the background) its workspace and conversation.
-    /// The confirmed half of `dd`, and what a delete from the phone, `cc` and
-    /// the cleanup run. Keeps the selection on a sensible neighbor and returns
-    /// the notice to show.
-    fn delete_agent_now(&mut self, index: usize) -> String {
+    /// Take one row off the dashboard: the row, its plan launch, signal files
+    /// and ledger entries go, its record, conversation and workspace stay
+    /// (closing and deleting decide what happens to those, agent_life.rs).
+    /// Keeps the selection on a sensible neighbor.
+    fn take_agent_row(&mut self, index: usize) -> AgentRun {
         let run = self.agents.remove(index);
-        // Read before the record goes: it names every session the run left.
-        let conversation = self.conversation_of(&run);
-        self.delete_conversation_in_background(conversation);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
         // click resolves to nothing instead of a neighbor (next render rebuilds it).
         self.agent_row_map.clear();
-        let _ = remove_native_run_record(&self.cwd, &run.id);
-        // A deleted launched node must leave the plan's id set: its id can never
+        // A removed launched node must leave the plan's id set: its id can never
         // reach Merged, so keeping it in plan_launched_node_ids made every hard
         // dependent permanently un-ready (known_plan_node_ids still contained
         // the id) with no notice. Dropping it turns the dep into a dangling id,
@@ -19965,6 +20024,7 @@ Address the objection directly. If you disagree, say why inside \
             }
         }
         // Drop the run's hook/signal files too, or ~/.rudder/signals grows forever.
+        // A reopened run gets new ones when it starts.
         signals::cleanup_run_signals(&run.id);
         // Prune the run from the ingest ledger so it does not accumulate dead ids (and so
         // a hypothetically-reused run id is not pre-marked ingested).
@@ -19972,12 +20032,6 @@ Address the objection directly. If you disagree, say why inside \
         let was_pending = self.completion_summary_pending.remove(&run.id);
         if was_ingested || was_pending {
             self.persist_ingested_runs();
-        }
-        // Workspace removal runs in the BACKGROUND: doing it here froze the whole
-        // UI, the freeze that buffered the key bursts dd now guards against. The
-        // row is already gone; the outcome lands in the notice line.
-        if let Some(path) = run.workspace_path.clone() {
-            self.remove_workspace_in_background(path, run.workspace_name.clone());
         }
         if index < self.selected_agent {
             self.selected_agent -= 1;
@@ -19995,6 +20049,17 @@ Address the objection directly. If you disagree, say why inside \
                 self.selected_agent = next;
             }
         }
+        run
+    }
+
+    /// Delete one row for good, record, conversation and workspace included,
+    /// for rows with nothing to reopen: a launch cancelled before it started,
+    /// a branch that never started, an agent deleted on the home machine.
+    /// Everything a person deletes is closed instead (`close_agent_now`).
+    /// Returns the notice to show.
+    fn delete_agent_now(&mut self, index: usize) -> String {
+        let run = self.take_agent_row(index);
+        self.purge_agent(&run, &native_run_dir(&self.cwd, &run.id));
         if run.workspace_path.is_some() {
             "deleted agent · removing workspace in background".to_string()
         } else {
@@ -20354,12 +20419,19 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
 
-        let cleared = merged.len();
+        let mut cleared = 0;
+        let mut failed = None;
         for index in merged.into_iter().rev() {
-            self.delete_agent_now(index);
+            match self.close_agent_now(index) {
+                Ok(_) => cleared += 1,
+                Err(error) => failed = Some(error),
+            }
         }
         self.delete_pending = None;
-        self.notice = Some(format!("cleared {cleared} merged agent(s)"));
+        self.notice = Some(match failed {
+            None => format!("cleared {cleared} merged agent(s) · {}", agent_life::CLOSED_KEPT_COPY),
+            Some(error) => format!("cleared {cleared} merged agent(s); could not clear the rest: {error}"),
+        });
         let _ = self.write_rudder_context_timed(None);
     }
 

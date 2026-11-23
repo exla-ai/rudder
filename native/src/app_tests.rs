@@ -2222,7 +2222,8 @@ fn a_dead_main_row_deletes_and_a_live_one_stops_on_confirm() {
     // followed, because x excluded main rows and stop_agent_at refused them
     // again underneath. Three layers deep, the row was undeletable while
     // running; the reported symptom was simply "dd doesn't work".
-    let mut live = test_agent_run(MAIN_AGENT_ID, "own the checkout");
+    // Its own id: the dead row's record already waits under .rudder/closed.
+    let mut live = test_agent_run("main-live", "own the checkout");
     live.mode = AgentMode::Main;
     live.status = AgentStatus::Running;
     let fake = app.cwd.join("sleeper.sh");
@@ -10132,13 +10133,13 @@ fn deleting_an_agent_keeps_its_conversation_while_a_branch_of_it_is_set_up() {
             typed: Vec::new(),
         },
     );
-    let job = app.conversation_of(&source);
+    let job = app.conversation_of(&source, &native_run_dir(&dir, "src-1").join("run.json"));
     assert_eq!(delete_conversation(&roots, &job).unwrap(), 0);
     assert!(rollout.is_file(), "the fork being made still reads it");
 
     // With no branch in the way, the source's conversation goes with it.
     app.pending_launches.clear();
-    let job = app.conversation_of(&source);
+    let job = app.conversation_of(&source, &native_run_dir(&dir, "src-1").join("run.json"));
     assert_eq!(delete_conversation(&roots, &job).unwrap(), 1);
     assert!(!rollout.exists());
     let _ = fs::remove_dir_all(&dir);
@@ -19856,8 +19857,8 @@ fn enter_in_an_open_drawer_reopens_the_highlighted_agent() {
 
 #[cfg(not(windows))]
 #[test]
-fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change() {
-    use crate::agent_life::{cleanup_since, untouched_agents, ConversationRoots, UNTOUCHED_AGENT_TTL};
+fn untouched_agents_are_closed_then_deleted_with_their_conversation_but_not_their_jj_change() {
+    use crate::agent_life::{cleanup_since, untouched_agents, ConversationRoots, CLOSED_AGENT_TTL, UNTOUCHED_AGENT_TTL};
     use crate::gitio::note_rudder_session;
     let mut env = env_guard();
     let repo = unique_test_repo("agent-gc");
@@ -19879,7 +19880,7 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     if jj(&repo, &["git", "init", "--colocate"]).is_none() {
-        eprintln!("skipping untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change: no jj");
+        eprintln!("skipping untouched_agents_are_closed_then_deleted_with_their_conversation_but_not_their_jj_change: no jj");
         return;
     }
     let age = |path: &Path| {
@@ -20026,6 +20027,25 @@ fn untouched_agents_are_deleted_with_their_conversation_but_not_their_jj_change(
         ["fresh-chat", "codex-child", "failed-worker", "old-worker", "reverted", "busy", "asking", "plan-node"]
     );
     assert!(app.activity_log.iter().any(|entry| entry.contains("cleaned up \"old chat\" (untouched for a day)")));
+
+    // Closed, not deleted: the records wait under .rudder/closed and the
+    // conversations and workspace stay until the closed chats expire.
+    let mut closed: Vec<&str> = app.closed_agents.iter().map(|closed| closed.id.as_str()).collect();
+    closed.sort();
+    assert_eq!(closed, ["merged-worker", "old-chat", "old-codex"]);
+    for id in closed {
+        assert!(closed_run_dir(&repo, id).join("run.json").is_file(), "{id} is closed");
+        assert!(!native_run_dir(&repo, id).exists(), "{id} left the agents everything lists");
+    }
+    assert!(claude_dir.join(format!("{s1}.jsonl")).is_file());
+    assert!(c1_file.is_file());
+    assert!(workspace.is_dir());
+    app.purge_expired_closed_agents(SystemTime::now());
+    assert_eq!(app.closed_agents.len(), 3, "nothing closed a week ago yet");
+    assert_eq!(crate::agent_life::load_closed_agents(&repo).len(), 3, "a restart lists them too");
+    app.purge_expired_closed_agents(SystemTime::now() + CLOSED_AGENT_TTL);
+    assert!(app.closed_agents.is_empty(), "a week later they go for good");
+    assert!(!closed_run_dir(&repo, "old-chat").exists());
 
     // Deletion runs on threads: wait until everything that should go is gone.
     let doomed = [s1, s2, cut]
@@ -28872,6 +28892,135 @@ fn the_home_machine_adopts_a_staged_agent_once_and_resumes_its_conversation() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// The user deleted their main chat from the phone by accident and could not
+// get it back: delete closes, and Show closed (a click on the task pane's
+// label, or the app's Reopen) reopens it on the same session, for a
+// main-checkout chat and an isolated worker.
+#[cfg(not(windows))]
+#[test]
+fn a_deleted_chat_waits_in_closed_and_reopens_on_its_own_session() {
+    let _env = env_guard();
+    let dir = unique_test_repo("show-closed");
+    let claude_log = dir.join("claude-args.txt");
+    let claude = dir.join("claude");
+    write_fake_bin(
+        &claude,
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexec cat >/dev/null\n", claude_log.display()),
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &claude);
+    let session = "11111111-2222-3333-4444-555555555555";
+    let mut chat = test_agent_run("general", "general");
+    chat.mode = AgentMode::Main;
+    chat.status = AgentStatus::Done;
+    chat.cwd = dir.clone();
+    chat.session_id = Some(session.to_string());
+    let workspace = dir.join(".rudder-workspaces").join("proj").join("fix-1");
+    fs::create_dir_all(&workspace).unwrap();
+    let mut worker = test_agent_run("worker-1", "fix the flaky test");
+    worker.status = AgentStatus::Done;
+    worker.cwd = workspace.clone();
+    worker.workspace_path = Some(workspace.clone());
+    worker.workspace_name = Some("rudder-worker-1".to_string());
+    worker.session_id = Some("66666666-2222-3333-4444-555555555555".to_string());
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    for run in [&chat, &worker] {
+        save_native_run_record(&dir, run).unwrap();
+    }
+    app.agents = vec![chat, worker];
+    app.selected_agent = 0;
+    app.focus = FocusPane::Agents;
+
+    // dd closes the chat, the phone closes the worker; both leave every list.
+    app.delete_selected_agent();
+    assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("kept a day under Show closed in the task pane")), "{:?}", app.notice);
+    app.frames_drawn += 1;
+    app.delete_selected_agent();
+    assert_eq!(app.notice.as_deref(), Some("deleted \"general\" · kept a day under Show closed in the task pane"));
+    assert!(matches!(app.deliver_delete_request("worker-1"), SteerDelivery::Delivered));
+    assert!(app.agents.is_empty());
+    for id in ["general", "worker-1"] {
+        assert!(!native_run_dir(&dir, id).exists());
+        assert!(closed_run_dir(&dir, id).join("run.json").is_file());
+    }
+    assert!(workspace.is_dir(), "a closed worker keeps its workspace");
+    assert_eq!(app.closed_agents.iter().map(|closed| closed.id.as_str()).collect::<Vec<_>>(), ["worker-1", "general"]);
+
+    // The task pane's border says so; clicking that label shows the list and
+    // again hides it. A click on a row reopens that chat.
+    let left_click = |column: u16, row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    let click_label = |app: &mut App| {
+        render_screen(app, 140, 40);
+        let (label, _) = closed_toggle(app, app.task_area.unwrap()).expect("the Show closed label");
+        app.handle_mouse(left_click(label.x + 1, label.y));
+    };
+    app.focus = FocusPane::Agents;
+    let screen = render_screen(&mut app, 140, 40);
+    assert!(screen.contains("Show closed · 2"), "{screen}");
+    click_label(&mut app);
+    assert!(app.closed_list.is_some() && app.focus == FocusPane::Task, "the click shows closed chats");
+    let screen = render_screen(&mut app, 140, 40);
+    assert!(screen.contains("Hide closed"), "{screen}");
+    assert!(screen.contains("Closed chats · 2"), "{screen}");
+    assert!(screen.contains("claude · this checkout · closed just now"), "{screen}");
+    click_label(&mut app);
+    assert!(app.closed_list.is_none(), "a second click hides them");
+    assert!(render_screen(&mut app, 140, 40).contains("Show closed · 2"));
+    click_label(&mut app);
+    let layout = closed_list_layout(&app, app.task_area.unwrap()).unwrap();
+    let general_row = layout.area.y + 1 + (1 - layout.first as u16);
+    app.handle_mouse(left_click(layout.area.x + 4, general_row));
+    assert!(app.closed_list.is_none());
+    assert_eq!(app.notice.as_deref(), Some("reopened \"general\""));
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].id, "general");
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(app.agents[0].terminal.is_some());
+    assert_eq!(app.agents[0].cwd, dir);
+    assert_eq!(app.focus, FocusPane::Worker);
+    assert!(native_run_dir(&dir, "general").join("run.json").is_file());
+    assert!(!closed_run_dir(&dir, "general").exists());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !claude_log.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let args = fs::read_to_string(&claude_log).unwrap_or_default();
+    assert!(args.contains(&format!("--resume {session}")), "the same conversation continues: {args}");
+
+    // The app's Reopen (steer `reopen`) brings the worker back in its own
+    // workspace without moving the dashboard's focus.
+    assert!(matches!(app.deliver_reopen_request("nope"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_reopen_request("worker-1"), SteerDelivery::Delivered));
+    assert_eq!(app.focus, FocusPane::Worker);
+    assert_eq!(app.selected_agent, 0);
+    let reopened = app.agents.iter().find(|agent| agent.id == "worker-1").expect("the worker is back");
+    assert_eq!(reopened.cwd, workspace);
+    assert!(native_run_dir(&dir, "worker-1").join("run.json").is_file());
+    assert!(app.closed_agents.is_empty());
+
+    // Closed again, d twice in the list deletes it for good.
+    assert!(matches!(app.deliver_delete_request("worker-1"), SteerDelivery::Delivered));
+    click_label(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    assert_eq!(app.closed_agents.len(), 1, "the first d only asks");
+    app.frames_drawn += 1;
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    assert!(app.closed_agents.is_empty());
+    assert!(!closed_run_dir(&dir, "worker-1").exists());
+    assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("deleted \"fix the flaky test\" forever")), "{:?}", app.notice);
+
+    for agent in &mut app.agents {
+        agent.terminal = None;
+    }
+    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_delete_from_the_phone_removes_the_row_and_its_record() {
     let dir = unique_test_repo("phone-delete");
@@ -28888,6 +29037,7 @@ fn a_delete_from_the_phone_removes_the_row_and_its_record() {
     assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Delivered));
     assert_eq!(app.agents.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(), vec!["keep"]);
     assert!(!dir.join(".rudder").join("runs").join("gone").exists(), "the phone lists records, so the record goes");
+    assert!(closed_run_dir(&dir, "gone").join("run.json").is_file(), "closed, so it can come back");
     assert!(dir.join(".rudder").join("runs").join("keep").exists());
     assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Failed(_)));
     let _ = fs::remove_dir_all(&dir);

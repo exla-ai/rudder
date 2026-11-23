@@ -11,14 +11,20 @@ export const CLOSE_AGREE_MS = 60_000;
  * Drop the agents in `closing` (`${ws}|${run}` -> `{ title, answered }`,
  * `answered` the time the dashboard said yes, null while asking) from
  * `state`'s projects and its All agents project, and forget each answered
- * close the state no longer lists. Returns the closes the state still lists
- * CLOSE_AGREE_MS after the yes: those rows are shown again.
+ * close the state no longer lists, or lists under the project's `closed`
+ * (Show closed): a Reopen right after then shows the row again. Returns the
+ * closes the state still lists CLOSE_AGREE_MS after the yes: those rows are
+ * shown again.
  */
 export function hideClosed(state, closing, now) {
   const stuck = [];
   if (!closing.size) return stuck;
   const listed = new Set();
   for (const p of [...(state?.projects || []), state?.coordinator]) {
+    for (const c of p?.closed || []) {
+      const k = `${p.workspaceId}|${c.id}`;
+      if (closing.get(k)?.answered != null) closing.delete(k);
+    }
     if (!p?.agents) continue;
     p.agents = p.agents.filter((a) => {
       const k = `${p.workspaceId}|${a.id}`;

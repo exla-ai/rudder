@@ -1924,11 +1924,11 @@ function enableSwipeDelete(el) {
 
 async function deleteAgent(ws, a, { after } = {}) {
   const live = a.status === "working" || a.status === "waiting";
-  // "Close" everywhere (both menus, the swipe): the dashboard's dd. Its
-  // workspace is snapshotted into jj before it goes (native delete_agent_now).
+  // "Close" everywhere (both menus, the swipe): the dashboard's dd, which
+  // keeps a closed chat for a day (native close_agent_now).
   const ok = await confirmDialog({
     title: "Close this agent?",
-    body: `"${a.title || "This agent"}" ${live ? "stops and is" : "is"} deleted, with its workspace and conversation, from your cloud machine and every screen. Edits it made that are not merged stay in the project's jj history. This cannot be undone.`,
+    body: `"${a.title || "This agent"}" ${live ? "stops and is" : "is"} closed and leaves every screen. It's kept a day under Show closed, below the project's agents, where you can reopen it with its conversation and workspace.`,
     confirm: "Close",
     danger: true,
   });
@@ -3588,6 +3588,14 @@ function groupOf(a) {
   return "earlier";
 }
 
+// "closed just now", "closed 2h ago": a closed chat is kept a day.
+function closedAgo(t) {
+  const r = rel(t);
+  if (!r) return "";
+  if (r === "now") return "closed just now";
+  return /^\d+[mhd]$/.test(r) ? `closed ${r} ago` : `closed ${r.toLowerCase()}`;
+}
+
 function ProjectScreen(ws) {
   const el = h(`<section class="screen project-screen">
     <header class="topbar">
@@ -3601,6 +3609,14 @@ function ProjectScreen(ws) {
       <div class="section ports-sec" hidden><div class="section-head"><h2>Previews</h2></div><div class="ports"></div></div>
       <div class="groups"></div>
       <div class="p-empty"></div>
+      <div class="section closed-sec" hidden>
+        <button type="button" class="btn small closed-toggle" aria-expanded="false"></button>
+        <div class="closed-group" hidden>
+          <div class="section-head"><h2>Closed</h2><span class="count"></span></div>
+          <div class="list grouped card closed-list"></div>
+          <p class="hint">A deleted chat is kept here for a day with its conversation and workspace.</p>
+        </div>
+      </div>
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
@@ -3692,6 +3708,52 @@ function ProjectScreen(ws) {
   const portsEl = el.querySelector(".ports");
   const emptySlot = el.querySelector(".p-empty");
   const statusSlot = el.querySelector(".status-slot");
+  // Show closed: chats deleted in the last day, each with Reopen (the
+  // dashboard's reopen_closed_agent, through the home's `reopen` action).
+  const closedSec = el.querySelector(".closed-sec");
+  const closedToggle = el.querySelector(".closed-toggle");
+  const closedGroup = el.querySelector(".closed-group");
+  const closedList = el.querySelector(".closed-list");
+  let showClosed = false;
+  const reopening = new Set();
+  closedToggle.addEventListener("click", () => { showClosed = !showClosed; update(); });
+  async function reopen(chat) {
+    reopening.add(chat.id);
+    update();
+    try {
+      const res = await api("/api/app/action", { method: "POST", body: { workspace: ws, run: chat.id, action: "reopen" } });
+      toast(res?.status === "queued" ? "Reopening. Its dashboard is busy, so it comes back in a moment" : `Reopened "${chat.title}"`);
+    } catch (err) {
+      reopening.delete(chat.id);
+      if (err.status !== 401) toast(`Couldn't reopen "${chat.title}": ${err.message}`, { error: true });
+    }
+    refreshState();
+  }
+  function paintClosed(p) {
+    const closed = p.closed || [];
+    for (const id of reopening) if (!closed.some((c) => c.id === id)) reopening.delete(id);
+    if (!closed.length) showClosed = false;
+    closedSec.hidden = !closed.length;
+    setText(closedToggle, showClosed ? "Hide closed" : `Show closed (${closed.length})`);
+    closedToggle.setAttribute("aria-expanded", String(showClosed));
+    closedGroup.hidden = !showClosed;
+    setText(closedGroup.querySelector(".count"), String(closed.length));
+    reconcile(closedList, showClosed ? closed : [], (c) => c.id,
+      () => {
+        const row = h(`<div class="row closed-row"><div class="r-body"><div class="r-title"></div><div class="r-sub"></div></div><button type="button" class="btn small c-reopen">Reopen</button></div>`);
+        row.querySelector(".c-reopen").addEventListener("click", () => reopen(row._chat));
+        return row;
+      },
+      (row, c) => {
+        row._chat = c;
+        setText(row.querySelector(".r-title"), c.title);
+        setText(row.querySelector(".r-sub"), [agentModelLabel(c), closedAgo(c.closedAt)].filter(Boolean).join(" · "));
+        const busy = reopening.has(c.id);
+        const btn = row.querySelector(".c-reopen");
+        btn.disabled = busy;
+        setText(btn, busy ? "Reopening" : "Reopen");
+      });
+  }
 
   function update() {
     const s = store.state;
@@ -3706,6 +3768,7 @@ function ProjectScreen(ws) {
     if (!p) {
       setText(el.querySelector(".title"), "Project");
       groupsEl.replaceChildren();
+      closedSec.hidden = true;
       if (!emptySlot.querySelector(".empty")) {
         const back = h(`<a class="btn" href="/app" data-link>All projects</a>`);
         emptySlot.replaceChildren(emptyState({ ic: "folder", title: "Project not found", body: "It may still be cloning onto your cloud machine, or it was removed." , action: back }));
@@ -3766,6 +3829,7 @@ function ProjectScreen(ws) {
         emptySlot.replaceChildren(emptyState({ ic: "terminal", title: "No agents yet", body: "Describe a task below and Rudder starts an agent on this project." }));
       }
     } else emptySlot.replaceChildren();
+    paintClosed(p);
   }
   const stopMarkdownReady = onMarkdownReady(update);
   return { el, update, destroy: stopMarkdownReady };

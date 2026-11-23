@@ -105,6 +105,16 @@ pub(crate) fn native_run_dir(repo_root: &Path, run_id: &str) -> PathBuf {
     native_runs_dir(repo_root).join(run_id)
 }
 
+/// Closed chats' records (agent_life.rs). Outside `runs`, so nothing that
+/// lists agents (the phone, the CLI, a restart) sees them.
+pub(crate) fn closed_runs_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".rudder").join("closed")
+}
+
+pub(crate) fn closed_run_dir(repo_root: &Path, run_id: &str) -> PathBuf {
+    closed_runs_dir(repo_root).join(run_id)
+}
+
 pub(crate) fn graph_json_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".rudder").join("graph.json")
 }

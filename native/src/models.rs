@@ -816,8 +816,8 @@ pub(crate) fn dashboard_help() -> &'static str {
     concat!(
         "plain input -> one isolated mergeable worker in its own jj workspace; multi-part implementation plans wait for approval. ",
         "/main [task] -> agent in this shared checkout. Send follow-ups in the owning agent's pane. ",
-        "/model chooses model/effort · /resume continues a conversation · /sync tells every agent what the others are doing · /cloud changes new-task location · /help shortcuts. ",
-        "Option-1/2/3/4 or ^W panes · Option-h hide agents and task · Enter start/focus · Tab in the agent list shows an agent's subagents or opens the done/closed drawer · m merge · u undo merge · x stop · $ command opens a shell in this checkout."
+        "/model chooses model/effort · /resume continues a conversation · Show closed on the task pane reopens a deleted chat · /sync tells every agent what the others are doing · /cloud changes new-task location · /help shortcuts. ",
+        "Option-1/2/3/4 or ^W panes · Option-h hide agents and task · Enter start/focus · Tab in the agent list shows an agent's subagents or opens the done/earlier drawer · m merge · u undo merge · x stop · $ command opens a shell in this checkout."
     )
 }
 

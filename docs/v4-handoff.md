@@ -157,6 +157,28 @@ snapshots first, so the agent's jj change stays in `jj log`; a workspace with
 no jj name is kept. Checked with native filter `untouched_agents` and
 a headless run against dev-mock.
 
+Show closed (2026-11-23, not released): every delete (`dd`, `cc`, the app's
+Close, the day-old cleanup) now closes the chat. Its record moves to
+`.rudder/closed/<id>/` (with `closed.json`), out of everything that lists
+agents, and its conversation and workspace stay. In the dashboard, the task
+pane's top border shows "Show closed · N" while any are kept; clicking it
+lists closed chats over the pane (title, backend, checkout or own workspace,
+when closed) and the label turns to "Hide closed". No key opens it (the user
+asked for a click, not Ctrl+O). A click or Enter on a row reopens it: the
+record goes back and its session resumes through the adopt path's
+`resume_recorded_agent` with no new turn. `d d` on a row deletes it for good,
+Esc hides the list. In the app, the project screen has a "Show closed (N)"
+button below its groups: the home publishes each project's `closed` list
+(`cloud/worker/closed-chats.mjs`), and Reopen sends action `reopen`, which
+the home queues as steer `reopen` for `deliver_reopen_request`. The cleanup
+deletes closed chats for good a day after they closed, which is when the
+conversation and workspace removal above runs. A cancelled launch, a failed
+branch and a row deleted on the home machine are still deleted at once.
+Checked with native filter `a_deleted_chat_waits_in_closed`,
+`tests/cloud-closed-chats.test.mjs`, `tests/app-closing.test.mjs` and a
+headless Chromium run against `cloud/app/dev-mock.mjs`. Cloud's server and
+worker image need a deploy before the app's Show closed appears.
+
 Moving agents in the app's sidebar (not released yet): drag an agent row up
 or down within its project (touch: press and hold first, so a swipe still
 scrolls; hold and let go opens the row menu), Alt+Up / Alt+Down on a focused

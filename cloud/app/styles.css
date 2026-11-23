@@ -407,6 +407,12 @@ a { color: var(--accent); }
 .row .r-sub { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .row .chev { color: var(--faint); width: 16px; height: 16px; flex: none; }
 
+/* Show closed (ProjectScreen): chats deleted in the last day */
+.closed-toggle { color: var(--muted); }
+.closed-group { margin-top: 12px; }
+.closed-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.closed-row .btn { flex: none; }
+
 /* Project cards */
 .project { padding: 15px 16px 14px; }
 .project .p-top { display: flex; align-items: center; gap: 10px; }

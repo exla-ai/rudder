@@ -216,13 +216,14 @@ test("headless view confirms deletion after rendering and SIGTERM persists a res
   await view.press("d");
   await view.waitForText("press d again to confirm", { timeout: 10_000 });
   await view.press("d");
-  await view.waitForGone("delete fixture", { timeout: 20_000 });
-  await waitUntil(async () => {
-    try { await fsp.access(removed.record.workspace.path); return false; }
-    catch (error) { if (error.code === "ENOENT") return true; throw error; }
-  }, { timeout: 20_000, label: "the confirmed worker's actual workspace is removed" });
-  await view.waitForText("deleted agent and removed workspace", { timeout: 10_000 });
+  // A delete closes the chat: it leaves the list, and its record, conversation
+  // and workspace wait a day under Show closed so it can be reopened.
+  await view.waitForText("kept a day under Show closed", { timeout: 20_000 });
+  await view.waitForText("Show closed · 1", { timeout: 10_000 });
   await waitPidGone(removed.pid, "deleted worker");
+  await fsp.access(path.join(state.repo, ".rudder/closed", removed.record.id, "run.json"));
+  await fsp.access(removed.record.workspace.path);
+  assert.ok(!(await records(state.repo)).some((record) => record.id === removed.record.id));
   assert.equal((await state.native("status")).running, true);
 
   const live = await startWorker(state, view, "implement the signal shutdown fixture");

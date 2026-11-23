@@ -57,6 +57,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.full_screen.is_none() {
         render_task(frame, layout.task, app);
         render_suggestions(frame, layout.task, app);
+        render_closed_list(frame, layout.task, app);
     }
     render_cloud_prompt(frame, area, app);
     render_merge_prompt(frame, area, app);
@@ -5614,6 +5615,20 @@ pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
         )
         .style(app_style());
     frame.render_widget(block, area);
+    // A chat deleted by accident is one click away: the label on the pane's
+    // border shows or hides the closed chats (agent_life.rs).
+    if let Some((label_area, label)) = closed_toggle(app, area) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default()
+                    .fg(if focused { p.accent } else { p.muted })
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .style(app_style()),
+            label_area,
+        );
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -5760,6 +5775,120 @@ pub(crate) fn render_suggestions(frame: &mut Frame<'_>, task_area: Rect, app: &A
     frame.render_widget(list, area);
 }
 
+/// Show closed is open and drawn: it shows only while the task pane has focus.
+pub(crate) fn closed_list_shown(app: &App) -> bool {
+    app.closed_list.is_some() && app.focus == FocusPane::Task
+}
+
+/// The Show closed label on the task pane's top border, and where it sits:
+/// " Show closed · N ", or " Hide closed " while the list is open. Clicking it
+/// toggles the list (agent_life.rs handle_closed_click). None while nothing is
+/// closed, or when the pane is too narrow for it beside the model tag.
+pub(crate) fn closed_toggle(app: &App, task_area: Rect) -> Option<(Rect, String)> {
+    let shown = closed_list_shown(app);
+    if app.closed_agents.is_empty() && !shown {
+        return None;
+    }
+    let label = if shown {
+        " Hide closed ".to_string()
+    } else {
+        format!(" Show closed · {} ", app.closed_agents.len())
+    };
+    let width = label.chars().count() as u16;
+    let model_tag = task_model_tag(app).chars().count() as u16 + 2;
+    if width + model_tag + 4 > task_area.width {
+        return None;
+    }
+    Some((Rect { x: task_area.x + 2, y: task_area.y, width, height: 1 }, label))
+}
+
+/// Where Show closed draws over the task pane: its box, the closed chat its
+/// first row shows, and how many rows it has. Render and clicks share it.
+pub(crate) struct ClosedListLayout {
+    pub(crate) area: Rect,
+    pub(crate) first: usize,
+    pub(crate) rows: usize,
+}
+
+pub(crate) fn closed_list_layout(app: &App, task_area: Rect) -> Option<ClosedListLayout> {
+    let list = app.closed_list.as_ref()?;
+    if !closed_list_shown(app) {
+        return None;
+    }
+    let rows = app
+        .closed_agents
+        .len()
+        .max(1)
+        .min(task_area.y.saturating_sub(2).min(10) as usize);
+    if rows == 0 {
+        return None;
+    }
+    let height = rows as u16 + 2;
+    let area = Rect { x: task_area.x, y: task_area.y - height, width: task_area.width, height };
+    let selected = list.selected.min(app.closed_agents.len().saturating_sub(1));
+    Some(ClosedListLayout { area, first: selected.saturating_sub(rows - 1), rows })
+}
+
+/// Show closed over the task pane: deleted chats, newest first (agent_life.rs
+/// handles its keys and clicks).
+pub(crate) fn render_closed_list(frame: &mut Frame<'_>, task_area: Rect, app: &App) {
+    use crate::agent_life::{closed_age_label, CLOSED_KEEP_COPY};
+    let Some(ClosedListLayout { area, first, rows: visible }) = closed_list_layout(app, task_area) else {
+        return;
+    };
+    let Some(list) = app.closed_list.as_ref() else {
+        return;
+    };
+    let items = if app.closed_agents.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            format!("nothing closed · a deleted chat waits here for {CLOSED_KEEP_COPY}"),
+            muted_style(true),
+        )))]
+    } else {
+        let now = SystemTime::now();
+        let selected = list.selected.min(app.closed_agents.len() - 1);
+        let shown = || app.closed_agents.iter().enumerate().skip(first).take(visible);
+        let max_title = (area.width as usize).saturating_sub(48).clamp(12, 64);
+        let title_width = shown()
+            .map(|(_, closed)| closed.title.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(max_title);
+        shown()
+            .map(|(index, closed)| {
+                let style = if index == selected { accent_style(true) } else { app_style() };
+                let marker = if index == selected { "> " } else { "  " };
+                let title = truncate_chars(&closed.title, title_width);
+                let place = if closed.workspace_path.is_some() { "own workspace" } else { "this checkout" };
+                let age = closed_age_label(now.duration_since(closed.closed_at).unwrap_or_default());
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(format!("{title:<title_width$}"), style),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("{} · {place} · closed {age}", closed.backend.as_str()),
+                        muted_style(true),
+                    ),
+                ]))
+            })
+            .collect::<Vec<_>>()
+    };
+    let title = format!(
+        " Closed chats · {} · click or Enter reopens · d d deletes forever · Esc hides ",
+        app.closed_agents.len()
+    );
+    let title = truncate_chars(&title, area.width.saturating_sub(4) as usize);
+    let widget = List::new(items).style(app_style()).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(FOCUS_COLOR))
+            .style(app_style()),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(widget, area);
+}
+
 pub(crate) fn model_picker_title(input: &str, selected: usize, total: usize) -> String {
     let rest = input
         .trim_start()
@@ -5855,7 +5984,7 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
                 "Destroys cloud sail {id}: its machine and its snapshot. The conversation running there ends. This cannot be undone."
             ),
             crate::CloudDeleteTarget::HomeAgent(_) => {
-                "Deletes it on the home machine: its conversation ends there and it disappears from the phone. This laptop's copy of its workspace goes too. This cannot be undone."
+                "Deletes it on the home machine: it stops there and disappears from the phone. The home dashboard keeps it for a day under Show closed in its task pane, where it can be reopened. This laptop's copy of its workspace goes now."
                     .to_string()
             }
             crate::CloudDeleteTarget::Workspace => {
@@ -7139,7 +7268,14 @@ fn context_footer_keys(app: &App) -> Vec<(&'static str, &'static str)> {
             ("\u{2325}2", "terminal"),
         ],
         FocusPane::Task => {
-            if app.task_input.is_empty() {
+            if closed_list_shown(app) {
+                vec![
+                    ("click/enter", "reopen"),
+                    ("d d", "delete forever"),
+                    ("j/k", "move"),
+                    ("esc", "hide"),
+                ]
+            } else if app.task_input.is_empty() {
                 vec![
                     ("enter", "run"),
                     ("/", "commands"),

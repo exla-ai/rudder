@@ -97,6 +97,7 @@ view_state! {
     full_screen: Option<FocusPane> = None,
     task_area: Option<Rect> = None,
     rename_input: Option<String> = None,
+    closed_list: Option<crate::agent_life::ClosedList> = None,
     rename_cursor: usize = 0,
     rename_prefilled: bool = false,
     model_for: Option<String> = None,

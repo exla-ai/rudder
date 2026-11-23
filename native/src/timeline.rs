@@ -633,23 +633,50 @@ pub(crate) fn append_timeline_event(repo_root: &Path, run_id: &str, mut event: s
 }
 
 /// Workspace start time and the last recorded summary from the timeline file.
+/// The file only grows, and the selected row is polled every few seconds, so
+/// this reads its first line (the `workspace` event, written once when Rudder
+/// creates the run's workspace) and the tail back to the last `summary` line:
+/// the same few kilobytes however long the file is.
 pub(crate) fn read_timeline_file(repo_root: &Path, run_id: &str) -> (Option<u64>, Option<TimelineSummary>) {
-    let Ok(content) = fs::read_to_string(timeline_path(repo_root, run_id)) else {
+    let Ok(mut file) = fs::File::open(timeline_path(repo_root, run_id)) else {
         return (None, None);
     };
-    let mut start = None;
-    let mut last = None;
-    for line in content.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        match value.get("kind").and_then(|v| v.as_str()) {
-            Some("workspace") => start = value.get("ms").and_then(|v| v.as_u64()).or(start),
-            Some("summary") => last = serde_json::from_value(value).ok().or(last),
-            _ => {}
+    let mut first = String::new();
+    let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(&file), &mut first);
+    let start = serde_json::from_str::<serde_json::Value>(&first)
+        .ok()
+        .filter(|value| value.get("kind").and_then(|v| v.as_str()) == Some("workspace"))
+        .and_then(|value| value.get("ms").and_then(|v| v.as_u64()));
+    (start, last_summary(&mut file))
+}
+
+/// The last `summary` line, read backwards from the end of the file in chunks.
+fn last_summary(file: &mut fs::File) -> Option<TimelineSummary> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    const CHUNK: u64 = 8 * 1024;
+    let mut end = file.metadata().ok()?.len();
+    // The start of a line that began before the chunk read last.
+    let mut carry: Vec<u8> = Vec::new();
+    while end > 0 {
+        let begin = end.saturating_sub(CHUNK);
+        let mut buf = vec![0; (end - begin) as usize];
+        file.seek(SeekFrom::Start(begin)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+        buf.extend_from_slice(&carry);
+        let mut lines = buf.split(|b| *b == b'\n');
+        let partial = if begin > 0 { lines.next() } else { None };
+        for line in lines.rev() {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("kind").and_then(|v| v.as_str()) == Some("summary") {
+                return serde_json::from_value(value).ok();
+            }
         }
+        carry = partial.map(<[u8]>::to_vec).unwrap_or_default();
+        end = begin;
     }
-    (start, last)
+    None
 }
 
 /// Recompute the run's summary from its session log, and append it to the
@@ -736,19 +763,17 @@ pub(crate) fn compute_timeline_in(
     let (start, last) = read_timeline_file(&request.repo_root, &request.run_id);
     summary.start_ms = start;
     let has_data = summary.context.is_some() || summary.model_ms + summary.input + summary.output > 0;
-    // The file never holds the growth history, so compare without it.
-    let mut recorded = summary.clone();
-    recorded.model = None;
-    if let Some(c) = recorded.context.as_mut() {
-        c.history.clear();
-    }
+    // Compare what the file would hold. The memory-only fields (model, speed,
+    // window, context history) never reach it, so an idle row whose summary
+    // only has them set must not count as changed on every poll.
+    let mut value = serde_json::to_value(&summary).expect("a timeline summary serializes");
+    let recorded: TimelineSummary =
+        serde_json::from_value(value.clone()).expect("a serialized timeline summary reads back");
     if has_data && last.as_ref() != Some(&recorded) {
-        if let Ok(mut value) = serde_json::to_value(&recorded) {
-            if let Some(map) = value.as_object_mut() {
-                map.insert("kind".into(), serde_json::json!("summary"));
-            }
-            append_timeline_event(&request.repo_root, &request.run_id, value);
+        if let Some(map) = value.as_object_mut() {
+            map.insert("kind".into(), serde_json::json!("summary"));
         }
+        append_timeline_event(&request.repo_root, &request.run_id, value);
     } else if !has_data {
         if let Some(mut last) = last {
             last.start_ms = start;
@@ -943,5 +968,48 @@ mod tests {
         assert_eq!(summary.start_ms, Some(800));
         assert!(format_timeline(&summary).starts_with("start 0.8s"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_idle_rows_summary_is_written_once_not_on_every_poll() {
+        // The speed is memory only, so the summary read back never has it. It
+        // used to count as a change, and an idle row got a line every 10 s
+        // (37k lines, 12 MB), each poll reading the whole file again.
+        let dir = std::env::temp_dir().join(format!("rudder-timeline-idle-{}", std::process::id()));
+        let cwd = dir.join("cwd");
+        let projects = dir.join("claude-projects");
+        let sessions = projects.join(encode_claude_projects_cwd(&cwd));
+        fs::create_dir_all(&sessions).unwrap();
+        let transcript = [
+            r#"{"type":"user","timestamp":"2026-11-04T00:00:00.000Z","message":{"content":"hi"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-04T00:00:05.000Z","message":{"id":"m1","model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0,"output_tokens":500}}}"#,
+        ];
+        fs::write(sessions.join("s1.jsonl"), transcript.join("\n")).unwrap();
+        append_timeline_event(&dir, "r1", serde_json::json!({"kind":"workspace","ms":800}));
+        // Older summaries, enough for the tail to span several read chunks.
+        for n in 0..300 {
+            append_timeline_event(&dir, "r1", serde_json::json!({"kind":"summary","modelMs":n,"input":1}));
+        }
+        let request = TimelineRequest {
+            repo_root: dir.clone(),
+            run_id: "r1".into(),
+            backend: Backend::Claude,
+            cwd,
+            created_at: "0".into(),
+            model: String::new(),
+            session_id: None,
+        };
+        let lines = || fs::read_to_string(timeline_path(&dir, "r1")).unwrap().lines().count();
+        let summary = compute_timeline_in(&request, Some(&projects), None);
+        assert!(summary.speed.is_some(), "the summary has a memory-only field set");
+        assert_eq!(summary.start_ms, Some(800));
+        assert_eq!(lines(), 302, "the new summary is written");
+        for _ in 0..3 {
+            compute_timeline_in(&request, Some(&projects), None);
+        }
+        assert_eq!(lines(), 302, "an unchanged summary is not written again");
+        let (start, last) = read_timeline_file(&dir, "r1");
+        assert_eq!((start, last.map(|s| s.output)), (Some(800), Some(500)));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

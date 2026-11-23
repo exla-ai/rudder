@@ -796,14 +796,25 @@ fn ensure_antigravity_hooks(path: &Path) -> Result<()> {
 /// (camelCase JSON) on stdin, and a JSON answer on stdout, `{}` for all three
 /// events (no decision, nothing injected, the stop allowed).
 ///
+/// Only the agent's own conversation reports. A subagent (`invoke_subagent`)
+/// runs inside the agent's process with its environment, so its hooks run
+/// this script too; agy lists each subagent in its parent's folder at
+/// `brain/<parent>/.system_generated/subagents/<id>.json` before the
+/// subagent's `SessionStart`, and every event of a listed conversation is
+/// ignored. Otherwise a subagent's id became the run's conversation and its
+/// `Stop` ended the run's turn while the agent was still working.
+///
 /// - `SessionStart` records `conversationId`: the id `--conversation` resumes.
 /// - `PreInvocation` with `invocationNum` 1 is the first model call of a turn:
 ///   the human answered, back to work. Later calls of the same turn write
 ///   nothing.
-/// - `Stop` ends the turn: `done`, or `error` with the error text when
-///   `terminationReason` is `ERROR`. An interrupt (`USER_CANCELED`) is `done`:
-///   the agent is back at its prompt.
-pub(crate) fn antigravity_hook_script(signal: &Path) -> String {
+/// - `Stop` ends the turn when `fullyIdle`: `done`, or `error` with the error
+///   text when `terminationReason` is `ERROR`. An interrupt (`USER_CANCELED`)
+///   is `done`: the agent is back at its prompt. A `Stop` while subagents or
+///   background tasks still run is no turn end: the agent wakes when they
+///   report, and its terminal says `done` once that work ends
+///   (`antigravity_status_signal`).
+pub(crate) fn antigravity_hook_script(signal: &Path, brain: &Path) -> String {
     let path = signal.display();
     let dir = signal
         .parent()
@@ -811,6 +822,7 @@ pub(crate) fn antigravity_hook_script(signal: &Path) -> String {
         .unwrap_or_default();
     let session = signal.with_extension("agy-session");
     let session = session.display();
+    let brain = brain.display();
     format!(
         r#"#!/bin/sh
 # Rudder Antigravity lifecycle signal: hooks.json command, event name in $1, payload on stdin.
@@ -825,9 +837,12 @@ number() {{
 emit() {{
   mkdir -p '{dir}' && printf '{{"state":"%s"}}' "$1" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}'
 }}
+id=$(field conversationId)
+for listed in '{brain}'/*/.system_generated/subagents/"$id".json; do
+  [ -f "$listed" ] && {{ printf '{{}}'; exit 0; }}
+done
 case "$1" in
   SessionStart)
-    id=$(field conversationId)
     [ -n "$id" ] && printf '%s' "$id" > '{session}'.$$.tmp && mv -f '{session}'.$$.tmp '{session}' ;;
   PreInvocation)
     [ "$(number invocationNum)" = "1" ] && emit working ;;
@@ -836,7 +851,7 @@ case "$1" in
       ERROR)
         detail=$(field error | tr -d '\\"' | cut -c1-80)
         mkdir -p '{dir}' && printf '{{"state":"error","detail":"%s"}}' "$detail" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
-      *) emit done ;;
+      *) printf '%s' "$payload" | grep -q '"fullyIdle": *true' && emit done ;;
     esac ;;
 esac
 printf '{{}}'
@@ -846,13 +861,21 @@ printf '{{}}'
 
 /// The wait an Antigravity OSC 7501 status describes. `blocked` on a
 /// permission prompt is `Permission`; blocked on anything else (a question,
-/// a sign-in) waits for an answer. `working` lifts a wait. `done` and `failed`
-/// are left to the `Stop` hook, which also carries the error text.
-pub(crate) fn antigravity_status_signal(status: &rudder_native::pty_terminal::AgentTerminalStatus) -> Option<SignalState> {
+/// a sign-in) waits for an answer. `working` lifts a wait. `done` is the end
+/// of a turn whose subagents or background tasks outlived its `Stop` hook:
+/// agy reports it once that work ends (daemon tasks such as dev servers do
+/// not count). An orchestrator reads no turn signals (its plan ends its
+/// turn), so its `done` means nothing here. `failed` is left to the `Stop`
+/// hook, which carries the error text.
+pub(crate) fn antigravity_status_signal(
+    status: &rudder_native::pty_terminal::AgentTerminalStatus,
+    orchestrator: bool,
+) -> Option<SignalState> {
     match (status.state.as_str(), status.kind.as_str()) {
         ("blocked", "permission") => Some(SignalState::Permission),
         ("blocked", _) => Some(SignalState::Input),
         ("working", _) => Some(SignalState::Working),
+        ("done", _) if !orchestrator => Some(SignalState::Done),
         _ => None,
     }
 }
@@ -939,8 +962,11 @@ pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> Result<W
         Backend::Antigravity => {
             let hooks = antigravity_hooks_path().context("no home directory for Antigravity's hooks file")?;
             ensure_antigravity_hooks(&hooks)?;
+            let brain = crate::antigravity::antigravity_cli_dir()
+                .context("no home directory for Antigravity's conversations")?
+                .join("brain");
             let script = dir.join(format!("{run_id}-agy-hook.sh"));
-            write(&script, &antigravity_hook_script(&signal))?;
+            write(&script, &antigravity_hook_script(&signal, &brain))?;
             set_executable(&script)?;
             Ok(WorkerSignals {
                 antigravity_hook: Some(script),

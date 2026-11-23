@@ -125,6 +125,15 @@ pub(crate) fn agent_model_label(
                 Backend::Claude => model.strip_prefix("claude-").unwrap_or(model),
                 _ => model,
             };
+            // agy names one id per effort ("gemini-4-neon-low"), so its effort
+            // reads where every other harness's does: `antigravity gemini-4-neon(low)`.
+            if let Some((base, level)) = (backend == Backend::Antigravity && effort.is_none())
+                .then(|| model.rsplit_once('-'))
+                .flatten()
+                .and_then(|(base, level)| EffortLevel::parse(level).map(|level| (base, level)))
+            {
+                return format!("{} {base}({})", backend.as_str(), level.as_str());
+            }
             format!("{} {model}({})", backend.as_str(), effort_label(effort))
         }
     }
@@ -1830,9 +1839,14 @@ pub(crate) fn antigravity_models_cache_path() -> Option<PathBuf> {
         .map(|home| home.join("antigravity-models.json"))
 }
 
-/// A detached `agy models` refresh when the cache is missing or a day old, at
-/// most once a minute. agy prints only the list on stdout; signed out it
-/// prints none, which leaves the cache as it was.
+/// A detached `agy models` refresh when the cache is missing, a day old or
+/// older than agy's sign-in, at most once a minute. The list depends on the
+/// account: a free account lists no Gemini 4 Neon, so a list kept from before
+/// a sign-in hid Neon from the picker and refused `/model antigravity` for it.
+/// agy keeps its sign-in in `antigravity-oauth-token` where it has no system
+/// keyring (Linux homes); a keyring sign-in shows up within the day. agy
+/// prints only the list on stdout; signed out it prints none, which leaves
+/// the cache as it was.
 fn maybe_refresh_antigravity_models_cache() {
     static LAST_TRY: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     if cfg!(test) {
@@ -1841,12 +1855,16 @@ fn maybe_refresh_antigravity_models_cache() {
     let Some(path) = antigravity_models_cache_path() else {
         return;
     };
-    let stale = fs::metadata(&path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .map(|age| age > Duration::from_secs(24 * 60 * 60))
-        .unwrap_or(true);
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let signed_in = crate::antigravity::antigravity_cli_dir()
+        .and_then(|dir| modified(&dir.join("antigravity-oauth-token")));
+    let stale = match modified(&path) {
+        None => true,
+        Some(cached) => {
+            cached.elapsed().is_ok_and(|age| age > Duration::from_secs(24 * 60 * 60))
+                || signed_in.is_some_and(|signed_in| signed_in > cached)
+        }
+    };
     if !stale {
         return;
     }

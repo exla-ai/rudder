@@ -408,6 +408,15 @@ Remote Control on a new conversation is typed, not a flag: agy with
 the pane can show that one, so the prompt lands in a chat nobody sees. Rudder
 types `/remote-control` into the pane once the SessionStart hook names the
 conversation. A resumed one (`--conversation`) keeps the flag.
+Subagents (`invoke_subagent`, which Gemini 4 Neon uses on most real tasks) run
+inside the agent's process and fire the same hooks. The run's hook script
+skips every conversation that a parent lists at
+`brain/<parent>/.system_generated/subagents/<id>.json`, so a subagent never
+becomes the run's conversation and its `Stop` never ends the run's turn. A
+`Stop` with `fullyIdle: false` (subagents or background tasks still running)
+is not a turn end either; agy's OSC 7501 `done` ends that turn once the work
+finishes (workers only, not orchestrators). Before this a Neon run went to
+review mid-task and its chat and resume pointed at a subagent.
 Rudder refuses with a plain reason where agy has no way in: fork, branch and
 handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global
@@ -418,7 +427,12 @@ when signed in: a result envelope with the list under `command.data.models`
 as `{id, label}` (tests/fixtures/agy-1.5.0-models.json). An id is a slug per
 effort (`gemini-4-neon-low`); the picker groups a model's slugs into one row
 with an effort chip (`cloud/app/model-effort.js`) and shows the id without the
-effort. agy wraps a typed prompt in `<USER_REQUEST>` and adds notes for the
+effort, and dashboard labels read `antigravity gemini-4-neon(low)`. The list
+depends on the account (a free account lists no Neon), so the dashboard's
+cache (`~/.rudder/antigravity-models.json`) is read again once agy's sign-in
+file is newer than it, not only when it is a day old. agy also takes
+`--model gemini-4-neon --effort low` (no effort runs its default, High for
+Neon), which a later change could use to drop the slug-per-effort ids. agy wraps a typed prompt in `<USER_REQUEST>` and adds notes for the
 model after it (the time, a model switch); the chat shows only the request.
 Rudder has no "/" list for it, and the app does not ask. Open: phone answers to its permission
 prompts, the files an edit wrote in a handoff

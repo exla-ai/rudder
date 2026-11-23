@@ -22605,14 +22605,19 @@ What to do\n\
                         // waiting state.
                         // Antigravity also reports a wait on its terminal (OSC
                         // 7501), which its hooks cannot: a permission prompt or
-                        // a question. Its hooks own turn start and end.
+                        // a question. Its hooks own turn start and end; its `done`
+                        // also ends a turn whose subagents outlived the last `Stop`.
                         let agy_status = (run.backend == Backend::Antigravity)
                             .then(|| terminal.take_agent_status())
                             .flatten();
                         let signal = (!is_orchestrator)
                             .then(|| signals::read_signal(&run.id))
                             .flatten()
-                            .or_else(|| agy_status.as_ref().and_then(signals::antigravity_status_signal));
+                            .or_else(|| {
+                                agy_status.as_ref().and_then(|status| {
+                                    signals::antigravity_status_signal(status, is_orchestrator)
+                                })
+                            });
                         match signal {
                             Some(signals::SignalState::Done) => {
                                 signals::clear_signal(&run.id);

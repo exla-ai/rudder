@@ -1779,6 +1779,12 @@ fn antigravity_names_and_models_route_to_its_backend() {
         vec![None],
         "agy lists a slug per effort, so its models take none of their own"
     );
+    // The slug's effort reads as the effort, not as part of the model's name.
+    assert_eq!(agent_model_label(Backend::Antigravity, "gemini-4-neon-low", None), "antigravity gemini-4-neon(low)");
+    assert_eq!(
+        agent_model_label(Backend::Antigravity, "claude-opus-4-6-thinking", None),
+        "antigravity claude-opus-4-6-thinking(auto)"
+    );
 }
 
 #[test]
@@ -1806,7 +1812,8 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let signal = dir.join("run-1.json");
     let script = dir.join("run-1-agy-hook.sh");
-    std::fs::write(&script, signals::antigravity_hook_script(&signal)).expect("script");
+    let brain = dir.join("brain");
+    std::fs::write(&script, signals::antigravity_hook_script(&signal, &brain)).expect("script");
     let hook = |event: &str, payload: &str| {
         use std::io::Write;
         let mut child = std::process::Command::new("sh")
@@ -1835,6 +1842,8 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
     std::fs::remove_file(&signal).expect("clear");
     hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":2,"initialNumSteps":5}"#);
     assert_eq!(state(), "", "later calls in the same turn write nothing");
+    hook("Stop", r#"{"conversationId":"7f0c","terminationReason":"NO_TOOL_CALL","fullyIdle":false}"#);
+    assert_eq!(state(), "", "a Stop while subagents still run is no turn end");
     hook("Stop", r#"{"conversationId":"7f0c","terminationReason":"NO_TOOL_CALL","fullyIdle":true}"#);
     assert_eq!(state(), r#"{"state":"done"}"#);
     hook(
@@ -1842,7 +1851,40 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
         r#"{"conversationId":"7f0c","terminationReason":"ERROR","error":"quota exhausted","fullyIdle":true}"#,
     );
     assert_eq!(state(), r#"{"state":"error","detail":"quota exhausted"}"#);
+    std::fs::remove_file(&signal).expect("clear");
+
+    // Neon's subagents run in the agent's process, so their hooks reach the
+    // run's script; agy lists each in its parent's folder (payloads and
+    // layout as agy 1.5.14 wrote them).
+    let subagent = "0de82969-3acd-4b94-ac3a-6a2b949b45d5";
+    let listing = brain.join("7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10/.system_generated/subagents");
+    std::fs::create_dir_all(&listing).expect("subagents dir");
+    std::fs::write(listing.join(format!("{subagent}.json")), format!(r#"{{"conversationId":"{subagent}"}}"#))
+        .expect("listing");
+    hook("SessionStart", &format!(r#"{{"conversationId":"{subagent}","modelName":"gemini-4-neon-low"}}"#));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("run-1.agy-session")).unwrap_or_default(),
+        "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10",
+        "a subagent never becomes the run's conversation"
+    );
+    hook("PreInvocation", &format!(r#"{{"conversationId":"{subagent}","invocationNum":1}}"#));
+    hook("Stop", &format!(r#"{{"conversationId":"{subagent}","terminationReason":"NO_TOOL_CALL","fullyIdle":true}}"#));
+    assert_eq!(state(), "", "a subagent's turn is not the run's");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn antigravity_terminal_done_ends_a_workers_turn_only() {
+    let status = |state: &str| rudder_native::pty_terminal::AgentTerminalStatus {
+        state: state.to_string(),
+        kind: String::new(),
+        message: String::new(),
+    };
+    use signals::SignalState;
+    assert_eq!(signals::antigravity_status_signal(&status("done"), false), Some(SignalState::Done));
+    assert_eq!(signals::antigravity_status_signal(&status("done"), true), None, "an orchestrator's plan ends its turn");
+    assert_eq!(signals::antigravity_status_signal(&status("idle"), false), None, "agy starts idle");
+    assert_eq!(signals::antigravity_status_signal(&status("working"), true), Some(SignalState::Working));
 }
 
 #[test]

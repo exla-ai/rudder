@@ -411,9 +411,12 @@ pasted code, and a chat can switch to and from it in the model picker. Its
 models come from `agy --output-format json models`, which agy prints only
 when signed in: a result envelope with the list under `command.data.models`
 as `{id, label}` (tests/fixtures/agy-1.5.0-models.json). An id is a slug per
-effort (`gemini-3.8-flash-high`), so the pickers offer no efforts or default
-for it. Open: phone answers to its permission
-prompts, the app's "/" list for it, the files an edit wrote in a handoff
+effort (`gemini-4-neon-low`); the picker groups a model's slugs into one row
+with an effort chip (`cloud/app/model-effort.js`) and shows the id without the
+effort. agy wraps a typed prompt in `<USER_REQUEST>` and adds notes for the
+model after it (the time, a model switch); the chat shows only the request.
+Rudder has no "/" list for it, and the app does not ask. Open: phone answers to its permission
+prompts, the files an edit wrote in a handoff
 from it (its CODE_ACTION step), and the files hub showing `~/.gemini`
 instructions and skills.
 

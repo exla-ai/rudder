@@ -818,7 +818,7 @@ fn web_conductor_steer_uses_task_input_path_without_a_live_conductor() {
     assert!(
         app.activity_log
             .iter()
-            .any(|line| line.contains("steered conductor: /help")),
+            .any(|line| line.contains("steered conductor: \"/help\"")),
         "web action is acknowledged in activity: {:?}",
         app.activity_log
     );

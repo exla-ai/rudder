@@ -121,6 +121,7 @@ mod opencode;
 mod antigravity;
 use crate::antigravity::antigravity_session_exists;
 mod plan_stream;
+mod redact;
 mod telemetry;
 
 mod prompt_suggestion;
@@ -13855,7 +13856,7 @@ Address the objection directly. If you disagree, say why inside \
         let launch_name = format!("rdr-{nanos}-{}", std::process::id());
         let sail_id = format!("cloud-{launch_name}");
         let label = format!("cloud sail {sail_id} · {}", short_task(task));
-        self.push_activity(format!("cloud task: {task}"));
+        self.push_activity(format!("cloud task: \"{}\"", steer_preview(task)));
         self.start_rudder_cli_command_with_env(
             &label,
             vec!["cloud".to_string(), task.to_string()],
@@ -16176,7 +16177,7 @@ Address the objection directly. If you disagree, say why inside \
     /// Append a one-line entry to the conductor activity log without taking over
     /// the task-pane notice. Used when a modal is already carrying the active prompt.
     fn record_activity(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
+        let msg = redact::activity_text(&msg.into());
         // Mirror every conductor/steer line into the append-only narration stream the
         // web board tails, so "what's happening" shows up live in the browser too.
         self.append_activity_jsonl(&msg, "action");
@@ -16245,7 +16246,13 @@ Address the objection directly. If you disagree, say why inside \
         self.write_activity_line(&path, line);
     }
 
-    fn write_activity_line(&self, path: &Path, line: serde_json::Value) {
+    /// Every activity line goes through here: its text is a short preview with
+    /// secrets and email addresses taken out (redact.rs). The log is synced to
+    /// the phone and the app.
+    fn write_activity_line(&self, path: &Path, mut line: serde_json::Value) {
+        if let Some(text) = line.get("text").and_then(serde_json::Value::as_str) {
+            line["text"] = serde_json::Value::String(redact::activity_text(text));
+        }
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -16651,7 +16658,7 @@ Address the objection directly. If you disagree, say why inside \
             // Do not replace the notice produced by the task-input path (for
             // example a command result or a planner error); the activity stream is
             // enough to acknowledge the web action without hiding that feedback.
-            self.record_activity(format!("steered conductor: {instruction}"));
+            self.record_activity(format!("steered conductor: \"{}\"", steer_preview(&instruction)));
             return SteerDelivery::Delivered;
         }
 

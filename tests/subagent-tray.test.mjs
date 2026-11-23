@@ -1,7 +1,8 @@
 // The chat's subagent tray (cloud/worker/subagents.mjs): every Claude Code
-// Agent-tool subagent and teammate, and every Codex spawn_agent subagent, an
-// agent started, found from their own records. Fixtures are synthetic, shaped
-// like Claude Code 2.1.327 and Codex 0.169 logs.
+// Agent-tool subagent and teammate, every Codex spawn_agent subagent and every
+// Antigravity invoke_subagent subagent an agent started, found from their own
+// records. Fixtures are synthetic, shaped like Claude Code 2.1.327, Codex 0.169
+// and agy 1.5.14 logs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -173,4 +174,74 @@ test("Codex: the tray lists every thread that names the agent's thread as its pa
   [sub] = tray.subagents;
   assert.deepEqual({ status: sub.status, endedAt: sub.endedAt, step: sub.step }, { status: "done", endedAt: Date.parse(at(20)), step: "Parsing works." });
   assert.deepEqual(tray.open.messages.map((m) => m.role), ["tool", "assistant"]);
+});
+
+test("Antigravity: the tray lists the subagents agy filed under the conversation, done once a reply ends their turn", (t) => {
+  const parentId = "eaff9cce-8c16-45b6-b055-da500727ba34";
+  const { home, repo, write } = setup(t, { id: "run_g", backend: "antigravity", status: "running", process: { pid: process.pid }, session: { nativeSessionId: parentId } });
+  const brain = path.join(home, ".gemini", "antigravity-cli", "brain");
+  const transcript = (id, steps) => {
+    const logs = path.join(brain, id, ".system_generated", "logs");
+    fs.mkdirSync(logs, { recursive: true });
+    fs.writeFileSync(path.join(logs, "transcript_full.jsonl"), jsonl(steps));
+    return path.join(logs, "transcript_full.jsonl");
+  };
+  transcript(parentId, [{ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: at(0), content: "<USER_REQUEST>\naudit it\n</USER_REQUEST>" }]);
+  // Shaped like agy 1.5.14's listing: `state` stays ALIVE after a subagent finishes.
+  const listed = path.join(brain, parentId, ".system_generated", "subagents");
+  fs.mkdirSync(listed, { recursive: true });
+  const list = (id, typeName, role) => fs.writeFileSync(path.join(listed, `${id}.json`), JSON.stringify({
+    conversationId: id, subagentDescriptor: { typeName, role }, state: "SUBAGENT_STATE_ALIVE", spawnStepIndex: 3, workspaceUris: ["file:///w"],
+  }));
+  const asked = (ts, prompt) => ({ step_index: 0, source: "SYSTEM", type: "SYSTEM_MESSAGE", status: "DONE", created_at: at(ts),
+    content: `The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=${at(ts)} sender=${parentId} priority=MESSAGE_PRIORITY_HIGH content=${prompt}\n</SYSTEM_MESSAGE>` });
+  const reply = (index, ts, content, calls = []) => ({ step_index: index, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: at(ts), content, tool_calls: calls });
+  const result = (index, ts, content) => ({ step_index: index, source: "MODEL", type: "GENERIC", status: "DONE", created_at: at(ts), content: `Created At: ${at(ts)}\nCompleted At: ${at(ts)}\n${content}` });
+
+  const doneId = "0d6b9b6e-f9f3-4b3d-8a0c-3cbed5e475f7";
+  list(doneId, "research", "Examples Auditor");
+  transcript(doneId, [
+    asked(1, "Read every file in `examples/`.\nReport what is broken."),
+    reply(1, 2, "", [{ name: "read_file", args: { Path: '"/w/examples/README.md"' } }]),
+    result(2, 3, "1: # Examples"),
+    reply(3, 4, "", [{ name: "send_message", args: { Message: "**Two** examples are broken: session/redis.js and auth." } }]),
+    result(4, 5, `Message sent to "${parentId}".`),
+    reply(5, 6, "Report sent to the parent agent."),
+  ]);
+  const runningId = "6dbb782b-252e-421b-9e06-b30e03bb8740";
+  list(runningId, "research", "Test Suite Auditor");
+  const runningLog = transcript(runningId, [
+    asked(1, "Read the tests."),
+    reply(1, 7, "", [{ name: "run_command", args: { CommandLine: '"npm test"' } }]),
+  ]);
+  // Listed, its conversation not written yet; and a listing agy is still writing.
+  list("61445077-562e-40cf-a703-6b468d8b156d", "research", "Lib Code Auditor");
+  fs.writeFileSync(path.join(listed, "2f6a2ad6-38d3-4918-b1b3-94c43ed1165b.json"), '{"conversationId":"2f6a');
+
+  const tray = listSubagents(repo, "run_g", { home, open: doneId });
+  const subs = byName(tray.subagents);
+  assert.deepEqual(Object.keys(subs), ["Test Suite Auditor", "Examples Auditor"], "running first, then done");
+  assert.deepEqual(
+    { backend: subs["Examples Auditor"].backend, kind: subs["Examples Auditor"].kind, status: subs["Examples Auditor"].status, startedAt: subs["Examples Auditor"].startedAt, endedAt: subs["Examples Auditor"].endedAt, toolCalls: subs["Examples Auditor"].toolCalls, step: subs["Examples Auditor"].step },
+    { backend: "antigravity", kind: "research", status: "done", startedAt: Date.parse(at(1)), endedAt: Date.parse(at(6)), toolCalls: 2, step: "**Two** examples are broken: session/redis.js and auth." },
+  );
+  assert.deepEqual(
+    { status: subs["Test Suite Auditor"].status, endedAt: subs["Test Suite Auditor"].endedAt, step: subs["Test Suite Auditor"].step },
+    { status: "running", endedAt: null, step: "run_command npm test" },
+  );
+  assert.equal(tray.open.prompt, "Read every file in `examples/`.\nReport what is broken.");
+  assert.equal(tray.open.result, "**Two** examples are broken: session/redis.js and auth.");
+  assert.deepEqual(tray.open.messages.map((m) => m.role), ["tool", "tool", "assistant"]);
+  assert.equal(tray.open.earlier, 0);
+
+  // Its reply with no tool call ends its turn.
+  fs.appendFileSync(runningLog, jsonl([result(2, 8, "Command exited with code 0."), reply(3, 9, "All tests pass.")]));
+  assert.deepEqual(
+    (({ status, endedAt, step }) => ({ status, endedAt, step }))(byName(listSubagents(repo, "run_g", { home }).subagents)["Test Suite Auditor"]),
+    { status: "done", endedAt: Date.parse(at(9)), step: "All tests pass." },
+  );
+  // A subagent mid-turn when the agent's process is gone was stopped.
+  fs.appendFileSync(runningLog, jsonl([asked(10, "Also read the benchmarks."), reply(4, 11, "", [{ name: "list_dir", args: { DirectoryPath: '"/w/benchmarks"' } }])]));
+  write({ process: { pid: DEAD_PID } });
+  assert.equal(byName(listSubagents(repo, "run_g", { home }).subagents)["Test Suite Auditor"].status, "stopped");
 });

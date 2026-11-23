@@ -60,9 +60,11 @@ fn brain_dir(id: &str) -> Option<PathBuf> {
     valid_conversation_id(id).then(|| antigravity_cli_dir()).flatten().map(|dir| dir.join("brain").join(id))
 }
 
-/// The conversation's transcript, one JSON object per line.
+/// The conversation's transcript, one JSON object per line. agy's
+/// `transcript.jsonl` cuts each step at about 4 KB; `transcript_full.jsonl`
+/// beside it has the same steps whole.
 pub(crate) fn transcript_path(id: &str) -> Option<PathBuf> {
-    brain_dir(id).map(|dir| dir.join(".system_generated").join("logs").join("transcript.jsonl"))
+    brain_dir(id).map(|dir| dir.join(".system_generated").join("logs").join("transcript_full.jsonl"))
 }
 
 /// True when agy has this conversation on disk, so `--conversation` can
@@ -148,7 +150,7 @@ pub(crate) fn transcript_usage(raw: &str) -> TokenUsage {
 mod tests {
     use super::*;
 
-    // Shaped like agy's transcript.jsonl lines (step_index, source, type,
+    // Shaped like agy's transcript_full.jsonl lines (step_index, source, type,
     // status, model, token counts, content).
     const TRANSCRIPT: &str = concat!(
         r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-19T05:10:00Z","content":"say pong"}"#, "\n",

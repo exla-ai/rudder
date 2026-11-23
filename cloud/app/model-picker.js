@@ -29,7 +29,8 @@ function effortFor(row, effort, model) {
 }
 const effortLabel = (e) => EFFORTS.find((x) => x.id === e)?.label || "";
 /** How an effort reads after a model's name ("high"); Auto and none read as nothing. */
-const effortWord = (e) => (e && e !== "auto" ? effortLabel(e).toLowerCase() : null);
+/** The effort as the chat's effort chip names it ("Low", "Extra high"); none for Auto. */
+const effortWord = (e) => (e && e !== "auto" ? effortLabel(e) : null);
 
 // The list (`rudder __models` on the cloud machine, built ahead of time):
 // { current, harnesses: [{ id, label, account, models }] }, one entry per
@@ -96,7 +97,7 @@ function harnessLabel(backend) {
   return modelsCache ? harnessOf(modelsCache, backend)?.label ?? backend : null;
 }
 
-/** A model in words, harness first: "Claude · Opus 5.5 · high". Any part may be missing. */
+/** A model in words, harness first: "Claude · Opus 5.5 · High". Any part may be missing. */
 function modelText(backend, name, effort) {
   return [harnessLabel(backend), name, effortWord(effort)].filter(Boolean).join(" · ");
 }
@@ -112,7 +113,7 @@ const CHIP = `<button type="button" class="model-chip" aria-haspopup="dialog"><s
 
 /**
  * A model chip's face: the harness's logo, the model's name and, quieter, its
- * effort: [logo] Opus 5.5 · high. The logo says which harness it is, so the
+ * effort: [logo] Opus 5.5 · High. The logo says which harness it is, so the
  * name goes without "Claude ·"; a harness with no logo yet (harness-logos.js)
  * is named in words instead. With no name (a cloud machine too old to send
  * one, or a harness that does not say what it runs by default) the chip
@@ -148,7 +149,7 @@ function currentChoice(ws) {
   if (cur?.backend && cur?.model && cur?.name) return { backend: cur.backend, model: cur.model, effort: cur.effort || null, name: cur.name };
   return null;
 }
-/** "Codex · Sol 6.1 · high" */
+/** "Codex · Sol 6.1 · High" */
 function choiceLabel(c) {
   return c ? modelText(c.backend, c.name, c.effort) : "Choose model";
 }
@@ -526,7 +527,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
 
 /* The model control in an agent's chat --------------------------------- */
 
-/** "Codex · Sol 6.1 · high" */
+/** "Codex · Sol 6.1 · High" */
 const chatLabel = (a) => modelText(a.backend, a.modelName, a.effort);
 
 /**

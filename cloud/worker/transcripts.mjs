@@ -4,7 +4,7 @@
 //   ~/.claude/projects/<cwd with every non-alphanumeric char as "->/<id>.jsonl
 // Codex keeps rollouts at ~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl,
 // and Antigravity (agy) keeps one per conversation at
-//   ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl.
+//   ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl.
 // All are normalized to { id, role, ts, text, tool } messages; a user message
 // with files sent from the app also has `attachments`.
 
@@ -474,8 +474,18 @@ export function transcriptFile(record, home, now = Date.now()) {
   }
   if (record.backend === "antigravity") {
     // agy files a conversation under its id alone: one stat, nothing to search.
-    const file = path.join(home, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl");
-    return fs.existsSync(file) ? file : null;
+    // Its transcript.jsonl cuts each step's content and tool calls at about
+    // 4 KB ("<truncated 8434 bytes>"); transcript_full.jsonl beside it has
+    // the same steps whole, and agy 1.5.14 writes both.
+    const logs = path.join(home, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs");
+    const file = path.join(logs, "transcript_full.jsonl");
+    if (fs.existsSync(file)) {
+      return file;
+    }
+    if (fs.existsSync(path.join(logs, "transcript.jsonl"))) {
+      throw new Error(`Antigravity conversation ${sessionId} has no transcript_full.jsonl, only the cut-short transcript.jsonl`);
+    }
+    return null;
   }
   const known = transcriptPaths.get(sessionId);
   if (known?.file && fs.existsSync(known.file)) {
@@ -565,7 +575,7 @@ const READERS = { claude: claudeReader, codex: codexReader, antigravity: antigra
 const STATS = { claude: claudeStats, codex: codexStats, antigravity: antigravityStats };
 
 // ---------------------------------------------------------------------------
-// Antigravity (agy) transcript.jsonl: one step per line,
+// Antigravity (agy) transcript_full.jsonl: one step per line,
 //   {"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE",
 //    "model":"…","input_tokens":…,"cache_read_tokens":…,"output_tokens":…,"content":"…",
 //    "tool_calls":[{"name":"run_command","args":{"CommandLine":"\"npm test\"",…}}]}

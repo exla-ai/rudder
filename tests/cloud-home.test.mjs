@@ -726,8 +726,9 @@ nodeTest("a compacted conversation shows one marker with its sizes, its duration
   }
 });
 
-nodeTest("an Antigravity transcript becomes chat messages, and its prompts cannot be edited", () => {
+nodeTest("an Antigravity transcript becomes chat messages, and its prompts cannot be edited", (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const conversation = "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10";
   const logs = path.join(home, ".gemini", "antigravity-cli", "brain", conversation, ".system_generated", "logs");
   fs.mkdirSync(logs, { recursive: true });
@@ -744,11 +745,17 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
     { step_index: 5, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2344, output_tokens: 5, content: "One test fails." },
     // The notes agy adds for the model after what was typed are not the user's words.
     { step_index: 6, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-19T05:11:00Z", content: "<USER_REQUEST>\nfix it\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-19T05:11:00Z.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Neon (Low). No need to comment on this change if the user doesn't ask about it.\n</USER_SETTINGS_CHANGE>" },
-    { step_index: 7, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2400, output_tokens: 5, content: "Fixed." },
+    { step_index: 7, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2400, output_tokens: 5, content: LONG_REPLY },
   ];
-  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":8,"sou`);
+  // agy 1.5.14 writes each step twice: whole in transcript_full.jsonl, and
+  // cut at about 4 KB in transcript.jsonl, which the chat must not show.
+  fs.writeFileSync(path.join(logs, "transcript_full.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":8,"sou`);
+  const cut = steps.map((s) => (s.content === LONG_REPLY ? { ...s, content: `${LONG_REPLY.slice(0, 4096)}<truncated ${LONG_REPLY.length - 4096} bytes>`, truncated_fields: ["content"] } : s));
+  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${cut.map((s) => JSON.stringify(s)).join("\n")}\n`);
   const record = { id: "run-agy", backend: "antigravity", task: "Objective: run the tests\nDone when: they pass\n\nrun the tests", session: { nativeSessionId: conversation } };
-  const transcript = readTranscript(fixtureRepo(record), "run-agy", { limit: 50, home });
+  const repo = fixtureRepo(record);
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  const transcript = readTranscript(repo, "run-agy", { limit: 50, home });
   assert.deepEqual(transcript.messages.map((m) => [m.role, m.text || m.tool?.name]), [
     ["user", "run the tests"],
     ["assistant", "Running them."],
@@ -756,7 +763,7 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
     ["tool", "run_command"],
     ["assistant", "One test fails."],
     ["user", "fix it"],
-    ["assistant", "Fixed."],
+    ["assistant", LONG_REPLY],
   ]);
   assert.equal(transcript.messages[2].tool.input, "/repo/package.json:1-20");
   assert.equal(transcript.messages[2].tool.output, "Showing lines 1-20 of 20\n1: {");
@@ -764,8 +771,16 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
   assert.equal(transcript.messages[3].tool.output, "Command exited with code 1.\n\nCommand output:\n1 failing");
   assert.deepEqual(transcript.edits, []);
   assert.equal(transcript.stats.model, "gemini-3.8-flash");
-  assert.equal(lastAssistantText(record, { home }).text, "Fixed.");
+  assert.ok(lastAssistantText(record, { home }).text.startsWith("Fixed. Every test passes"));
+  assert.doesNotMatch(lastAssistantText(record, { home }).text, /<truncated/);
+
+  // Only the cut-short file: the chat says so instead of showing cut replies.
+  fs.rmSync(path.join(logs, "transcript_full.jsonl"));
+  assert.throws(() => readTranscript(repo, "run-agy", { limit: 50, home }), /no transcript_full\.jsonl/);
 });
+
+// An Antigravity reply longer than the 4 KB agy keeps in transcript.jsonl.
+const LONG_REPLY = `Fixed. ${"Every test passes now, and the flaky one waits for its server. ".repeat(120)}`.trim();
 
 nodeTest("agent stats: output speed over the last five responses and context left, through a compaction", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));

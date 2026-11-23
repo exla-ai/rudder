@@ -805,9 +805,11 @@ fn ensure_antigravity_hooks(path: &Path) -> Result<()> {
 /// `Stop` ended the run's turn while the agent was still working.
 ///
 /// - `SessionStart` records `conversationId`: the id `--conversation` resumes.
-/// - `PreInvocation` with `invocationNum` 1 is the first model call of a turn:
-///   the human answered, back to work. Later calls of the same turn write
-///   nothing.
+/// - `PreInvocation` with `invocationNum` 0 is the first model call of a
+///   turn (agy 1.5.14 counts from 0 on every turn, the first included, and
+///   again after a `Stop` that was not fully idle): the human answered, back
+///   to work. A one-call turn has no call 1. Later calls of the same turn
+///   write nothing.
 /// - `Stop` ends the turn when `fullyIdle`: `done`, or `error` with the error
 ///   text when `terminationReason` is `ERROR`. An interrupt (`USER_CANCELED`)
 ///   is `done`: the agent is back at its prompt. A `Stop` while subagents or
@@ -845,7 +847,7 @@ case "$1" in
   SessionStart)
     [ -n "$id" ] && printf '%s' "$id" > '{session}'.$$.tmp && mv -f '{session}'.$$.tmp '{session}' ;;
   PreInvocation)
-    [ "$(number invocationNum)" = "1" ] && emit working ;;
+    [ "$(number invocationNum)" = "0" ] && emit working ;;
   Stop)
     case "$(field terminationReason)" in
       ERROR)

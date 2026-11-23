@@ -1837,10 +1837,11 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
         std::fs::read_to_string(dir.join("run-1.agy-session")).unwrap_or_default(),
         "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"
     );
-    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":1,"initialNumSteps":3}"#);
-    assert_eq!(state(), r#"{"state":"working"}"#);
+    // agy 1.5.14 numbers a turn's model calls from 0, the first turn included.
+    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":0,"initialNumSteps":149}"#);
+    assert_eq!(state(), r#"{"state":"working"}"#, "the first call of a turn is working");
     std::fs::remove_file(&signal).expect("clear");
-    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":2,"initialNumSteps":5}"#);
+    hook("PreInvocation", r#"{"conversationId":"7f0c","invocationNum":1,"initialNumSteps":151}"#);
     assert_eq!(state(), "", "later calls in the same turn write nothing");
     hook("Stop", r#"{"conversationId":"7f0c","terminationReason":"NO_TOOL_CALL","fullyIdle":false}"#);
     assert_eq!(state(), "", "a Stop while subagents still run is no turn end");
@@ -1867,7 +1868,7 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
         "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10",
         "a subagent never becomes the run's conversation"
     );
-    hook("PreInvocation", &format!(r#"{{"conversationId":"{subagent}","invocationNum":1}}"#));
+    hook("PreInvocation", &format!(r#"{{"conversationId":"{subagent}","invocationNum":0}}"#));
     hook("Stop", &format!(r#"{{"conversationId":"{subagent}","terminationReason":"NO_TOOL_CALL","fullyIdle":true}}"#));
     assert_eq!(state(), "", "a subagent's turn is not the run's");
     let _ = std::fs::remove_dir_all(&dir);

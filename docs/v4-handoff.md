@@ -421,8 +421,11 @@ resume and read it. Its turn state comes from hooks in
 `~/.gemini/config/hooks.json` (a `rudder` entry that does nothing unless
 `RUDDER_AGY_HOOK` is set). Permission prompts and questions come from its OSC
 7501 terminal status (`AGY_CLI_OSC7501=on`). Transcripts are read from
-`~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl`,
-and each agent's own workspace folder is trusted through `trustedWorkspaces`
+`~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl`
+(`transcript.jsonl` beside it cuts each step at about 4 KB with
+"<truncated N bytes>"; a conversation with only that file is an error, not a
+cut chat). A turn starts at `PreInvocation` with `invocationNum` 0: agy
+1.5.14 counts each turn's model calls from 0. And each agent's own workspace folder is trusted through `trustedWorkspaces`
 in its `settings.json` (agy asks again in any subfolder of a trusted one, and
 that dialog swallowed the first follow-up).
 Remote Control on a new conversation is typed, not a flag: agy with
@@ -438,7 +441,11 @@ becomes the run's conversation and its `Stop` never ends the run's turn. A
 `Stop` with `fullyIdle: false` (subagents or background tasks still running)
 is not a turn end either; agy's OSC 7501 `done` ends that turn once the work
 finishes (workers only, not orchestrators). Before this a Neon run went to
-review mid-task and its chat and resume pointed at a subagent.
+review mid-task and its chat and resume pointed at a subagent. The app's
+subagent tray lists those listings (`role`, `typeName`) with each one's own
+transcript. agy leaves `state` at SUBAGENT_STATE_ALIVE after a subagent
+finishes, so a subagent is done when its last step is a reply with no tool
+calls, and its result is the last `send_message` to its parent.
 Rudder refuses with a plain reason where agy has no way in: fork, branch and
 handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global

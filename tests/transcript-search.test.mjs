@@ -57,7 +57,7 @@ function fixtures() {
   const agyId = "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b11";
   const logs = path.join(home, ".gemini", "antigravity-cli", "brain", agyId, ".system_generated", "logs");
   fs.mkdirSync(logs, { recursive: true });
-  fs.writeFileSync(path.join(logs, "transcript.jsonl"), jsonl([
+  fs.writeFileSync(path.join(logs, "transcript_full.jsonl"), jsonl([
     { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: at(20), content: "can you deploy the docs" },
     { step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: at(21), content: "Deploying the docs.", tool_calls: [{ name: "run_command", args: { CommandLine: '"npm run deploy"' } }] },
     { step_index: 2, source: "MODEL", type: "GENERIC", status: "DONE", created_at: at(22), content: "Created At: x\nCommand output:\ndeploy done" },

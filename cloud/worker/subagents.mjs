@@ -14,6 +14,8 @@
 //   - Codex subagents: a rollout whose session_meta names the agent's thread as
 //     its parent (source.subagent.thread_spawn.parent_thread_id).
 //   - OpenCode subagents: a session whose parent_id names the agent's session.
+//   - Antigravity subagents: brain/<conversation>/.system_generated/subagents/<id>.json,
+//     one per invoke_subagent; each is a conversation of its own.
 // Each log is followed (transcripts.mjs followFile), so a poll reads only what
 // was appended since the last one.
 //
@@ -30,6 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   SUBAGENT_PROMPT_LIMIT,
+  antigravityReader,
   attachClaudeSubagents,
   attachCodexSubagents,
   claudeInterrupted,
@@ -65,7 +68,9 @@ export function listSubagents(repoDir, runId, { home, open = null }) {
     ? []
     : record.backend === "codex"
       ? codexSubagents(home, record.session.nativeSessionId, live)
-      : [...claudeAgentSubagents(file, live), ...claudeTeammates(home, file, live)];
+      : record.backend === "antigravity"
+        ? antigravitySubagents(home, record.session.nativeSessionId, live)
+        : [...claudeAgentSubagents(file, live), ...claudeTeammates(home, file, live)];
   found.sort(newestFirst);
   const opened = open === null ? null : found.find((entry) => entry.id === open) ?? null;
   return { runId: record.id, subagents: found.map(line), open: opened && activity(opened) };
@@ -286,6 +291,115 @@ function readTeamConfig(file, stat) {
     mtimeMs: stat.mtimeMs,
     size: stat.size,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity
+// ---------------------------------------------------------------------------
+
+// agy lists each subagent a conversation started in
+// brain/<conversation>/.system_generated/subagents/<id>.json:
+//   {"conversationId":"…","subagentDescriptor":{"typeName":"research","role":"Examples Auditor"},
+//    "state":"SUBAGENT_STATE_ALIVE","spawnStepIndex":80,"workspaceUris":[…]}
+// and keeps the subagent's steps in its own brain folder, like any
+// conversation. agy 1.5.14 leaves `state` at SUBAGENT_STATE_ALIVE after the
+// subagent finishes, so its own transcript tells: it is done once its last
+// step is a reply with no tool calls (its turn ended there; a message from
+// its parent starts it again).
+function antigravitySubagents(home, conversationId, live) {
+  const dir = path.join(home, ".gemini", "antigravity-cli", "brain", conversationId, ".system_generated", "subagents");
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return []; // it started none
+    }
+    throw error;
+  }
+  const list = [];
+  for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    let listing;
+    try {
+      listing = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        continue; // agy is still writing it
+      }
+      throw error;
+    }
+    const id = text(listing?.conversationId);
+    const file = id && transcriptFile({ backend: "antigravity", session: { nativeSessionId: id } }, home);
+    const reader = file ? followFile(file, antigravityChildReader) : null;
+    if (!reader) {
+      continue; // its transcript is not written yet
+    }
+    const status = reader.finished ? "done" : live ? "running" : "stopped";
+    const replies = reader.messages.filter((message) => message.role === "assistant");
+    list.push({
+      id,
+      backend: "antigravity",
+      type: "subagent",
+      kind: text(listing.subagentDescriptor?.typeName),
+      name: text(listing.subagentDescriptor?.role),
+      description: null,
+      status,
+      startedAt: reader.firstAt,
+      endedAt: status === "running" ? null : reader.lastAt,
+      result: status === "done" ? reader.report ?? replies[replies.length - 1]?.text ?? null : null,
+      reader,
+      nest: () => {},
+    });
+  }
+  return list;
+}
+
+// A subagent's transcript, read as the chat reads one, plus its prompt (the
+// parent's message in its first step:
+// "[Message] timestamp=… sender=<parent> priority=… content=<prompt></SYSTEM_MESSAGE>"),
+// the last report it sent its parent (send_message) and whether its turn ended.
+function antigravityChildReader() {
+  const reader = antigravityReader();
+  const addStep = reader.addLine;
+  Object.assign(reader, { dropped: 0, toolCalls: 0, prompt: null, report: null, firstAt: null, lastAt: null, finished: false });
+  reader.skip = () => false;
+  reader.addLine = (line) => {
+    let step;
+    try {
+      step = JSON.parse(line);
+    } catch {
+      return; // the line agy is still writing
+    }
+    const at = Date.parse(step.created_at);
+    if (Number.isFinite(at)) {
+      reader.firstAt ??= at;
+      reader.lastAt = at;
+    }
+    if (step.type === "SYSTEM_MESSAGE" && reader.prompt === null) {
+      reader.prompt = /\[Message\][^\n]*?\bcontent=([\s\S]*?)\s*<\/SYSTEM_MESSAGE>/.exec(step.content ?? "")?.[1] ?? null;
+    }
+    const calls = step.type === "PLANNER_RESPONSE" && Array.isArray(step.tool_calls) ? step.tool_calls : [];
+    reader.toolCalls += calls.length;
+    for (const call of calls.filter((entry) => entry?.name === "send_message")) {
+      reader.report = agyArg(call.args?.Message) ?? reader.report;
+    }
+    reader.finished = step.type === "PLANNER_RESPONSE" && calls.length === 0;
+    addStep(line);
+  };
+  return reader;
+}
+
+// agy logs some tool arguments JSON-encoded ("\"npm test\"") and some as is.
+function agyArg(value) {
+  if (typeof value !== "string" || !value) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(value);
+    return typeof decoded === "string" ? decoded : value;
+  } catch {
+    return value;
+  }
 }
 
 // ---------------------------------------------------------------------------

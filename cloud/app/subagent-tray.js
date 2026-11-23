@@ -21,7 +21,7 @@ import { paintSubagentActivity, subagentFacts } from "/app/subagents.js";
 const POLL_LIVE_MS = 3000;
 const POLL_IDLE_MS = 12000;
 
-export function mountSubagentTray({ workspace, run }) {
+export function mountSubagentTray({ workspace, run, isWorking = () => false }) {
   const button = h(`<button type="button" class="sat-btn" hidden aria-expanded="false">${icon("agents")}<span class="sat-badge" hidden></span></button>`);
   const el = h(`<section class="sa-tray" hidden aria-label="Subagents">
     <div class="sat-panel">
@@ -220,7 +220,7 @@ export function mountSubagentTray({ workspace, run }) {
     if (destroyed || paused) return;
     paint();
     if (again) { again = false; poll(); return; }
-    const live = open || list.length > 0;
+    const live = open || list.length > 0 || Boolean(isWorking());
     timer = setTimeout(tick, live ? POLL_LIVE_MS : POLL_IDLE_MS);
   }
   const tick = () => { if (paused) return; if (document.hidden) timer = setTimeout(tick, POLL_IDLE_MS); else poll(); };
@@ -235,6 +235,10 @@ export function mountSubagentTray({ workspace, run }) {
   return {
     el,
     button,
+    poke() {
+      if (destroyed || paused || document.hidden) return;
+      poll();
+    },
     pause(on) {
       if (paused === on) return;
       paused = on;

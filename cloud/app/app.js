@@ -4467,7 +4467,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   composer.el.before(askSlot);
   // Above it: every subagent and teammate the agent started (subagent-tray.js),
   // opened by its button left of the message bar.
-  const tray = ro ? null : mountSubagentTray({ workspace: ws, run });
+  const tray = ro ? null : mountSubagentTray({
+    workspace: ws,
+    run,
+    isWorking: () => {
+      const st = agentNow()?.status;
+      return st === "running" || !!statusOf(st).live;
+    },
+  });
   if (tray) {
     askSlot.before(tray.el);
     mountFileRefs(tray.el, { ws, run });
@@ -5676,6 +5683,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     stateSig = sig;
     wasRunning = running;
     if (!moved || destroyed || document.hidden) return;
+    if (running && !before) tray?.poke();
     if (before && !running) { loadTranscript({ replace: true }); return; }
     // Polled every CHAT_LIVE_MS while it worked: that covers it. Otherwise
     // read now, and the next poll is timed for what the agent does now.

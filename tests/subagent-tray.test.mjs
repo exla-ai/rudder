@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { listSubagents } from "../cloud/worker/subagents.mjs";
+import { readTranscript } from "../cloud/worker/transcripts.mjs";
 
 const line = (entry) => `${JSON.stringify(entry)}\n`;
 const jsonl = (entries) => entries.map(line).join("");
@@ -200,6 +201,17 @@ test("Antigravity: the tray lists the subagents agy filed under the conversation
   const result = (index, ts, content) => ({ step_index: index, source: "MODEL", type: "GENERIC", status: "DONE", created_at: at(ts), content: `Created At: ${at(ts)}\nCompleted At: ${at(ts)}\n${content}` });
 
   const doneId = "0d6b9b6e-f9f3-4b3d-8a0c-3cbed5e475f7";
+  const runningId = "6dbb782b-252e-421b-9e06-b30e03bb8740";
+  const startingId = "61445077-562e-40cf-a703-6b468d8b156d";
+  transcript(parentId, [
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: at(0), content: "<USER_REQUEST>\naudit it\n</USER_REQUEST>" },
+    reply(1, 1, "", [
+      { name: "invoke_subagent", args: { TypeName: '"research"', Role: '"Examples Auditor"', Prompt: '"Read every file in examples/."' } },
+      { name: "invoke_subagent", args: { TypeName: '"research"', Role: '"Test Suite Auditor"', Prompt: '"Read the tests."' } },
+    ]),
+    result(2, 2, `Created the following subagent:\n{\n  "conversationId": "${doneId}"\n}`),
+    result(3, 2, `Created the following subagent:\n{\n  "conversationId": "${runningId}"\n}`),
+  ]);
   list(doneId, "research", "Examples Auditor");
   transcript(doneId, [
     asked(1, "Read every file in `examples/`.\nReport what is broken."),
@@ -208,24 +220,37 @@ test("Antigravity: the tray lists the subagents agy filed under the conversation
     reply(3, 4, "", [{ name: "send_message", args: { Message: "**Two** examples are broken: session/redis.js and auth." } }]),
     result(4, 5, `Message sent to "${parentId}".`),
     reply(5, 6, "Report sent to the parent agent."),
+    // A trailing system note after the final reply must not revert done -> running.
+    { step_index: 6, source: "SYSTEM", type: "SYSTEM_MESSAGE", status: "DONE", created_at: at(7), content: "<SYSTEM_MESSAGE>Reminder: idle</SYSTEM_MESSAGE>" },
   ]);
-  const runningId = "6dbb782b-252e-421b-9e06-b30e03bb8740";
   list(runningId, "research", "Test Suite Auditor");
   const runningLog = transcript(runningId, [
     asked(1, "Read the tests."),
     reply(1, 7, "", [{ name: "run_command", args: { CommandLine: '"npm test"' } }]),
   ]);
-  // Listed, its conversation not written yet; and a listing agy is still writing.
-  list("61445077-562e-40cf-a703-6b468d8b156d", "research", "Lib Code Auditor");
+  // Listed, its conversation not written yet: shown immediately as running so
+  // the tray button appears left of the message bar without waiting. A torn
+  // JSON file agy is still writing is skipped.
+  list(startingId, "research", "Lib Code Auditor");
   fs.writeFileSync(path.join(listed, "2f6a2ad6-38d3-4918-b1b3-94c43ed1165b.json"), '{"conversationId":"2f6a');
 
   const tray = listSubagents(repo, "run_g", { home, open: doneId });
   const subs = byName(tray.subagents);
-  assert.deepEqual(Object.keys(subs), ["Test Suite Auditor", "Examples Auditor"], "running first, then done");
+  assert.deepEqual(Object.keys(subs).sort(), ["Examples Auditor", "Lib Code Auditor", "Test Suite Auditor"]);
+  assert.equal(subs["Lib Code Auditor"].status, "running");
+  assert.equal(subs["Test Suite Auditor"].status, "running");
+  assert.equal(subs["Examples Auditor"].status, "done");
   assert.deepEqual(
-    { backend: subs["Examples Auditor"].backend, kind: subs["Examples Auditor"].kind, status: subs["Examples Auditor"].status, startedAt: subs["Examples Auditor"].startedAt, endedAt: subs["Examples Auditor"].endedAt, toolCalls: subs["Examples Auditor"].toolCalls, step: subs["Examples Auditor"].step },
-    { backend: "antigravity", kind: "research", status: "done", startedAt: Date.parse(at(1)), endedAt: Date.parse(at(6)), toolCalls: 2, step: "**Two** examples are broken: session/redis.js and auth." },
+    { backend: subs["Examples Auditor"].backend, kind: subs["Examples Auditor"].kind, status: subs["Examples Auditor"].status, startedAt: subs["Examples Auditor"].startedAt, toolCalls: subs["Examples Auditor"].toolCalls, step: subs["Examples Auditor"].step },
+    { backend: "antigravity", kind: "research", status: "done", startedAt: Date.parse(at(1)), toolCalls: 2, step: "**Two** examples are broken: session/redis.js and auth." },
   );
+  // Inline subagent cards appear on invoke_subagent calls in the chat too.
+  const chat = readTranscript(repo, "run_g", { home });
+  const cards = chat.messages.filter((m) => m.subagent).map((m) => [m.subagent.name, m.subagent.status, m.subagent.result]);
+  assert.deepEqual(cards, [
+    ["Examples Auditor", "done", "**Two** examples are broken: session/redis.js and auth."],
+    ["Test Suite Auditor", "running", null],
+  ]);
   assert.deepEqual(
     { status: subs["Test Suite Auditor"].status, endedAt: subs["Test Suite Auditor"].endedAt, step: subs["Test Suite Auditor"].step },
     { status: "running", endedAt: null, step: "run_command npm test" },

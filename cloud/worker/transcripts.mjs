@@ -156,6 +156,8 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     attachCodexSubagents(page.reader, { home, live, shown, depth: 0 });
   } else if (backend === "claude") {
     attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
+  } else if (backend === "antigravity") {
+    attachAntigravitySubagents(page.reader, { home, conversationId: conversation, live, shown, depth: 0 });
   }
   if (!end) {
     base.messages = markRunning(base.messages, live);
@@ -722,8 +724,11 @@ const STATS = { claude: claudeStats, codex: codexStats, antigravity: antigravity
 function antigravityReader({ stats = null } = {}) {
   // The newest response's calls still waiting for their result steps.
   let pending = [];
+  const spawnByMessage = new Map();
   const reader = {
     messages: [],
+    // invoke_subagent calls: [{ message, ts, stepIndex, kind, name, prompt, childId }]
+    spawns: [],
     // As claudeReader's: called as each result step lands on its call.
     onResult: null,
     addLine(line) {
@@ -765,8 +770,22 @@ function antigravityReader({ stats = null } = {}) {
           reader.messages.push({ id, role: "assistant", ts, text: content });
         }
         pending = (step.tool_calls ?? []).map((call, index) => {
-          const message = { id: `${id}.${index}`, role: "tool", ts, tool: { name: call.name, input: antigravityCallInput(call.args ?? {}), output: null, isError: false } };
+          const args = call.args ?? {};
+          const message = { id: `${id}.${index}`, role: "tool", ts, tool: { name: call.name, input: antigravityCallInput(args), output: null, isError: false } };
           reader.messages.push(message);
+          if (call.name === "invoke_subagent") {
+            const spawn = {
+              message,
+              ts,
+              stepIndex: Number.isFinite(step.step_index) ? step.step_index : null,
+              kind: agyArg(args.TypeName),
+              name: agyArg(args.Role),
+              prompt: agyArg(args.Prompt),
+              childId: null,
+            };
+            reader.spawns.push(spawn);
+            spawnByMessage.set(message, spawn);
+          }
           return message;
         });
       } else if (step.source === "MODEL") {
@@ -776,11 +795,178 @@ function antigravityReader({ stats = null } = {}) {
           const output = content.replace(/^(?:(?:Created|Completed) At: \S+\n?)+/, "");
           target.tool.output = clip(output);
           target.tool.isError = step.status === "ERROR" || /^Command exited with code [1-9]/.test(output);
+          const spawn = spawnByMessage.get(target);
+          if (spawn && !spawn.childId) {
+            const matched = /"conversationId"\s*:\s*"([A-Za-z0-9-]+)"/.exec(output);
+            if (matched) {
+              spawn.childId = matched[1];
+            }
+          }
         }
       }
     },
   };
   return reader;
+}
+
+// agy logs some tool arguments JSON-encoded ("\"npm test\"") and some as is.
+function agyArg(value) {
+  if (typeof value !== "string" || !value) {
+    return null;
+  }
+  try {
+    const decoded = JSON.parse(value);
+    return typeof decoded === "string" ? decoded : value;
+  } catch {
+    return value;
+  }
+}
+
+// A subagent's transcript, read as the chat reads one, plus its prompt (the
+// parent's message in its first step:
+// "[Message] timestamp=... sender=<parent> priority=... content=<prompt></SYSTEM_MESSAGE>"),
+// the last report it sent its parent (send_message) and whether its turn ended.
+// A trailing SYSTEM_MESSAGE reminder or GENERIC step never reopens a finished
+// subagent; only a new parent [Message], USER_INPUT, or PLANNER_RESPONSE with
+// tool calls does.
+function antigravityChildReader() {
+  const reader = antigravityReader();
+  const addStep = reader.addLine;
+  Object.assign(reader, { dropped: 0, toolCalls: 0, prompt: null, report: null, firstAt: null, lastAt: null, finished: false });
+  reader.skip = () => false;
+  reader.addLine = (line) => {
+    let step;
+    try {
+      step = JSON.parse(line);
+    } catch {
+      return; // the line agy is still writing
+    }
+    const at = Date.parse(step.created_at);
+    if (Number.isFinite(at)) {
+      reader.firstAt ??= at;
+      reader.lastAt = at;
+    }
+    if (step.type === "SYSTEM_MESSAGE") {
+      if (reader.prompt === null) {
+        reader.prompt = /\[Message\][^\n]*?\bcontent=([\s\S]*?)\s*<\/SYSTEM_MESSAGE>/.exec(step.content ?? "")?.[1] ?? null;
+      }
+      if (/\[Message\]/.test(step.content ?? "")) {
+        reader.finished = false;
+      }
+    } else if (step.type === "USER_INPUT") {
+      reader.finished = false;
+    }
+    if (step.type === "PLANNER_RESPONSE") {
+      const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
+      reader.toolCalls += calls.length;
+      for (const call of calls.filter((entry) => entry?.name === "send_message")) {
+        reader.report = agyArg(call.args?.Message) ?? reader.report;
+      }
+      reader.finished = calls.length === 0;
+    }
+    addStep(line);
+  };
+  return reader;
+}
+
+function antigravitySubagentsDir(home, conversationId) {
+  return path.join(home, ".gemini", "antigravity-cli", "brain", conversationId, ".system_generated", "subagents");
+}
+
+function readAntigravitySubagentListings(dir) {
+  dependPath(dir);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const listings = [];
+  for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    const file = path.join(dir, name);
+    const stat = statOrNull(file);
+    if (!stat) {
+      continue;
+    }
+    depend(file, stat);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (typeof parsed?.conversationId === "string" && /^[A-Za-z0-9-]+$/.test(parsed.conversationId)) {
+        listings.push({ id: parsed.conversationId, listing: parsed, stat });
+      }
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        continue; // agy is still writing it
+      }
+      throw error;
+    }
+  }
+  return listings;
+}
+
+// Antigravity subagents: each invoke_subagent call spawns a brain conversation
+// listed under brain/<parent>/.system_generated/subagents/<childId>.json.
+// Attaching it inline keeps finished Gemini subagents visible as rich cards in
+// the chat after they leave the running-only tray left of the message bar.
+function attachAntigravitySubagents(reader, { home, conversationId, live, shown, depth }) {
+  if (!reader?.spawns?.length || !conversationId) {
+    return;
+  }
+  const listings = readAntigravitySubagentListings(antigravitySubagentsDir(home, conversationId));
+  const byId = new Map(listings.map((entry) => [entry.id, entry]));
+  const claimed = new Set();
+  for (const spawn of reader.spawns) {
+    if (spawn.childId) {
+      claimed.add(spawn.childId);
+    }
+  }
+  for (const spawn of reader.spawns) {
+    if (shown && !shown.has(spawn.message)) {
+      continue;
+    }
+    let id = spawn.childId;
+    if (!id) {
+      const match = listings.find((entry) => !claimed.has(entry.id)
+        && (!spawn.name || entry.listing.subagentDescriptor?.role === spawn.name)
+        && (!spawn.kind || entry.listing.subagentDescriptor?.typeName === spawn.kind));
+      if (match) {
+        id = match.id;
+        claimed.add(id);
+      }
+    }
+    if (!id) {
+      continue;
+    }
+    const meta = byId.get(id);
+    const descriptor = meta?.listing?.subagentDescriptor;
+    const childFile = path.join(home, ".gemini", "antigravity-cli", "brain", id, ".system_generated", "logs", "transcript_full.jsonl");
+    dependPath(childFile);
+    const sub = fs.existsSync(childFile) ? followFile(childFile, antigravityChildReader) : null;
+    if (sub && depth + 1 < SUBAGENT_DEPTH) {
+      attachAntigravitySubagents(sub, { home, conversationId: id, live, shown: null, depth: depth + 1 });
+    }
+    const status = sub?.finished ? "done" : live ? "running" : "stopped";
+    const replies = (sub?.messages ?? []).filter((message) => message.role === "assistant");
+    const result = status === "done" ? sub?.report ?? replies[replies.length - 1]?.text ?? null : null;
+    const prompt = spawn.prompt || sub?.prompt || null;
+    spawn.message.subagent = {
+      id,
+      backend: "antigravity",
+      kind: spawn.kind || (typeof descriptor?.typeName === "string" && descriptor.typeName ? descriptor.typeName : null),
+      name: spawn.name || (typeof descriptor?.role === "string" && descriptor.role ? descriptor.role : null),
+      description: null,
+      prompt: prompt ? clip(prompt, SUBAGENT_PROMPT_LIMIT) : null,
+      status,
+      startedAt: sub?.firstAt ?? spawn.ts ?? meta?.stat?.mtimeMs ?? null,
+      endedAt: status === "running" ? null : sub?.lastAt ?? null,
+      toolCalls: sub?.toolCalls ?? 0,
+      result: result ? clip(result, SUBAGENT_OUTPUT_LIMIT) : null,
+      ...shownMessages(sub),
+    };
+  }
 }
 
 // agy saves at most about 190 KB of a step, even in transcript_full.jsonl. A
@@ -2811,7 +2997,7 @@ function toMillis(value) {
 }
 
 // The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
-export { SUBAGENT_PROMPT_LIMIT, antigravityReader, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
+export { SUBAGENT_PROMPT_LIMIT, antigravityChildReader, antigravityReader, attachAntigravitySubagents, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
 
 // ---------------------------------------------------------------------------
 // The app's poll. The open chat asks for its newest page every few seconds;

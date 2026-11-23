@@ -34,7 +34,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   SUBAGENT_PROMPT_LIMIT,
-  antigravityReader,
+  antigravityChildReader,
+  attachAntigravitySubagents,
   attachClaudeSubagents,
   attachCodexSubagents,
   claudeInterrupted,
@@ -430,9 +431,14 @@ function antigravitySubagents(home, conversationId, live) {
   }
   const list = [];
   for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    const listingPath = path.join(dir, name);
+    const listingStat = statOrNull(listingPath);
+    if (!listingStat) {
+      continue;
+    }
     let listing;
     try {
-      listing = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+      listing = JSON.parse(fs.readFileSync(listingPath, "utf8"));
     } catch (error) {
       if (error instanceof SyntaxError) {
         continue; // agy is still writing it
@@ -440,12 +446,36 @@ function antigravitySubagents(home, conversationId, live) {
       throw error;
     }
     const id = text(listing?.conversationId);
-    const file = id && transcriptFile({ backend: "antigravity", session: { nativeSessionId: id } }, home);
-    const stat = file ? statOrNull(file) : null;
-    if (!stat) {
-      continue; // its transcript is not written yet
+    if (!id) {
+      continue;
     }
     const descriptor = listing.subagentDescriptor;
+    const file = transcriptFile({ backend: "antigravity", session: { nativeSessionId: id } }, home);
+    const stat = file ? statOrNull(file) : null;
+    if (!stat) {
+      // Newly spawned subagent: list it immediately so the tray button left of
+      // the message bar appears before agy flushes its first transcript line.
+      list.push({
+        id,
+        file: listingPath,
+        key: ["starting", listingStat.size, listingStat.mtimeMs, live, JSON.stringify(descriptor ?? null)].join("|"),
+        make: () => ({
+          id,
+          backend: "antigravity",
+          type: "subagent",
+          kind: text(descriptor?.typeName),
+          name: text(descriptor?.role),
+          description: null,
+          status: live ? "running" : "stopped",
+          startedAt: listingStat.mtimeMs,
+          endedAt: live ? null : listingStat.mtimeMs,
+          result: null,
+          reader: { messages: [], toolCalls: 0, dropped: 0, prompt: null },
+          nest: () => {},
+        }),
+      });
+      continue;
+    }
     list.push({ id, file, key: [stat.size, stat.mtimeMs, live, JSON.stringify(descriptor ?? null)].join("|"), make: () => {
       const reader = followFile(file, antigravityChildReader);
       if (!reader) {
@@ -461,63 +491,15 @@ function antigravitySubagents(home, conversationId, live) {
         name: text(descriptor?.role),
         description: null,
         status,
-        startedAt: reader.firstAt,
+        startedAt: reader.firstAt ?? listingStat.mtimeMs,
         endedAt: status === "running" ? null : reader.lastAt,
         result: status === "done" ? reader.report ?? replies[replies.length - 1]?.text ?? null : null,
         reader,
-        nest: () => {},
+        nest: () => attachAntigravitySubagents(reader, { home, conversationId: id, live, shown: null, depth: 1 }),
       };
     } });
   }
   return list;
-}
-
-// A subagent's transcript, read as the chat reads one, plus its prompt (the
-// parent's message in its first step:
-// "[Message] timestamp=… sender=<parent> priority=… content=<prompt></SYSTEM_MESSAGE>"),
-// the last report it sent its parent (send_message) and whether its turn ended.
-function antigravityChildReader() {
-  const reader = antigravityReader();
-  const addStep = reader.addLine;
-  Object.assign(reader, { dropped: 0, toolCalls: 0, prompt: null, report: null, firstAt: null, lastAt: null, finished: false });
-  reader.skip = () => false;
-  reader.addLine = (line) => {
-    let step;
-    try {
-      step = JSON.parse(line);
-    } catch {
-      return; // the line agy is still writing
-    }
-    const at = Date.parse(step.created_at);
-    if (Number.isFinite(at)) {
-      reader.firstAt ??= at;
-      reader.lastAt = at;
-    }
-    if (step.type === "SYSTEM_MESSAGE" && reader.prompt === null) {
-      reader.prompt = /\[Message\][^\n]*?\bcontent=([\s\S]*?)\s*<\/SYSTEM_MESSAGE>/.exec(step.content ?? "")?.[1] ?? null;
-    }
-    const calls = step.type === "PLANNER_RESPONSE" && Array.isArray(step.tool_calls) ? step.tool_calls : [];
-    reader.toolCalls += calls.length;
-    for (const call of calls.filter((entry) => entry?.name === "send_message")) {
-      reader.report = agyArg(call.args?.Message) ?? reader.report;
-    }
-    reader.finished = step.type === "PLANNER_RESPONSE" && calls.length === 0;
-    addStep(line);
-  };
-  return reader;
-}
-
-// agy logs some tool arguments JSON-encoded ("\"npm test\"") and some as is.
-function agyArg(value) {
-  if (typeof value !== "string" || !value) {
-    return null;
-  }
-  try {
-    const decoded = JSON.parse(value);
-    return typeof decoded === "string" ? decoded : value;
-  } catch {
-    return value;
-  }
 }
 
 // ---------------------------------------------------------------------------

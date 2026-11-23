@@ -17,7 +17,8 @@
 //   - Antigravity subagents: brain/<conversation>/.system_generated/subagents/<id>.json,
 //     one per invoke_subagent; each is a conversation of its own.
 // Each log is followed (transcripts.mjs followFile), so a poll reads only what
-// was appended since the last one.
+// was appended since the last one, and each line is kept by what it was made
+// from (trayLine): a log that has not changed is not read at all.
 //
 // The list has one line per subagent:
 //   { id, backend, type, kind, name, description, status, startedAt, endedAt,
@@ -28,6 +29,7 @@
 // cards (cloud/app/subagents.js): the line plus prompt, result, messages and
 // earlier.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -63,17 +65,116 @@ export function listSubagents(repoDir, runId, { home, open = null }) {
     const opened = subagents.find((entry) => entry.id === open);
     return { runId: record.id, subagents, open: opened ? opencodeSubagentActivity(opened, { home, live }) : null };
   }
+  const store = trayStore(home);
   const file = transcriptFile(record, home);
   const found = !file
     ? []
     : record.backend === "codex"
-      ? codexSubagents(home, record.session.nativeSessionId, live)
+      ? codexSubagents(store, home, record.session.nativeSessionId, live)
       : record.backend === "antigravity"
         ? antigravitySubagents(home, record.session.nativeSessionId, live)
         : [...claudeAgentSubagents(file, live), ...claudeTeammates(home, file, live)];
-  found.sort(newestFirst);
-  const opened = open === null ? null : found.find((entry) => entry.id === open) ?? null;
-  return { runId: record.id, subagents: found.map(line), open: opened && activity(opened) };
+  const subagents = found.map((item) => trayLine(store, item)).filter(Boolean).sort(newestFirst);
+  const item = open === null ? null : found.find((entry) => entry.id === open);
+  const opened = item ? item.make() : null;
+  return { runId: record.id, subagents, open: opened && activity(opened) };
+}
+
+// ---------------------------------------------------------------------------
+// Tray lines kept by what they are made from. Each subagent is an item
+// { id, file, key, make }: `key` holds its log's size and mtime and every
+// other fact its line reads (its meta, whether the agent lives, whether it is
+// still a team member), and `make()` follows the log into the full entry. A
+// line whose key is unchanged is not made again. Following every log from the
+// start took 451 ms for libra hi-lsup5 (29 subagents, 270 MB of logs) on a
+// home's first poll; a finished subagent's log never changes. The lines, and
+// the Codex rollout heads, are kept on disk too, so a restarted home does not
+// read them all again, and are dropped when this code or the readers change.
+// ---------------------------------------------------------------------------
+
+const LINES_MAX = 4096;
+const SAVE_MS = 2_000;
+const CODE = createHash("sha256")
+  .update(fs.readFileSync(new URL(import.meta.url)))
+  .update(fs.readFileSync(new URL("./transcripts.mjs", import.meta.url)))
+  .digest("hex")
+  .slice(0, 16);
+const stores = new Map(); // home -> { file, lines, heads, timer }
+
+function trayStore(home) {
+  let store = stores.get(home);
+  if (store) {
+    return store;
+  }
+  store = { file: path.join(home, ".rudder", "subagent-tray.json"), lines: new Map(), heads: new Map(), timer: null };
+  let saved = null;
+  try {
+    saved = JSON.parse(fs.readFileSync(store.file, "utf8"));
+  } catch (error) {
+    // None yet, or one this code cannot read: the lines are made again.
+    if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+      throw error;
+    }
+  }
+  if (saved?.code === CODE) {
+    for (const [file, key, value] of saved.lines) store.lines.set(file, { key, line: value });
+    for (const [file, meta] of saved.heads) store.heads.set(file, meta);
+  }
+  stores.set(home, store);
+  return store;
+}
+
+function trayLine(store, item) {
+  const hit = store.lines.get(item.file);
+  if (hit?.key === item.key) {
+    return hit.line;
+  }
+  const entry = item.make();
+  if (!entry) {
+    return null; // removed since the listing
+  }
+  const value = line(entry);
+  store.lines.delete(item.file);
+  store.lines.set(item.file, { key: item.key, line: value });
+  if (store.lines.size > LINES_MAX) {
+    store.lines.delete(store.lines.keys().next().value);
+  }
+  saveSoon(store);
+  return value;
+}
+
+function saveSoon(store) {
+  if (store.timer) {
+    return;
+  }
+  store.timer = setTimeout(() => {
+    store.timer = null;
+    // Into the home's own ~/.rudder, never made here (a test's home may be
+    // gone by the time this runs).
+    if (!fs.existsSync(path.dirname(store.file))) {
+      return;
+    }
+    const body = JSON.stringify({
+      code: CODE,
+      lines: [...store.lines].map(([file, { key, line: value }]) => [file, key, value]),
+      heads: [...store.heads],
+    });
+    const tmp = `${store.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, store.file);
+  }, SAVE_MS);
+  store.timer.unref?.();
+}
+
+function statOrNull(file) {
+  try {
+    return fs.statSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 // Running ones first, newest first; then the rest by when they ended.
@@ -147,25 +248,32 @@ function claudeAgentSubagents(session, live) {
     if (typeof meta.parentAgentId === "string") {
       continue; // shows inside its parent
     }
-    const reader = followFile(path.join(dir, `agent-${agentId}.jsonl`), () => claudeReader({ sub: true, self: toolUseId }));
-    if (!reader) {
+    const file = path.join(dir, `agent-${agentId}.jsonl`);
+    const stat = statOrNull(file);
+    if (!stat) {
       continue; // its log is not written yet
     }
-    const status = meta.finished ? "done" : live && !claudeInterrupted(reader) ? "running" : "stopped";
-    list.push({
-      id: agentId,
-      backend: "claude",
-      type: "subagent",
-      kind: text(meta.agentType),
-      name: text(meta.name),
-      description: text(meta.description),
-      status,
-      startedAt: reader.firstAt,
-      endedAt: status === "running" ? null : reader.lastAt,
-      result: claudeResult(reader, status),
-      reader,
-      nest: () => attachClaudeSubagents(reader, { dir, projectDir: path.dirname(session), live, shown: null, depth: 1 }),
-    });
+    list.push({ id: agentId, file, key: [stat.size, stat.mtimeMs, live, JSON.stringify(meta)].join("|"), make: () => {
+      const reader = followFile(file, () => claudeReader({ sub: true, self: toolUseId }));
+      if (!reader) {
+        return null;
+      }
+      const status = meta.finished ? "done" : live && !claudeInterrupted(reader) ? "running" : "stopped";
+      return {
+        id: agentId,
+        backend: "claude",
+        type: "subagent",
+        kind: text(meta.agentType),
+        name: text(meta.name),
+        description: text(meta.description),
+        status,
+        startedAt: reader.firstAt,
+        endedAt: status === "running" ? null : reader.lastAt,
+        result: claudeResult(reader, status),
+        reader,
+        nest: () => attachClaudeSubagents(reader, { dir, projectDir: path.dirname(session), live, shown: null, depth: 1 }),
+      };
+    } });
   }
   return list;
 }
@@ -201,26 +309,29 @@ function claudeTeammates(home, session, live) {
     if (!members) {
       continue;
     }
-    const reader = followFile(file, () => claudeReader({ sub: true }));
-    if (!reader) {
-      continue; // removed since the listing
-    }
     const member = members.some((m) => m.name === head.agent && m.prompt === head.prompt);
-    const status = reader.idle || reader.shutDown ? "done" : live && member && !reader.exited && !claudeInterrupted(reader) ? "running" : "stopped";
-    list.push({
-      id: path.basename(name, ".jsonl"),
-      backend: "claude",
-      type: "teammate",
-      kind: null,
-      name: head.agent,
-      description: null,
-      status,
-      startedAt: head.ts,
-      endedAt: status === "running" ? null : reader.lastAt,
-      result: claudeResult(reader, status),
-      reader,
-      nest: () => attachClaudeSubagents(reader, { dir: claudeSubagentsDir(file), projectDir, live, shown: null, depth: 1 }),
-    });
+    const id = path.basename(name, ".jsonl");
+    list.push({ id, file, key: [stat.size, stat.mtimeMs, live, member].join("|"), make: () => {
+      const reader = followFile(file, () => claudeReader({ sub: true }));
+      if (!reader) {
+        return null;
+      }
+      const status = reader.idle || reader.shutDown ? "done" : live && member && !reader.exited && !claudeInterrupted(reader) ? "running" : "stopped";
+      return {
+        id,
+        backend: "claude",
+        type: "teammate",
+        kind: null,
+        name: head.agent,
+        description: null,
+        status,
+        startedAt: head.ts,
+        endedAt: status === "running" ? null : reader.lastAt,
+        result: claudeResult(reader, status),
+        reader,
+        nest: () => attachClaudeSubagents(reader, { dir: claudeSubagentsDir(file), projectDir, live, shown: null, depth: 1 }),
+      };
+    } });
   }
   return list;
 }
@@ -330,26 +441,33 @@ function antigravitySubagents(home, conversationId, live) {
     }
     const id = text(listing?.conversationId);
     const file = id && transcriptFile({ backend: "antigravity", session: { nativeSessionId: id } }, home);
-    const reader = file ? followFile(file, antigravityChildReader) : null;
-    if (!reader) {
+    const stat = file ? statOrNull(file) : null;
+    if (!stat) {
       continue; // its transcript is not written yet
     }
-    const status = reader.finished ? "done" : live ? "running" : "stopped";
-    const replies = reader.messages.filter((message) => message.role === "assistant");
-    list.push({
-      id,
-      backend: "antigravity",
-      type: "subagent",
-      kind: text(listing.subagentDescriptor?.typeName),
-      name: text(listing.subagentDescriptor?.role),
-      description: null,
-      status,
-      startedAt: reader.firstAt,
-      endedAt: status === "running" ? null : reader.lastAt,
-      result: status === "done" ? reader.report ?? replies[replies.length - 1]?.text ?? null : null,
-      reader,
-      nest: () => {},
-    });
+    const descriptor = listing.subagentDescriptor;
+    list.push({ id, file, key: [stat.size, stat.mtimeMs, live, JSON.stringify(descriptor ?? null)].join("|"), make: () => {
+      const reader = followFile(file, antigravityChildReader);
+      if (!reader) {
+        return null;
+      }
+      const status = reader.finished ? "done" : live ? "running" : "stopped";
+      const replies = reader.messages.filter((message) => message.role === "assistant");
+      return {
+        id,
+        backend: "antigravity",
+        type: "subagent",
+        kind: text(descriptor?.typeName),
+        name: text(descriptor?.role),
+        description: null,
+        status,
+        startedAt: reader.firstAt,
+        endedAt: status === "running" ? null : reader.lastAt,
+        result: status === "done" ? reader.report ?? replies[replies.length - 1]?.text ?? null : null,
+        reader,
+        nest: () => {},
+      };
+    } });
   }
   return list;
 }
@@ -406,36 +524,42 @@ function agyArg(value) {
 // Codex
 // ---------------------------------------------------------------------------
 
-function codexSubagents(home, threadId, live) {
+function codexSubagents(store, home, threadId, live) {
   const since = uuid7Time(threadId);
   if (since === null) {
     throw new Error(`not a Codex thread id: ${threadId}`);
   }
   const list = [];
   for (const file of codexRollouts(home, since)) {
-    const meta = codexChildMeta(file);
+    const meta = codexChildMeta(store, file);
     if (meta?.parent !== threadId) {
       continue;
     }
-    const reader = followFile(file, () => codexReader({ child: true }));
-    if (!reader) {
+    const stat = statOrNull(file);
+    if (!stat) {
       continue; // removed since the listing
     }
-    const status = reader.turn === "done" ? "done" : reader.turn === "aborted" ? "stopped" : live ? "running" : "stopped";
-    list.push({
-      id: meta.id,
-      backend: "codex",
-      type: "subagent",
-      kind: meta.role,
-      name: meta.nickname,
-      description: meta.path ? path.basename(meta.path).replace(/[_-]+/g, " ").trim() : null,
-      status,
-      startedAt: uuid7Time(meta.id),
-      endedAt: status === "running" ? null : reader.endedAt,
-      result: status === "done" ? reader.result : null,
-      reader,
-      nest: () => attachCodexSubagents(reader, { home, live, shown: null, depth: 1 }),
-    });
+    list.push({ id: meta.id, file, key: [stat.size, stat.mtimeMs, live].join("|"), make: () => {
+      const reader = followFile(file, () => codexReader({ child: true }));
+      if (!reader) {
+        return null;
+      }
+      const status = reader.turn === "done" ? "done" : reader.turn === "aborted" ? "stopped" : live ? "running" : "stopped";
+      return {
+        id: meta.id,
+        backend: "codex",
+        type: "subagent",
+        kind: meta.role,
+        name: meta.nickname,
+        description: meta.path ? path.basename(meta.path).replace(/[_-]+/g, " ").trim() : null,
+        status,
+        startedAt: uuid7Time(meta.id),
+        endedAt: status === "running" ? null : reader.endedAt,
+        result: status === "done" ? reader.result : null,
+        reader,
+        nest: () => attachCodexSubagents(reader, { home, live, shown: null, depth: 1 }),
+      };
+    } });
   }
   return list;
 }
@@ -451,8 +575,10 @@ function uuid7Time(id) {
 
 // The rollouts of threads started since `since`. Codex files a rollout under
 // the local day it started, so the UTC days from the day before through the
-// day after today cover every zone.
+// day after today cover every zone. A day's folder is listed again only when
+// it changed: an old thread's tray looked through weeks of them every poll.
 const DAY_MS = 86_400_000;
+const dayListings = new Map(); // folder -> { mtimeMs, names }
 const ROLLOUT = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
 function codexRollouts(home, since) {
@@ -461,16 +587,16 @@ function codexRollouts(home, since) {
   for (let at = Math.floor(since / DAY_MS - 1) * DAY_MS; at <= end; at += DAY_MS) {
     const day = new Date(at);
     const dir = path.join(home, ".codex", "sessions", String(day.getUTCFullYear()), String(day.getUTCMonth() + 1).padStart(2, "0"), String(day.getUTCDate()).padStart(2, "0"));
-    let names;
-    try {
-      names = fs.readdirSync(dir);
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        continue; // no rollout that day
-      }
-      throw error;
+    const stat = statOrNull(dir);
+    if (!stat) {
+      continue; // no rollout that day
     }
-    for (const name of names) {
+    let listing = dayListings.get(dir);
+    if (listing?.mtimeMs !== stat.mtimeMs) {
+      listing = { mtimeMs: stat.mtimeMs, names: fs.readdirSync(dir) };
+      dayListings.set(dir, listing);
+    }
+    for (const name of listing.names) {
       const match = ROLLOUT.exec(name);
       const started = match ? uuid7Time(match[1]) : null;
       if (started !== null && started >= since) {
@@ -482,13 +608,13 @@ function codexRollouts(home, since) {
 }
 
 // Rollout -> who spawned it, from its first line (its own session_meta), or
-// null for a thread nobody spawned. It never changes once written.
+// null for a thread nobody spawned. It never changes once written, so it is
+// kept with the tray's lines (store.heads).
 const HEAD_BYTES = 64 * 1024;
-const codexHeads = new Map();
 
-function codexChildMeta(file) {
-  if (codexHeads.has(file)) {
-    return codexHeads.get(file);
+function codexChildMeta(store, file) {
+  if (store.heads.has(file)) {
+    return store.heads.get(file);
   }
   const first = firstLine(file);
   if (first === null) {
@@ -514,7 +640,8 @@ function codexChildMeta(file) {
         role: text(payload.agent_role),
       }
     : null;
-  codexHeads.set(file, meta);
+  store.heads.set(file, meta);
+  saveSoon(store);
   return meta;
 }
 

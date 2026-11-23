@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { listSubagents } from "../cloud/worker/subagents.mjs";
 
 const line = (entry) => `${JSON.stringify(entry)}\n`;
@@ -245,3 +246,48 @@ test("Antigravity: the tray lists the subagents agy filed under the conversation
   write({ process: { pid: DEAD_PID } });
   assert.equal(byName(listSubagents(repo, "run_g", { home }).subagents)["Test Suite Auditor"].status, "stopped");
 });
+
+test("a restarted home serves an unchanged subagent's line without reading its log", async (t) => {
+  // Following every log from the start blocked the home for 451 ms on the
+  // first tray poll of libra hi-lsup5 (29 subagents, 270 MB of logs).
+  const session = "5e551011-0000-4000-8000-0000000000e1";
+  const { home, repo } = setup(t, { id: "run_r", backend: "claude", status: "completed", process: { pid: DEAD_PID }, session: { nativeSessionId: session } });
+  fs.mkdirSync(path.join(home, ".rudder"), { recursive: true });
+  const project = path.join(home, ".claude", "projects", "-x");
+  const subagents = path.join(project, session, "subagents");
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(path.join(project, `${session}.jsonl`), "");
+  const side = (uuid, type, content, ts) => ({ type, uuid, isSidechain: true, timestamp: at(ts), message: { role: type, content } });
+  const log = path.join(subagents, "agent-afin.jsonl");
+  fs.writeFileSync(path.join(subagents, "agent-afin.meta.json"), JSON.stringify({ agentType: "Explore", description: "Map it", toolUseId: "toolu_f", finished: true }));
+  fs.writeFileSync(log, jsonl([side("f1", "user", "Map the flow.", 1), side("f2", "assistant", [{ type: "text", text: "Mapped." }], 5)]));
+  const first = listSubagents(repo, "run_r", { home }).subagents;
+  assert.equal(first[0].step, "Mapped.");
+  const saved = path.join(home, ".rudder", "subagent-tray.json");
+  await waitFor(() => fs.existsSync(saved));
+
+  // Unreadable, same size and mtime: a home that read it would fail.
+  fs.chmodSync(log, 0);
+  const restarted = () => {
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      const { listSubagents } = await import(${JSON.stringify(new URL("../cloud/worker/subagents.mjs", import.meta.url).href)});
+      process.stdout.write(JSON.stringify(listSubagents(${JSON.stringify(repo)}, "run_r", { home: ${JSON.stringify(home)} }).subagents));
+    `], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    return JSON.parse(run.stdout);
+  };
+  assert.deepEqual(restarted(), first);
+
+  // A log that grew is read again.
+  fs.chmodSync(log, 0o644);
+  fs.appendFileSync(log, line(side("f3", "assistant", [{ type: "text", text: "Mapped twice." }], 9)));
+  assert.equal(restarted()[0].step, "Mapped twice.");
+});
+
+async function waitFor(check, timeout = 5000) {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > timeout) throw new Error("timed out");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

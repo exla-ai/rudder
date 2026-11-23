@@ -2210,6 +2210,34 @@ pub(crate) fn prepare_jj_workspace_as(
     })
 }
 
+/// The dashboard opened `cwd`: `rudder __warm-start` colocates jj and starts
+/// the project's warm builder when its base has no snapshot yet, so the first
+/// task finds one ready instead of waiting about 3 s for its build. Returns
+/// why it failed. A folder that is not a Git repo has nothing to warm.
+pub(crate) fn start_warm_builder(cwd: &Path) -> Option<String> {
+    let repo = dashboard_root(cwd);
+    if !is_git_repo(&repo) {
+        return None;
+    }
+    let Some(rudder) = locate_rudder_cli() else {
+        return Some("warm snapshot: rudder CLI not found on PATH".to_string());
+    };
+    let output = Command::new(&rudder)
+        .arg("__warm-start")
+        .arg("--repo")
+        .arg(&repo)
+        .current_dir(&repo)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!("warm snapshot: {}", String::from_utf8_lossy(&output.stderr).trim())),
+        Err(error) => Some(format!("warm snapshot: could not run rudder __warm-start: {error}")),
+    }
+}
+
 pub(crate) fn repo_root(cwd: &Path) -> PathBuf {
     git_output(cwd, ["rev-parse", "--show-toplevel"])
         .map(|root| PathBuf::from(root.trim()))

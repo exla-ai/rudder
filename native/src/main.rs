@@ -598,7 +598,7 @@ fn optional_nonempty(value: &str) -> Option<String> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum Backend {
     Claude,
     Codex,
@@ -2290,6 +2290,13 @@ struct App {
     home_runs_interval: Duration,
     task_summary_tx: mpsc::Sender<TaskSummaryResult>,
     task_summary_rx: mpsc::Receiver<TaskSummaryResult>,
+    /// Titles waiting for their agent's first output: (run id, task). A title
+    /// is a `claude -p` call (about 2 s of model and CPU time); started with
+    /// the launch it competed with the workspace and the agent's own start.
+    pending_titles: Vec<(String, String)>,
+    /// The thread that writes graph.json (`rudder __graph-mirror`), started
+    /// with the first mirror. Newest payload wins.
+    graph_mirror_tx: Option<mpsc::Sender<(PathBuf, String)>>,
     /// BACKSTOP channel: a finished worker that filed no report has a one-shot summarizer
     /// run over its diff; the reconstructed note arrives here. `pending` holds the run ids
     /// with a summarizer in flight so the poll loop never re-spawns one.
@@ -2604,7 +2611,7 @@ impl WorkspacePrepJob {
             (Some(source), _) => crate::branch::fork_conversation(source, &workspace.path)
                 .map(|branched| outcome.branched = Some(branched)),
             (None, Some((source_cwd, session_id))) => {
-                stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path)
+                stage_claude_session_for_cwd(&source_cwd, &session_id, &workspace.path, StagedSession::Fork)
             }
             (None, None) => Ok(()),
         };
@@ -3900,6 +3907,8 @@ impl App {
             home_runs_interval: HOME_RUNS_CHECK_BASE_INTERVAL,
             task_summary_tx,
             task_summary_rx,
+            pending_titles: Vec::new(),
+            graph_mirror_tx: None,
             completion_summary_tx,
             completion_summary_rx,
             completion_summary_pending: HashSet::new(),
@@ -8972,7 +8981,7 @@ impl App {
         self.selected_agent = 0;
         self.focus_or_spawn_main_with_prompt(&discussion_task_prompt(task), false);
         self.notice = Some("discussion session in this checkout; implementation workers were not started".to_string());
-        spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, task.to_string());
+        self.queue_task_title(run_id, task.to_string());
     }
 
     /// Queue a deferred Enter for `run_id`, flushed by `flush_pending_enters`
@@ -9775,8 +9784,9 @@ impl App {
             .unwrap_or_else(|| summarize_task(input));
         // The workspace is named from the local summary, not a model title: a
         // new task used to wait ~3s on a haiku call before anything started.
-        // The model title still arrives (spawn_task_summary_worker below) and
-        // renames the row; only the directory keeps the heuristic words.
+        // The model title still arrives (queue_task_title below, once the
+        // agent shows output) and renames the row; only the directory keeps
+        // the heuristic words.
         let workspace_label = task_summary.clone();
         let run_id = new_run_id(&workspace_label);
         let single_run = node.is_none();
@@ -9895,11 +9905,7 @@ impl App {
         self.focus = FocusPane::Worker;
         self.dirty = true;
         if should_generate_summary {
-            spawn_task_summary_worker(
-                self.task_summary_tx.clone(),
-                run_id.clone(),
-                input.to_string(),
-            );
+            self.queue_task_title(run_id.clone(), input.to_string());
         }
         let job = WorkspacePrepJob {
             cwd: self.cwd.clone(),
@@ -10547,8 +10553,7 @@ Until the first packet arrives, reply only: \"standing by\"."
                 let _ = save_native_run_record(&self.cwd, recorded);
             }
         }
-        spawn_task_summary_worker(
-            self.task_summary_tx.clone(),
+        self.queue_task_title(
             self.agents[self.agents.len() - 2].id.clone(),
             self.agents[self.agents.len() - 2].task.clone(),
         );
@@ -12854,7 +12859,7 @@ Address the objection directly. If you disagree, say why inside \
                 ));
                 return;
             }
-            if let Err(error) = stage_claude_session_for_cwd(&self.cwd, &session_id, &self.cwd) {
+            if let Err(error) = stage_claude_session_for_cwd(&self.cwd, &session_id, &self.cwd, StagedSession::Resume) {
                 self.notice = Some(format!("restore failed: {error}"));
                 return;
             }
@@ -13034,7 +13039,7 @@ Address the objection directly. If you disagree, say why inside \
         // Claude scopes `--resume` lookup to the current directory's project folder;
         // a chat started in a subdirectory of this repo lives in a different one.
         if backend == Backend::Claude {
-            if let Err(error) = stage_claude_session_for_cwd(&self.cwd, session_id, &self.cwd) {
+            if let Err(error) = stage_claude_session_for_cwd(&self.cwd, session_id, &self.cwd, StagedSession::Fork) {
                 self.notice = Some(format!("handoff failed: {error}"));
                 return;
             }
@@ -13873,11 +13878,7 @@ Address the objection directly. If you disagree, say why inside \
         self.task_cursor = 0;
         self.focus_or_spawn_main_with_prompt(trimmed_prompt, false);
         if !trimmed_prompt.is_empty() {
-            spawn_task_summary_worker(
-                self.task_summary_tx.clone(),
-                run_id,
-                trimmed_prompt.to_string(),
-            );
+            self.queue_task_title(run_id, trimmed_prompt.to_string());
         }
     }
 
@@ -19046,10 +19047,11 @@ Address the objection directly. If you disagree, say why inside \
 
     /// MIRROR the current plan into graph.json so the web board shows this TUI
     /// session's DAG. Coalesced: a stable signature of the payload is hashed and
-    /// the shell-out is skipped when nothing changed since the last mirror (so a
-    /// burst of poll ticks is one write at most). Best-effort + NON-FATAL: the TS
-    /// shim is shelled synchronously and any failure (missing CLI, non-zero exit,
-    /// spawn error) is swallowed - mirroring must never block or break the TUI.
+    /// nothing is sent when nothing changed since the last mirror (so a burst of
+    /// poll ticks is one write at most). The write itself runs on the mirror
+    /// thread (`spawn_graph_mirror_writer`): spawning and waiting for the TS shim
+    /// took 75 ms of the dashboard's first frame on the App loop. Best-effort:
+    /// a failed mirror never blocks or breaks the TUI.
     fn mirror_graph(&mut self) {
         let payload = self.build_mirror_payload();
         // Coalesce: hash the serialized payload; skip when unchanged. The payload
@@ -19064,10 +19066,6 @@ Address the objection directly. If you disagree, say why inside \
         }
         self.last_mirror_signature = Some(signature);
 
-        // Nothing to mirror and we have never mirrored a non-empty plan: skip the
-        // shell-out entirely (avoids spawning a CLI just to write an empty graph).
-        // We still recorded the signature above so we do not re-check every tick.
-
         #[cfg(test)]
         {
             // Tests exercise build_mirror_payload + the coalesce guard directly;
@@ -19077,39 +19075,14 @@ Address the objection directly. If you disagree, say why inside \
 
         #[cfg(not(test))]
         {
-            let Some(rudder) = locate_rudder_cli() else {
-                return;
-            };
-            let mirror_started = Instant::now();
-            let repo = self.cwd.clone();
-            let child = Command::new(&rudder)
-                .arg("__graph-mirror")
-                .arg("--repo")
-                .arg(&repo)
-                .current_dir(&repo)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            let Ok(mut child) = child else {
-                return;
-            };
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(serialized.as_bytes());
-                // Drop stdin to signal EOF so the shim's stdin read completes.
+            let job = (self.cwd.clone(), serialized);
+            let tx = self.graph_mirror_tx.get_or_insert_with(spawn_graph_mirror_writer);
+            if let Err(mpsc::SendError(job)) = tx.send(job) {
+                // The writer thread is gone (it could not start): start another.
+                let tx = spawn_graph_mirror_writer();
+                let _ = tx.send(job);
+                self.graph_mirror_tx = Some(tx);
             }
-            // Reap so we do not leave a zombie; ignore the outcome (best-effort).
-            let _ = child.wait();
-            let duration = mirror_started.elapsed();
-            self.record_perf_duration("mirror_graph", duration);
-            self.log_perf_duration_over(
-                "mirror_graph",
-                duration,
-                SLOW_POLL_THRESHOLD,
-                serde_json::json!({
-                    "nodes": payload.get("nodes").and_then(|nodes| nodes.as_array()).map(|nodes| nodes.len()).unwrap_or(0),
-                }),
-            );
         }
     }
 
@@ -23571,7 +23544,63 @@ What to do\n\
         );
     }
 
+    /// Work the dashboard starts when it opens, off the App loop: the
+    /// project's warm builder (the first task then finds its snapshot ready)
+    /// and the models.dev parse the first `/model` would otherwise make on
+    /// the App loop (135 ms).
+    fn start_open_warmups(&self) {
+        if cfg!(test) {
+            return;
+        }
+        crate::models::prewarm_models_dev_catalog();
+        let cwd = self.cwd.clone();
+        let notices = self.bg_notice_tx.clone();
+        let waker = self.pty_output_waker.clone();
+        let _ = thread::Builder::new()
+            .name("rudder-warm-start".to_string())
+            .spawn(move || {
+                // It may colocate jj, as a launch's workspace preparation does.
+                let failed = {
+                    let _serial = WORKSPACE_PREP_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    gitio::start_warm_builder(&cwd)
+                };
+                if let Some(problem) = failed {
+                    let _ = notices.send(problem);
+                    if let Some(wake) = waker {
+                        wake();
+                    }
+                }
+            });
+    }
+
+    /// Title `run_id` once its agent shows output (see `pending_titles`).
+    pub(crate) fn queue_task_title(&mut self, run_id: String, task: String) {
+        self.pending_titles.push((run_id, task));
+    }
+
+    /// Start the titles whose agent has drawn its first output, or stopped
+    /// without any. A row that is gone needs no title.
+    fn start_due_titles(&mut self) {
+        if self.pending_titles.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_titles);
+        for (run_id, task) in pending {
+            let Some(run) = self.agents.iter().find(|run| run.id == run_id) else {
+                continue;
+            };
+            let started = run.terminal.as_ref().is_some_and(|terminal| !terminal.output_log_snapshot().is_empty())
+                || (run.status != AgentStatus::Running && !self.pending_launches.contains_key(&run_id));
+            if started {
+                spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, task);
+            } else {
+                self.pending_titles.push((run_id, task));
+            }
+        }
+    }
+
     fn poll_task_summary_workers(&mut self) {
+        self.start_due_titles();
         let mut changed = false;
         let repo_root = self.cwd.clone();
         while let Ok(result) = self.task_summary_rx.try_recv() {
@@ -24100,6 +24129,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
         });
         app.pty_output_waker = Some(waker);
     }
+    app.start_open_warmups();
 
     // Dedicated blocking reader for terminal input. `event::read` blocks until an
     // event is available and forwards each one to the loop. At shutdown this thread
@@ -24429,16 +24459,68 @@ fn claude_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The graph.json writer: runs `rudder __graph-mirror --repo <repo>` with each
+/// payload on stdin, one at a time and newest first (payloads queued behind a
+/// running mirror collapse to the last one). It ends when the App drops its
+/// sender.
+#[cfg(not(test))]
+fn spawn_graph_mirror_writer() -> mpsc::Sender<(PathBuf, String)> {
+    let (tx, rx) = mpsc::channel::<(PathBuf, String)>();
+    let _ = thread::Builder::new()
+        .name("rudder-graph-mirror".to_string())
+        .spawn(move || {
+            while let Ok(mut job) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    job = newer;
+                }
+                let (repo, payload) = job;
+                let Some(rudder) = locate_rudder_cli() else {
+                    continue;
+                };
+                let Ok(mut child) = Command::new(&rudder)
+                    .arg("__graph-mirror")
+                    .arg("--repo")
+                    .arg(&repo)
+                    .current_dir(&repo)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                else {
+                    continue;
+                };
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(payload.as_bytes());
+                    // Dropping stdin is the EOF the shim's read waits for.
+                }
+                let _ = child.wait();
+            }
+        });
+    tx
+}
+
+/// How a transcript staged into another cwd's project folder is used next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedSession {
+    /// `--resume <sid> --fork-session`: Claude reads it and writes a NEW
+    /// session, so the staged name is a hard link to the same file. Copies
+    /// of one 1.17 GB session filled 4.7 GB of ~/.claude/projects.
+    Fork,
+    /// `--resume <sid>` in place: Claude appends to it, so it is a copy.
+    Resume,
+}
+
 /// Make a Claude session resumable from `target_cwd`. Claude Code scopes `--resume`
 /// lookup to the CURRENT directory's project folder under ~/.claude/projects, so a
 /// fork spawned in a fresh workspace cannot see the source session ("No conversation
-/// found with session ID"). Copying the transcript into the target's project folder
-/// is enough: `--resume <sid> --fork-session` reads it there and mints a NEW session
-/// for the fork, leaving the original transcript untouched.
+/// found with session ID"). Putting the transcript in the target's project folder is
+/// enough: `--resume <sid> --fork-session` reads it there and mints a NEW session for
+/// the fork, leaving the original transcript untouched.
 fn stage_claude_session_for_cwd(
     source_cwd: &Path,
     session_id: &str,
     target_cwd: &Path,
+    how: StagedSession,
 ) -> std::result::Result<(), String> {
     let source = claude_transcript_path(source_cwd, session_id)
         .ok_or_else(|| "no session transcript found to branch".to_string())?;
@@ -24455,8 +24537,34 @@ fn stage_claude_session_for_cwd(
     }
     std::fs::create_dir_all(&target_dir)
         .map_err(|error| format!("could not create session dir: {error}"))?;
-    std::fs::copy(&source, &target)
-        .map_err(|error| format!("could not stage session transcript: {error}"))?;
+    match how {
+        StagedSession::Resume => {
+            std::fs::copy(&source, &target)
+                .map_err(|error| format!("could not stage session transcript: {error}"))?;
+        }
+        StagedSession::Fork => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let same = |a: &std::fs::Metadata, b: &std::fs::Metadata| a.dev() == b.dev() && a.ino() == b.ino();
+                if let (Ok(have), Ok(want)) = (std::fs::metadata(&target), std::fs::metadata(&source)) {
+                    if same(&have, &want) {
+                        return Ok(());
+                    }
+                }
+            }
+            // Linked under a private name, then renamed over whatever the
+            // target name holds (an earlier copy) in one step.
+            let staging = target_dir.join(format!(".{session_id}.{}.link", std::process::id()));
+            let _ = std::fs::remove_file(&staging);
+            std::fs::hard_link(&source, &staging)
+                .map_err(|error| format!("could not link session transcript: {error}"))?;
+            if let Err(error) = std::fs::rename(&staging, &target) {
+                let _ = std::fs::remove_file(&staging);
+                return Err(format!("could not stage session transcript: {error}"));
+            }
+        }
+    }
     Ok(())
 }
 

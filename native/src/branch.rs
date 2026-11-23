@@ -28,6 +28,7 @@
 //! the app. With no prompt the branch waits, idle, for one.
 use super::*;
 use crate::agent_life::{ConversationRoots, AGENT_TITLE_MAX_CHARS};
+use std::io::Seek;
 
 pub(crate) const NOTHING_TO_BRANCH: &str = "Nothing to branch yet";
 const BRANCH_SUFFIX: &str = " (branch)";
@@ -141,7 +142,12 @@ pub(crate) fn copy_code(source_cwd: &Path, run_id: &str) -> Result<String, Strin
 }
 
 /// Copy the source's Claude session file into `target_cwd`'s project folder
-/// under a new id. Only complete lines: Claude may be mid-write.
+/// under a new id. Only complete lines: Claude may be mid-write. Long
+/// sessions pass a gigabyte, so the copy is made in the kernel
+/// (`copy_file_range`), never read into memory, and not flushed to disk:
+/// Claude reads it from the page cache at once. A full read and an fsync took
+/// about 2 s for a 1.2 GB session; this takes about 0.2 s. The branch's Claude
+/// appends to its copy, so it cannot share the source's file.
 pub(crate) fn fork_claude(
     projects: &Path,
     source_cwd: &Path,
@@ -151,20 +157,62 @@ pub(crate) fn fork_claude(
     let source = projects
         .join(encode_claude_project_dir(source_cwd))
         .join(format!("{session}.jsonl"));
-    let bytes = match fs::read(&source) {
-        Ok(bytes) => bytes,
+    let unreadable = |error: io::Error| format!("could not read {}: {error}", source.display());
+    let mut file = match fs::File::open(&source) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(NOTHING_TO_BRANCH.to_string()),
-        Err(error) => return Err(format!("could not read {}: {error}", source.display())),
+        Err(error) => return Err(unreadable(error)),
     };
-    let complete = bytes.iter().rposition(|byte| *byte == b'\n').map_or(0, |at| at + 1);
+    let complete = complete_lines_len(&mut file).map_err(unreadable)?;
     if complete == 0 {
         return Err(NOTHING_TO_BRANCH.to_string());
     }
     let folder = projects.join(encode_claude_project_dir(target_cwd));
     fs::create_dir_all(&folder).map_err(|error| format!("could not create {}: {error}", folder.display()))?;
     let session = crate::gitio::new_rudder_session_id();
-    write_private_new(&folder.join(format!("{session}.jsonl")), &bytes[..complete])?;
-    Ok(Branched::Claude { session })
+    let target = folder.join(format!("{session}.jsonl"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut copy = options
+        .open(&target)
+        .map_err(|error| format!("could not create {}: {error}", target.display()))?;
+    let copied = file
+        .seek(io::SeekFrom::Start(0))
+        .and_then(|_| io::copy(&mut io::Read::by_ref(&mut file).take(complete), &mut copy));
+    match copied {
+        Ok(bytes) if bytes == complete => Ok(Branched::Claude { session }),
+        result => {
+            let _ = fs::remove_file(&target);
+            Err(match result {
+                Ok(bytes) => format!("could not copy {}: {bytes} of {complete} bytes", source.display()),
+                Err(error) => format!("could not copy {} to {}: {error}", source.display(), target.display()),
+            })
+        }
+    }
+}
+
+/// How much of `file` ends in a newline: the length up to and including its
+/// last `\n`, found by reading back from the end (0 without one).
+fn complete_lines_len(file: &mut fs::File) -> io::Result<u64> {
+    const CHUNK: u64 = 64 * 1024;
+    let mut end = file.metadata()?.len();
+    let mut buf = vec![0u8; CHUNK as usize];
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let chunk = &mut buf[..(end - start) as usize];
+        file.seek(io::SeekFrom::Start(start))?;
+        io::Read::read_exact(file, chunk)?;
+        if let Some(at) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            return Ok(start + at as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
 }
 
 /// Fork the source's whole conversation for the branch working in `target_cwd`.
@@ -504,6 +552,18 @@ mod tests {
             b"{\"type\":\"user\",\"uuid\":\"u1\"}\n{\"type\":\"assistant\",\"uuid\":\"a1\"}\n"
         );
         assert_eq!(fs::read(&source_file).unwrap(), written);
+
+        // The copy is cut at the last newline even when the line still being
+        // written is longer than one backward read.
+        let mut long = b"{\"type\":\"user\",\"uuid\":\"u1\"}\n".to_vec();
+        long.extend(std::iter::repeat(b'x').take(200 * 1024));
+        fs::write(&source_file, &long).unwrap();
+        let Branched::Claude { session: forked } = fork_claude(&projects, &source_cwd, session, &target_cwd).unwrap()
+        else {
+            panic!("a Claude source forks as Claude");
+        };
+        let copy = projects.join(encode_claude_project_dir(&target_cwd)).join(format!("{forked}.jsonl"));
+        assert_eq!(fs::read(&copy).unwrap(), b"{\"type\":\"user\",\"uuid\":\"u1\"}\n");
 
         // No conversation on disk yet: nothing to branch.
         assert_eq!(

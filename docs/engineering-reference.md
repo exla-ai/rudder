@@ -683,7 +683,8 @@ The workspace itself is made OFF the App loop. `start_execute_task_node` (typed
 tasks and plan nodes) and `spawn_forked_conversation` (`b`, `/handoff`) push the
 row at once with no workspace, session or PTY, record a `PendingLaunch` in
 `App::pending_launches`, and hand a `WorkspacePrepJob` (`__launch-node`, plus
-the Claude transcript copy for a fork) to a thread. `WORKSPACE_PREP_LOCK` keeps
+a hard link of the Claude transcript for a fork, which only reads it) to a
+thread. `WORKSPACE_PREP_LOCK` keeps
 those one at a time. `poll_agents` drains `WorkspacePrepOutcome` and
 `finish_task_launch` / `finish_fork_launch` fill in the workspace, build the
 command and spawn the PTY. While a row is pending it renders as "preparing

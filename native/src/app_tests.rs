@@ -10210,7 +10210,8 @@ fn branch_guards_main_orchestrator_and_sessionless_runs() {
 }
 
 #[test]
-fn stage_claude_session_copies_the_transcript_to_the_fork_cwd() {
+fn stage_claude_session_links_a_fork_and_copies_a_resume() {
+    use std::os::unix::fs::MetadataExt;
     let mut env = env_guard();
     let base = unique_test_repo("stage-session");
     let home = base.join("home");
@@ -10226,26 +10227,29 @@ fn stage_claude_session_copies_the_transcript_to_the_fork_cwd() {
         .join("projects")
         .join(encode_claude_project_dir(&source_cwd));
     fs::create_dir_all(&source_dir).unwrap();
-    fs::write(source_dir.join(format!("{sid}.jsonl")), "{\"a\":1}\n").unwrap();
+    let source = source_dir.join(format!("{sid}.jsonl"));
+    fs::write(&source, "{\"a\":1}\n").unwrap();
+    let target_dir = home.join(".claude").join("projects").join(encode_claude_project_dir(&target_cwd));
+    let target = target_dir.join(format!("{sid}.jsonl"));
+    let inode = |path: &Path| fs::metadata(path).unwrap().ino();
 
     // Missing transcript fails with a readable error (no such session id).
-    let missing = stage_claude_session_for_cwd(&source_cwd, "no-such-sid", &target_cwd);
-    assert!(missing.is_err());
+    assert!(stage_claude_session_for_cwd(&source_cwd, "no-such-sid", &target_cwd, StagedSession::Fork).is_err());
 
-    let staged = stage_claude_session_for_cwd(&source_cwd, sid, &target_cwd);
-    assert!(staged.is_ok(), "staging succeeds: {staged:?}");
-    let target = home
-        .join(".claude")
-        .join("projects")
-        .join(encode_claude_project_dir(&target_cwd))
-        .join(format!("{sid}.jsonl"));
-    assert!(
-        target.is_file(),
-        "the transcript is readable from the fork's cwd, so --resume finds it"
-    );
-    // The ORIGINAL transcript is untouched.
-    assert!(source_dir.join(format!("{sid}.jsonl")).is_file());
+    // A resume appends to what it finds: its own copy.
+    stage_claude_session_for_cwd(&source_cwd, sid, &target_cwd, StagedSession::Resume).unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":1}\n");
+    assert_ne!(inode(&target), inode(&source));
 
+    // A fork only reads it: the same file under the fork's project folder,
+    // replacing the earlier copy, staged again without a trace.
+    for _ in 0..2 {
+        stage_claude_session_for_cwd(&source_cwd, sid, &target_cwd, StagedSession::Fork).unwrap();
+        assert_eq!(inode(&target), inode(&source), "--resume finds the session from the fork's cwd");
+    }
+    let names: Vec<_> = fs::read_dir(&target_dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    assert_eq!(names, vec![std::ffi::OsString::from(format!("{sid}.jsonl"))]);
+    assert_eq!(fs::read_to_string(&source).unwrap(), "{\"a\":1}\n");
 }
 
 #[cfg(not(windows))]

@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 //! Model/effort tables, the model picker, and suggestion ranking.
 use super::*;
+use std::sync::Arc;
 
 /// Codex's default model. gpt-5.5 retired on 2026-10-14; Codex then puts up a
 /// blocking "Try new model" dialog in every pane launched on it.
@@ -206,7 +207,8 @@ pub(crate) fn known_model_backend(model: &str) -> Option<Backend> {
         }
     }
     maybe_refresh_models_dev_cache();
-    for (backend, candidate, _) in cached_models_dev_rows() {
+    // Asked on every frame of a `/gam` preview: never parse here.
+    for (backend, candidate, _) in models_dev_catalog_now().rows.iter().cloned() {
         if candidate.eq_ignore_ascii_case(query) {
             return Some(backend);
         }
@@ -258,6 +260,9 @@ pub(crate) fn known_model(backend: Backend, model: &str) -> Option<String> {
 /// unknown value is never saved.
 pub(crate) fn parse_model_args(args: &[&str]) -> Result<(Backend, String, Option<EffortLevel>), String> {
     const USAGE: &str = "usage: /model claude|codex|opencode|antigravity <model> [effort]";
+    // A choice being applied must see the whole list, so wait for the
+    // models.dev parse here; the palette reads the rows without waiting.
+    let _ = models_dev_catalog();
     let Some((first, rest)) = args.split_first() else {
         return Err(USAGE.to_string());
     };
@@ -371,7 +376,7 @@ pub(crate) fn model_supports_reasoning(backend: Backend, model: &str) -> bool {
     // stale or wrong models.dev entry (`reasoning: false`) must never REMOVE the
     // High/XHigh/Max effort options from a family we know reasons. The cache can
     // still ADD reasoning for ids the heuristic doesn't recognize.
-    heuristic || cached_model_reasoning(backend, model).unwrap_or(false)
+    heuristic || models_dev_catalog_now().reasoning.get(&(backend, model.to_string())).copied().unwrap_or(false)
 }
 
 pub(crate) fn is_reasoning_alias(backend: Backend, model: &str) -> bool {
@@ -394,47 +399,13 @@ pub(crate) fn is_reasoning_alias(backend: Backend, model: &str) -> bool {
 /// the CLI does not list the model.
 pub(crate) fn cached_model_efforts(backend: Backend, model: &str) -> Option<Vec<EffortLevel>> {
     match backend {
-        Backend::Claude => cached_claude_code_efforts().get(model).cloned(),
+        Backend::Claude => models_dev_catalog_now().claude_efforts.get(model).cloned(),
         Backend::Opencode => cached_opencode_models()
             .into_iter()
             .find(|entry| entry.id == model)
             .map(|entry| entry.efforts),
         Backend::Codex | Backend::Antigravity => None,
     }
-}
-
-/// Every catalog entry's Claude Code effort list, parsed once per version of
-/// the cache file (it is megabytes, and the palette asks on every frame).
-fn cached_claude_code_efforts() -> HashMap<String, Vec<EffortLevel>> {
-    type Memo = Option<(PathBuf, Option<SystemTime>, u64, HashMap<String, Vec<EffortLevel>>)>;
-    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
-    let Some(cache_path) = models_dev_cache_path() else {
-        return HashMap::new();
-    };
-    let Ok(meta) = fs::metadata(&cache_path) else {
-        return HashMap::new();
-    };
-    let stamp = (meta.modified().ok(), meta.len());
-    // Tests rewrite caches faster than mtime resolution; they parse every time.
-    let use_memo = !cfg!(test);
-    if let Some(memo) = MEMO.lock().ok().filter(|_| use_memo) {
-        if let Some((path, modified, len, efforts)) = memo.as_ref() {
-            if *path == cache_path && (*modified, *len) == stamp {
-                return efforts.clone();
-            }
-        }
-    }
-    let Ok(raw) = fs::read_to_string(&cache_path) else {
-        return HashMap::new();
-    };
-    let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return HashMap::new();
-    };
-    let efforts = collect_claude_code_efforts(&data);
-    if let Some(mut memo) = MEMO.lock().ok().filter(|_| use_memo) {
-        *memo = Some((cache_path, stamp.0, stamp.1, efforts.clone()));
-    }
-    efforts
 }
 
 pub(crate) fn collect_claude_code_efforts(data: &serde_json::Value) -> HashMap<String, Vec<EffortLevel>> {
@@ -451,25 +422,6 @@ pub(crate) fn collect_claude_code_efforts(data: &serde_json::Value) -> HashMap<S
             Some((id.clone(), levels))
         })
         .collect()
-}
-
-pub(crate) fn cached_model_reasoning(backend: Backend, model_id: &str) -> Option<bool> {
-    let cache_path = models_dev_cache_path()?;
-    let raw = fs::read_to_string(cache_path).ok()?;
-    let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-    let provider = match backend {
-        Backend::Claude => "anthropic",
-        Backend::Codex => "openai",
-        // opencode ids already carry their provider ("anthropic/claude-sonnet-4-5");
-        // there is no single models.dev provider to look them up under.
-        // Antigravity's list comes from `agy models`, not models.dev.
-        Backend::Opencode | Backend::Antigravity => return None,
-    };
-    data.get(provider)?
-        .get("models")?
-        .get(model_id)?
-        .get("reasoning")?
-        .as_bool()
 }
 
 pub(crate) fn suggestions_for(app: &App) -> Vec<Suggestion> {
@@ -947,8 +899,9 @@ fn searchable_command_suggestions() -> Vec<Suggestion> {
 /// refreshes at dashboard launch, but a dashboard left open for days would
 /// otherwise never see a model released mid-session. Opening the /model picker
 /// on a stale cache (>24h) fires one detached `rudder __refresh-models`;
-/// `cached_models_dev_rows` re-reads the file on every render, so the picker
-/// updates live the moment the refresh lands. At most one spawn per session.
+/// `models_dev_catalog_now` sees the new file on the next render and parses it
+/// in the background, so the picker updates once it lands. At most one spawn
+/// per session.
 fn maybe_refresh_models_dev_cache() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REFRESH_STARTED: AtomicBool = AtomicBool::new(false);
@@ -1416,7 +1369,7 @@ pub(crate) fn model_suggestions_for(backend_filter: Backend, query: &str) -> Vec
             push_model_suggestion(&mut suggestions, &mut seen, Backend::Antigravity, &model, "");
         }
     }
-    for (backend, model, detail) in cached_models_dev_rows() {
+    for (backend, model, detail) in models_dev_catalog_now().rows.iter().cloned() {
         if backend == backend_filter {
             push_model_suggestion(&mut suggestions, &mut seen, backend, &model, &detail);
         }
@@ -1549,45 +1502,124 @@ pub(crate) fn push_model_suggestion(
     });
 }
 
-/// The models.dev rows, parsed once per version of the cache file.
+/// What Rudder reads from the models.dev cache (`models-dev.json`), taken in
+/// one parse of the whole file.
+#[derive(Default)]
+pub(crate) struct ModelsDevCatalog {
+    /// The picker's Claude and Codex rows: (backend, model id, detail).
+    pub(crate) rows: Vec<(Backend, String, String)>,
+    /// Claude Code's effort list per model (`anthropic.models.<id>.efforts`).
+    pub(crate) claude_efforts: HashMap<String, Vec<EffortLevel>>,
+    /// `reasoning` per Claude and Codex model id.
+    pub(crate) reasoning: HashMap<(Backend, String), bool>,
+}
+
+/// The parsed catalog and the (path, mtime, length) of the file it came from.
+type ModelsDevMemo = Option<(PathBuf, Option<SystemTime>, u64, Arc<ModelsDevCatalog>)>;
+static MODELS_DEV_MEMO: std::sync::Mutex<ModelsDevMemo> = std::sync::Mutex::new(None);
+/// Held while the cache is parsed, so a caller that must wait for the
+/// catalog waits for a parse in flight instead of starting a second one.
+static MODELS_DEV_PARSE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static MODELS_DEV_PARSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The models.dev catalog for the current version of the cache file, waiting
+/// for its parse when the memo is older. For a command being applied, which
+/// must not reject a model the cache lists.
 ///
-/// The palette asks for these on EVERY frame while a model picker or a `/gam`
-/// preview is up, and the cache is a ~6 MB JSON document: re-reading and
-/// re-parsing it per frame cost far more than drawing the frame. Keyed by
-/// (path, mtime, length), so a refreshed cache is picked up on the next call.
-pub(crate) fn cached_models_dev_rows() -> Vec<(Backend, String, String)> {
-    type Memo = Option<(PathBuf, Option<SystemTime>, u64, Vec<(Backend, String, String)>)>;
-    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
-    let Some(cache_path) = models_dev_cache_path() else {
-        return Vec::new();
-    };
-    let Ok(meta) = fs::metadata(&cache_path) else {
-        return Vec::new();
-    };
-    let stamp = (meta.modified().ok(), meta.len());
+/// The cache is an ~11 MB JSON document and a parse takes about 135 ms, so
+/// everything drawn per frame uses `models_dev_catalog_now` instead, and the
+/// dashboard parses it once when it opens (`prewarm_models_dev_catalog`).
+/// Keyed by (path, mtime, length): a refreshed cache is picked up on the next
+/// call.
+pub(crate) fn models_dev_catalog() -> Arc<ModelsDevCatalog> {
     // Tests rewrite caches faster than mtime resolution; they parse every time.
-    let use_memo = !cfg!(test);
-    if let Some(memo) = MEMO.lock().ok().filter(|_| use_memo) {
-        if let Some((path, modified, len, rows)) = memo.as_ref() {
-            if *path == cache_path && (*modified, *len) == stamp {
-                return rows.clone();
-            }
-        }
+    if cfg!(test) {
+        return Arc::new(models_dev_stamp().map(|(path, _, _)| parse_models_dev(&path)).unwrap_or_default());
     }
-    let Ok(raw) = fs::read_to_string(&cache_path) else {
-        return Vec::new();
+    let _parse = MODELS_DEV_PARSE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some((path, modified, len)) = models_dev_stamp() else {
+        return Arc::default();
+    };
+    if let Some(catalog) = current_models_dev_memo(&path, modified, len) {
+        return catalog;
+    }
+    let catalog = Arc::new(parse_models_dev(&path));
+    if let Ok(mut memo) = MODELS_DEV_MEMO.lock() {
+        *memo = Some((path, modified, len, Arc::clone(&catalog)));
+    }
+    catalog
+}
+
+/// The models.dev catalog without waiting: the current one, else the one
+/// parsed from the previous version of the cache (empty before the first
+/// parse) while a background parse brings it up to date. For the palette and
+/// previews, which ask on every frame.
+pub(crate) fn models_dev_catalog_now() -> Arc<ModelsDevCatalog> {
+    if cfg!(test) {
+        return models_dev_catalog();
+    }
+    if let Some((path, modified, len)) = models_dev_stamp() {
+        if let Some(catalog) = current_models_dev_memo(&path, modified, len) {
+            return catalog;
+        }
+        prewarm_models_dev_catalog();
+    }
+    MODELS_DEV_MEMO
+        .lock()
+        .ok()
+        .and_then(|memo| memo.as_ref().map(|(_, _, _, catalog)| Arc::clone(catalog)))
+        .unwrap_or_default()
+}
+
+/// Parse the models.dev cache on a background thread, one parse at a time.
+pub(crate) fn prewarm_models_dev_catalog() {
+    use std::sync::atomic::Ordering;
+    if cfg!(test) || MODELS_DEV_PARSING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("rudder-models-dev".to_string())
+        .spawn(|| {
+            let _ = models_dev_catalog();
+            MODELS_DEV_PARSING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        MODELS_DEV_PARSING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn models_dev_stamp() -> Option<(PathBuf, Option<SystemTime>, u64)> {
+    let path = models_dev_cache_path()?;
+    let meta = fs::metadata(&path).ok()?;
+    Some((path, meta.modified().ok(), meta.len()))
+}
+
+fn current_models_dev_memo(path: &Path, modified: Option<SystemTime>, len: u64) -> Option<Arc<ModelsDevCatalog>> {
+    let memo = MODELS_DEV_MEMO.lock().ok()?;
+    let (memo_path, memo_modified, memo_len, catalog) = memo.as_ref()?;
+    (memo_path == path && *memo_modified == modified && *memo_len == len).then(|| Arc::clone(catalog))
+}
+
+fn parse_models_dev(path: &Path) -> ModelsDevCatalog {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return ModelsDevCatalog::default();
     };
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
+        return ModelsDevCatalog::default();
     };
-
     let mut rows = Vec::new();
     collect_provider_models(&data, "anthropic", Backend::Claude, &mut rows);
     collect_provider_models(&data, "openai", Backend::Codex, &mut rows);
-    if let Some(mut memo) = MEMO.lock().ok().filter(|_| use_memo) {
-        *memo = Some((cache_path, stamp.0, stamp.1, rows.clone()));
+    let mut reasoning = HashMap::new();
+    for (provider, backend) in [("anthropic", Backend::Claude), ("openai", Backend::Codex)] {
+        let models = data.get(provider).and_then(|provider| provider.get("models")).and_then(serde_json::Value::as_object);
+        for (id, model) in models.into_iter().flatten() {
+            if let Some(value) = model.get("reasoning").and_then(serde_json::Value::as_bool) {
+                reasoning.insert((backend, id.clone()), value);
+            }
+        }
     }
-    rows
+    ModelsDevCatalog { rows, claude_efforts: collect_claude_code_efforts(&data), reasoning }
 }
 
 pub(crate) fn collect_provider_models(

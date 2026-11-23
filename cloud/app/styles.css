@@ -601,11 +601,24 @@ a { color: var(--accent); }
 .bubble pre { background: rgba(0,0,0,0.22); }
 .msg.pending .bubble { opacity: 0.92; }
 .msg.queued .bubble { border: 1px dashed var(--muted); background: var(--surface-2); color: var(--ink); opacity: 1; }
-.msg.failed .bubble { box-shadow: 0 0 0 1.5px var(--failed); }
 .msg .m-foot { font-size: 11.5px; color: var(--faint); margin-top: 4px; padding: 0 4px; display: flex; gap: 8px; align-items: center; }
 .msg.queued .m-foot { color: var(--muted); font-weight: 600; }
-.msg .m-foot button { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px; }
-.msg .m-foot button.drop { color: var(--muted); }
+.msg .m-foot > button { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px; }
+/* A message that did not get through (app.js problemOf): the bubble trades
+   its fill for the problem's color, and under it what happened stays in
+   full, with the ways on, until it is sent again or removed. Refused is red;
+   not picked up and not received are amber. */
+.msg.problem { --c: var(--failed); --cs: var(--failed-soft); }
+.msg.problem.warn { --c: var(--needs); --cs: var(--needs-soft); }
+.msg.problem .bubble { background: var(--cs); color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--c); }
+.msg.problem .bubble code, .msg.problem .bubble pre { background: var(--surface-2); }
+.msg.problem .m-foot { display: block; width: min(86%, 440px); margin-top: 6px; padding: 0; }
+.m-note { box-sizing: border-box; background: var(--surface); border: 1px solid var(--line-strong); border-left: 3px solid var(--c); border-radius: 12px; padding: 10px 12px; font-size: 13.5px; line-height: 1.45; color: var(--ink-2); }
+.m-note .m-head { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--c); }
+.m-note .m-head svg { width: 16px; height: 16px; flex: none; }
+.m-note .m-why { margin: 3px 0 0; }
+.m-note .m-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.m-note .m-acts .btn.small { min-height: 32px; font-size: 13.5px; }
 /* Edit under a sent message (chat-edit.js) shows on hover or focus. A phone
    has no hover, so it always shows there, and a long press opens the
    message's menu instead of selecting text. */
@@ -1057,6 +1070,8 @@ dialog.sheet.antigravity-login { max-width: 476px; max-height: var(--vvh); }
 /* Ask card: a prompt the agent is blocked on, pinned above the composer */
 .ask-slot { flex: none; padding: 0 calc(var(--sar) + 10px) 0 calc(var(--sal) + 10px); position: relative; z-index: 4; }
 .ask-slot:empty { display: none; }
+.ask-card.flash { animation: ask-flash 0.9s ease-out; }
+@keyframes ask-flash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1.5px var(--accent); } 100% { box-shadow: var(--shadow-2); } }
 .ask-card {
   margin: 6px 0 8px; padding: 12px 12px 10px; border-radius: var(--radius);
   background: var(--surface); border: 1px solid color-mix(in srgb, var(--needs) 40%, var(--line-strong));

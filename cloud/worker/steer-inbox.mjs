@@ -56,10 +56,71 @@ export function waitSteerReceipt(repoDir, requestId, timeoutMs) {
   });
 }
 
+const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
 /** Read a completed receipt for a send that previously timed out. */
 export function readSteerReceipt(repoDir, requestId) {
-  if (typeof requestId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId)) return null;
+  if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) return null;
   return readReceipt(path.join(repoDir, ".rudder", "steer-receipts", `${requestId}.json`));
+}
+
+/**
+ * What a refused message waited on, from the dashboard's reason
+ * (native/src/detect.rs terminal_composer_blocked): "menu" when a menu owns
+ * the agent's keyboard, "prompt" when a permission or other prompt does, or
+ * null for any other refusal. The app words the reason and offers the way
+ * out from this.
+ */
+export function blockedBy(error) {
+  const text = String(error || "");
+  if (text.includes("a menu is open")) return "menu";
+  if (text.includes("waiting for approval") || text.includes("rate-limit prompt")) return "prompt";
+  return null;
+}
+
+const WITHDRAW_SETTLE_MS = 250;
+
+/**
+ * Take back a request the dashboard has not acted on, so a message the app
+ * sends again cannot also arrive late. Its receipt is written first, as
+ * "withdrawn": the dashboard skips any request that already has a receipt
+ * (native poll_steer_inbox, its at-most-once ledger). Returns
+ * `{status: "withdrawn"}`, or the dashboard's own answer when it got there
+ * first: `{status: "processing"}` while it acts, then the receipt.
+ */
+export async function withdrawSteer(repoDir, requestId) {
+  if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) throw new Error("bad request id");
+  const dir = path.join(repoDir, ".rudder", "steer-receipts");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${requestId}.json`);
+  const mine = JSON.stringify({ requestId, status: "failed", error: "withdrawn", withdrawn: true });
+  try {
+    fs.writeFileSync(file, mine, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    return answerIn(file);
+  }
+  const inbox = path.join(repoDir, ".rudder", "steer");
+  let names = [];
+  try {
+    names = fs.readdirSync(inbox);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  for (const name of names) {
+    if (name.endsWith(`-${requestId}.json`)) fs.rmSync(path.join(inbox, name), { force: true });
+  }
+  // The dashboard checks for a receipt just before it writes "processing"
+  // over it: one that had checked already shows up within this wait.
+  await new Promise((resolve) => setTimeout(resolve, WITHDRAW_SETTLE_MS));
+  return fs.readFileSync(file, "utf8") === mine ? { status: "withdrawn" } : answerIn(file);
+}
+
+function answerIn(file) {
+  const receipt = readReceipt(file);
+  if (receipt?.withdrawn) return { status: "withdrawn" };
+  if (receipt) return { status: receipt.status, error: receipt.error, blocked: blockedBy(receipt.error) };
+  return { status: "processing" };
 }
 
 function readReceipt(file) {

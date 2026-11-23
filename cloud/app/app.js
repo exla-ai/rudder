@@ -32,7 +32,7 @@ import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.j
 import { COMPACTING_HTML, compactHasDetail, compactHtml, paintCompacting, paintCompaction } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
-import { sentAfter, settlePending, withAttachments } from "/app/pending.js";
+import { isCommand, sentAfter, settlePending, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { openTour, tourDue } from "/app/tutorial.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -4340,6 +4340,16 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     askCard._setSubmission(message || "");
     setText(askCard.querySelector(".ask-count"), asks.length > 1 ? `1 of ${asks.length}` : "");
   }
+  // A refused message's "Go to prompt": the card above the composer, brought
+  // into view with its first control focused.
+  function showAsk() {
+    if (!askCard) return;
+    askCard.scrollIntoView({ block: "nearest" });
+    askCard.classList.remove("flash");
+    void askCard.offsetWidth;
+    askCard.classList.add("flash");
+    askCard.querySelector("button, textarea, input")?.focus({ preventScroll: true });
+  }
   async function answerAsk(ask, answer) {
     try {
       const submission = await api("/api/app/answer", { method: "POST", body: { workspace: ws, run, ask: ask.id, answer } });
@@ -4554,18 +4564,91 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paintTool(box, box._msg);
       return;
     }
-    // A bubble that was not sent: send it again, or take it away.
-    const retry = e.target.closest(".retry, .drop");
-    if (retry) {
-      const id = retry.closest(".msg").dataset.key;
-      const list = store.pending.get(key) || [];
-      const item = list.find((x) => x.id === id);
-      if (!item) return;
-      store.pending.set(key, list.filter((x) => x !== item));
-      if (retry.classList.contains("retry")) send(item.text, [], item);
-      else paint();
-    }
+    // A message that did not get through: the ways on under it (problemOf).
+    const act = e.target.closest(".m-acts [data-act]");
+    if (act) void onProblem(act.closest(".msg").dataset.key, act.dataset.act);
   });
+
+  // What happened to a message that did not get through, in words the app
+  // user can act on, and the ways on from there: `head` and `why` say it,
+  // `acts` are [action, label] with the one most likely wanted first.
+  function problemOf(p) {
+    if (p.state === "stuck") {
+      return { tone: "warn", head: "Not picked up", why: "The agent's dashboard has not taken this message after a minute. It may be busy or restarting.", acts: [["retry", "Retry"], ["drop", "Remove"]] };
+    }
+    if (p.state === "lost") {
+      return isCommand(p.text)
+        ? { tone: "warn", head: "No sign of this command", why: "The agent's conversation shows nothing from it. Its terminal shows what happened.", acts: [["terminal", "View terminal"], ["retry", "Run again"], ["drop", "Remove"]] }
+        : { tone: "warn", head: "Not received", why: "The agent's conversation never showed this message, so the agent may not have it.", acts: [["retry", "Send again"], ["drop", "Remove"]] };
+    }
+    if (p.blocked === "menu") {
+      return { tone: "err", head: "Not sent", why: "A menu is open in the agent's terminal, so your message would have gone into the menu.", acts: [["close-send", "Close menu and send"], ["terminal", "View terminal"], ["drop", "Remove"]] };
+    }
+    // The prompt may reach the app a poll after the refusal, and leaves it
+    // once answered: one the app showed keeps the bubble pointing at it.
+    const asking = p.blocked === "prompt" && pendingAsks(agentNow()).length > 0;
+    if (asking) p.sawAsk = true;
+    if (asking) {
+      return { tone: "err", head: "Not sent", why: "The agent is waiting for your answer to the prompt below. Answer it, then send this again.", acts: [["ask", "Go to prompt"], ["retry", "Retry"], ["drop", "Remove"]] };
+    }
+    if (p.blocked === "prompt" && p.sawAsk) {
+      return { tone: "err", head: "Not sent", why: "The agent was waiting for your answer to a prompt. That prompt is answered now, so this can go.", acts: [["retry", "Send now"], ["drop", "Remove"]] };
+    }
+    if (p.blocked === "prompt") {
+      return { tone: "err", head: "Not sent", why: "The agent is waiting on a permission prompt in its terminal that the app can't show. Decline it to send your message instead, or look at it first.", acts: [["decline-send", "Decline it and send"], ["terminal", "View terminal"], ["drop", "Remove"]] };
+    }
+    const why = String(p.error || "The dashboard did not take it.").replace(/^not sent:\s*/i, "");
+    return { tone: "err", head: "Not sent", why: `${why.charAt(0).toUpperCase()}${why.slice(1)}${/[.!?]$/.test(why) ? "" : "."}`, acts: [["retry", "Retry"], ["drop", "Remove"]] };
+  }
+  const PROBLEMS = new Set(["failed", "stuck", "lost"]);
+  const noteHtml = (n, acting) => `<div class="m-note"><div class="m-head">${icon("alert")}<span>${escapeHtml(n.head)}</span></div><p class="m-why">${escapeHtml(n.why)}</p><div class="m-acts">${n.acts.map(([action, label], i) => `<button type="button" class="btn small${i === 0 ? " accent" : ""}" data-act="${action}"${acting ? " disabled" : ""}>${escapeHtml(label)}</button>`).join("")}</div></div>`;
+
+  async function onProblem(id, action) {
+    const item = (store.pending.get(key) || []).find((x) => x.id === id);
+    if (!item || item.acting) return;
+    if (action === "terminal") return setTerm(true);
+    if (action === "ask") return showAsk();
+    item.acting = true;
+    paint();
+    try {
+      // A queued message goes back first, so it cannot also arrive late.
+      if (item.state === "stuck" && !(await withdraw(item))) return;
+      store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
+      if (action === "drop") return;
+      // Esc closes the menu, or declines the prompt, the way it would in the
+      // terminal; the pane redraws before the message goes in.
+      if (action === "close-send" || action === "decline-send") {
+        await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      item.acting = false;
+      void send(item.text, [], item);
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+    } finally {
+      item.acting = false;
+      paint();
+    }
+  }
+
+  // Take back a queued message (worker/steer-inbox.mjs withdrawSteer). True
+  // when it was; otherwise the dashboard got there first and its answer is
+  // the message's state now.
+  async function withdraw(item) {
+    const res = await api("/api/app/withdraw", { method: "POST", body: { workspace: ws, requestId: item.requestId } });
+    if (res.status === "withdrawn") return true;
+    if (res.status === "processing") Object.assign(item, { state: "queued", ts: Date.now() });
+    else applyReceipt(item, res);
+    if (res.status === "delivered") toast("It reached the agent just now");
+    return false;
+  }
+
+  // The dashboard's answer to a queued message: in the agent's terminal now,
+  // or refused with what it waited on.
+  function applyReceipt(item, receipt) {
+    if (receipt.status === "delivered") Object.assign(item, { state: item.interrupt ? "sent" : "waiting", ts: Date.now() });
+    if (receipt.status === "failed") Object.assign(item, { state: "failed", error: receipt.error, blocked: receipt.blocked });
+  }
 
   // Mac app: pull a copy of this agent into the local clone.
   const copyHere = () => {
@@ -4637,7 +4720,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })), interrupt };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
-    item.ts = Date.now();
+    Object.assign(item, { ts: Date.now(), error: null, blocked: null, requestId: null, busyAt: null });
     // Only a user message the transcript adds after this point can be this one (pending.js).
     item.after = sentAfter(store.transcripts.get(key)?.messages);
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
@@ -4653,10 +4736,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paint();
       const wasWorking = isRunning(agentNow()?.status || store.transcripts.get(key)?.status);
       const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt } });
-      item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
-      item.requestId = res.requestId;
-      sentAt = Date.now();
-      pollState();
+      if (res.status === "refused") Object.assign(item, { state: "failed", error: res.error, blocked: res.blocked });
+      else {
+        item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
+        sentAt = Date.now();
+        pollState();
+      }
+      item.requestId = res.requestId ?? null;
       // The question card tracks a typed answer through the same receipts.
       if (res?.answered) {
         localAnswerSubmission = res;
@@ -4665,8 +4751,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       setTimeout(() => loadTranscript({ replace: true }), 1200);
     } catch (err) {
-      item.state = "failed";
-      if (err.status !== 401) toast(err.message, { error: true });
+      Object.assign(item, { state: "failed", error: err.message, blocked: null });
     }
     paint();
   }
@@ -4689,7 +4774,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const page = new URLSearchParams();
       if (pin) page.set("after", pin);
       for (const p of store.pending.get(key) || []) {
-        if (p.state === "queued" && p.requestId) page.append("pending", p.requestId);
+        if ((p.state === "queued" || p.state === "stuck") && p.requestId) page.append("pending", p.requestId);
       }
       // Edits the home answered "queued" (chat-edit.js): their receipts too.
       for (const id of editAction.queued()) page.append("pending", id);
@@ -4738,15 +4823,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const list = store.pending.get(key);
     if (!list?.length) return;
     for (const receipt of t.receipts || []) {
-      const item = list.find((p) => p.state === "queued" && p.requestId === receipt.requestId);
-      if (!item) continue;
-      if (receipt.status === "delivered") item.state = item.interrupt ? "sent" : "waiting";
-      if (receipt.status === "failed") {
-        item.state = "failed";
-        if (receipt.error) toast(receipt.error, { error: true });
-      }
+      const item = list.find((p) => (p.state === "queued" || p.state === "stuck") && p.requestId === receipt.requestId);
+      if (item) applyReceipt(item, receipt);
     }
-    store.pending.set(key, settlePending(list, t.messages, Date.now()));
+    store.pending.set(key, settlePending(list, t.messages, Date.now(), isRunning(agentNow()?.status || t.status)));
   }
 
   // The chat's transcript request. A teammate's agent is read through the team view.
@@ -4972,7 +5052,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "empty" || x.kind === "error") return;
     if (x.kind === "pending") {
       const p = x.p;
-      node.className = `msg user ${p.state === "failed" ? "failed" : "pending"}`;
+      const problem = PROBLEMS.has(p.state) ? problemOf(p) : null;
+      node.className = `msg user ${problem ? `problem ${problem.tone}` : "pending"}`;
       node.classList.toggle("queued", p.state === "queued" || p.state === "waiting");
       const md = node.querySelector(".md");
       // A reply's quote goes above the bubble (quote-reply.js).
@@ -4988,7 +5069,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       else if (p.state === "sent") label = "Sent";
       else if (p.state === "uploading" && uploading) label = `Uploading ${p.files.length - uploading + 1} of ${p.files.length}`;
       const foot = node.querySelector(".m-foot");
-      const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button><button type="button" class="drop">Remove</button>` : `<span>${label}</span>`;
+      const html = problem ? noteHtml(problem, p.acting) : `<span>${label}</span>`;
+      foot.setAttribute("role", problem ? "alert" : "status");
       if (foot.dataset.h !== html) { foot.innerHTML = html; foot.dataset.h = html; }
       return;
     }

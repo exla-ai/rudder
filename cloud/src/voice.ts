@@ -437,9 +437,12 @@ async function sendMessage(ctx: VoiceContext, args: Record<string, unknown>): Pr
 }
 
 async function delivered(ctx: VoiceContext, project: VoiceProject, agent: VoiceAgent, text: string): Promise<VoiceToolResult> {
-  const result = (await ctx.rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text })) as { status?: string } | null;
+  const result = (await ctx.rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text })) as { status?: string; error?: string } | null;
   const name = `"${shortTitle(agent)}" (${STATUS_WORDS[agent.status ?? ""] ?? agent.status ?? "unknown"}) in ${project.name}`;
   ctx.log?.(`sent to ${agent.id} in ${project.name}: ${result?.status ?? "?"}`);
+  if (result?.status === "refused") {
+    return { output: `Not sent to ${name}: ${result.error}. Tell the user it was not sent and why, in a few words.` };
+  }
   if (result?.status === "queued") {
     return { output: `Queued for ${name}: "${clip(text, 200)}". Its dashboard has not taken it yet; it will on its next check. Tell the user it is queued for that agent.` };
   }
@@ -526,8 +529,10 @@ async function deliverWhenStarted(ctx: VoiceContext, started: NonNullable<VoiceM
     const found = findStarted(ctx, started);
     if (found) {
       try {
-        await ctx.rpc("send", { workspaceId: found.project.workspaceId, runId: found.agent.id, text });
-        ctx.log?.(`held message delivered to ${found.agent.id} in ${found.project.name}`);
+        const result = (await ctx.rpc("send", { workspaceId: found.project.workspaceId, runId: found.agent.id, text })) as { status?: string; error?: string } | null;
+        ctx.log?.(result?.status === "refused"
+          ? `held message for ${found.agent.id} not sent: ${result.error}`
+          : `held message delivered to ${found.agent.id} in ${found.project.name}`);
       } catch (error) {
         ctx.log?.(`held message for ${found.agent.id} failed: ${error instanceof Error ? error.message : String(error)}`);
       }

@@ -7915,6 +7915,14 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, sent);
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/withdraw") {
+    // A queued message the app gave up on: the dashboard skips it from now on
+    // (worker/steer-inbox.mjs withdrawSteer), or says it got there first.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    sendJson(res, 200, await homeRpc(home.id, "withdraw", { workspaceId: repo.id, requestId: stringField(body, "requestId") ?? "" }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/upload") {
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     sendJson(res, 200, await uploadToHome(home.id, repo.id, url.searchParams.get("name") ?? "", req));

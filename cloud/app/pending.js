@@ -8,8 +8,26 @@
 // attached. Each message settles one bubble: the same text sent twice shows
 // twice until the transcript has both. A slash command settles on the note
 // or compaction it left instead (settlePending).
+//
+// A bubble never leaves on its own: one that waits too long on a step says
+// where it is stuck, and keeps settling if the transcript shows it later.
 
-const KEEP_MS = 5 * 60 * 1000;
+/**
+ * How long a message may sit "queued" (the home answered before the
+ * dashboard did) before it reads as not picked up. A dashboard takes a
+ * message from its inbox within a second, and the home already waited 12 s
+ * for it, so a minute from the send means the dashboard is not taking it.
+ */
+export const QUEUE_LIMIT_MS = 60_000;
+
+/**
+ * How long a delivered message may be missing from the transcript before it
+ * reads as not received. The agent records it as it takes it: at once when
+ * it is free, within half a minute when its CLI has to start first, and when
+ * its turn ends when it is busy, so the clock runs from the later of the
+ * send and the last time the agent was seen working.
+ */
+export const SHOW_LIMIT_MS = 2 * 60_000;
 
 /**
  * The text sent for a message with files: the saved paths listed after it,
@@ -54,8 +72,13 @@ const recorded = (m) => {
   return m.command ?? null;
 };
 
-/** The bubbles of `list` the transcript `messages` does not show yet. */
-export function settlePending(list, messages, now) {
+/**
+ * The bubbles of `list` the transcript `messages` does not show yet. One that
+ * waited past its limit turns "stuck" (queued, the dashboard has not taken
+ * it) or "lost" (delivered, the agent never recorded it). `p.ts` is when its
+ * current step began; `busy` says whether the agent is working now.
+ */
+export function settlePending(list, messages, now, busy) {
   const shown = (messages || []).filter((m) => m.ts != null && (m.role === "user" || recorded(m)));
   const taken = new Set();
   return list.filter((p) => {
@@ -72,8 +95,18 @@ export function settlePending(list, messages, now) {
       (p.usedIds ??= new Set()).add(m.id);
       return false;
     });
-    if (!hit) return p.state !== "sent" || now - p.ts <= KEEP_MS;
-    taken.add(hit.id);
-    return false;
+    if (hit) {
+      taken.add(hit.id);
+      return false;
+    }
+    if (p.state === "queued" && now - p.ts > QUEUE_LIMIT_MS) p.state = "stuck";
+    if (p.state === "sent" || p.state === "waiting") {
+      if (busy) p.busyAt = now;
+      if (now - Math.max(p.ts, p.busyAt ?? -Infinity) > SHOW_LIMIT_MS) p.state = "lost";
+    }
+    return true;
   });
 }
+
+/** Whether a message is a slash command, which the transcript may not record. */
+export const isCommand = (text) => commandOf(text) !== null;

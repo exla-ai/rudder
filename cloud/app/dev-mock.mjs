@@ -8,6 +8,8 @@
 // /app/__mock/subagents/<ok|old> (the chat's subagent tray, or a home too old to list them),
 // /app/__mock/compact/<live|done|off> (run_a1 compacting its context now, then the marker it leaves),
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
+// /app/__mock/send/<ok|menu|prompt|queued|lost> (how the next messages go: delivered, refused for a
+// menu or a prompt in the agent's pane, never taken by the dashboard, or taken but never in the transcript),
 // /app/__mock/harness/<ok|old> (move a chat to another harness, or a home too old to),
 // /app/__mock/notes/<ok|old> (a chat's notes, or a home too old to keep them),
 // /app/__mock/search/<ok|old|slow> (Search everything's messages, a home too old to search them, or a slow one;
@@ -48,6 +50,7 @@ let trayMode = "ok";
 let compactMode = "off";
 let compactSince = 0;
 let closeMode = "ok";
+let sendMode = "ok";
 let harnessMode = "ok";
 let notesMode = "ok";
 let fileRefMode = "ok";
@@ -1076,6 +1079,7 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   if (p.startsWith("/app/__mock/update/")) { updateMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/all/new" }); return res.end(); }
+  if (p.startsWith("/app/__mock/send/")) { sendMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/close/")) { closeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p === "/app/__mock/file-ref/ok" || p === "/app/__mock/file-ref/old") {
     fileRefMode = p.split("/").pop();
@@ -1347,6 +1351,11 @@ const server = http.createServer(async (req, res) => {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "The agent's terminal is not accepting input right now." });
+      // The dashboard's refusals (native terminal_composer_blocked), as worker/home.mjs answers them.
+      if (sendMode === "menu") return json(res, 200, { ok: false, status: "refused", error: "not sent: a menu is open in its pane (Esc closes it)", blocked: "menu" });
+      if (sendMode === "prompt") return json(res, 200, { ok: false, status: "refused", error: "not sent: the agent is waiting for approval. Open its Terminal to review the prompt, then retry", blocked: "prompt" });
+      if (sendMode === "queued") return json(res, 200, { ok: true, status: "queued", requestId: randomUUID() });
+      if (sendMode === "lost") return json(res, 200, { ok: true, status: "delivered" });
       setTimeout(() => {
         // Files come back as `attachments`, as the worker reads them.
         t.msgs.push(...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
@@ -1689,7 +1698,12 @@ const server = http.createServer(async (req, res) => {
         " Enter to confirm · Esc to exit",
       ].join("\n") });
     }
+    if (p === "/api/app/withdraw") {
+      return json(res, 200, steerReceipts.has(body.requestId) ? steerReceipts.get(body.requestId) : { status: "withdrawn" });
+    }
     if (p === "/api/app/keys") {
+      // Esc closes the menu or declines the prompt a message was refused for.
+      if (body.keys === "esc" && (sendMode === "menu" || sendMode === "prompt")) sendMode = "ok";
       return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/models") {

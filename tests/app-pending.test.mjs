@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sentAfter, settlePending } from "../cloud/app/pending.js";
+import { QUEUE_LIMIT_MS, SHOW_LIMIT_MS, sentAfter, settlePending } from "../cloud/app/pending.js";
 
 // What the composer sent, and what Claude Code recorded after the dashboard
 // typed it in (sanitize_steer_instruction trims each line and collapses runs
@@ -49,4 +49,27 @@ test("a message sent with files settles on the transcript entry with the same wo
   assert.deepEqual(settlePending([sent], [wordsOnly], now + 2000), [sent], "the same words without the file are another message");
   const withFile = { ...wordsOnly, id: "u5", attachments: [shot] };
   assert.deepEqual(settlePending([sent], [wordsOnly, withFile], now + 2000), []);
+});
+
+test("a message that waits too long says where it is stuck, and still settles when it shows up", () => {
+  // Queued: the dashboard never answered. A minute after the send it reads as not picked up.
+  const queued = { id: "p5", text: "update the README", ts: now, state: "queued", after: now + skew };
+  settlePending([queued], [], now + QUEUE_LIMIT_MS - 1000);
+  assert.equal(queued.state, "queued");
+  assert.deepEqual(settlePending([queued], [], now + QUEUE_LIMIT_MS + 1000), [queued], "never dropped");
+  assert.equal(queued.state, "stuck");
+
+  // Delivered while the agent worked: no clock while it keeps working, then
+  // the limit from the last time it was seen working.
+  const waiting = { id: "p6", text: "and the tests", ts: now, state: "waiting", after: now + skew };
+  settlePending([waiting], [], now + 10 * 60_000, true);
+  assert.equal(waiting.state, "waiting", "a long turn is not a lost message");
+  settlePending([waiting], [], now + 10 * 60_000 + SHOW_LIMIT_MS - 1000, false);
+  assert.equal(waiting.state, "waiting");
+  assert.deepEqual(settlePending([waiting], [], now + 10 * 60_000 + SHOW_LIMIT_MS + 1000, false), [waiting], "never dropped");
+  assert.equal(waiting.state, "lost");
+
+  // The transcript shows it after all: the bubble settles.
+  const late = [{ id: "u6", role: "user", ts: now + skew + 11 * 60_000, text: "and the tests" }];
+  assert.deepEqual(settlePending([waiting], late, now + 13 * 60_000, false), []);
 });

@@ -39,7 +39,7 @@ import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
-import { queueSteer, readSteerReceipt, waitSteerReceipt } from "./steer-inbox.mjs";
+import { blockedBy, queueSteer, readSteerReceipt, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
@@ -902,7 +902,7 @@ async function handleRpc(method, params) {
     const receipts = [];
     for (const requestId of Array.isArray(params.pending) ? params.pending.slice(0, 40) : []) {
       const receipt = readSteerReceipt(project.dir, requestId);
-      if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error });
+      if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error, blocked: blockedBy(receipt.error) });
     }
     return { ...transcript, receipts };
   }
@@ -936,7 +936,14 @@ async function handleRpc(method, params) {
       if (commands.some((item) => item.name === command[1] && item.prompt)) kind = "opencode-prompt";
     }
     if (interrupt) kind = kind === "opencode-prompt" ? "interrupt-opencode-prompt" : "interrupt-send";
-    return await steer(project, { kind, taskId: runId, instruction: text });
+    // A message the dashboard refused is an answer about the message, not a
+    // failed call: the app keeps it on its bubble with what it waited on.
+    const sent = await deliver(project, { kind, taskId: runId, instruction: text });
+    return sent.status === "failed" ? { ok: false, status: "refused", error: sent.error, blocked: blockedBy(sent.error) } : sent;
+  }
+  if (method === "withdraw") {
+    // A queued message the app gave up on (its Retry or Remove).
+    return await withdrawSteer(project.dir, String(params.requestId || ""));
   }
   if (method === "task") {
     return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });
@@ -1551,7 +1558,17 @@ function readScreen(project, runId, watchLive = true) {
 // channel the web board uses: the dashboard is the single writer of its agents,
 // so the phone never touches a PTY or run.json directly. The receipt says
 // whether it was delivered.
-async function steer(project, { kind, taskId, instruction }) {
+async function steer(project, request) {
+  const sent = await deliver(project, request);
+  if (sent.status === "failed") {
+    throw new Error(sent.error);
+  }
+  return sent;
+}
+
+// One request and the dashboard's answer: delivered, failed with its reason,
+// or queued with the id its receipt will carry.
+async function deliver(project, { kind, taskId, instruction }) {
   if (!instruction.trim()) {
     throw new Error("message is empty");
   }
@@ -1570,7 +1587,7 @@ async function steer(project, { kind, taskId, instruction }) {
     return { ok: true, status: "delivered" };
   }
   if (receipt?.status === "failed") {
-    throw new Error(receipt.error || "the dashboard could not deliver it");
+    return { ok: false, status: "failed", error: receipt.error || "the dashboard could not deliver it" };
   }
   return { ok: true, status: "queued", requestId };
 }

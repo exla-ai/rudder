@@ -267,6 +267,7 @@ export function createCoordinatorTools({ projects, rpc, home, sleep = (ms) => ne
       if (!text) throw new Error("text is empty");
       remember(caller, project, agent);
       const result = await rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text: text.slice(0, 16_000) });
+      if (result?.status === "refused") throw new Error(`not sent to ${label(project, agent)}: ${result.error}`);
       return delivered(result, `Sent to ${label(project, agent)}`);
     },
     async interrupt_agent(args, { caller }) {

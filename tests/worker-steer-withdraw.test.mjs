@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { blockedBy, queueSteer, readSteerReceipt, withdrawSteer } from "../cloud/worker/steer-inbox.mjs";
+import { queueSteer, readSteerReceipt, withdrawSteer } from "../cloud/worker/steer-inbox.mjs";
 
 // A queued message the app sends again must not also arrive late: withdrawing
 // it writes its receipt first, which the dashboard treats as already handled
@@ -29,15 +29,8 @@ test("withdrawing a queued request leaves the dashboard nothing to deliver", asy
   assert.equal(readSteerReceipt(repo, busy).status, "delivered");
 
   const refused = queueSteer(repo, { kind: "steer", taskId: "run-1", instruction: "three" });
-  fs.writeFileSync(path.join(receipts, `${refused}.json`), JSON.stringify({ requestId: refused, status: "failed", error: "not sent: a menu is open in its pane (Esc closes it)" }));
-  assert.equal((await withdrawSteer(repo, refused)).blocked, "menu");
+  fs.writeFileSync(path.join(receipts, `${refused}.json`), JSON.stringify({ requestId: refused, status: "failed", error: "not sent: a menu is open in its pane (Esc closes it)", code: "menu_open" }));
+  assert.deepEqual(await withdrawSteer(repo, refused), { status: "failed", error: "not sent: a menu is open in its pane (Esc closes it)", code: "menu_open" });
 
   await assert.rejects(withdrawSteer(repo, "../x"), /bad request id/);
-});
-
-test("a refusal names what the agent waited on", () => {
-  assert.equal(blockedBy("not sent: a menu is open in its pane (Esc closes it)"), "menu");
-  assert.equal(blockedBy("not sent: the agent is waiting for approval. Open its Terminal to review the prompt, then retry"), "prompt");
-  assert.equal(blockedBy("not sent: answer the Codex rate-limit prompt first"), "prompt");
-  assert.equal(blockedBy("target not found: run-9"), null);
 });

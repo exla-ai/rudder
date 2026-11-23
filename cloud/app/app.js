@@ -32,7 +32,7 @@ import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.j
 import { COMPACTING_HTML, compactHasDetail, compactHtml, paintCompacting, paintCompaction } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
-import { isCommand, sentAfter, settlePending, withAttachments } from "/app/pending.js";
+import { isCommand, leavesRecord, sentAfter, settlePending, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { openTour, tourDue } from "/app/tutorial.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -4231,7 +4231,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const fileLinks = !ro;
   const chatMarkdown = { fileRefs: fileLinks };
   if (!ro) mountFileRefs(msgsEl, { ws, run });
-  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: () => loadTranscript({ replace: true }), onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
+  const editAction = chatEdit({ workspace: ws, run, agent: agentNow, readOnly: ro, onSent: (text, files, requestId) => { showEdit(text, files, requestId); loadTranscript({ replace: true }); }, onReply: quoteReply && ((text) => quoteReply.reply(text, "you")) });
   // The prompts it goes on, as of the last paint.
   let chatEdits = [];
   // Read only: whose agent this is, where the composer would be.
@@ -4596,28 +4596,39 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         ? { tone: "warn", head: "No sign of this command", why: "The agent's conversation shows nothing from it. Its terminal shows what happened.", acts: [["terminal", "View terminal"], ["retry", "Run again"], ["drop", "Remove"]] }
         : { tone: "warn", head: "Not received", why: "The agent's conversation never showed this message, so the agent may not have it.", acts: [["retry", "Send again"], ["drop", "Remove"]] };
     }
-    if (p.blocked === "menu") {
+    // What the dashboard's refusal waited on is its receipt's `code`.
+    if (p.code === "menu_open") {
       return { tone: "err", head: "Not sent", why: "A menu is open in the agent's terminal, so your message would have gone into the menu.", acts: [["close-send", "Close menu and send"], ["terminal", "View terminal"], ["drop", "Remove"]] };
     }
-    // The prompt may reach the app a poll after the refusal, and leaves it
-    // once answered: one the app showed keeps the bubble pointing at it.
-    const asking = p.blocked === "prompt" && pendingAsks(agentNow()).length > 0;
+    // A prompt the app can answer (asks.mjs) may reach it a poll after the
+    // refusal, and leaves once answered: one it showed keeps the bubble
+    // pointing at it.
+    const prompt = p.code === "permission_prompt" || p.code === "rate_limit_prompt";
+    const asking = prompt && pendingAsks(agentNow()).length > 0;
     if (asking) p.sawAsk = true;
     if (asking) {
       return { tone: "err", head: "Not sent", why: "The agent is waiting for your answer to the prompt below. Answer it, then send this again.", acts: [["ask", "Go to prompt"], ["retry", "Retry"], ["drop", "Remove"]] };
     }
-    if (p.blocked === "prompt" && p.sawAsk) {
+    if (prompt && p.sawAsk) {
       return { tone: "err", head: "Not sent", why: "The agent was waiting for your answer to a prompt. That prompt is answered now, so this can go.", acts: [["retry", "Send now"], ["drop", "Remove"]] };
     }
-    if (p.blocked === "prompt") {
+    if (p.code === "permission_prompt") {
       return { tone: "err", head: "Not sent", why: "The agent is waiting on a permission prompt in its terminal that the app can't show. Decline it to send your message instead, or look at it first.", acts: [["decline-send", "Decline it and send"], ["terminal", "View terminal"], ["drop", "Remove"]] };
     }
+    if (p.code === "rate_limit_prompt") {
+      return { tone: "err", head: "Not sent", why: "The agent hit a usage limit, and its terminal asks what to do next. Answer it there, then send this again.", acts: [["terminal", "View terminal"], ["retry", "Retry"], ["drop", "Remove"]] };
+    }
+    if (p.code === "turn_did_not_stop") {
+      return { tone: "err", head: "Not sent", why: "The agent's turn did not stop, so your message did not interrupt it.", acts: [["retry", "Retry"], ["drop", "Remove"]] };
+    }
+    if (p.code === "not_submitted") {
+      return { tone: "err", head: "Not sent", why: "The agent's terminal did not take the message.", acts: [["terminal", "View terminal"], ["retry", "Retry"], ["drop", "Remove"]] };
+    }
+    // Any other refusal: the dashboard's own words.
     const why = String(p.error || "The dashboard did not take it.").replace(/^not sent:\s*/i, "");
     return { tone: "err", head: "Not sent", why: `${why.charAt(0).toUpperCase()}${why.slice(1)}${/[.!?]$/.test(why) ? "" : "."}`, acts: [["retry", "Retry"], ["drop", "Remove"]] };
   }
   const PROBLEMS = new Set(["failed", "stuck", "lost"]);
-  // Esc presses "Close menu and send" makes before it leaves the menu to you.
-  const MENU_ESCS = 3;
   const noteHtml = (n, acting) => `<div class="m-note"><div class="m-head">${icon("alert")}<span>${escapeHtml(n.head)}</span></div><p class="m-why">${escapeHtml(n.why)}</p><div class="m-acts">${n.acts.map(([action, label], i) => `<button type="button" class="btn small${i === 0 ? " accent" : ""}" data-act="${action}"${acting ? " disabled" : ""}>${escapeHtml(label)}</button>`).join("")}</div></div>`;
 
   async function onProblem(id, action) {
@@ -4631,9 +4642,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       // A queued message goes back first, so it cannot also arrive late.
       if (item.state === "stuck" && !(await withdraw(item))) return;
       if (action === "drop") return unlist(item);
-      if (action === "close-send") return await closeMenuAndSend(item);
-      // Esc declines the prompt, the way it would in the terminal.
-      if (action === "decline-send") await pressEsc();
+      // Esc closes the menu or declines the prompt, as it would in the
+      // terminal. One press a click: a menu that takes more (Claude's /config
+      // goes back a level first) refuses the message again and says so.
+      if (action === "close-send" || action === "decline-send") await pressEsc();
       unlist(item);
       item.acting = false;
       void send(item.text, [], item);
@@ -4651,16 +4663,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
     await new Promise((resolve) => setTimeout(resolve, 700));
   };
-  // Esc closes a menu as it would in the terminal, but some take more than
-  // one (Claude's /config goes back a level first). Esc goes in until the
-  // dashboard stops refusing the message for a menu, at most MENU_ESCS times.
-  async function closeMenuAndSend(item) {
-    for (let n = 0; n < MENU_ESCS && item.blocked === "menu"; n++) {
-      await pressEsc();
-      unlist(item);
-      await send(item.text, [], item);
-    }
-  }
 
   // Take back a queued message (worker/steer-inbox.mjs withdrawSteer). True
   // when it was; otherwise the dashboard got there first and its answer is
@@ -4677,8 +4679,29 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // The dashboard's answer to a queued message: in the agent's terminal now,
   // or refused with what it waited on.
   function applyReceipt(item, receipt) {
-    if (receipt.status === "delivered") Object.assign(item, { state: item.interrupt ? "sent" : "waiting", ts: Date.now() });
-    if (receipt.status === "failed") Object.assign(item, { state: "failed", error: receipt.error, blocked: receipt.blocked });
+    if (receipt.status === "delivered" && !ranCommand(item)) Object.assign(item, { state: item.interrupt ? "sent" : "waiting", ts: Date.now() });
+    if (receipt.status === "failed") Object.assign(item, { state: "failed", error: receipt.error, code: receipt.code });
+  }
+
+  // A slash command in the agent's terminal now. One its CLI keeps no record
+  // of (pending.js leavesRecord) has nothing more to show, so its bubble goes.
+  function ranCommand(item) {
+    if (leavesRecord(agentNow()?.backend, item.text)) return false;
+    unlist(item);
+    toast(`Sent ${item.text.trim().split(/\s/)[0]} to the agent's terminal`);
+    return true;
+  }
+
+  // An edit takes its message and every turn after it out of the chat
+  // (chat-edit.js). Until the agent records the new one, that stands in as
+  // sent, or waiting while the dashboard has yet to do the edit, so the chat
+  // is not left without it. An edit the dashboard refuses leaves the
+  // message as it was (reconcilePending).
+  function showEdit(text, paths, requestId) {
+    const item = { id: `pending-${Date.now()}-${seq++}`, text, files: paths.map((path) => ({ path })), ts: Date.now(), state: requestId ? "waiting" : "sent", editRequest: requestId };
+    item.after = sentAfter(store.transcripts.get(key)?.messages);
+    store.pending.set(key, [...(store.pending.get(key) || []), item]);
+    paint();
   }
 
   // Mac app: pull a copy of this agent into the local clone.
@@ -4751,7 +4774,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })), interrupt };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
-    Object.assign(item, { ts: Date.now(), error: null, blocked: null, requestId: null, busyAt: null });
+    Object.assign(item, { ts: Date.now(), error: null, code: null, requestId: null, busyAt: null });
     // Only a user message the transcript adds after this point can be this one (pending.js).
     item.after = sentAfter(store.transcripts.get(key)?.messages);
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
@@ -4767,7 +4790,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paint();
       const wasWorking = isRunning(agentNow()?.status || store.transcripts.get(key)?.status);
       const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt } });
-      if (res.status === "refused") Object.assign(item, { state: "failed", error: res.error, blocked: res.blocked });
+      if (res.status === "refused") Object.assign(item, { state: "failed", error: res.error, code: res.code });
+      else if (res.status === "delivered" && ranCommand(item)) pollState();
       else {
         item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
         sentAt = Date.now();
@@ -4782,7 +4806,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       setTimeout(() => loadTranscript({ replace: true }), 1200);
     } catch (err) {
-      Object.assign(item, { state: "failed", error: err.message, blocked: null });
+      Object.assign(item, { state: "failed", error: err.message, code: null });
     }
     paint();
   }
@@ -4851,13 +4875,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   }
 
   function reconcilePending(t) {
-    const list = store.pending.get(key);
-    if (!list?.length) return;
+    if (!store.pending.get(key)?.length) return;
     for (const receipt of t.receipts || []) {
+      const list = store.pending.get(key);
       const item = list.find((p) => (p.state === "queued" || p.state === "stuck") && p.requestId === receipt.requestId);
       if (item) applyReceipt(item, receipt);
+      // chat-edit.js says why the edit failed; its message is as it was.
+      if (receipt.status === "failed") store.pending.set(key, list.filter((p) => p.editRequest !== receipt.requestId));
     }
-    store.pending.set(key, settlePending(list, t.messages, Date.now(), isRunning(agentNow()?.status || t.status)));
+    store.pending.set(key, settlePending(store.pending.get(key), t.messages, Date.now(), isRunning(agentNow()?.status || t.status)));
   }
 
   // The chat's transcript request. A teammate's agent is read through the team view.

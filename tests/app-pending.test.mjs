@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QUEUE_LIMIT_MS, SHOW_LIMIT_MS, sentAfter, settlePending } from "../cloud/app/pending.js";
+import { QUEUE_LIMIT_MS, SHOW_LIMIT_MS, leavesRecord, sentAfter, settlePending } from "../cloud/app/pending.js";
 
 // What the composer sent, and what Claude Code recorded after the dashboard
 // typed it in (sanitize_steer_instruction trims each line and collapses runs
@@ -82,4 +82,17 @@ test("only the agent's own conversation settles a message, not Rudder's copy of 
   assert.deepEqual(settlePending([sent], typed, now + 2000, false), [sent]);
   const own = [{ id: "u7", role: "user", ts: now + skew + 9000, text: "Are you still there?" }];
   assert.deepEqual(settlePending([sent], own, now + 12_000, false), []);
+});
+
+// A command its CLI runs without a record would read "No sign of this
+// command" two minutes later, though it worked (Codex /model, /fast).
+test("a slash command waits for the transcript only where the CLI records it", () => {
+  assert.equal(leavesRecord("claude", "/fast"), true);
+  assert.equal(leavesRecord("codex", "/goal ship it"), true);
+  assert.equal(leavesRecord("codex", "/compact"), true);
+  assert.equal(leavesRecord("codex", "/model gpt-5"), false);
+  assert.equal(leavesRecord("antigravity", "/model"), false);
+  assert.equal(leavesRecord("opencode", "/review"), false);
+  assert.equal(leavesRecord("codex", "/tmp/x is gone"), true, "a path is words, not a command");
+  assert.equal(leavesRecord("antigravity", "hello"), true);
 });

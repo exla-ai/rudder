@@ -39,7 +39,7 @@ import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
-import { blockedBy, queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
+import { queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
@@ -956,7 +956,7 @@ async function handleRpc(method, params) {
     const receipts = [];
     for (const requestId of Array.isArray(params.pending) ? params.pending.slice(0, 40) : []) {
       const receipt = readSteerReceipt(project.dir, requestId);
-      if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error, blocked: blockedBy(receipt.error) });
+      if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error, code: receipt.code });
     }
     return { ...transcript, receipts };
   }
@@ -991,9 +991,10 @@ async function handleRpc(method, params) {
     }
     if (interrupt) kind = kind === "opencode-prompt" ? "interrupt-opencode-prompt" : "interrupt-send";
     // A message the dashboard refused is an answer about the message, not a
-    // failed call: the app keeps it on its bubble with what it waited on.
+    // failed call: the app keeps it on its bubble, with the receipt's `code`
+    // (menu_open, permission_prompt, ...) saying what it waited on.
     const sent = await deliver(project, { kind, taskId: runId, instruction: text });
-    return sent.status === "failed" ? { ok: false, status: "refused", error: sent.error, blocked: blockedBy(sent.error) } : sent;
+    return sent.status === "failed" ? { ok: false, status: "refused", error: sent.error, code: sent.code } : sent;
   }
   if (method === "withdraw") {
     // A queued message the app gave up on (its Retry or Remove).
@@ -1656,7 +1657,7 @@ async function deliver(project, { kind, taskId, instruction }) {
     return { ok: true, status: "delivered" };
   }
   if (receipt?.status === "failed") {
-    return { ok: false, status: "failed", error: receipt.error || "the dashboard could not deliver it" };
+    return { ok: false, status: "failed", error: receipt.error || "the dashboard could not deliver it", code: receipt.code };
   }
   return { ok: true, status: "queued", requestId };
 }

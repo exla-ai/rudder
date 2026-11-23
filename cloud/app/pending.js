@@ -112,3 +112,17 @@ export function settlePending(list, messages, now, busy) {
 
 /** Whether a message is a slash command, which the transcript may not record. */
 export const isCommand = (text) => commandOf(text) !== null;
+
+/**
+ * Whether the agent's transcript shows a message once the agent has it, so
+ * its bubble can wait for that. Every message does but a slash command its
+ * CLI runs without a record (worker/transcripts.mjs): Claude Code notes each
+ * one it runs and Codex only /goal and /compact. OpenCode records only the
+ * ones that run as a prompt, which the app does not know apart, and
+ * Antigravity none. A command with no record leaves once it is delivered.
+ */
+export function leavesRecord(backend, text) {
+  const command = commandOf(text);
+  if (command === null || backend === "claude") return true;
+  return backend === "codex" && (command === "/goal" || command === "/compact");
+}

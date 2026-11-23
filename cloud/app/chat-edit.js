@@ -24,7 +24,9 @@ const LONG_PRESS_MS = 450;
  * the chat's latest prompt) gets the action, every other one loses it.
  * `paint.editing()` says whether a message is open for editing, so the chat
  * does not scroll it away. `agent` returns the chat's agent row now;
- * `onSent` reloads the transcript. `onReply(text)`, when given, adds Reply to
+ * `onSent(text, paths, requestId)` gets the edited message (its words and
+ * attached paths, and the request id of an edit the home answered "queued")
+ * to show until the transcript has it. `onReply(text)`, when given, adds Reply to
  * a phone's message menu: there the bubble's text can't be selected to quote.
  *
  * An edit the dashboard has not done when the home answers (a turn it stops
@@ -190,7 +192,7 @@ export function chatEdit({ workspace, run, agent, readOnly, onSent, onReply = nu
         if (res?.status === "queued") queued.set(res.requestId, messageId);
         const later = stopping ? "Stopping the turn, then sending the edited message" : "Editing when the cloud machine picks it up";
         toast(res?.status === "queued" ? later : "Sent the edited message");
-        onSent();
+        onSent(value, attachments, res?.status === "queued" ? res.requestId : null);
         app.refreshState();
       } catch (err) {
         // Closed while it was sending: the box is gone, so say it here.

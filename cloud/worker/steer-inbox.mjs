@@ -99,20 +99,6 @@ export function readSteerReceipt(repoDir, requestId) {
   return readReceipt(path.join(repoDir, ".rudder", "steer-receipts", `${requestId}.json`));
 }
 
-/**
- * What a refused message waited on, from the dashboard's reason
- * (native/src/detect.rs terminal_composer_blocked): "menu" when a menu owns
- * the agent's keyboard, "prompt" when a permission or other prompt does, or
- * null for any other refusal. The app words the reason and offers the way
- * out from this.
- */
-export function blockedBy(error) {
-  const text = String(error || "");
-  if (text.includes("a menu is open")) return "menu";
-  if (text.includes("waiting for approval") || text.includes("rate-limit prompt")) return "prompt";
-  return null;
-}
-
 const WITHDRAW_SETTLE_MS = 250;
 
 /**
@@ -154,7 +140,7 @@ export async function withdrawSteer(repoDir, requestId) {
 function answerIn(file) {
   const receipt = readReceipt(file);
   if (receipt?.withdrawn) return { status: "withdrawn" };
-  if (receipt) return { status: receipt.status, error: receipt.error, blocked: blockedBy(receipt.error) };
+  if (receipt) return { status: receipt.status, error: receipt.error, code: receipt.code };
   return { status: "processing" };
 }
 

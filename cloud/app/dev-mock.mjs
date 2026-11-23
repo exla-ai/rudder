@@ -1352,8 +1352,8 @@ const server = http.createServer(async (req, res) => {
       if (!t) return json(res, 404, { error: "Agent not found" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "The agent's terminal is not accepting input right now." });
       // The dashboard's refusals (native terminal_composer_blocked), as worker/home.mjs answers them.
-      if (sendMode === "menu") return json(res, 200, { ok: false, status: "refused", error: "not sent: a menu is open in its pane (Esc closes it)", blocked: "menu" });
-      if (sendMode === "prompt") return json(res, 200, { ok: false, status: "refused", error: "not sent: the agent is waiting for approval. Open its Terminal to review the prompt, then retry", blocked: "prompt" });
+      if (sendMode === "menu") return json(res, 200, { ok: false, status: "refused", error: "not sent: a menu is open in its pane (Esc closes it)", code: "menu_open" });
+      if (sendMode === "prompt") return json(res, 200, { ok: false, status: "refused", error: "not sent: the agent is waiting for approval. Open its Terminal to review the prompt, then retry", code: "permission_prompt" });
       if (sendMode === "queued") return json(res, 200, { ok: true, status: "queued", requestId: randomUUID() });
       if (sendMode === "lost") return json(res, 200, { ok: true, status: "delivered" });
       setTimeout(() => {
@@ -1369,7 +1369,7 @@ const server = http.createServer(async (req, res) => {
         t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: `On it. I read your note:\n\n> ${String(body.text).slice(0, 200)}\n\nI'll report back when the change is in.` });
         t.a.status = "review"; t.a.updatedAt = now(); t.a.lastMessage = "On it. I'll report back when the change is in.";
       }, 8000);
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     // Edit a sent prompt (chat-edit.js; native chat_edit.rs on a real home):
     // the chat goes back to just before it and the new text runs instead.
@@ -1385,9 +1385,12 @@ const server = http.createServer(async (req, res) => {
       const at = t.msgs.findIndex((m) => m.id === body.entry);
       if (at < 0) return json(res, 502, { error: "That message is no longer in this chat. Reload the chat and try again" });
       if (/fail/i.test(body.text || "")) return json(res, 502, { error: "could not relaunch run_a1: the agent's terminal is gone" });
+      // The message and the turns after it leave at once; the agent records
+      // the new one when it takes it, about 2 seconds later on a real home.
       const rewind = () => {
         const from = t.msgs.findIndex((m) => m.id === body.entry);
-        t.msgs.splice(from, t.msgs.length - from, ...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }]));
+        t.msgs.splice(from, t.msgs.length - from);
+        setTimeout(() => t.msgs.push(...showAttachments([{ id: `u${now()}`, role: "user", ts: now(), text: body.text }])), 2000);
         t.a.status = "working"; t.a.updatedAt = now();
         setTimeout(() => {
           t.msgs.push({ id: `a${now()}`, role: "assistant", ts: now(), text: "Starting from your edited message." });

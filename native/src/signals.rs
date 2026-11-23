@@ -397,6 +397,8 @@ fn write_compacted_signal_command(signal: &Path) -> String {
 /// (turn ended on an API error), `Notification` hooks for the pause states, and
 /// a `PostCompact` hook (a manual `/compact` ended), each writing the signal file.
 /// The subagent hooks write payload files for the sidebar tree (subagents.rs).
+/// Every command runs only in the chat's own Claude process, never in a
+/// teammate's (`chat_process_only`).
 ///
 /// Matcher names are Claude's OWN notification types, verified against the
 /// installed binary: `permission_prompt`, `idle_prompt`, `agent_needs_input`,
@@ -473,12 +475,45 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
             }]
         }
     });
+    for groups in settings["hooks"].as_object_mut().expect("hooks is an object").values_mut() {
+        for group in groups.as_array_mut().expect("each event is a list") {
+            for hook in group["hooks"].as_array_mut().expect("each group has hooks") {
+                let command = hook["command"].as_str().expect("each hook is a command");
+                hook["command"] = serde_json::Value::String(chat_process_only(command));
+            }
+        }
+    }
     if fast_mode {
         if let Some(obj) = settings.as_object_mut() {
             obj.insert("fastMode".to_string(), serde_json::Value::Bool(true));
         }
     }
     settings.to_string()
+}
+
+/// Runs a Claude hook command only in the chat's own Claude process.
+///
+/// Claude starts each agent-team teammate that gets a pane (teammateMode
+/// `tmux`, `iterm2`, or `auto` inside tmux) as a separate `claude` process
+/// with the lead's flags, `--settings` included, plus
+/// `--agent-id <name>@<team> --parent-session-id <lead>`. So the teammate fires
+/// every one of these hooks with its OWN `session_id`: each `Stop` of a
+/// teammate moved the chat's row onto the teammate's conversation and wrote
+/// `done` into the chat's signal (measured on Claude Code 2.1.330).
+/// Nothing in the payload or the hook's environment names a teammate:
+/// `agent_type` is there only when the teammate was given one. The process
+/// that fired the hook is the hook's parent, and its arguments do name it.
+/// The payload is still read, so Claude never writes into a closed pipe.
+///
+/// Subagents and in-process teammates need no guard: they run inside the
+/// chat's process and report the chat's own `session_id` with an `agent_id`.
+/// The `PermissionRequest` hook (`with_permission_hook`) is not wrapped: a
+/// teammate's approval prompt sits in a pane nobody sees, so the app's asks
+/// are the only place to answer it.
+fn chat_process_only(command: &str) -> String {
+    format!(
+        "case \" $(ps -ww -o args= -p \"$PPID\") \" in *' --agent-id '*) cat >/dev/null; exit 0 ;; esac; {command}"
+    )
 }
 
 /// The Codex signal script. It is wired TWICE, because Codex has two lifecycle

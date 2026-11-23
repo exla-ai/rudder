@@ -29324,6 +29324,128 @@ fn claude_hooks_report_the_live_session_and_the_row_follows_it() {
     assert_eq!(adopted.as_deref(), Some("3709e163-3eb4-489f-a5a9-15353f4aa59b"));
 }
 
+/// Run a hook command the way a Claude process with `claude_args` fires it:
+/// that process is the hook shell's parent, and the payload is on stdin.
+#[cfg(not(windows))]
+fn run_hook_from_claude(command: &str, claude_args: &[&str], payload: &str) {
+    // `; exit $?` keeps this shell alive as the hook's parent instead of
+    // letting it exec the hook in its place.
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("sh -c \"$HOOK\"; exit $?")
+        .args(claude_args)
+        .env("HOOK", command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "{command}");
+}
+
+/// Claude starts a pane teammate as its own process with the chat's
+/// `--settings`, so the teammate fires all of Rudder's hooks with its own
+/// session. Those reports used to move the chat's row onto the teammate's
+/// conversation (258 times since 11-18). Payloads and arguments are the real
+/// ones from Claude Code 2.1.330, trimmed.
+#[cfg(not(windows))]
+#[test]
+fn a_teammates_hooks_leave_the_chat_alone() {
+    let _env = env_guard();
+    let dir = unique_test_repo("claude-teammate-hooks");
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+    let run_id = "lead-run";
+    let lead = "188e4dd6-1130-47f3-97eb-ee14a6c1f029";
+    let teammate_session = "a3427d1f-1096-49e0-ae04-350e0fd2686d";
+    let signal = signals::signal_path(run_id).expect("signal path");
+    fs::create_dir_all(signal.parent().unwrap()).unwrap();
+    let settings: serde_json::Value =
+        serde_json::from_str(&signals::claude_settings_json(&signal, false)).unwrap();
+    let commands: Vec<(String, String)> = settings["hooks"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .flat_map(|(event, groups)| {
+            groups.as_array().unwrap().iter().flat_map(move |group| {
+                group["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |hook| (event.clone(), hook["command"].as_str().unwrap().to_string()))
+            })
+        })
+        .collect();
+    let teammate = [
+        "/home/u/.local/share/claude/versions/2.1.330",
+        "--agent-id",
+        "counter@session-188e4dd6",
+        "--agent-name",
+        "counter",
+        "--team-name",
+        "session-188e4dd6",
+        "--parent-session-id",
+        lead,
+        "--dangerously-skip-permissions",
+        "--settings",
+        "/home/u/.rudder/signals/lead-run-claude.json",
+    ];
+    for (event, command) in &commands {
+        let payload = format!(
+            r#"{{"session_id":"{teammate_session}","transcript_path":"/home/u/.claude/projects/-p/{teammate_session}.jsonl","cwd":"/p","permission_mode":"bypassPermissions","agent_type":"general-purpose","hook_event_name":"{event}","notification_type":"idle_prompt","trigger":"manual","error":"rate_limit","tool_name":"Agent","agent_id":"a1","prompt":"<task-notification>"}}"#
+        );
+        run_hook_from_claude(command, &teammate, &payload);
+        let written: Vec<_> = fs::read_dir(signal.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(written.is_empty(), "a teammate's {event} hook wrote {written:?}");
+    }
+
+    // The chat's own process still reports, its first session and the one
+    // a `/clear` or `/resume` moves it to.
+    let chat = [
+        "claude",
+        "--permission-mode",
+        "bypassPermissions",
+        "--settings",
+        "/home/u/.rudder/signals/lead-run-claude.json",
+    ];
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.agents.clear();
+    let mut run = test_agent_run(run_id, "chat");
+    run.cwd = dir.clone();
+    run.terminal = None;
+    run.session_id = Some(lead.to_string());
+    app.agents.push(run);
+    let session_hook = |event: &str| {
+        commands
+            .iter()
+            .find(|(name, command)| name == event && command.contains("session_id"))
+            .map(|(_, command)| command.clone())
+            .unwrap_or_else(|| panic!("{event} reports the session"))
+    };
+    let cleared = "6d71f2c8-f0fa-4a44-ba4e-38e1a953b56e";
+    run_hook_from_claude(
+        &session_hook("Stop"),
+        &chat,
+        &format!(r#"{{"session_id":"{lead}","hook_event_name":"Stop","stop_hook_active":false}}"#),
+    );
+    app.adopt_reported_sessions();
+    let first = app.agents[0].session_id.clone();
+    run_hook_from_claude(
+        &session_hook("UserPromptSubmit"),
+        &chat,
+        &format!(r#"{{"session_id":"{cleared}","hook_event_name":"UserPromptSubmit","prompt":"hi"}}"#),
+    );
+    app.adopt_reported_sessions();
+    let after_clear = app.agents[0].session_id.clone();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(first.as_deref(), Some(lead));
+    assert_eq!(after_clear.as_deref(), Some(cleared));
+}
+
 /// `rudder cloud` reconnecting sends the dashboard a SIGWINCH at the SAME size
 /// (the relay's replay is only the tail of the output, so the laptop needs the
 /// whole picture again). A same-size resize changes nothing ratatui can see, so

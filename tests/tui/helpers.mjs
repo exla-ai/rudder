@@ -241,12 +241,14 @@ async function withoutSummaries(rudderHome, claudeBin) {
   await fsp.writeFile(
     file,
     `#!/bin/sh
-print=0; stream=0
+print=0; stream=0; prev=""
 for arg in "$@"; do
   case "$arg" in
     -p) print=1 ;;
-    --output-format) stream=1 ;;
+    stream-json) [ "$prev" = "--output-format" ] && stream=1 ;;
+    --output-format=stream-json) stream=1 ;;
   esac
+  prev="$arg"
 done
 if [ "$print" = 1 ] && [ "$stream" = 0 ]; then exit 0; fi
 exec ${quoted} "$@"

@@ -297,7 +297,14 @@ async function draft() {
     });
     log(`created the draft release ${ctx.tag} (${created.id}) for ${ctx.revision}`);
   } else if (existing.target_commitish !== ctx.revision) {
-    await api.json("PATCH", `/repos/${REPO}/releases/${existing.id}`, { target_commitish: ctx.revision });
+    // GitHub resets a draft release's tag_name to "untagged-<hex>" when PATCH
+    // omits tag_name, which hides the draft from every subsequent lookup.
+    const updated = await api.json("PATCH", `/repos/${REPO}/releases/${existing.id}`, {
+      tag_name: ctx.tag,
+      target_commitish: ctx.revision,
+      draft: true,
+    });
+    check(updated.tag_name === ctx.tag && updated.draft === true, `PATCH left draft ${existing.id} as tag_name=${updated.tag_name}, draft=${updated.draft}`);
     log(`moved the draft release ${ctx.tag} (${existing.id}) from ${existing.target_commitish} to ${ctx.revision}`);
   } else {
     log(`the draft release ${ctx.tag} (${existing.id}) stages ${ctx.revision}`);

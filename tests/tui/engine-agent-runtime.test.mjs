@@ -11,8 +11,8 @@ import { nativeBin, repoRoot, scratchRepo, removeScratch, seedBackend, waitUntil
 
 const fakeClaude = `#!/usr/bin/env node
 const fs=require('node:fs'),rl=require('node:readline');
-// A one-shot summary (plain print mode) gets no answer; only the session writes the broker file.
-if(process.argv.includes('-p')&&!process.argv.includes('--output-format'))process.exit(0);
+// A one-shot summary (plain or schema-checked print mode) gets no answer; only the session writes the broker file.
+if(process.argv.includes('-p')&&!process.argv.includes('stream-json'))process.exit(0);
 fs.writeFileSync('claude-broker.json',JSON.stringify({identity:process.env.RUDDER_FABRIC_IDENTITY,socket:process.env.RUDDER_FABRIC_BROKER_SOCKET}));
 const sid=process.argv[process.argv.indexOf('--session-id')+1]||'fixture-session';
 const put=x=>process.stdout.write(JSON.stringify(x)+'\\n');let active,initialized=false;

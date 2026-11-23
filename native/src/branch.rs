@@ -364,11 +364,7 @@ impl App {
             self.push_activity(format!("branch: {reason}"));
         }
         if let Some(request_id) = request_id {
-            let delivery = match result {
-                Ok(()) => SteerDelivery::Delivered,
-                Err(reason) => SteerDelivery::Failed(reason),
-            };
-            let _ = self.write_steer_receipt(&request_id, &delivery);
+            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(String::as_str));
         }
         let _ = self.write_rudder_context_timed(None);
         self.dirty = true;

@@ -152,6 +152,29 @@ pub(crate) fn conversation_can_reopen(run: &AgentRun) -> bool {
         && can_resume_agent(run)
 }
 
+/// Wire a reopened conversation's launch with `wire` and give it `prompt` as
+/// its next turn. The prompt goes last, after `--`, so text that starts with
+/// "-" (a list) is the prompt and not a flag. The managed Claude profile reads
+/// its first prompt while it is wired, so there it goes in first.
+pub(crate) fn wire_with_launch_prompt(
+    command: &mut TerminalCommand,
+    prompt: Option<&str>,
+    profile: Option<&str>,
+    wire: impl FnOnce(&mut TerminalCommand) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let sdk = profile == Some("claude-sdk");
+    if let Some(prompt) = prompt.filter(|_| sdk) {
+        command.args.push(prompt.to_string());
+        command.env.push(("RUDDER_AGENT_INITIAL_PROMPT".to_string(), prompt.to_string()));
+    }
+    wire(command)?;
+    if let Some(prompt) = prompt.filter(|_| !sdk) {
+        command.args.push("--".to_string());
+        command.args.push(prompt.to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
     claude_session_command(run, "--resume", session_id)
 }

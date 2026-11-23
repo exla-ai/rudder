@@ -92,7 +92,7 @@ impl App {
             .unwrap_or(MAIN_ACCOUNT);
         let spec = format!("{model} {} {account}", effort.map(EffortLevel::as_str).unwrap_or("auto"));
         match self.deliver_model_request(&id, &spec) {
-            SteerDelivery::Delivered => {
+            SteerDelivery::Delivered | SteerDelivery::Sent(_) => {
                 if let Some(index) = self.agent_index_for_token(&id) {
                     let run = &self.agents[index];
                     self.notice = Some(format!("now on {}", agent_model_label(run.backend, &run.model, run.effort)));

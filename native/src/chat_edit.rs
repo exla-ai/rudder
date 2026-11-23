@@ -973,7 +973,7 @@ impl App {
             if let Err(reason) = started {
                 self.chat_edits_in_flight.remove(&run_id);
                 self.push_activity(format!("edit: {reason}"));
-                let _ = self.write_steer_receipt(&request_id, &SteerDelivery::Failed(reason));
+                let _ = self.write_steer_receipt(&request_id, Err(&reason));
             }
         }
     }
@@ -983,14 +983,11 @@ impl App {
         while let Ok(outcome) = self.chat_edit_rx.try_recv() {
             self.chat_edits_in_flight.remove(&outcome.run_id);
             let request_id = outcome.request_id.clone();
-            let result = match self.finish_chat_edit(outcome) {
-                Ok(()) => SteerDelivery::Delivered,
-                Err(reason) => {
-                    self.push_activity(format!("edit: {reason}"));
-                    SteerDelivery::Failed(reason)
-                }
-            };
-            let _ = self.write_steer_receipt(&request_id, &result);
+            let result = self.finish_chat_edit(outcome);
+            if let Err(reason) = &result {
+                self.push_activity(format!("edit: {reason}"));
+            }
+            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(String::as_str));
         }
     }
 

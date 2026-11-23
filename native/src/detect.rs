@@ -800,6 +800,18 @@ pub(crate) fn rows_above_composer(backend: Backend, lines: &[String]) -> &[Strin
     composer.map_or(&[], |row| &lines[..row])
 }
 
+/// Whether Claude Code's or Codex's composer is on screen: the CLI has drawn
+/// its input box and text typed now goes into it. A CLI that is still starting
+/// has not, and keeps what it is sent but drops the Enter (2.1.330 and 0.170).
+pub(crate) fn terminal_composer_shown(backend: Backend, lines: &[String]) -> bool {
+    let rows = lines.iter().map(|line| normalize_terminal_line(line)).collect::<Vec<_>>();
+    match backend {
+        Backend::Claude => claude_composer_top(&rows).is_some(),
+        Backend::Codex => codex_composer_row(&rows).is_some(),
+        Backend::Opencode | Backend::Antigravity => true,
+    }
+}
+
 /// Where Claude Code's composer box starts (its top rule), when the box is on
 /// screen: its last two rules enclose the `❯` input row (with the rows its
 /// text wraps onto), and the mode footer is among the rows under the box. A

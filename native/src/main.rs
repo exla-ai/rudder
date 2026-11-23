@@ -137,6 +137,7 @@ use crate::agent_sync::*;
 mod subagents;
 mod background;
 mod codex_rollout;
+mod delivery;
 mod chat_edit;
 mod agent_life;
 mod branch;
@@ -1927,6 +1928,12 @@ struct App {
     /// flushed as a separate write once ENTER_SUBMIT_DELAY has passed.
     pending_enters: Vec<PendingEnter>,
     pending_interrupt_sends: Vec<PendingInterruptSend>,
+    /// Messages whose receipt waits for the agent to take them (delivery.rs),
+    /// the read of their transcripts in flight, and when the last one began.
+    pending_deliveries: Vec<delivery::PendingDelivery>,
+    delivery_rx: Option<mpsc::Receiver<Vec<delivery::ScanResult>>>,
+    last_delivery_scan: Instant,
+    next_delivery_id: u64,
     /// `/sync` messages waiting for their agent's turn to end (agent_sync.rs).
     pending_syncs: Vec<PendingSync>,
     /// Runs a `/sync` was typed into, so the reply turn ends without a review
@@ -3126,6 +3133,9 @@ struct AgentTurn {
 
 enum SteerDelivery {
     Delivered,
+    /// Typed into the agent or given to it at launch. Its receipt waits for
+    /// the agent's transcript to record it (delivery.rs).
+    Sent(delivery::SentMessage),
     Failed(String),
 }
 
@@ -3696,6 +3706,10 @@ impl App {
             pty_output_waker: None,
             pending_enters: Vec::new(),
             pending_interrupt_sends: Vec::new(),
+            pending_deliveries: Vec::new(),
+            delivery_rx: None,
+            last_delivery_scan: Instant::now(),
+            next_delivery_id: 0,
             pending_syncs: Vec::new(),
             sync_deliveries: HashMap::new(),
             claude_message_navs: Vec::new(),
@@ -12578,7 +12592,10 @@ Address the objection directly. If you disagree, say why inside \
         self.focus_or_spawn_main_with_prompt("", false);
     }
 
-    fn focus_or_spawn_main_with_prompt(&mut self, override_prompt: &str, continue_opencode: bool) {
+    /// `continue_session`: a message for the main chat reopens its saved
+    /// session with `override_prompt` as the next turn, instead of starting a
+    /// new conversation with it.
+    fn focus_or_spawn_main_with_prompt(&mut self, override_prompt: &str, continue_session: bool) {
         let main_index = match self.selected_main_index() {
             Some(idx) => idx,
             None => {
@@ -12657,7 +12674,7 @@ Address the objection directly. If you disagree, say why inside \
             } else {
                 String::new()
             };
-            let resume_existing = (continue_opencode
+            let resume_existing = (continue_session
                 || (override_prompt.is_empty() && run.status == AgentStatus::Paused))
                 && run
                     .session_id
@@ -12679,18 +12696,25 @@ Address the objection directly. If you disagree, say why inside \
                 resume_existing,
             )
         };
+        // The next turn of a reopened session, given at launch.
+        let next_turn = continue_session.then_some(bootstrap.as_str()).filter(|prompt| !prompt.is_empty());
+        let mut launch_prompt = None;
         let mut command = if resume_existing {
             let run = &self.agents[main_index];
-            match backend {
-                Backend::Claude => claude_resume_command(run, session_id.as_deref().unwrap()),
-                Backend::Codex => codex_resume_command(run, session_id.as_deref().unwrap()),
-                Backend::Opencode if continue_opencode => {
-                    opencode_continue_command(run, session_id.as_deref().unwrap(), &bootstrap)
+            let session = session_id.as_deref().unwrap();
+            match (backend, next_turn) {
+                (Backend::Claude, _) => {
+                    launch_prompt = next_turn;
+                    claude_resume_command(run, session)
                 }
-                Backend::Opencode => opencode_resume_command(run, session_id.as_deref().unwrap()),
-                Backend::Antigravity => {
-                    antigravity_resume_command(run, session_id.as_deref().unwrap())
+                (Backend::Codex, _) => {
+                    launch_prompt = next_turn;
+                    codex_resume_command(run, session)
                 }
+                (Backend::Opencode, Some(prompt)) => opencode_continue_command(run, session, prompt),
+                (Backend::Opencode, None) => opencode_resume_command(run, session),
+                (Backend::Antigravity, Some(prompt)) => antigravity_continue_command(run, session, prompt),
+                (Backend::Antigravity, None) => antigravity_resume_command(run, session),
             }
         } else {
             agent_command(
@@ -12703,14 +12727,16 @@ Address the objection directly. If you disagree, say why inside \
             )
         };
         let main_run = &self.agents[main_index];
-        let wired = if main_run.execution_profile.is_some() {
-            signals::augment_existing_worker_command(
-                &mut command, backend, AgentMode::Main,
-                &main_run.id, main_run.execution_profile.as_deref(), main_run.account.as_deref(),
-            )
-        } else {
-            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &main_run.id, main_run.account.as_deref())
-        };
+        let wired = wire_with_launch_prompt(&mut command, launch_prompt, main_run.execution_profile.as_deref(), |command| {
+            if main_run.execution_profile.is_some() {
+                signals::augment_existing_worker_command(
+                    command, backend, AgentMode::Main,
+                    &main_run.id, main_run.execution_profile.as_deref(), main_run.account.as_deref(),
+                )
+            } else {
+                signals::augment_worker_command(command, backend, AgentMode::Main, &main_run.id, main_run.account.as_deref())
+            }
+        });
         let done_file = worker_done_file(&self.cwd, &self.agents[main_index].id);
         if !bootstrap.is_empty() {
             let _ = std::fs::remove_file(&done_file);
@@ -12748,9 +12774,10 @@ Address the objection directly. If you disagree, say why inside \
                     run.turns.push(AgentTurn {
                         ts: now.clone(),
                         prompt: bootstrap.clone(),
-                        source: "bootstrap".to_string(),
+                        source: if continue_session { "user" } else { "bootstrap" }.to_string(),
                     });
                     run.last_user_input_at = now;
+                    run.needs_user_input = false;
                     run.done_summary = None;
                     let requested_delivery = DeliveryEvidence::for_task(&bootstrap);
                     if requested_delivery.required || !run.delivery.required || starting_new_turn {
@@ -16534,6 +16561,13 @@ Address the objection directly. If you disagree, say why inside \
                     self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
                     continue;
                 }
+                if self.agent_index_for_token(&task_id).is_some_and(|index| self.agent_is_starting(index)) {
+                    // Typed into a CLI that is still starting, it would sit in
+                    // the input box without its Enter. Wait for the composer.
+                    let due = Instant::now() + Duration::from_millis(250);
+                    self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
+                    continue;
+                }
             }
             if valid_request_id && self.write_steer_processing(&request_id).is_err() {
                 // Do not touch the PTY until the at-most-once tombstone is
@@ -16626,10 +16660,10 @@ Address the objection directly. If you disagree, say why inside \
                 // text ("park"'s reason once would have been a prompt).
                 other => SteerDelivery::Failed(format!("unknown request kind: {other}")),
             };
-            let _ = self.write_steer_receipt(&request_id, &result);
-            // The durable receipt is written after the injection attempt, then
-            // the request is consumed. This gives the browser a correlated
-            // delivered/failed outcome without risking repeated PTY input.
+            self.settle_steer(&request_id, result);
+            // The request is consumed after the injection attempt; its
+            // "processing" tombstone keeps it from being typed again while
+            // the receipt waits for the agent to take it.
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -16647,7 +16681,8 @@ Address the objection directly. If you disagree, say why inside \
         std::fs::rename(temp, file)
     }
 
-    fn write_steer_receipt(&self, request_id: &str, result: &SteerDelivery) -> io::Result<()> {
+    /// The answer to one request: delivered, or failed with why.
+    fn write_steer_receipt(&self, request_id: &str, result: Result<(), &str>) -> io::Result<()> {
         if request_id.len() < 8
             || request_id.len() > 128
             || !request_id
@@ -16661,11 +16696,11 @@ Address the objection directly. If you disagree, say why inside \
         let file = dir.join(format!("{request_id}.json"));
         let temp = dir.join(format!("{request_id}.{}.tmp", std::process::id()));
         let value = match result {
-            SteerDelivery::Delivered => serde_json::json!({
+            Ok(()) => serde_json::json!({
                 "requestId": request_id,
                 "status": "delivered",
             }),
-            SteerDelivery::Failed(error) => serde_json::json!({
+            Err(error) => serde_json::json!({
                 "requestId": request_id,
                 "status": "failed",
                 "error": error,
@@ -16769,7 +16804,172 @@ Address the objection directly. If you disagree, say why inside \
                 Ok(()) => self.deliver_steer_request(&pending.run_id, &pending.text, pending.opencode_prompt),
                 Err(reason) => SteerDelivery::Failed(reason),
             };
-            let _ = self.write_steer_receipt(&pending.request_id, &result);
+            self.settle_steer(&pending.request_id, result);
+        }
+    }
+
+    /// Answer a request, or for a message typed into an agent or given to it
+    /// at launch, wait for the agent to take it before answering.
+    fn settle_steer(&mut self, request_id: &str, result: SteerDelivery) {
+        match result {
+            SteerDelivery::Delivered => {
+                let _ = self.write_steer_receipt(request_id, Ok(()));
+            }
+            SteerDelivery::Failed(error) => {
+                let _ = self.write_steer_receipt(request_id, Err(&error));
+            }
+            SteerDelivery::Sent(message) => {
+                let Some(run) = self.agents.iter().find(|run| run.id == message.run_id) else {
+                    let _ = self.write_steer_receipt(request_id, Err("not delivered: the chat was closed"));
+                    return;
+                };
+                self.next_delivery_id += 1;
+                self.pending_deliveries.push(delivery::PendingDelivery {
+                    id: self.next_delivery_id,
+                    request_id: request_id.to_string(),
+                    label: run.node_id.clone().unwrap_or_else(|| run.id.clone()),
+                    backend: run.backend,
+                    cwd: run.cwd.clone(),
+                    message,
+                    sent: Instant::now(),
+                    idle_since: None,
+                    gone_since: None,
+                    path: None,
+                    offset: None,
+                });
+            }
+        }
+    }
+
+    /// A message sent to the agent at `index`: checked against its transcript
+    /// when the backend records one (delivery.rs), else delivered as written.
+    fn sent_or_delivered(&self, index: usize, text: &str, launched: bool) -> SteerDelivery {
+        match self.agents.get(index) {
+            Some(run) if delivery::checked(run.backend, text) => match run.terminal.as_ref() {
+                Some(terminal) => SteerDelivery::Sent(delivery::SentMessage::new(
+                    &run.id,
+                    terminal.instance_id(),
+                    text,
+                    launched,
+                )),
+                None => SteerDelivery::Failed("not delivered: the agent has no terminal".to_string()),
+            },
+            _ => SteerDelivery::Delivered,
+        }
+    }
+
+    /// Whether the agent's CLI is still starting: it was given a message at
+    /// launch that it has not recorded yet, or its new pane has not drawn the
+    /// composer yet. Claude Code and Codex keep what is typed then in the
+    /// input box and drop the Enter.
+    fn agent_is_starting(&mut self, index: usize) -> bool {
+        let Some(run) = self.agents.get_mut(index) else {
+            return false;
+        };
+        if self
+            .pending_deliveries
+            .iter()
+            .any(|pending| pending.message.launched && pending.message.run_id == run.id)
+        {
+            return true;
+        }
+        let backend = run.backend;
+        run.terminal.as_mut().is_some_and(|terminal| {
+            terminal.is_alive()
+                && !terminal.is_output_only()
+                && terminal.age() < delivery::STARTUP_WAIT
+                && !terminal_composer_shown(backend, &terminal.live_screen_lines())
+        })
+    }
+
+    /// Answer each message once its agent took it or plainly did not: read
+    /// the transcripts on a scan thread and apply what came back.
+    fn drive_deliveries(&mut self) {
+        if let Some(rx) = &self.delivery_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.delivery_rx = None;
+                    for result in results {
+                        self.apply_delivery_scan(result);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.delivery_rx = None,
+            }
+        }
+        if self.pending_deliveries.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        for pending in &mut self.pending_deliveries {
+            let run = self.agents.iter_mut().find(|run| run.id == pending.message.run_id);
+            let resting = run.as_ref().is_none_or(|run| run.status != AgentStatus::Running);
+            let alive = run.and_then(|run| run.terminal.as_mut()).is_some_and(|terminal| {
+                terminal.instance_id() == pending.message.instance_id && terminal.is_alive()
+            });
+            if !alive {
+                pending.gone_since.get_or_insert(now);
+            }
+            if resting {
+                pending.idle_since.get_or_insert(now);
+            } else {
+                pending.idle_since = None;
+            }
+        }
+        if self.delivery_rx.is_some() || self.last_delivery_scan.elapsed() < delivery::SCAN_INTERVAL {
+            return;
+        }
+        self.last_delivery_scan = now;
+        let requests: Vec<delivery::ScanRequest> = self
+            .pending_deliveries
+            .iter()
+            .map(|pending| delivery::ScanRequest {
+                id: pending.id,
+                backend: pending.backend,
+                cwd: pending.cwd.clone(),
+                session_id: self
+                    .agents
+                    .iter()
+                    .find(|run| run.id == pending.message.run_id)
+                    .and_then(|run| run.session_id.clone()),
+                text: pending.message.text.clone(),
+                sent_ms: pending.message.sent_ms,
+                launched: pending.message.launched,
+                path: pending.path.clone(),
+                offset: pending.offset,
+            })
+            .collect();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(delivery::scan(requests));
+        });
+        self.delivery_rx = Some(rx);
+    }
+
+    fn apply_delivery_scan(&mut self, result: delivery::ScanResult) {
+        let Some(at) = self.pending_deliveries.iter().position(|pending| pending.id == result.id) else {
+            return;
+        };
+        let pending = &mut self.pending_deliveries[at];
+        pending.path = result.path;
+        pending.offset = result.offset;
+        let outcome = if result.taken {
+            Ok(())
+        } else {
+            match pending.not_taken(result.started) {
+                Some(reason) => Err(reason),
+                None => return,
+            }
+        };
+        let pending = self.pending_deliveries.remove(at);
+        match outcome {
+            Ok(()) => {
+                let _ = self.write_steer_receipt(&pending.request_id, Ok(()));
+            }
+            Err(reason) => {
+                self.push_activity(format!("steer: {} not delivered, {reason}", pending.label));
+                let _ = self.write_steer_receipt(&pending.request_id, Err(&format!("not delivered: {reason}")));
+            }
         }
     }
 
@@ -16896,7 +17096,7 @@ Address the objection directly. If you disagree, say why inside \
                         "steered {label}: \"{}\"",
                         steer_preview(&instruction)
                     ));
-                    SteerDelivery::Delivered
+                    self.sent_or_delivered(index, &instruction, false)
                 } else {
                     self.push_activity(format!("steer: {label} has no live terminal"));
                     SteerDelivery::Failed(format!("{label} has no live terminal"))
@@ -16910,15 +17110,15 @@ Address the objection directly. If you disagree, say why inside \
                 if self.agents[index].is_main() =>
             {
                 // The main checkout's agent cannot be re-goaled (that path is for
-                // isolated workers); bring its session back the way Enter does,
-                // then type the message into it. This is the phone case: after the
-                // cloud machine restarts every row is Paused with no process.
+                // isolated workers); reopen its session with the message as its
+                // next turn. This is the phone case: after the cloud machine
+                // restarts every row is Paused with no process.
                 if self.steer_resume_main(index, paste) {
                     self.push_activity(format!(
                         "resumed {label} with: \"{}\"",
                         steer_preview(&instruction)
                     ));
-                    SteerDelivery::Delivered
+                    self.sent_or_delivered(index, &instruction, true)
                 } else {
                     self.record_activity(format!("steer: {label} could not be resumed"));
                     SteerDelivery::Failed(format!("{label} could not be resumed"))
@@ -16940,7 +17140,7 @@ Address the objection directly. If you disagree, say why inside \
                     self.record_activity(format!("steer: {label} could not be resumed"));
                     SteerDelivery::Failed(format!("{label} could not be resumed"))
                 } else {
-                    SteerDelivery::Delivered
+                    self.sent_or_delivered(index, &instruction, true)
                 }
             }
             status => {
@@ -17244,32 +17444,25 @@ Address the objection directly. If you disagree, say why inside \
                 Backend::Opencode => opencode_resume_command(run, &session),
                 Backend::Antigravity => antigravity_resume_command(run, &session),
             };
-            let sdk_prompt = prompt.filter(|_| run.execution_profile.as_deref() == Some("claude-sdk"));
-            if let Some(prompt) = sdk_prompt {
-                command.args.push(prompt.to_string());
-                command.env.push(("RUDDER_AGENT_INITIAL_PROMPT".to_string(), prompt.to_string()));
-            }
-            let wired = if run.is_main() && run.execution_profile.is_none() {
-                signals::augment_worker_command(&mut command, backend, run.mode, &run.id, run.account.as_deref())
-            } else {
-                signals::augment_existing_worker_command(
-                    &mut command,
-                    backend,
-                    run.mode,
-                    &run.id,
-                    run.execution_profile.as_deref(),
-                    run.account.as_deref(),
-                )
-            };
+            let wired = wire_with_launch_prompt(&mut command, prompt, run.execution_profile.as_deref(), |command| {
+                if run.is_main() && run.execution_profile.is_none() {
+                    signals::augment_worker_command(command, backend, run.mode, &run.id, run.account.as_deref())
+                } else {
+                    signals::augment_existing_worker_command(
+                        command,
+                        backend,
+                        run.mode,
+                        &run.id,
+                        run.execution_profile.as_deref(),
+                        run.account.as_deref(),
+                    )
+                }
+            });
             // Refused before the old process is touched: it keeps its model,
             // effort and account.
             if let Err(error) = wired {
                 (run.model, run.effort, run.account) = previous;
                 return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
-            }
-            if let Some(prompt) = prompt.filter(|_| sdk_prompt.is_none()) {
-                command.args.push("--".to_string());
-                command.args.push(prompt.to_string());
             }
             let options = TerminalPaneOptions {
                 size: run.terminal_size.unwrap_or_default(),
@@ -17327,7 +17520,11 @@ Address the objection directly. If you disagree, say why inside \
         self.push_activity(note);
         self.mirror_graph();
         self.dirty = true;
-        SteerDelivery::Delivered
+        match prompt {
+            // The reopened session's first turn.
+            Some(prompt) => self.sent_or_delivered(index, prompt, true),
+            None => SteerDelivery::Delivered,
+        }
     }
 
     /// A sleeping row woke (a message, Enter, focus, any relaunch): forget the
@@ -20961,36 +21158,13 @@ Address the objection directly. If you disagree, say why inside \
         }
         let run_id = self.agents[index].id.clone();
         self.selected_agent = index;
-        if self.agents[index].backend == Backend::Opencode
-            && self.agents[index].session_id.as_deref().is_some_and(|id| !id.trim().is_empty())
-        {
-            // Deliver the first message through the plugin once the session is
-            // open. A paste made during startup can miss the OpenCode prompt.
-            self.agents[index].terminal = None;
-            self.focus_or_spawn_main_with_prompt(message.trim_end(), true);
-            return self.agents.iter().any(|run| run.id == run_id && run.terminal.is_some());
-        }
-        self.focus_or_spawn_main();
-        let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
-            return false;
-        };
-        if !self.live_inject_at(index, message) {
-            return false;
-        }
-        let now = now_stamp();
-        let cwd = self.cwd.clone();
-        if let Some(run) = self.agents.get_mut(index) {
-            run.current_prompt = message.to_string();
-            run.turns.push(AgentTurn {
-                ts: now.clone(),
-                prompt: message.to_string(),
-                source: "user".to_string(),
-            });
-            run.last_user_input_at = now;
-            run.needs_user_input = false;
-            let _ = save_native_run_record(&cwd, run);
-        }
-        true
+        // The message is the reopened session's next turn, given at launch.
+        // Typed into a CLI that is still starting, it sits in the input box
+        // without its Enter (Claude Code, Codex), or is dropped (agy, and
+        // OpenCode, whose plugin sends it once the session is open).
+        self.agents[index].terminal = None;
+        self.focus_or_spawn_main_with_prompt(message.trim_end(), true);
+        self.agents.iter().any(|run| run.id == run_id && run.terminal.is_some())
     }
 
     fn regoal_agent_at(&mut self, index: usize, new_goal: &str) -> bool {
@@ -21067,7 +21241,7 @@ Address the objection directly. If you disagree, say why inside \
             let report_id = node_id.as_deref().unwrap_or(&id);
             let _ = std::fs::remove_file(worker_done_file(&run_cwd, report_id));
         }
-        let (command, deliver_after, new_session, size, cwd, node_label) = {
+        let (command, new_session, size, cwd, node_label) = {
             let Some(run) = self.agents.get(index) else {
                 return false;
             };
@@ -21080,14 +21254,16 @@ Address the objection directly. If you disagree, say why inside \
             let run_mode = run.mode;
             let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
             let session = run.session_id.clone().filter(|s| !s.trim().is_empty());
-            let (mut command, deliver_after, new_session) = if let Some(sid) = session.as_deref() {
-                // Resume the SAME session; the new goal arrives as the next turn.
-                // OpenCode's TUI takes no typed-ahead turn into a session it
-                // opens (its plugin sends it), and agy drops what is typed while
-                // it starts, so both take the goal at launch.
+            let (mut command, launch_prompt, new_session) = if let Some(sid) = session.as_deref() {
+                // Resume the SAME session with the new goal as its next turn,
+                // given at launch. Typed into a CLI that is still starting,
+                // Claude Code and Codex keep the text in the input box and drop
+                // the Enter (2.1.330 and 0.170), so the goal sat unsent until
+                // the next message was glued onto it. agy drops the text too,
+                // and OpenCode's plugin sends it.
                 match backend {
-                    Backend::Claude => (claude_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
-                    Backend::Codex => (codex_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
+                    Backend::Claude => (claude_resume_command(run, sid), Some(new_goal), session.clone()),
+                    Backend::Codex => (codex_resume_command(run, sid), Some(new_goal), session.clone()),
                     Backend::Opencode => (opencode_continue_command(run, sid, new_goal), None, session.clone()),
                     Backend::Antigravity => (antigravity_continue_command(run, sid, new_goal), None, session.clone()),
                 }
@@ -21112,15 +21288,17 @@ Address the objection directly. If you disagree, say why inside \
             // RE-WIRE completion hooks for the re-goaled session: its hook config file
             // already exists, so the poll loop waits for the official signal — a
             // relaunch without the hooks wired would never flip back to review.
-            let wired = signals::augment_existing_worker_command(
-                &mut command,
-                backend,
-                run.mode,
-                &run.id,
-                run.execution_profile.as_deref(),
-                run.account.as_deref(),
-            );
-            (wired.map(|()| command), deliver_after, new_session, size, cwd, label)
+            let wired = wire_with_launch_prompt(&mut command, launch_prompt, run.execution_profile.as_deref(), |command| {
+                signals::augment_existing_worker_command(
+                    command,
+                    backend,
+                    run.mode,
+                    &run.id,
+                    run.execution_profile.as_deref(),
+                    run.account.as_deref(),
+                )
+            });
+            (wired.map(|()| command), new_session, size, cwd, label)
         };
 
         let options = TerminalPaneOptions {
@@ -21135,9 +21313,6 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
-                if let Some(text) = &deliver_after {
-                    let _ = terminal.write_input(format!("{text}\r").as_bytes());
-                }
                 let now = now_stamp();
                 if let Some(run) = self.agents.get_mut(index) {
                     let starting_new_turn = run.status == AgentStatus::Done;
@@ -22987,6 +23162,7 @@ What to do\n\
         // After the loop, so a plan turn that just ended (mark_run_done clears
         // needs_user_input) shows its "Implement this plan?" wait this tick.
         self.poll_codex_rollouts();
+        self.drive_deliveries();
 
         self.finish_interrupt_sends();
 

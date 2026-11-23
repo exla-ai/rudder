@@ -1001,7 +1001,7 @@ fn web_steer_resumes_a_stopped_worker() {
         let delivery = app.deliver_steer_request("n-stopped", "pick it back up", false);
         results.push((
             status,
-            matches!(delivery, SteerDelivery::Delivered),
+            matches!(&delivery, SteerDelivery::Sent(sent) if sent.launched),
             app.agents[0].status,
             app.agents[0].turns.last().map(|turn| turn.prompt.clone()),
         ));
@@ -1022,6 +1022,130 @@ fn web_steer_resumes_a_stopped_worker() {
         assert_eq!(status, AgentStatus::Running, "{from:?} worker resumed");
         assert_eq!(last_prompt.as_deref(), Some("pick it back up"), "{from:?}");
     }
+}
+
+// 11-23 08:39 to 09:03 on 5.0.33: a message to a finished chat re-goaled it
+// and was typed into the new pane at once. Claude Code and Codex keep what is
+// typed while they start in the input box and drop its Enter, so the message
+// sat unsent until the next one was glued onto it. It is the resumed
+// session's launch prompt now, last and after `--`, and nothing is typed.
+#[cfg(not(windows))]
+#[test]
+fn a_regoaled_chat_gets_the_message_at_launch_not_typed() {
+    let _env = env_guard();
+    let dir = unique_test_repo("regoal-launch-prompt");
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+    // Records its arguments, then what reaches its terminal in its first
+    // second. Other launches through the same fake (a title summary) are not it.
+    let fake = dir.join("fake-agent.sh");
+    write_fake_bin(
+        &fake,
+        "#!/bin/sh\ncase \"$*\" in *0190a1b2-c3d4*) ;; *) exit 0 ;; esac\nd=$(dirname \"$0\")\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > \"$d/args.tmp\"\ncat > \"$d/typed\" &\nsleep 1\nkill $! 2>/dev/null\nmv \"$d/args.tmp\" \"$d/args\"\nsleep 5\n",
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake);
+    for backend in [Backend::Claude, Backend::Codex] {
+        let _ = fs::remove_file(dir.join("args"));
+        let _ = fs::remove_file(dir.join("typed"));
+        let mut app = App::new();
+        app.cwd = dir.clone();
+        let mut run = test_agent_run("regoal-launch", "implement parser");
+        run.backend = backend;
+        run.cwd = dir.clone();
+        run.node_id = Some("n-done".to_string());
+        run.status = AgentStatus::Done;
+        run.session_id = Some("0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".to_string());
+        app.agents.push(run);
+
+        let delivery = app.deliver_steer_request("n-done", "- also cover malformed input", false);
+
+        assert!(
+            matches!(&delivery, SteerDelivery::Sent(sent) if sent.launched),
+            "{backend:?}: the receipt waits for the agent to take it"
+        );
+        let args = wait_for_log(&dir, "args", "--");
+        let args: Vec<&str> = args.lines().collect();
+        assert!(args.len() >= 2, "{backend:?} launched: {args:?}");
+        assert_eq!(args[args.len() - 2..], ["--", "- also cover malformed input"], "{backend:?}");
+        assert!(args.contains(&"resume") || args.contains(&"--resume"), "{backend:?} reopened its session: {args:?}");
+        assert_eq!(
+            fs::read_to_string(dir.join("typed")).unwrap_or_default(),
+            "",
+            "{backend:?}: nothing is typed into a CLI that is starting"
+        );
+        app.agents[0].terminal = None;
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// The phone is told "delivered" once the agent's transcript has the message,
+// and "not delivered" when the agent went without taking it.
+#[cfg(not(windows))]
+#[test]
+fn a_steer_receipt_waits_for_the_transcript_to_record_the_message() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("steer-receipt-transcript");
+    env.set_home(&dir, &dir.join("home"));
+    std::env::set_var("RUDDER_HOME", dir.join("home/.rudder"));
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 30\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    let session = "5a0c2f9e-1d2b-4c3a-9e8f-7a6b5c4d3e2f";
+    let projects = dir.join("home/.claude/projects").join(encode_claude_project_dir(&dir));
+    fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{session}.jsonl"));
+    fs::write(&transcript, "").unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("receipt-run", "implement parser");
+    run.cwd = dir.clone();
+    run.node_id = Some("n-done".to_string());
+    run.status = AgentStatus::Done;
+    run.session_id = Some(session.to_string());
+    app.agents.push(run);
+    let receipt = |id: &str| {
+        fs::read_to_string(dir.join(format!(".rudder/steer-receipts/{id}.json")))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .map(|value| (value["status"].as_str().unwrap_or("").to_string(), value["error"].as_str().unwrap_or("").to_string()))
+    };
+    let drive = |app: &mut App, id: &str, for_ms: u64| {
+        let deadline = Instant::now() + Duration::from_millis(for_ms);
+        while !receipt(id).is_some_and(|(status, _)| status == "delivered" || status == "failed")
+            && Instant::now() < deadline
+        {
+            app.drive_deliveries();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        receipt(id).unwrap_or_default()
+    };
+    let inbox = dir.join(".rudder/steer");
+    fs::create_dir_all(&inbox).unwrap();
+    let request = serde_json::json!({"requestId": "request-taken-1", "taskId": "n-done", "instruction": "also cover malformed input"});
+    fs::write(inbox.join("1-a.json"), request.to_string()).unwrap();
+
+    app.poll_steer_inbox();
+    assert_eq!(receipt("request-taken-1").unwrap_or_default().0, "processing", "launched, not taken yet");
+    assert_eq!(drive(&mut app, "request-taken-1", 600).0, "processing", "nothing recorded yet");
+    let turn = serde_json::json!({
+        "type": "user",
+        "timestamp": system_time_to_iso(SystemTime::now()),
+        "message": {"role": "user", "content": "also cover malformed input"},
+    });
+    fs::write(&transcript, format!("{turn}\n")).unwrap();
+    assert_eq!(drive(&mut app, "request-taken-1", 5_000).0, "delivered");
+
+    // The next message goes to the live agent, which then exits without
+    // recording it.
+    let sent = app.deliver_steer_request("n-done", "and the docs", false);
+    assert!(matches!(&sent, SteerDelivery::Sent(message) if !message.launched));
+    app.settle_steer("request-lost-2", sent);
+    app.agents[0].terminal = None;
+    let (status, error) = drive(&mut app, "request-lost-2", 5_000);
+    assert_eq!(status, "failed");
+    assert!(error.contains("not delivered"), "{error}");
+    assert!(app.pending_deliveries.is_empty());
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -20652,7 +20776,8 @@ fn fleet_note_terminal(repo: &std::path::Path, label: &str) -> TerminalPane {
         "/bin/sh",
         vec![
             "-c".to_string(),
-            "stty -echo; printf ready > \"$1\"; IFS= read -r line; printf '%s\\n' \"$line\" > \"$2\"; IFS= read -r rest".to_string(),
+            // Claude Code's composer, so typed input does not wait for it.
+            "stty -echo; printf '%s\\r\\n' '──────────' '❯ ' '──────────' '  ⏵⏵ bypass permissions on'; printf ready > \"$1\"; IFS= read -r line; printf '%s\\n' \"$line\" > \"$2\"; IFS= read -r rest".to_string(),
             "fleet-note-fixture".to_string(),
             repo.join(&ready).to_string_lossy().into_owned(),
             repo.join(&capture).to_string_lossy().into_owned(),
@@ -20668,6 +20793,12 @@ fn fleet_note_terminal(repo: &std::path::Path, label: &str) -> TerminalPane {
     )
     .expect("spawn fleet fixture PTY");
     assert_eq!(wait_for_log(repo, &ready, "ready"), "ready");
+    let mut terminal = terminal;
+    let start = Instant::now();
+    while !terminal_composer_shown(Backend::Claude, &terminal.live_screen_lines()) {
+        assert!(start.elapsed() < Duration::from_secs(5), "the fixture's composer did not appear");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     terminal
 }
 
@@ -28789,7 +28920,7 @@ fn a_phone_message_is_refused_with_a_reason_when_the_pane_has_a_menu_open() {
 
     match result {
         SteerDelivery::Failed(reason) => assert!(reason.contains("menu is open"), "{reason}"),
-        SteerDelivery::Delivered => panic!("the message was typed into the menu"),
+        SteerDelivery::Delivered | SteerDelivery::Sent(_) => panic!("the message was typed into the menu"),
     }
     assert_eq!(app.agents[0].turns.len(), 1, "no phantom turn was recorded");
     app.agents[0].terminal = None;
@@ -33090,7 +33221,9 @@ fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
             app.agents[index].last_worker_input_at = None;
         }
 
-        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Delivered));
+        // The new account's session starts with the prompt, and its receipt
+        // waits for the transcript.
+        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Sent(sent) if sent.launched));
         let run = &mut app.agents[index];
         assert_eq!(run.account.as_deref(), Some("work"));
         assert_eq!(run.session_id.as_deref(), Some(session));
@@ -33158,7 +33291,7 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
     // must belong to the harness named, and the handoff is required.
     let refused = |app: &mut App, spec: &str| match app.deliver_harness_request("chat-run", spec) {
         SteerDelivery::Failed(reason) => reason,
-        SteerDelivery::Delivered => panic!("{spec} moved the chat"),
+        SteerDelivery::Delivered | SteerDelivery::Sent(_) => panic!("{spec} moved the chat"),
     };
     assert!(refused(&mut app, &format!("claude sonnet auto main\n{handoff}")).contains("already runs on claude"));
     assert!(refused(&mut app, &format!("codex opus auto main\n{handoff}")).contains("claude model"));
@@ -33361,8 +33494,13 @@ fn chat_edit_of_the_first_message_starts_the_conversation_over() {
 fn interrupt_and_send_waits_for_the_same_terminal_to_accept_a_follow_up() {
     let mut env = env_guard();
     let dir = unique_test_repo("interrupt-and-send");
-    chat_edit_env(&mut env, &dir);
+    let (home, _) = chat_edit_env(&mut env, &dir);
     crate::signals::prepare_worker_signals("interrupt-test", Backend::Claude).unwrap();
+    let session = "33333333-3333-4333-8333-333333333333";
+    let projects = home.join(".claude/projects").join(encode_claude_project_dir(&dir));
+    fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{session}.jsonl"));
+    fs::write(&transcript, "").unwrap();
     let script = r#"stty raw -echo
 printf '✻ Thinking… (esc to interrupt)\r\n'
 : > ready
@@ -33382,6 +33520,7 @@ sleep 30"#;
     run.cwd = dir.clone();
     run.backend = Backend::Claude;
     run.status = AgentStatus::Running;
+    run.session_id = Some(session.to_string());
     run.terminal = Some(terminal);
     app.agents.push(run);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -33403,9 +33542,6 @@ sleep 30"#;
     assert!(matches!(app.deliver_steer_request("interrupt-test", "another message", false), SteerDelivery::Failed(_)));
 
     fs::write(dir.join("show-composer"), "").unwrap();
-    let receipt = chat_edit_receipt(&mut app, "interrupt-test-0001");
-    assert_eq!(receipt["status"], "delivered", "{receipt}");
-    assert_eq!(app.agents[0].turns.last().unwrap().prompt, "new message");
     wait_for(&mut app, "message");
     let expected = [bracketed_paste_bytes("new message"), vec![b'\r']].concat();
     while fs::metadata(dir.join("message")).unwrap().len() < expected.len() as u64 {
@@ -33414,6 +33550,13 @@ sleep 30"#;
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(fs::read(dir.join("message")).unwrap(), expected);
+    assert_eq!(app.agents[0].turns.last().unwrap().prompt, "new message");
+    // Typed is not delivered: the receipt waits for Claude to record it.
+    assert!(!dir.join(".rudder/steer-receipts/interrupt-test-0001.json").exists());
+    let turn = serde_json::json!({"type": "user", "timestamp": system_time_to_iso(SystemTime::now()), "message": {"role": "user", "content": "new message"}});
+    fs::write(&transcript, format!("{turn}\n")).unwrap();
+    let receipt = chat_edit_receipt(&mut app, "interrupt-test-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
     app.agents[0].terminal = None;
     fs::remove_dir_all(dir).unwrap();
 }

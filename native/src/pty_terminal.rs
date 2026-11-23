@@ -619,6 +619,9 @@ pub struct TerminalPane {
     /// When the process spawned (Unix ms). Claude's background tasks die with
     /// their process, so only transcript lines written since count (background.rs).
     spawned_at_ms: u64,
+    /// When the process was started: a CLI drawing its first screen is not
+    /// ready for typed input yet (`App::agent_is_starting`).
+    spawned_at: Instant,
     execution_profile: Option<String>,
     agent_link_launch_json: Option<String>,
     /// Launched with `TYPED_REMOTE_CONTROL_ENV`: the app still has to type
@@ -1244,6 +1247,7 @@ impl TerminalPane {
         Ok(Self {
             instance_id,
             spawned_at_ms,
+            spawned_at: Instant::now(),
             execution_profile,
             agent_link_launch_json,
             remote_control_to_type,
@@ -1297,6 +1301,10 @@ impl TerminalPane {
         self.spawned_at_ms
     }
 
+    /// How long ago the process was started.
+    pub fn age(&self) -> Duration {
+        self.spawned_at.elapsed()
+    }
     pub fn execution_profile(&self) -> Option<&str> {
         self.execution_profile.as_deref()
     }

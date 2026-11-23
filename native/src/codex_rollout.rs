@@ -361,7 +361,7 @@ fn cache<K, V>(cell: &'static OnceLock<Mutex<HashMap<K, V>>>) -> std::sync::Mute
 /// `<sessions>/YYYY/MM/DD/rollout-<time>-<thread>.jsonl`. Rollouts never move,
 /// so a found path is kept; a miss is looked for again after `MISS_RECHECK`
 /// (Codex writes the file at its first turn).
-fn rollout_file(sessions: &Path, thread: &str) -> Option<PathBuf> {
+pub(crate) fn rollout_file(sessions: &Path, thread: &str) -> Option<PathBuf> {
     static FOUND: OnceLock<Mutex<HashMap<String, (Option<PathBuf>, Instant)>>> = OnceLock::new();
     if let Some((path, checked)) = cache(&FOUND).get(thread) {
         if path.as_ref().is_some_and(|path| path.exists()) {

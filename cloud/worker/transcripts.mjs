@@ -597,8 +597,13 @@ function antigravityReader({ stats = null } = {}) {
       const ts = toMillis(step.created_at);
       const content = typeof step.content === "string" ? step.content.trim() : "";
       if (step.type === "USER_INPUT") {
-        if (content) {
-          reader.messages.push({ id, role: "user", ts, text: content });
+        // agy wraps what was typed in <USER_REQUEST> and adds notes for the
+        // model after it (<ADDITIONAL_METADATA>: the time;
+        // <USER_SETTINGS_CHANGE>: a model switch). The chat shows the request.
+        const request = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/.exec(content);
+        const text = request ? request[1].trim() : content;
+        if (text) {
+          reader.messages.push({ id, role: "user", ts, text });
         }
       } else if (step.type === "PLANNER_RESPONSE") {
         if (content) {

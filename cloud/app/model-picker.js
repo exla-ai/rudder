@@ -284,9 +284,9 @@ function paintModels(modelsEl, section, { selected, current, onPick, reveal, que
     const b = h(`<button type="button" role="radio" class="mp-model"><span class="mp-mt"><span class="mp-name"></span><span class="mp-badge" hidden>Current</span></span><span class="mp-detail"><span class="mp-id"></span><span class="mp-desc"></span></span><span class="mp-radio">${icon("check")}</span></button>`);
     setText(b.querySelector(".mp-name"), o.label);
     b.querySelector(".mp-badge").hidden = !(current?.backend === harness.id && current.model === o.value);
-    setText(b.querySelector(".mp-id"), o.value);
+    setText(b.querySelector(".mp-id"), o.family ?? o.value);
     setText(b.querySelector(".mp-desc"), o.detail || "");
-    b.title = [o.value, o.detail].filter(Boolean).join(" · ");
+    b.title = [o.family ?? o.value, o.detail].filter(Boolean).join(" · ");
     b.setAttribute("aria-label", `${harness.label} ${o.label}`);
     b.setAttribute("aria-checked", String(selected?.backend === harness.id && selected.model === o.value));
     b.addEventListener("click", () => onPick(harness.id, o.value));

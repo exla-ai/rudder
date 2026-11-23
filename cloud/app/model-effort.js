@@ -12,7 +12,8 @@ export function groupAntigravityEfforts(models) {
     const [, family, effort] = variant;
     let group = groups.get(family);
     if (!group) {
-      group = { ...row, label: label[1], efforts: [], variants: {} };
+      // `family` is the id without the effort, which the picker chooses apart.
+      group = { ...row, family, label: label[1], efforts: [], variants: {} };
       groups.set(family, group);
       rows.push(group);
     }

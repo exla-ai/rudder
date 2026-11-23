@@ -732,7 +732,7 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
   const logs = path.join(home, ".gemini", "antigravity-cli", "brain", conversation, ".system_generated", "logs");
   fs.mkdirSync(logs, { recursive: true });
   const steps = [
-    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-19T05:10:00Z", content: "Objective: run the tests\nDone when: they pass\n\nRudder-specific context injected by Rudder:\n- use jj\n\nrun the tests" },
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-19T05:10:00Z", content: "<USER_REQUEST>\nObjective: run the tests\nDone when: they pass\n\nRudder-specific context injected by Rudder:\n- use jj\n\nrun the tests\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-19T05:10:00Z.\n</ADDITIONAL_METADATA>" },
     // agy 1.5 logs a response's tool calls on it (arg values JSON-encoded)
     // and each call's result as a GENERIC step after it, in order.
     { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2233, output_tokens: 69, content: "Running them.", tool_calls: [
@@ -742,8 +742,11 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
     { step_index: 3, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-19T05:10:02Z", content: "Created At: 2026-11-19T05:10:02Z\nCompleted At: 2026-11-19T05:10:02Z\nShowing lines 1-20 of 20\n1: {" },
     { step_index: 4, source: "MODEL", type: "GENERIC", status: "DONE", created_at: "2026-11-19T05:10:03Z", content: "Created At: 2026-11-19T05:10:03Z\nCompleted At: 2026-11-19T05:10:09Z\nCreated At: 2026-11-19T05:10:03Z\nCompleted At: 2026-11-19T05:10:09Z\nCommand exited with code 1.\n\nCommand output:\n1 failing" },
     { step_index: 5, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2344, output_tokens: 5, content: "One test fails." },
+    // The notes agy adds for the model after what was typed are not the user's words.
+    { step_index: 6, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-11-19T05:11:00Z", content: "<USER_REQUEST>\nfix it\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-19T05:11:00Z.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Neon (Low). No need to comment on this change if the user doesn't ask about it.\n</USER_SETTINGS_CHANGE>" },
+    { step_index: 7, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", model: "gemini-3.8-flash", input_tokens: 2400, output_tokens: 5, content: "Fixed." },
   ];
-  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":6,"sou`);
+  fs.writeFileSync(path.join(logs, "transcript.jsonl"), `${steps.map((s) => JSON.stringify(s)).join("\n")}\n{"step_index":8,"sou`);
   const record = { id: "run-agy", backend: "antigravity", task: "Objective: run the tests\nDone when: they pass\n\nrun the tests", session: { nativeSessionId: conversation } };
   const transcript = readTranscript(fixtureRepo(record), "run-agy", { limit: 50, home });
   assert.deepEqual(transcript.messages.map((m) => [m.role, m.text || m.tool?.name]), [
@@ -752,6 +755,8 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
     ["tool", "read_file"],
     ["tool", "run_command"],
     ["assistant", "One test fails."],
+    ["user", "fix it"],
+    ["assistant", "Fixed."],
   ]);
   assert.equal(transcript.messages[2].tool.input, "/repo/package.json:1-20");
   assert.equal(transcript.messages[2].tool.output, "Showing lines 1-20 of 20\n1: {");
@@ -759,7 +764,7 @@ nodeTest("an Antigravity transcript becomes chat messages, and its prompts canno
   assert.equal(transcript.messages[3].tool.output, "Command exited with code 1.\n\nCommand output:\n1 failing");
   assert.deepEqual(transcript.edits, []);
   assert.equal(transcript.stats.model, "gemini-3.8-flash");
-  assert.equal(lastAssistantText(record, { home }).text, "One test fails.");
+  assert.equal(lastAssistantText(record, { home }).text, "Fixed.");
 });
 
 nodeTest("agent stats: output speed over the last five responses and context left, through a compaction", () => {

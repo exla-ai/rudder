@@ -32,6 +32,8 @@ test("Gemini 4 Neon exposes the CLI's four selectable thinking levels", () => {
   })));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].label, "Gemini 4 Neon");
+  // The picker shows this id: the effort is chosen apart from the model.
+  assert.equal(rows[0].family, "gemini-4-neon");
   assert.deepEqual(rows[0].efforts, ["low", "medium", "high", "xhigh"]);
   assert.deepEqual(modelRequest(rows[0], "xhigh"), {
     model: "gemini-4-neon-xhigh", effort: null, name: "Gemini 4 Neon (Extra)",

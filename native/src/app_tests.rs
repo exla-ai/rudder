@@ -33989,3 +33989,86 @@ fn agents_start_runs_a_linked_helper_on_its_own_model_without_moving_the_default
     assert_eq!(app.agents.len(), 2);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[cfg(not(windows))]
+#[test]
+fn a_helper_start_never_writes_the_model_config_even_beside_model_and_task_requests() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("helper-config");
+    let home = dir.join("home");
+    env.set_home(&dir, &home);
+    let rudder_home = home.join(".rudder");
+    std::env::set_var("RUDDER_HOME", &rudder_home);
+    fs::create_dir_all(&rudder_home).unwrap();
+    let models = serde_json::json!({"status": "SUCCESS", "command": {"name": "models", "data": {"models": [
+        {"id": "gemini-4-neon-medium", "label": "Gemini 4 Neon (Medium)"},
+        {"id": "gemini-4-neon-xhigh", "label": "Gemini 4 Neon (XHigh)"},
+    ]}}});
+    fs::write(rudder_home.join("antigravity-models.json"), models.to_string()).unwrap();
+    let config_path = rudder_home.join("config.json");
+    let original = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "lastUsedBackend": "claude",
+        "backends": {
+            "claude": {"model": "opus", "reasoningEffort": "high"},
+            "antigravity": {"model": "gemini-4-neon-medium"},
+        },
+    }))
+    .unwrap();
+    fs::write(&config_path, &original).unwrap();
+    let fake_cli = dir.join("fake-rudder.sh");
+    write_fake_bin(&fake_cli, "#!/bin/sh\nexit 1\n");
+    std::env::set_var("RUDDER_CLI", &fake_cli);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.workspace_prep_inline = false;
+    app.backend = Backend::Claude;
+    app.model = "opus".to_string();
+    app.effort = Some(EffortLevel::High);
+    let mut parent = test_agent_run("parent-run", "ship the parser");
+    parent.cwd = dir.join("parent-ws");
+    app.agents.push(parent);
+    let inbox = dir.join(".rudder").join("steer");
+    fs::create_dir_all(&inbox).unwrap();
+    let mut serial = 0;
+    let mut queue = |kind: &str, task_id: &str, instruction: &str| {
+        serial += 1;
+        let request = serde_json::json!({
+            "requestId": format!("request-{serial:08}"), "kind": kind, "taskId": task_id, "instruction": instruction,
+        });
+        fs::write(inbox.join(format!("{serial:013}-{task_id}.json")), request.to_string()).unwrap();
+    };
+    let helper = "antigravity gemini-4-neon-xhigh\nReview lib/.";
+
+    // A helper and a new task in one poll: the file is untouched, and the
+    // task starts on the defaults, not on the helper's model.
+    queue("helper", "parent-run", helper);
+    queue("task", "conductor", "add a health check endpoint");
+    queue("helper", "parent-run", helper);
+    app.poll_steer_inbox();
+    assert_eq!(fs::read(&config_path).unwrap(), original, "the config file did not move");
+    let launched: Vec<_> = app.agents[1..].iter().map(|run| (run.backend, run.model.as_str(), run.parent_run.is_some())).collect();
+    assert_eq!(
+        launched,
+        [
+            (Backend::Antigravity, "gemini-4-neon-xhigh", true),
+            (Backend::Claude, "opus", false),
+            (Backend::Antigravity, "gemini-4-neon-xhigh", true),
+        ]
+    );
+
+    // `/model` between two helpers: the file holds the `/model` choice and
+    // nothing of the helpers, and new agents keep starting on it.
+    queue("helper", "parent-run", helper);
+    queue("task", "conductor", "/model claude sonnet low");
+    queue("helper", "parent-run", helper);
+    app.poll_steer_inbox();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(saved["lastUsedBackend"], "claude");
+    assert_eq!(saved["backends"]["claude"]["model"], "sonnet");
+    assert_eq!(saved["backends"]["antigravity"]["model"], "gemini-4-neon-medium");
+    assert!(!fs::read_to_string(&config_path).unwrap().contains("xhigh"));
+    assert_eq!((app.backend, app.model.as_str(), app.effort), (Backend::Claude, "sonnet", Some(EffortLevel::Low)));
+    assert_eq!(app.agents.iter().filter(|run| run.parent_run.is_some()).count(), 4);
+    let _ = fs::remove_dir_all(&dir);
+}

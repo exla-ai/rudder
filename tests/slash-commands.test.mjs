@@ -166,9 +166,11 @@ test("a Claude list is rebuilt only when what its menu shows changes", () => {
     const stamp = () => claudeStamp({ bin: path.join(root, "bin/claude"), env });
     const first = stamp();
 
-    // Rewritten unchanged, used, or counted: the same rows.
+    // Rewritten unchanged, used, counted, or a marketplace refreshed (every
+    // Claude Code start, a list build's own too): the same rows.
     for (const rel of ["config/settings.json", "config/commands/hello.md", "config/skills/tidy/SKILL.md", "config/skills/synced/acct/manifest.json"]) later(rel);
     write("config/.claude.json", JSON.stringify({ oauthAccount: { accountUuid: "a" }, skillUsage: { tidy: { usageCount: 3, lastUsedAt: Date.now() } }, numStartups: 9 }));
+    write("config/plugins/known_marketplaces.json", JSON.stringify({ m: { source: { source: "github" }, lastUpdated: new Date().toISOString() } }));
     assert.equal(stamp(), first);
 
     const changes = [

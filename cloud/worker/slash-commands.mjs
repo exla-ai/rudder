@@ -857,14 +857,16 @@ function claudeConfigDir(env) {
 // skills, settings and plugins, and the sign-in and MCP servers in its global
 // config. Files count by content: Claude Code rewrites some of them
 // unchanged. A change rebuilds the list while it keeps serving; nothing else
-// does. Skill usage, which orders the most used skills first in Claude's own
-// popup, is left out: it changes on every skill an agent runs, and the rows
-// are the same.
+// does. Left out: skill usage, which orders the most used skills first in
+// Claude's own popup and changes on every skill an agent runs, and the
+// marketplaces file, whose lastUpdated every Claude Code start rewrites (our
+// own builds too, so each one set off the next); installed_plugins.json names
+// what the menu gets from them.
 export function claudeStamp({ bin, env }) {
   const config = claudeConfigDir(env);
   const real = fs.realpathSync(bin);
   const files = new Map();
-  for (const name of ["settings.json", "settings.local.json", "plugins/installed_plugins.json", "plugins/known_marketplaces.json"]) {
+  for (const name of ["settings.json", "settings.local.json", "plugins/installed_plugins.json"]) {
     contentTree(path.join(config, name), name, 0, files);
   }
   contentTree(path.join(config, "commands"), "commands", 4, files);

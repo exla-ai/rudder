@@ -193,13 +193,16 @@ impl App {
         match started {
             Ok(run_id) => match self.write_helper_receipt(request_id, &run_id) {
                 Ok(()) => None,
-                Err(error) => Some(SteerDelivery::Failed(format!(
-                    "helper {run_id} started, but its receipt was not written: {error}"
-                ))),
+                Err(error) => Some(SteerDelivery::Failed(
+                    crate::delivery::FailCode::Refused,
+                    format!(
+                        "helper {run_id} started, but its receipt was not written: {error}"
+                    ),
+                )),
             },
             Err(reason) => {
                 self.push_activity(format!("helper not started: {reason}"));
-                Some(SteerDelivery::Failed(reason))
+                Some(SteerDelivery::Failed(crate::delivery::FailCode::Refused, reason))
             }
         }
     }

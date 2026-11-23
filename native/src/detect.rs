@@ -22,6 +22,9 @@ pub(crate) fn post_completion_output_is_new_turn(
 /// them pushed the spinner out of this window while the tip above stayed in
 /// theirs. The window starts at the composer (`rows_above_composer`).
 pub(crate) fn recent_lines_look_busy(backend: Backend, lines: &[String]) -> bool {
+    if backend == Backend::Antigravity && antigravity_turn_active(lines) {
+        return true;
+    }
     rows_above_composer(backend, lines)
         .iter()
         .rev()
@@ -38,12 +41,24 @@ pub(crate) fn recent_lines_look_busy(backend: Backend, lines: &[String]) -> bool
 /// row said "working" with the agent idle at its prompt. An automatic
 /// compaction runs inside a turn its prompt already opened.
 pub(crate) fn recent_lines_show_turn_work(backend: Backend, lines: &[String]) -> bool {
+    if backend == Backend::Antigravity && antigravity_turn_active(lines) {
+        return true;
+    }
     rows_above_composer(backend, lines)
         .iter()
         .rev()
         .filter(|line| !line.trim().is_empty())
         .take(14)
         .any(|line| looks_busy(line.as_str()) && !looks_like_claude_compaction(line))
+}
+
+fn antigravity_turn_active(lines: &[String]) -> bool {
+    let rows: Vec<String> = lines
+        .iter()
+        .map(|line| normalize_terminal_line(line).to_ascii_lowercase())
+        .filter(|line| !line.is_empty())
+        .collect();
+    antigravity_turn_status_showing(&rows)
 }
 
 /// Claude Code's spinner while it compacts (2.1.318), and the hook phases

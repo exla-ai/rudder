@@ -2135,6 +2135,16 @@ fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
         r#"{"conversationId":"7f0c","terminationReason":"ERROR","error":"quota exhausted","fullyIdle":true}"#,
     );
     assert_eq!(state(), r#"{"state":"error","detail":"quota exhausted"}"#);
+    hook(
+        "Stop",
+        r#"{"conversationId":"7f0c","terminationReason":"MAX_INVOCATIONS","fullyIdle":true}"#,
+    );
+    assert_eq!(state(), r#"{"state":"error","detail":"stopped: reached Antigravity max invocation limit"}"#);
+    hook(
+        "Stop",
+        r#"{"conversationId":"7f0c","terminationReason":"MAX_TOKEN_BUDGET_EXCEEDED","fullyIdle":true}"#,
+    );
+    assert_eq!(state(), r#"{"state":"error","detail":"stopped: exceeded Antigravity token budget"}"#);
     std::fs::remove_file(&signal).expect("clear");
 
     // Neon's subagents run in the agent's process, so their hooks reach the
@@ -2171,6 +2181,30 @@ fn antigravity_terminal_done_ends_a_workers_turn_only() {
     // the wait it latched.
     assert_eq!(signals::antigravity_status_signal(&status("idle"), false), Some(SignalState::Working));
     assert_eq!(signals::antigravity_status_signal(&status("working"), true), Some(SignalState::Working));
+}
+
+#[test]
+fn antigravity_turn_status_marks_agent_busy_and_not_idle() {
+    let running: Vec<String> = vec![
+        "Working on the request".into(),
+        "────────────────────────".into(),
+        "> ".into(),
+        "────────────────────────".into(),
+        "esc to cancel   auto · gemini-4-neon · high".into(),
+    ];
+    assert!(recent_lines_look_busy(Backend::Antigravity, &running));
+    assert!(recent_lines_show_turn_work(Backend::Antigravity, &running));
+    assert!(!terminal_at_idle_prompt(Backend::Antigravity, &running));
+
+    let idle: Vec<String> = vec![
+        "Done.".into(),
+        "────────────────────────".into(),
+        "> ".into(),
+        "────────────────────────".into(),
+        "? for shortcuts   auto · gemini-4-neon · high".into(),
+    ];
+    assert!(!recent_lines_look_busy(Backend::Antigravity, &idle));
+    assert!(terminal_at_idle_prompt(Backend::Antigravity, &idle));
 }
 
 #[test]
@@ -34434,7 +34468,7 @@ fn agents_start_runs_a_linked_helper_on_its_own_model_without_moving_the_default
         "antigravity gemini-4-neon-xhigh\nReview lib/ and test/ and list the top findings.",
         "helper-0123456789",
     );
-    if let Some(SteerDelivery::Failed(why)) = &started {
+    if let Some(SteerDelivery::Failed(_, why)) = &started {
         panic!("the helper was refused: {why}");
     }
     assert!(started.is_none());
@@ -34469,7 +34503,7 @@ fn agents_start_runs_a_linked_helper_on_its_own_model_without_moving_the_default
 
     // Refused with the reason, and nothing starts.
     let refused = |app: &mut App, parent: &str, instruction: &str| match app.deliver_helper_request(parent, instruction, "helper-9876543210") {
-        Some(SteerDelivery::Failed(why)) => why,
+        Some(SteerDelivery::Failed(_, why)) => why,
         _ => panic!("{instruction:?} started a helper"),
     };
     let why = refused(&mut app, "parent-run", "antigravity gemini-4-neon xhigh\nreview");

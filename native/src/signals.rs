@@ -885,9 +885,20 @@ case "$1" in
   PreInvocation)
     [ "$(number invocationNum)" = "0" ] && emit working ;;
   Stop)
-    case "$(field terminationReason)" in
+    reason=$(field terminationReason)
+    case "$reason" in
       ERROR)
-        detail=$(field error | tr -d '\\"' | cut -c1-80)
+        detail=$(field error | tr '\r\n' '  ' | tr -d '\\"' | cut -c1-160)
+        mkdir -p '{dir}' && printf '{{"state":"error","detail":"%s"}}' "$detail" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
+      MAX_INVOCATIONS)
+        mkdir -p '{dir}' && printf '{{"state":"error","detail":"stopped: reached Antigravity max invocation limit"}}' > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
+      MAX_FORCED_INVOCATIONS)
+        mkdir -p '{dir}' && printf '{{"state":"error","detail":"stopped: reached Antigravity continuation limit"}}' > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
+      MAX_TOKEN_BUDGET_EXCEEDED)
+        mkdir -p '{dir}' && printf '{{"state":"error","detail":"stopped: exceeded Antigravity token budget"}}' > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
+      TERMINAL_CUSTOM_HOOK)
+        detail=$(field error | tr '\r\n' '  ' | tr -d '\\"' | cut -c1-160)
+        [ -z "$detail" ] && detail="stopped by an Antigravity hook"
         mkdir -p '{dir}' && printf '{{"state":"error","detail":"%s"}}' "$detail" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' ;;
       *) printf '%s' "$payload" | grep -q '"fullyIdle": *true' && emit done ;;
     esac ;;

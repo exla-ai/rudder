@@ -1,6 +1,7 @@
-// Local development server for the Rudder phone app. No dependencies.
+// Local development server for the Rudder phone app. Needs cloud's
+// dependencies (npm --prefix cloud ci) for the app build.
 //   PORT=4321 node cloud/app/dev-mock.mjs
-// Serves /app/* from this folder and mocks /api/app/*.
+// Serves /app/* built from this folder, as Cloud does, and mocks /api/app/*.
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
 // /app/__mock/creds/<out|claude|both|expired|two|three> (agent sign-ins; two, three: more Claude accounts),
@@ -23,7 +24,7 @@
 // /app/__mock/tailscale-flow/<ok|approval|refused> (how the next Connect goes),
 // /app/__mock/integrations/<on|off|unset>,
 // /app/__mock/invite (prints a join link), /app/__mock/files/agent-edit (an agent rewrites README.md
-// in run_a1's workspace, to see the Files panel's conflict banner; build cloud first for its renderer). Orgs, invites, Slack and a plan are mocked too,
+// in run_a1's workspace, to see the Files panel's conflict banner). Orgs, invites, Slack and a plan are mocked too,
 // and so is the team view (two teammates in Exla, one asleep; uses cloud/dist/team.js).
 // The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
@@ -33,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { digestRun } from "../worker/digest.mjs";
 import { readTranscript, showAttachments } from "../worker/transcripts.mjs";
+import { buildShell, buildVendor } from "../scripts/build-app.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4321);
@@ -600,23 +602,38 @@ function readBody(req) {
     req.on("end", () => { try { resolve(JSON.parse(d || "{}")); } catch { resolve({}); } });
   });
 }
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".webmanifest": "application/manifest+json" };
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".map": "application/json; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".webmanifest": "application/manifest+json" };
 
-// Built from cloud/src like server.ts serves them (build cloud first).
-const COMPILED = { "/app/terminal-recovery.js": "../dist/private-access/terminal-recovery.js", "/app/project-file-render.js": "../dist/project-files/browser-render.js" };
-function serveStatic(req, res, url) {
-  if (COMPILED[url.pathname]) {
-    res.writeHead(200, { "Content-Type": TYPES[".js"], "Cache-Control": "no-cache" });
-    return fs.createReadStream(path.join(DIR, COMPILED[url.pathname])).pipe(res);
+// The app as Cloud serves it (scripts/build-app.mjs), built in memory. The
+// shell is built again on every page load, so an edit under cloud/app shows
+// on reload; CodeMirror and xterm.js are built once, when first asked for.
+let shell = null; // Promise of published path -> bytes
+let vendor = null;
+async function serveStatic(req, res, url) {
+  const rel = url.pathname.replace(/^\/app\/?/, "") || "index.html";
+  let files;
+  try {
+    if (rel.startsWith("vendor/")) {
+      files = await (vendor ??= buildVendor());
+    } else {
+      if (!shell || req.headers["sec-fetch-mode"] === "navigate") shell = buildShell();
+      files = await shell;
+    }
+  } catch (error) {
+    if (rel.startsWith("vendor/")) vendor = null; else shell = null;
+    res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(`The app did not build: ${error.message}`);
   }
-  let rel = url.pathname.replace(/^\/app\/?/, "");
-  const file = path.join(DIR, rel);
-  const ok = rel && !rel.includes("..") && rel !== "dev-mock.mjs" && fs.existsSync(file) && fs.statSync(file).isFile();
-  const target = ok ? file : path.join(DIR, "index.html");
-  const headers = { "Content-Type": TYPES[path.extname(target)] || "application/octet-stream", "Cache-Control": "no-cache" };
-  if (rel === "sw.js") headers["Service-Worker-Allowed"] = "/app";
+  const asset = rel.startsWith("assets/");
+  if (!files.has(rel) && (asset || rel.startsWith("vendor/"))) {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(`${rel} is not in this build`);
+  }
+  const name = files.has(rel) ? rel : "index.html";
+  const headers = { "Content-Type": TYPES[path.extname(name)] || "application/octet-stream", "Cache-Control": asset ? "public, max-age=31536000, immutable" : "no-cache" };
+  if (name === "sw.js") headers["Service-Worker-Allowed"] = "/app";
   res.writeHead(200, headers);
-  fs.createReadStream(target).pipe(res);
+  res.end(files.get(name));
 }
 
 // ---------- Team view (cloud/src/team.ts, through its built module) ----------

@@ -1,5 +1,5 @@
-// The one xterm.js bundle the terminal panel loads (app/vendor/xterm.js and
-// its stylesheet app/vendor/xterm.css, built by `npm run build`). One file,
+// The one xterm.js bundle the terminal panel loads (/app/vendor/xterm.js and
+// its stylesheet /app/vendor/xterm.css, built by scripts/build-app.mjs). One file,
 // so the addons share the core's instance, like the CodeMirror bundle. The
 // stylesheet carries JetBrains Mono (OFL), the terminal's web font; its
 // .woff2 files land beside it.

@@ -1,7 +1,6 @@
 // Markdown rendering, icons and small DOM helpers.
 import { markFileRefs } from "/app/file-refs.js";
 
-const CDN = "https://cdn.jsdelivr.net/npm/";
 // DOMPurify's default allowed URIs plus file:, for chat Markdown only, where
 // markFileRefs turns every file: link into a file link without an href.
 const WITH_FILE_URIS = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|file):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
@@ -21,8 +20,9 @@ export function markdownReady() { return !!libs; }
 export function loadMarkdown() {
   if (libsPromise) return libsPromise;
   libsPromise = Promise.all([
-    import(CDN + "marked@12.0.2/lib/marked.esm.js"),
-    import(CDN + "dompurify@3.1.6/dist/purify.es.mjs"),
+    // Pinned in cloud/package.json and bundled as lazy chunks (scripts/build-app.mjs).
+    import("marked"),
+    import("dompurify/dist/purify.es.mjs"),
   ]).then(([m, p]) => {
     const marked = new m.Marked({ gfm: true, breaks: false });
     const purify = p.default;
@@ -55,7 +55,7 @@ export function loadMarkdown() {
 
 function loadHighlighter() {
   if (!highlighterPromise) {
-    highlighterPromise = import(CDN + "@highlightjs/cdn-assets@11.9.0/es/highlight.min.js")
+    highlighterPromise = import("@highlightjs/cdn-assets/es/highlight.min.js")
       .then(({ default: lib }) => { highlighter = lib; })
       .catch((err) => {
         console.warn("syntax highlighter unavailable", err);

@@ -5,7 +5,6 @@
 import fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
 
@@ -137,10 +136,9 @@ async function sidecars(file: string, stat: Stats): Promise<Partial<Record<Codin
 export async function sendStaticFile(
   req: IncomingMessage,
   res: ServerResponse,
-  target: string | URL,
+  file: string,
   headers: Record<string, string>,
 ): Promise<void> {
-  const file = typeof target === "string" ? target : fileURLToPath(target);
   const stat = await fs.stat(file);
   const accepted = acceptedCodings(req.headers["accept-encoding"]);
   const precompressed = await sidecars(file, stat);

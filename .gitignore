@@ -1,7 +1,5 @@
 node_modules/
 cloud/dist/
-# Built by `npm --prefix cloud run build` (cloud/editor).
-cloud/app/vendor/
 dist/
 target/
 __pycache__/

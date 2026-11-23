@@ -1,5 +1,5 @@
-// The one CodeMirror 6 bundle the app's file panel loads (app/vendor/codemirror.js,
-// built by `npm run build`). Bundling keeps a single @codemirror/state instance;
+// The one CodeMirror 6 bundle the app's file panel loads (/app/vendor/codemirror.js,
+// built by scripts/build-app.mjs). Bundling keeps a single @codemirror/state instance;
 // separate CDN modules can load two and break every extension check.
 export { EditorView, keymap } from "@codemirror/view";
 export { EditorState, Compartment } from "@codemirror/state";

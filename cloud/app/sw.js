@@ -1,26 +1,19 @@
-// Rudder app service worker: network first for the shell, cached copy when offline.
-// Never touches /api/.
-const CACHE = "rudder-app-v5";
-// Everything index.html links and app.js imports (directly or through another
-// module), so the app opens offline after its first visit. A module or
-// stylesheet added there belongs here too.
-const SHELL = [
-  "/app", "/app/theme.js", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js", "/app/model-effort.js", "/app/harness-logos.js",
-  "/app/org.js", "/app/select.js", "/app/team.js", "/app/tutorial.js", "/app/mac-local.js", "/app/prompt-suggest.js", "/app/quote-reply.js", "/app/quote-text.js",
-  "/app/agent-stats.js", "/app/context-meter.js", "/app/compaction.js", "/app/goal-chip.js", "/app/agent-menu.js", "/app/command-palette.js", "/app/command-rank.js", "/app/chat-find.js", "/app/global-search.js", "/app/closing.js", "/app/all-agents.js", "/app/home-update.js", "/app/canvas-panel.js", "/app/chat-edit.js",
-  "/app/code-editor.js", "/app/file-view.js", "/app/files-hub.js", "/app/files-panel.js", "/app/side-panel.js", "/app/notes.js", "/app/file-link.js", "/app/file-refs.js", "/app/tool-files.js", "/app/pending.js", "/app/tailscale-step.js",
-  "/app/project-file-render.js", "/app/slash-menu.js", "/app/slash-rank.js", "/app/subagents.js", "/app/subagent-tray.js", "/app/terminal-client.js", "/app/terminal-panel.js", "/app/terminal-recovery.js",
-  "/app/tabs.js", "/app/tabs.css",
-  "/app/styles.css", "/app/desktop.css", "/app/side-panel.css", "/app/files-panel.css", "/app/canvas-panel.css", "/app/terminal-panel.css", "/app/files-hub.css",
-  "/app/agent-stats.css", "/app/prompt-suggest.css", "/app/slash-menu.css", "/app/all-agents.css", "/app/home-update.css", "/app/context-meter.css", "/app/compaction.css", "/app/notes.css", "/app/file-link.css", "/app/subagent-tray.css", "/app/command-palette.css", "/app/global-search.css", "/app/chat-find.css", "/app/quote-reply.css", "/app/tailscale-step.css", "/app/tutorial.css",
-  "/app/manifest.webmanifest", "/app/icon.svg", "/app/favicon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",
-];
-const CDN = "https://cdn.jsdelivr.net/npm/";
+// Rudder app service worker. The build (cloud/scripts/build-app.mjs) writes
+// `BUILD` (this build's id) and `PRECACHE` (the shell, every hashed asset, the
+// icons and the manifest) in front of this file, so each build is a new
+// worker: it installs with its own cache and drops every earlier one.
+//   - The shell (navigations): network first, so a deploy shows on the next
+//     open; the cached shell only when offline.
+//   - /app/assets/: content-hashed and immutable, so from the cache.
+//   - Other /app files (vendor bundles, icons): network first, cached copy
+//     when offline.
+// Never touches /api/ or sign-in.
+const CACHE = `rudder-app-${BUILD}`;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE)
-      .then((c) => Promise.all(SHELL.map((u) => c.add(new Request(u, { cache: "reload" })).catch(() => null))))
+      .then((c) => c.addAll(PRECACHE.map((u) => new Request(u, { cache: "reload" }))))
       .then(() => self.skipWaiting()),
   );
 });
@@ -37,22 +30,14 @@ self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  if (!(url.pathname === "/app" || url.pathname.startsWith("/app/"))) return;
+  if (url.pathname.startsWith("/app/login")) return;
 
-  // Pinned CDN libraries never change: cache first.
-  if (url.href.startsWith(CDN)) {
-    event.respondWith(
-      caches.match(req).then((hit) => hit || fetch(req).then((res) => {
-        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
-        return res;
-      })),
-    );
+  if (url.pathname.startsWith("/app/assets/")) {
+    event.respondWith(caches.match(req).then((hit) => hit || fetch(req)));
     return;
   }
-
-  if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/")) return;
-  if (!(url.pathname === "/app" || url.pathname.startsWith("/app/"))) return;
-  if (url.pathname === "/app/login" || url.pathname.startsWith("/app/login")) return;
 
   const isNav = req.mode === "navigate";
   event.respondWith((async () => {

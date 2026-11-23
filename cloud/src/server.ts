@@ -7412,13 +7412,16 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
 // account ids line up; a CLI bearer token works on these routes too.
 // ---------------------------------------------------------------------------
 
-const appDir = process.env.RUDDER_APP_DIR || path.join(process.cwd(), "app");
+// Built by `npm run build` (scripts/build-app.mjs) from cloud/app.
+const appDir = path.join(process.cwd(), "dist", "app");
+const appAssets = path.join(appDir, "assets");
 const APP_CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
   ".webmanifest": "application/manifest+json",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -7441,11 +7444,6 @@ async function requireAccount(req: IncomingMessage): Promise<{ accountId: string
 }
 
 async function serveAppFile(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
-  if (pathname === "/app/terminal-recovery.js" || pathname === "/app/project-file-render.js") {
-    const source=pathname === "/app/terminal-recovery.js" ? "./private-access/terminal-recovery.js" : "./project-files/browser-render.js";
-    await sendStaticFile(req, res, new URL(source, import.meta.url), { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
-    return;
-  }
   const relative = pathname.replace(/^\/app\/?/, "") || "index.html";
   const resolved = path.resolve(appDir, relative);
   const insideApp = resolved === appDir || resolved.startsWith(`${appDir}${path.sep}`);
@@ -7457,15 +7455,24 @@ async function serveAppFile(req: IncomingMessage, res: ServerResponse, pathname:
     if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   });
+  const asset = target.startsWith(`${appAssets}${path.sep}`);
   if (!stat?.isFile()) {
+    // A hashed file this build does not have: a page from an earlier deploy
+    // asking for one of its own chunks. The shell in its place would only
+    // fail later, as a script of the wrong type.
+    if (asset) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+      res.end("This file is from an earlier version of the app. Reload the page.");
+      return;
+    }
     target = shell;
   }
-  // The shell and the service worker must revalidate so a deploy shows up on
-  // the next open; hashed assets are not used, so everything revalidates
-  // (cheaply, through the ETag).
+  // Hashed assets never change under their names. The shell and the service
+  // worker revalidate (cheaply, through the ETag) so a deploy shows on the
+  // next open, and so do the icons and vendor bundles, which keep their names.
   const headers: Record<string, string> = {
     "content-type": APP_CONTENT_TYPES[path.extname(target)] ?? "application/octet-stream",
-    "cache-control": "no-cache",
+    "cache-control": asset ? "public, max-age=31536000, immutable" : "no-cache",
   };
   if (path.basename(target) === "sw.js") {
     headers["service-worker-allowed"] = "/app";

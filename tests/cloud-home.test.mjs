@@ -121,9 +121,17 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal((await fetch(`${base}/api/app/state`)).status, 401);
   const shell = await fetch(`${base}/app/p/libra-test/a/some-run`);
   assert.equal(shell.status, 200, "client routes fall back to the app shell");
-  assert.match(await shell.text(), /<html/i);
+  assert.equal(shell.headers.get("cache-control"), "no-cache", "a deploy shows on the next open");
+  const shellHtml = await shell.text();
+  assert.match(shellHtml, /<html/i);
+  // The bundle the shell names never changes under its name; one this build lacks is a 404, not the shell.
+  const bundle = await fetch(`${base}${/src="(\/app\/assets\/app-[^"]+\.js)"/.exec(shellHtml)[1]}`);
+  assert.equal(bundle.status, 200);
+  assert.equal(bundle.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal((await fetch(`${base}/app/assets/app-GONE1234.js`)).status, 404);
   const sw = await fetch(`${base}/app/sw.js`);
   assert.equal(sw.headers.get("service-worker-allowed"), "/app");
+  assert.equal(sw.headers.get("cache-control"), "no-cache");
   const traversal = await fetch(`${base}/app/..%2f..%2fpackage.json`);
   assert.doesNotMatch(await traversal.text(), /"better-auth"/, "no reads outside the app dir");
 

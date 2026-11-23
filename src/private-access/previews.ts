@@ -198,6 +198,7 @@ export class PrivatePreviewDirectory {
   private readonly uncertain = new Map<number, Promise<unknown>>();
   private readonly unsettled = new Set<number>();
   private desired = new Map<number, PreviewListener>();
+  private checkedAt = -Infinity; // when Tailscale's status and Serve config were last read
   private revision = 0;
   private queue: Promise<void> = Promise.resolve();
   private online = false;
@@ -210,6 +211,7 @@ export class PrivatePreviewDirectory {
     timeoutMs?: number;
     maxAgeMs?: number;
     maxListeners?: number;
+    verifyMs?: number;
     allowPrivateHttp?: boolean;
     ownedPorts?: number[];
     onOwnedPorts?: (ports: number[]) => void;
@@ -278,7 +280,41 @@ export class PrivatePreviewDirectory {
     this.queue = result.catch(() => {});
     return result;
   }
+  // Nothing to change on the tailnet: every wanted listener has its route,
+  // nothing else is owned, no effect is in doubt, and Tailscale's status was
+  // read within verifyMs. Then only Serve's config is read (a port made public
+  // or repointed is withdrawn at once) and the local checks run (the same
+  // process, still answering); nothing is written. A full pass on every 5 s
+  // scan ran a tailscale command about twice a second on a home with previews.
+  private async keep(revision: number): Promise<boolean> {
+    if (!this.online || this.uncertain.size || this.unsettled.size) return false;
+    if (this.now() - this.checkedAt >= (this.options.verifyMs ?? 60_000)) return false;
+    if (this.routes.size !== this.desired.size || this.owned.size !== this.desired.size) return false;
+    for (const item of this.desired.values()) {
+      const route = this.routes.get(item.port);
+      if (!route || route.id !== identity(item, route.deviceId) || !this.owned.has(item.port)) return false;
+    }
+    if (!this.desired.size) return true;
+    const configuration = await this.command(["serve", "status", "--json"]);
+    let serve: unknown;
+    try { serve = JSON.parse(configuration?.code === 0 ? configuration.stdout : ""); } catch { return false; }
+    if (this.revision !== revision) return true; // a newer pass runs next
+    const publicPorts = funnelPorts(serve);
+    for (const item of this.desired.values()) {
+      if (publicPorts.has(item.port) || !forwardsToListener(serve, item, this.routes.get(item.port)!.dnsName)) return false;
+    }
+    for (const item of this.desired.values()) {
+      const ready = await this.processMatches(item)
+        && await bounded(() => (this.options.probe ?? previewReachable)(item.origin, this.timeoutMs), this.timeoutMs) === true;
+      if (!this.current(item, revision)) return true; // a newer pass runs next
+      if (!ready) return false;
+    }
+    const at = this.now();
+    for (const port of this.desired.keys()) this.routes.get(port)!.observedAt = at;
+    return true;
+  }
   private async update(revision: number) {
+    if (await this.keep(revision)) return;
     const status = await this.command(["status", "--json"]);
     let value: Record<string, unknown> = {};
     try { value = object(JSON.parse(status?.stdout ?? "")); } catch { /* offline */ }
@@ -289,6 +325,8 @@ export class PrivatePreviewDirectory {
     this.online = value.BackendState === "Running" && self.Online === true && !!deviceId
       && canonicalPreviewUrl(`https://${dnsName}:3000/`, dnsName, 3000) !== null;
     if (!this.online) { this.routes.clear(); return; }
+    // Commands still running now may change the config after it is read.
+    const pending = new Set(this.unsettled);
     const configuration = await this.command(["serve", "status", "--json"]);
     let serve: Record<string, unknown>;
     try {
@@ -313,7 +351,18 @@ export class PrivatePreviewDirectory {
         if (this.owned.delete(port)) this.journal();
       }
     }
+    this.checkedAt = this.now();
     for (const port of this.routes.keys()) if (!existing.has(port)) this.routes.delete(port);
+    // A journaled port Serve no longer configures has nothing to turn off. Turned
+    // off again and again, 300 such ports kept a home starting `tailscale serve
+    // --https=<port> off` every two seconds.
+    let forgot = false;
+    for (const port of this.owned) {
+      if (existing.has(port) || publicPorts.has(port) || pending.has(port) || this.unsettled.has(port)) continue;
+      this.owned.delete(port); this.claimedTargets.delete(port); this.uncertain.delete(port); this.routes.delete(port);
+      forgot = true;
+    }
+    if (forgot) this.journal();
     for (const port of this.owned) {
       const route = this.routes.get(port);
       const desired = this.desired.get(port);

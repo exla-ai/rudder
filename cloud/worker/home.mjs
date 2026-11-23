@@ -1905,6 +1905,12 @@ async function answerAsk(project, params) {
 // Explicit current-owner preview registrations become private tailnet previews.
 // ---------------------------------------------------------------------------
 
+// The app's tailnet status (signed in, online, DNS name) is read again this
+// often; sign-in and sign-out read it themselves. Previews read Tailscale only
+// when their ports change, or once a minute (private-access/previews.ts).
+const TAILNET_STATUS_MS = 60_000;
+let tailnetReadAt = 0;
+
 async function scanPorts() {
   const service = await privatePreviewService();
   // Concurrent discovery callers await the same fresh reconciliation, including
@@ -1912,7 +1918,10 @@ async function scanPorts() {
   await service.reconcile([...projects.values()].filter(project => project.status !== "cloning"));
   ports = [...projects.values()].flatMap(project => service.snapshot(project.workspaceId));
   // Read-only status does not share the superseded Serve writer or infer roles.
-  await tailscale.refresh();
+  if (Date.now() - tailnetReadAt >= TAILNET_STATUS_MS) {
+    tailnetReadAt = Date.now();
+    await tailscale.refresh();
+  }
 }
 
 // ---------------------------------------------------------------------------

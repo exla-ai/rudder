@@ -439,9 +439,46 @@ test("v4 requires live device identity and expires observations using a local mo
   assert.deepEqual(h.directory.snapshot(), []);
   await h.directory.reconcile([scopedListener()]);
   assert.equal(h.directory.snapshot().length, 1);
+  // Tailscale is read again within a minute of the last read.
   h.status({ ...scopedOnline(), BackendState: "NeedsLogin" });
+  h.time(70_001);
   await h.directory.reconcile([scopedListener()]);
   assert.deepEqual(h.directory.snapshot(), []);
+});
+
+test("a preview whose port, process and route are unchanged runs no tailscale command", async () => {
+  const owned = [];
+  const h = privateHarness({ ownedPorts: [4100, 4101], onOwnedPorts: (ports) => owned.push(ports) });
+  await h.directory.reconcile([scopedListener()]);
+  assert.equal(h.directory.snapshot().length, 1);
+  // Journaled ports Serve does not configure are forgotten, not turned off.
+  assert.equal(h.calls.filter((args) => args.includes("off") && args.some((arg) => /=410[01]$/.test(arg))).length, 0);
+  assert.deepEqual(owned.at(-1), [3000]);
+
+  // Scans every 5 s for most of a minute: Serve's config is read, nothing
+  // else runs, and the route stays fresh.
+  let before = h.calls.length;
+  for (let at = 5_000; at < 60_000; at += 5_000) {
+    h.time(at);
+    await h.directory.reconcile([scopedListener()]);
+    assert.equal(h.directory.snapshot().length, 1);
+  }
+  assert.deepEqual(new Set(h.calls.slice(before).map((args) => args.join(" "))), new Set(["serve status --json"]));
+  // A minute on, Tailscale's status is read again; Serve is left as it is.
+  h.time(60_000);
+  before = h.calls.length;
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.calls.slice(before).map((args) => args.join(" ")), ["status --json", "serve status --json"]);
+  // A new port is served at once.
+  await h.directory.reconcile([scopedListener(), scopedListener({ port: 3001, origin: "http://127.0.0.1:3001/" })]);
+  assert.equal(h.directory.snapshot().length, 2);
+  assert.ok(h.calls.some((args) => args.includes("--https=3001")));
+  // No previews: nothing runs between the once a minute reads.
+  await h.directory.reconcile([]);
+  before = h.calls.length;
+  h.time(65_000);
+  await h.directory.reconcile([]);
+  assert.deepEqual(h.calls.slice(before), []);
 });
 
 test("hung Tailscale and readiness probes stay bounded and do not serialize all work forever", { timeout: 2000 }, async () => {

@@ -13,11 +13,18 @@ type CwdRecovery = {
 const recovery = recoverCwdIfNeeded();
 
 try {
-  const { main } = await import("./main.js");
-  if (recovery.recovered) {
-    console.error(formatCwdRecoveryNotice(recovery));
+  // The dashboard's workspace helpers skip loading the whole CLI (launch-node.ts).
+  const helper = process.argv[2];
+  if (helper === "__launch-node" || helper === "__warm-start") {
+    const { runLaunchNodeCommand, runWarmStartCommand } = await import("./launch-node.js");
+    await (helper === "__launch-node" ? runLaunchNodeCommand : runWarmStartCommand)(process.argv.slice(3));
+  } else {
+    const { main } = await import("./main.js");
+    if (recovery.recovered) {
+      console.error(formatCwdRecoveryNotice(recovery));
+    }
+    await main();
   }
-  await main();
 } catch (error: unknown) {
   if (isMissingToolError(error)) {
     console.error(error.message);

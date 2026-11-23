@@ -303,7 +303,7 @@ export async function createNodeWorkspace(params: {
   runId?: string;
   task?: string;
   atChangeId?: string;
-}): Promise<{ workspaceName: string; path: string }> {
+}): Promise<{ workspaceName: string; path: string; changeId: string }> {
   ensureJj();
   // jj snapshots the main checkout while adding a workspace. Runtime state
   // must already be excluded at that exact point.
@@ -330,7 +330,7 @@ export async function createNodeWorkspace(params: {
     if ("snapshot" in fork) {
       const kind = process.platform === "darwin" ? "APFS clone" : "overlay fork";
       process.stderr.write(`[rudder] workspace ${workspaceName}: ${kind} of warm snapshot ${fork.snapshot.key}\n`);
-      return { workspaceName, path: targetPath };
+      return { workspaceName, path: targetPath, changeId: fork.changeId };
     }
     process.stderr.write(`[rudder] workspace ${workspaceName}: full jj checkout (${fork.reason})\n`);
   }
@@ -359,7 +359,7 @@ export async function createNodeWorkspace(params: {
     cwd: targetPath,
     allowFailure: true,
   });
-  return { workspaceName, path: targetPath };
+  return { workspaceName, path: targetPath, changeId: await currentJjChangeId(targetPath) };
 }
 
 /** jj working-copy description for a Rudder agent's workspace. */
@@ -379,7 +379,7 @@ export async function createRunJjWorkspace(params: {
   repoRoot: string;
   runId: string;
   task: string;
-}): Promise<{ workspaceName: string; path: string }> {
+}): Promise<{ workspaceName: string; path: string; changeId: string }> {
   return await createNodeWorkspace({
     repoRoot: params.repoRoot,
     runId: params.runId,

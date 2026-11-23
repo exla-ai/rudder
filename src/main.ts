@@ -17,8 +17,6 @@ import { dashboardRoot, runHandoff } from "./handoff.js";
 import { ensureBoardRunning } from "./daemon.js";
 import { ensureJjAvailable } from "./jj-binary.js";
 import {
-  createNodeWorkspace,
-  currentJjChangeId,
   currentOpId,
   ensureColocated,
   ensureJj,
@@ -256,10 +254,6 @@ export async function main(): Promise<void> {
     case "__route-task": {
       const { runTaskRoutingCommand } = await import("./task-routing.js");
       await runTaskRoutingCommand();
-      return;
-    }
-    case "__launch-node": {
-      await runLaunchNode(parsed);
       return;
     }
     case "__graph-mirror": {
@@ -1073,41 +1067,6 @@ async function runBoard(parsed: Parsed): Promise<void> {
   }
   // Keep the process alive while the in-process daemon serves the board.
   await new Promise<void>(() => {});
-}
-
-/**
- * `rudder __launch-node`: the native TUI calls this synchronously to isolate a
- * worker in a jj workspace (replacing `git workspace add`). It colocates jj with
- * the git repo, creates a per-node workspace, reads back its change id, and
- * prints a single JSON line {path, workspaceName, jjChangeId} to stdout. Errors
- * go to stderr and exit non-zero so the native side surfaces a clear failure.
- */
-async function runLaunchNode(parsed: Parsed): Promise<void> {
-  const repoRoot = parsed.flags.repo;
-  const task = parsed.flags.task;
-  if (!repoRoot) {
-    throw new Error("__launch-node requires --repo");
-  }
-  if (!task) {
-    throw new Error("__launch-node requires --task");
-  }
-  const runId = parsed.flags.node ?? newRunId(task);
-  ensureJj();
-  await ensureColocated(repoRoot);
-  const workspace = await createNodeWorkspace({
-    repoRoot,
-    runId,
-    task,
-    ...(parsed.flags.base ? { atChangeId: parsed.flags.base } : {}),
-  });
-  const jjChangeId = await currentJjChangeId(workspace.path);
-  process.stdout.write(
-    `${JSON.stringify({
-      path: workspace.path,
-      workspaceName: workspace.workspaceName,
-      jjChangeId,
-    })}\n`,
-  );
 }
 
 /**

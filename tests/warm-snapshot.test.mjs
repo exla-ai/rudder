@@ -69,9 +69,10 @@ test("warmCommands reads rudder.toml and detects lockfiles", () => {
     fs.writeFileSync(path.join(dir, "package-lock.json"), "{}");
     fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { build: "tsc" } }));
     fs.writeFileSync(path.join(dir, "uv.lock"), "");
-    assert.deepEqual(warmCommands(dir), ["npm ci", "npm run build", "uv sync"]);
+    // Installs and dev builds only: a project's `build` script is its release build.
+    assert.deepEqual(warmCommands(dir).map((command) => command.run), ["npm ci", "uv sync"]);
     fs.writeFileSync(path.join(dir, "rudder.toml"), '[warm]\ncommands = ["make deps", "make"]\n[other]\n');
-    assert.deepEqual(warmCommands(dir), ["make deps", "make"]);
+    assert.deepEqual(warmCommands(dir), [{ run: "make deps" }, { run: "make" }]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -375,6 +376,51 @@ test("refreshes stack on the previous snapshot, follow the base, compact when de
   await pruneWarmSnapshots(repo);
   assert.deepEqual(keys(), [s4.key]);
   assert.equal(fs.existsSync(s2.dir) || fs.existsSync(s1.dir), false);
+});
+
+test("a refresh reinstalls only when a dependency file changed", { skip: process.platform !== "linux" || !rudderJjPath() }, async (t) => {
+  const scratch = process.env.RUDDER_TEST_DISK ?? (fs.existsSync("/workspace/rudder-scratch") ? "/workspace/rudder-scratch" : os.tmpdir());
+  const root = fs.mkdtempSync(path.join(scratch, "rudder-warm-install-"));
+  const repo = path.join(root, "repo");
+  const bin = path.join(root, "bin");
+  const installs = path.join(root, "installs");
+  const saved = { PATH: process.env.PATH, NPM_LOG: process.env.NPM_LOG };
+  t.after(() => {
+    process.env.PATH = saved.PATH;
+    if (saved.NPM_LOG === undefined) delete process.env.NPM_LOG;
+    else process.env.NPM_LOG = saved.NPM_LOG;
+    removeRoot(root);
+  });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "npm"), '#!/bin/sh\necho "$@" >> "$NPM_LOG"\nmkdir -p node_modules/dep && echo installed > node_modules/dep/index.js\n', { mode: 0o755 });
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+  process.env.NPM_LOG = installs;
+  const put = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  };
+  put("package.json", JSON.stringify({ name: "x", scripts: { build: "exit 1" } }));
+  put("package-lock.json", "{}");
+  put("src/a.txt", "a\n");
+  put(".gitignore", "node_modules\n.rudder-workspaces\n");
+  sh(repo, "git", ["init", "-q"]);
+  sh(repo, "git", ["add", "."]);
+  sh(repo, "git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  sh(repo, "jj", ["git", "init", "--colocate"]);
+  const ran = () => fs.readFileSync(installs, "utf8").trim().split("\n");
+
+  assert.ok(await buildWarmSnapshot(repo, await currentBaseCommit(repo)), "first snapshot built");
+  assert.deepEqual(ran(), ["ci"], "the release `build` script is not a warm command");
+  put("src/a.txt", "b\n");
+  sh(repo, "jj", ["commit", "-m", "code only"]);
+  const code = await buildWarmSnapshot(repo, await currentBaseCommit(repo));
+  assert.ok(code, "code-only refresh built");
+  assert.deepEqual(ran(), ["ci"], "no dependency file changed: the previous install stays");
+  assert.match(fs.readFileSync(path.join(warmDir(repo), `${code.key}.log`), "utf8"), /npm ci: skipped/);
+  put("package.json", JSON.stringify({ name: "x", version: "2.0.0" }));
+  sh(repo, "jj", ["commit", "-m", "deps"]);
+  assert.ok(await buildWarmSnapshot(repo, await currentBaseCommit(repo)), "dependency refresh built");
+  assert.deepEqual(ran(), ["ci", "ci"]);
 });
 
 // macOS: forks are APFS clones of the warm snapshot (rudder-jj rudder-clone-add).

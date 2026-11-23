@@ -46,6 +46,7 @@
  */
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -180,8 +181,16 @@ export function readySnapshots(repoRoot: string): WarmSnapshot[] {
   return out.sort((a, b) => b.builtAt.localeCompare(a.builtAt));
 }
 
+/**
+ * One warm command. A detected install names the files it reads (`inputs`,
+ * matched by file name anywhere in the tree): a refresh whose base change
+ * touches none of them keeps the previous snapshot's dependencies instead of
+ * reinstalling them into a new layer. Configured commands always run.
+ */
+export type WarmCommand = { run: string; inputs?: string[] };
+
 /** Commands from rudder.toml `[warm] commands = [...]`, else detected from lockfiles. */
-export function warmCommands(dir: string): string[] {
+export function warmCommands(dir: string): WarmCommand[] {
   return commandsFor(
     (file) => fs.existsSync(path.join(dir, file)),
     (file) => {
@@ -195,7 +204,7 @@ export function warmCommands(dir: string): string[] {
 }
 
 /** warmCommands for a commit's tree, read from the Git store (a stacked build has no full checkout). */
-function warmCommandsAt(gitDir: string, commit: string): string[] {
+function warmCommandsAt(gitDir: string, commit: string): WarmCommand[] {
   const listed = spawnSync("git", ["--git-dir", gitDir, "ls-tree", "--name-only", "-z", commit], { encoding: "utf8" });
   const names = new Set(listed.status === 0 ? listed.stdout.split("\0") : []);
   return commandsFor(
@@ -208,26 +217,44 @@ function warmCommandsAt(gitDir: string, commit: string): string[] {
   );
 }
 
-function commandsFor(has: (file: string) => boolean, read: (file: string) => string | null): string[] {
+/**
+ * Detected commands install dependencies and run dev-profile builds only. A
+ * project's `build` script is usually its release build (rudder's runs a
+ * release cargo build, 77 s of a 96 s warm build), which agents do not start
+ * from; it belongs to releases.
+ */
+function commandsFor(has: (file: string) => boolean, read: (file: string) => string | null): WarmCommand[] {
   const configured = readConfiguredCommands(read("rudder.toml"));
-  if (configured) return configured;
-  const commands: string[] = [];
-  if (has("pnpm-lock.yaml")) commands.push("pnpm install --frozen-lockfile");
-  else if (has("yarn.lock")) commands.push("yarn install --frozen-lockfile");
-  else if (has("package-lock.json")) commands.push("npm ci");
-  else if (has("package.json")) commands.push("npm install");
-  if (has("package.json")) {
-    try {
-      const pkg = JSON.parse(read("package.json") ?? "") as { scripts?: Record<string, string> };
-      if (pkg.scripts?.build) commands.push(has("pnpm-lock.yaml") ? "pnpm run build" : has("yarn.lock") ? "yarn build" : "npm run build");
-    } catch {
-      /* unreadable package.json: install only */
-    }
-  }
-  if (has("Cargo.lock") || has("Cargo.toml")) commands.push("cargo build");
-  if (has("uv.lock")) commands.push("uv sync");
-  else if (has("requirements.txt")) commands.push("python3 -m venv .venv && .venv/bin/pip install -r requirements.txt");
+  if (configured) return configured.map((run) => ({ run }));
+  const commands: WarmCommand[] = [];
+  if (has("pnpm-lock.yaml")) commands.push({ run: "pnpm install --frozen-lockfile", inputs: ["pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json", ".npmrc"] });
+  else if (has("yarn.lock")) commands.push({ run: "yarn install --frozen-lockfile", inputs: ["yarn.lock", "package.json", ".yarnrc", ".yarnrc.yml", ".npmrc"] });
+  else if (has("package-lock.json")) commands.push({ run: "npm ci", inputs: ["package-lock.json", "package.json", ".npmrc"] });
+  else if (has("package.json")) commands.push({ run: "npm install", inputs: ["package.json", ".npmrc"] });
+  if (has("Cargo.lock") || has("Cargo.toml")) commands.push({ run: "cargo build" });
+  if (has("uv.lock")) commands.push({ run: "uv sync", inputs: ["uv.lock", "pyproject.toml"] });
+  else if (has("requirements.txt")) commands.push({ run: "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt", inputs: ["requirements.txt"] });
   return commands;
+}
+
+/** Runs the warm commands; `changed` (paths since the previous snapshot) skips installs nothing touched. */
+function runWarmCommands(
+  ctx: BuildContext,
+  env: NodeJS.ProcessEnv,
+  view: BuildView | null,
+  cwd: string,
+  commands: WarmCommand[],
+  changed: string[] | null,
+): void {
+  for (const command of commands) {
+    const inputs = command.inputs;
+    if (inputs && changed && !changed.some((file) => inputs.includes(path.posix.basename(file)))) {
+      ctx.say(`${command.run}: skipped, no ${inputs.join(", ")} changed`);
+      continue;
+    }
+    ctx.say(command.run);
+    if (!runStep(ctx.log, env, view, cwd, "sh", ["-c", command.run])) throw new Error(`${command.run} failed`);
+  }
 }
 
 function readConfiguredCommands(text: string | null): string[] | null {
@@ -330,6 +357,8 @@ type BuildContext = {
   dir: string;
   log: number;
   say: (line: string) => void;
+  /** Paths that differ from the nearest ready snapshot (null without one). */
+  changed: string[] | null;
 };
 
 /**
@@ -362,7 +391,9 @@ export async function buildWarmSnapshot(
   const ctx: BuildContext = {
     repoRoot, key, commit, dir, log,
     say: (line) => fs.writeSync(log, `[rudder] warm snapshot ${key}: ${line}\n`),
+    changed: null,
   };
+  let built: WarmSnapshot | null = null;
   try {
     await lock.write(String(process.pid));
     if (await conflicted(repoRoot, commit)) throw new Error(`${key} has conflicts`);
@@ -373,6 +404,7 @@ export async function buildWarmSnapshot(
       ctx.say(`same files as ${nearest.snap.key}`);
       return nearest.snap;
     }
+    if (nearest && gitDir) ctx.changed = await changedFiles(gitDir, nearest.snap.commit, commit);
     const started = Date.now();
     let snap: WarmSnapshot | null = null;
     if (nearest && gitDir && namespacesWork()) {
@@ -382,9 +414,10 @@ export async function buildWarmSnapshot(
     }
     snap ??= await buildFromScratch(ctx, nearest?.snap ?? null);
     ctx.say(`ready in ${((Date.now() - started) / 1000).toFixed(1)} s (${snap.layers?.length ?? 1} layer(s))`);
-    await fsp.writeFile(marker("ready"), JSON.stringify(snap));
-    await pruneWarmSnapshots(repoRoot);
-    return snap;
+    // Renamed into place: a launch watching the folder never reads half a marker.
+    await fsp.writeFile(`${marker("ready")}.tmp`, JSON.stringify(snap));
+    await fsp.rename(`${marker("ready")}.tmp`, marker("ready"));
+    built = snap;
   } catch (error) {
     ctx.say(`failed: ${error instanceof Error ? error.message : String(error)}`);
     // Marked before the cleanup, which throws when jj cannot forget the
@@ -393,10 +426,19 @@ export async function buildWarmSnapshot(
     await removeSnapshotFiles(repoRoot, key, dir);
     return null;
   } finally {
-    fs.closeSync(log);
     await lock.close();
     await fsp.rm(marker("building"), { force: true });
+    if (!built) fs.closeSync(log);
   }
+  // The snapshot is ready whatever pruning does: a failed prune is logged, not a failed build.
+  try {
+    await pruneWarmSnapshots(repoRoot);
+  } catch (error) {
+    ctx.say(`prune failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    fs.closeSync(log);
+  }
+  return built;
 }
 
 /**
@@ -445,10 +487,7 @@ async function buildOnLayers(ctx: BuildContext, gitDir: string, previous: WarmSn
     await removeSnapshotFiles(repoRoot, key, dir);
     return null;
   }
-  for (const command of warmCommandsAt(gitDir, commit)) {
-    say(command);
-    if (!runStep(log, env, view, dir, "sh", ["-c", command])) throw new Error(`${command} failed`);
-  }
+  runWarmCommands(ctx, env, view, dir, warmCommandsAt(gitDir, commit), ctx.changed);
   await removeWorkDir(work);
   if (flat) return { key, commit, dir, builtAt: new Date().toISOString() };
   const stack = [dir, ...layers];
@@ -462,7 +501,7 @@ async function buildOnLayers(ctx: BuildContext, gitDir: string, previous: WarmSn
  * so the warm commands start from its outputs. Null when the clone fails.
  */
 async function buildFromClone(ctx: BuildContext, previous: WarmSnapshot): Promise<WarmSnapshot | null> {
-  const { repoRoot, key, commit, dir, log, say } = ctx;
+  const { repoRoot, key, commit, dir, say } = ctx;
   const name = `${WARM_WORKSPACE_PREFIX}${key}`;
   await forgetJjWorkspace(repoRoot, name, dir);
   await removeTree(dir);
@@ -477,10 +516,7 @@ async function buildFromClone(ctx: BuildContext, previous: WarmSnapshot): Promis
     return null;
   }
   const env = { ...process.env, ...toolCacheEnv("builder", { workspace: dir }) };
-  for (const command of warmCommands(dir)) {
-    say(command);
-    if (!runStep(log, env, null, dir, "sh", ["-c", command])) throw new Error(`${command} failed`);
-  }
+  runWarmCommands(ctx, env, null, dir, warmCommands(dir), ctx.changed);
   await runCommand("jj", ["status"], { cwd: dir, allowFailure: true });
   return { key, commit, dir, builtAt: new Date().toISOString() };
 }
@@ -491,23 +527,23 @@ async function buildFromClone(ctx: BuildContext, previous: WarmSnapshot): Promis
  * fixed build path, as for layers built later on top of it.
  */
 async function buildFromScratch(ctx: BuildContext, previous: WarmSnapshot | null): Promise<WarmSnapshot> {
-  const { repoRoot, key, commit, dir, log, say } = ctx;
+  const { repoRoot, key, commit, dir } = ctx;
   const name = `${WARM_WORKSPACE_PREFIX}${key}`;
   await forgetJjWorkspace(repoRoot, name, dir);
   await removeSnapshotFiles(repoRoot, key, dir);
   const added = await runCommand("jj", ["workspace", "add", dir, "--name", name, "-r", commit], { cwd: repoRoot, allowFailure: true });
   if (added.code !== 0) throw new Error(added.stderr.trim() || "jj workspace add failed");
-  if (previous && layersOf(previous.dir).length === 1) await seedFromPrevious(previous.dir, dir);
+  // Seeded outputs are the previous snapshot's: its installs still match
+  // when no dependency file changed since.
+  const seeded = Boolean(previous && layersOf(previous.dir).length === 1);
+  if (seeded) await seedFromPrevious(previous!.dir, dir);
   let view: BuildView | null = null;
   if (namespacesWork()) {
     view = { mount: buildPath(repoRoot), mode: "bind", lowers: dir };
     await fsp.mkdir(view.mount, { recursive: true });
   }
   const env = { ...process.env, ...toolCacheEnv("builder", { workspace: view?.mount ?? dir }) };
-  for (const command of warmCommands(dir)) {
-    say(command);
-    if (!runStep(log, env, view, dir, "sh", ["-c", command])) throw new Error(`${command} failed`);
-  }
+  runWarmCommands(ctx, env, view, dir, warmCommands(dir), seeded ? ctx.changed : null);
   // Record file stats for the whole tree once; macOS clones reuse this state.
   if (process.platform === "darwin") await runCommand("jj", ["status"], { cwd: dir, allowFailure: true });
   return { key, commit, dir, builtAt: new Date().toISOString() };
@@ -599,6 +635,19 @@ export function startWarmBuild(repoRoot: string): string | null {
   return null;
 }
 
+/**
+ * A dashboard opened the project: starts the builder unless the base already
+ * has a snapshot (or a failed attempt at one), so the project's first task
+ * does not wait for its build. An idle builder would only poll the base.
+ */
+export async function warmStart(repoRoot: string): Promise<void> {
+  if (warmCommands(repoRoot).length === 0) return;
+  const base = await currentBaseCommit(repoRoot);
+  if (!base || (await baseDistance(repoRoot, base)) === 0) return;
+  const skipped = startWarmBuild(repoRoot);
+  if (skipped) process.stderr.write(`[rudder] ${skipped}\n`);
+}
+
 /** Takes the project's builder lock (pid written atomically). False when a live builder holds it. */
 function takeBuilderLock(lock: string): boolean {
   const tmp = `${lock}.${process.pid}`;
@@ -635,12 +684,13 @@ function opHeads(repoRoot: string): string {
 }
 
 /**
- * The builder's loop: whenever the operation log moves, read the base; once
- * the same new base is seen on two polls in a row, build its snapshot. Moves
- * during a build coalesce: the next check sees only the latest base. A small
- * move right after a refresh waits REFRESH_GAP_MS (or as long as that refresh
- * took); a move far from every snapshot builds at once. Exits after
- * FOLLOW_IDLE_MS without a move, or when the repo is gone.
+ * The builder's loop: whenever the operation log moves, read the base. A base
+ * far from every snapshot (or a project's first) builds at once: a launch may
+ * be waiting for it. A small move builds once the same base is seen on two
+ * polls in a row, and waits REFRESH_GAP_MS after a refresh (or as long as that
+ * refresh took). Moves during a build coalesce: the next check sees only the
+ * latest base. Exits after FOLLOW_IDLE_MS without a move, or when the repo is
+ * gone.
  */
 async function followBase(repoRoot: string): Promise<void> {
   const root = warmDir(repoRoot);
@@ -666,6 +716,7 @@ async function followBase(repoRoot: string): Promise<void> {
           const files = await baseDistance(repoRoot, base);
           if (files === 0) done = base;
           pending = files === 0 ? null : { base, urgent: files > NEAR_SNAPSHOT_FILES };
+          if (pending?.urgent) continue;
         } else if (pending.urgent || Date.now() >= nextRefresh) {
           pending = null;
           done = base;
@@ -710,7 +761,25 @@ export async function pruneWarmSnapshots(repoRoot: string, keep = KEEP_READY): P
     await removeSnapshotFiles(repoRoot, snap.key, snap.dir);
     await fsp.rm(path.join(warmDir(repoRoot), `${snap.key}.log`), { force: true });
   }
+  await pruneUnfinishedBuilds(repoRoot);
   await pruneOldMarkers(repoRoot);
+}
+
+/**
+ * Deletes snapshot directories no ready marker names and no live build owns:
+ * a builder killed mid-build, or a failed build whose cleanup could not finish,
+ * leaves them behind (one was 1.4 GB and 18 days old). Forks only mount ready
+ * snapshots.
+ */
+async function pruneUnfinishedBuilds(repoRoot: string): Promise<void> {
+  const root = warmDir(repoRoot);
+  const names = await fsp.readdir(root).catch(() => [] as string[]);
+  for (const name of names) {
+    const key = /^([0-9a-f]{12})(\.work)?$/.exec(name)?.[1];
+    if (!key || names.includes(`${key}.ready`) || lockAlive(path.join(root, `${key}.building`))) continue;
+    if (name.endsWith(".work")) await removeWorkDir(path.join(root, name));
+    else await removeSnapshotFiles(repoRoot, key, path.join(root, name));
+  }
 }
 
 /**
@@ -792,6 +861,24 @@ PATH="$F/bin:$PATH"; export PATH
 exec unshare -U --map-user="$U" --map-group="$G" -- "$@"' sh "$F" "$M" "$U" "$G" "$@"
 `;
 
+/**
+ * jj prints the summary of the working-copy commit an operation leaves (`Working
+ * copy (@) now at: ...`); this makes fork-add's line carry the full change id.
+ */
+const WORKING_COPY_CHANGE_SUMMARY = `templates.commit_summary=${JSON.stringify('if(current_working_copy, "rudder-change:" ++ change_id, "")')}`;
+const CHANGE_TAG = /rudder-change:([a-z]+)/;
+
+/** `.warm/<this>` holds the kernel release an overlay fork last mounted on. */
+const OVERLAY_PROVEN = "overlay-proven";
+
+function overlayProven(repoRoot: string): boolean {
+  try {
+    return fs.readFileSync(path.join(warmDir(repoRoot), OVERLAY_PROVEN), "utf8") === os.release();
+  } catch {
+    return false;
+  }
+}
+
 /** Ready snapshots further than this many files from the base wait for the base's own build. */
 const NEAR_SNAPSHOT_FILES = 500;
 const WAIT_FOR_BUILD_MS = 90_000;
@@ -803,10 +890,15 @@ async function gitDirOf(repoRoot: string): Promise<string | null> {
   return result.code === 0 && dir ? dir : null;
 }
 
+/** The paths that differ between two commits (null when Git cannot tell). */
+async function changedFiles(gitDir: string, from: string, to: string): Promise<string[] | null> {
+  const result = await runCommand("git", ["--git-dir", gitDir, "diff-tree", "-r", "-z", "--no-renames", "--name-only", from, to], { allowFailure: true });
+  return result.code === 0 ? result.stdout.split("\0").filter(Boolean) : null;
+}
+
 /** How many files differ between two commits (Infinity when Git cannot tell). */
 async function filesApart(gitDir: string, from: string, to: string): Promise<number> {
-  const result = await runCommand("git", ["--git-dir", gitDir, "diff-tree", "-r", "-z", "--no-renames", "--name-only", from, to], { allowFailure: true });
-  return result.code === 0 ? result.stdout.split("\0").length - 1 : Infinity;
+  return (await changedFiles(gitDir, from, to))?.length ?? Infinity;
 }
 
 /** The ready snapshot fewest files away from `base` (the newer one on a tie). */
@@ -820,30 +912,69 @@ async function nearestSnapshot(gitDir: string | null, snaps: WarmSnapshot[], bas
 /**
  * Waits up to `timeoutMs` for the builder to make a snapshot of `base`, or one
  * within NEAR_SNAPSHOT_FILES of it (the base may move on meanwhile). Returns
- * null when its build fails or no live builder is left to make it.
+ * null when its build fails or no live builder is left to make it. Woken by
+ * changes in `.warm` (a ready marker is renamed into place), so a launch starts
+ * the moment the snapshot is ready.
  */
 async function waitForNearSnapshot(repoRoot: string, gitDir: string | null, base: string, timeoutMs: number): Promise<WarmSnapshot | null> {
   const root = warmDir(repoRoot);
   const key = base.slice(0, 12);
   const started = Date.now();
+  // Build logs grow all through a build; only markers and the builder lock matter here.
+  const changes = watchFolder(root, (name) => /\.(ready|failed|building)$/.test(name) || name === BUILDER_LOCK);
   let seen = "";
-  while (Date.now() - started < timeoutMs) {
-    const snaps = readySnapshots(repoRoot);
-    const own = snaps.find((snap) => snap.commit === base);
-    if (own) return own;
-    if (fs.existsSync(path.join(root, `${key}.failed`))) return null;
-    const keys = snaps.map((snap) => snap.key).join();
-    if (snaps.length > 0 && keys !== seen) {
-      seen = keys;
-      gitDir ??= await gitDirOf(repoRoot);
-      const nearest = await nearestSnapshot(gitDir, snaps, base);
-      if (nearest.files <= NEAR_SNAPSHOT_FILES) return nearest.snap;
+  try {
+    while (Date.now() - started < timeoutMs) {
+      const snaps = readySnapshots(repoRoot);
+      const own = snaps.find((snap) => snap.commit === base);
+      if (own) return own;
+      if (fs.existsSync(path.join(root, `${key}.failed`))) return null;
+      const keys = snaps.map((snap) => snap.key).join();
+      if (snaps.length > 0 && keys !== seen) {
+        seen = keys;
+        gitDir ??= await gitDirOf(repoRoot);
+        const nearest = await nearestSnapshot(gitDir, snaps, base);
+        if (nearest.files <= NEAR_SNAPSHOT_FILES) return nearest.snap;
+      }
+      // A detached builder takes its lock right after it starts.
+      if (Date.now() - started > 5_000 && !lockAlive(path.join(root, BUILDER_LOCK)) && !lockAlive(path.join(root, `${key}.building`))) return null;
+      // The timeout only rechecks that a builder is still alive.
+      await changes.next(Math.min(1_000, timeoutMs - (Date.now() - started)));
     }
-    // A detached builder takes its lock right after it starts.
-    if (Date.now() - started > 5_000 && !lockAlive(path.join(root, BUILDER_LOCK)) && !lockAlive(path.join(root, `${key}.building`))) return null;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    return null;
+  } finally {
+    changes.close();
   }
-  return null;
+}
+
+/** Wakes a waiter when an entry of `dir` that `matters` changes, or after `ms` at the latest. */
+function watchFolder(dir: string, matters: (name: string) => boolean): { next: (ms: number) => Promise<void>; close: () => void } {
+  let changed = false;
+  let wake: (() => void) | null = null;
+  const watcher = fs.watch(dir, (_event, name) => {
+    if (name && !matters(String(name))) return;
+    changed = true;
+    wake?.();
+  });
+  return {
+    next: (ms) => {
+      if (changed) {
+        changed = false;
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(done, Math.max(0, ms));
+        function done() {
+          clearTimeout(timer);
+          wake = null;
+          changed = false;
+          resolve();
+        }
+        wake = done;
+      });
+    },
+    close: () => watcher.close(),
+  };
 }
 
 /** Does a live process hold this pid lock? An empty lock counts as live for 10 s. */
@@ -886,7 +1017,7 @@ export async function createForkWorkspace(params: {
   description?: string;
   /** Start from this change (a branch of another agent) instead of main. */
   atChangeId?: string;
-}): Promise<{ snapshot: WarmSnapshot } | { reason: string }> {
+}): Promise<{ snapshot: WarmSnapshot; changeId: string } | { reason: string }> {
   if (process.platform !== "linux" && process.platform !== "darwin") return { reason: "not Linux or macOS" };
   // Without these no fork can be made, so do not build or wait for a snapshot.
   const rudderJj = rudderJjPath();
@@ -938,6 +1069,7 @@ export async function createForkWorkspace(params: {
   const added = await runCommand(
     "jj",
     [
+      "--config", WORKING_COPY_CHANGE_SUMMARY,
       "rudder-fork-add", params.targetPath, "--name", params.workspaceName, "-r", snapshot.commit,
       "--lower", snapshot.dir, "--lowers-root", forkLowersRoot(params.repoRoot),
       "-m", params.description ?? "",
@@ -950,12 +1082,19 @@ export async function createForkWorkspace(params: {
     return { reason: added.stderr.trim() || "rudder-jj rudder-fork-add failed" };
   }
   try {
+    // Moving onto the base keeps the change: a rebase rewrites only the commit.
+    const changeId = CHANGE_TAG.exec(`${added.stderr}\n${added.stdout}`)?.[1];
+    if (!changeId) throw new Error(`rudder-jj rudder-fork-add did not report the new change: ${added.stderr.trim()}`);
     for (const sub of ["jjmnt", "bin"]) await fsp.mkdir(path.join(state, sub), { recursive: true });
     await fsp.symlink(rudderJj, path.join(state, "bin", "jj"));
     await fsp.writeFile(path.join(state, "alias"), buildPath(params.repoRoot));
     await fsp.writeFile(path.join(state, "enter"), ENTER_SCRIPT, { mode: 0o755 });
-    const probe = spawnSync(path.join(state, "enter"), ["true"], { cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"] });
-    if (probe.status !== 0) throw new Error(`overlay mount unavailable: ${probe.stderr?.toString().trim()}`);
+    // The move below enters the fork anyway; otherwise prove the mount once per kernel.
+    if (!(move && gitDir) && !overlayProven(params.repoRoot)) {
+      const probe = spawnSync(path.join(state, "enter"), ["true"], { cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"] });
+      if (probe.status !== 0) throw new Error(`overlay mount unavailable: ${probe.stderr?.toString().trim()}`);
+      await fsp.writeFile(path.join(warmDir(params.repoRoot), OVERLAY_PROVEN), os.release());
+    }
     // The snapshot supplies dependencies and build output; the code must be
     // current. Move the fork's change onto the main checkout's base so only the
     // files that differ are written into the upper layer.
@@ -970,7 +1109,7 @@ export async function createForkWorkspace(params: {
       await fsp.rm(index, { force: true });
       if (moved.code !== 0) throw new Error(`could not move fork to ${move.slice(0, 12)}: ${moved.stderr.trim()}`);
     }
-    return { snapshot };
+    return { snapshot, changeId };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     try {
@@ -1000,7 +1139,7 @@ async function createCloneWorkspace(
   params: { repoRoot: string; targetPath: string; workspaceName: string; description?: string },
   snapshot: WarmSnapshot,
   revision: string,
-): Promise<{ snapshot: WarmSnapshot } | { reason: string }> {
+): Promise<{ snapshot: WarmSnapshot; changeId: string } | { reason: string }> {
   if (fs.existsSync(params.targetPath)) return { reason: `${params.targetPath} already exists` };
   const added = await runCommand(
     "jj",
@@ -1010,7 +1149,11 @@ async function createCloneWorkspace(
     ],
     { cwd: params.repoRoot, allowFailure: true },
   );
-  if (added.code === 0) return { snapshot };
+  if (added.code === 0) {
+    // rudder-clone-add commits without a working-copy summary, so ask for the change.
+    const change = await runCommand("jj", ["log", "--no-graph", "--ignore-working-copy", "-r", "@", "-T", "change_id"], { cwd: params.targetPath });
+    return { snapshot, changeId: change.stdout.trim() };
+  }
   // rudder-clone-add publishes the workspace only once its files are in
   // place, so a failure leaves at most the partly cloned directory.
   await fsp.rm(params.targetPath, { recursive: true, force: true });

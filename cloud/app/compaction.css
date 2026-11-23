@@ -95,3 +95,7 @@
 .notice .n-icon svg { width: 13px; height: 13px; }
 .notice.n-warning { color: var(--needs); }
 .notice.n-error { color: var(--failed); }
+
+/* A tool call still running (app.js paintToolIcon): a small spinner in place
+   of its icon. */
+.tool-row .t-icon .t-spin { width: 13px; height: 13px; border-width: 2px; }

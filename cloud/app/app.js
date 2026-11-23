@@ -5243,6 +5243,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     return { name: tool.name || "Tool", input: (tool.input || "").replace(/\s+/g, " ").trim(), icon: toolIcon(tool.name) };
   }
 
+  // A tool row's icon, or a spinner while the call runs. Kept when unchanged,
+  // so the spinner turns smoothly across polls.
+  function paintToolIcon(box, name) {
+    if (box.dataset.ic === name) return;
+    box.dataset.ic = name;
+    box.innerHTML = name === "running" ? `<span class="spin t-spin"></span>` : icon(name);
+  }
+
   function paintSteps(node, x) {
     const open = store.expanded.has(`${key}|${x.id}`);
     node._steps = x;
@@ -5251,8 +5259,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     row.setAttribute("aria-expanded", String(open));
     const failed = x.tools.filter((m) => m.tool?.isError).length;
     const last = toolShown(x.tools[x.tools.length - 1].tool || {});
-    row.querySelector(".t-icon").innerHTML = icon(failed ? "alert" : "check");
-    setText(row.querySelector(".t-name"), `Worked · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`);
+    const running = x.tools.findLast((m) => m.tool?.running);
+    paintToolIcon(row.querySelector(".t-icon"), running ? "running" : failed ? "alert" : "check");
+    const did = running ? `Running for ${duration(Date.now() - running.ts)}` : "Worked";
+    setText(row.querySelector(".t-name"), `${did} · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`);
     setText(row.querySelector(".t-input"), open ? "" : `${last.name} ${last.input}`);
     const list = node.querySelector(".steps-list");
     list.hidden = !open;
@@ -5265,7 +5275,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const tool = m.tool || {};
     const k = `${key}|${box.dataset.key}`;
     const open = store.expanded.has(k);
-    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
+    // A running call (worker/transcripts.mjs markRunning) repaints each poll for its time.
+    const ran = tool.running ? duration(Date.now() - m.ts) : "";
+    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${ran}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.classList.toggle("error", !!tool.isError);
@@ -5274,14 +5286,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const toggle = row.querySelector(".t-toggle");
     toggle.setAttribute("aria-expanded", String(open));
     const shown = toolShown(tool);
-    row.querySelector(".t-icon").innerHTML = icon(tool.isError ? "alert" : shown.icon);
+    paintToolIcon(row.querySelector(".t-icon"), tool.running ? "running" : tool.isError ? "alert" : shown.icon);
     setText(row.querySelector(".t-name"), shown.name);
     setText(row.querySelector(".t-input"), shown.input);
     row.querySelector(".t-input").hidden = paintToolFiles(row.querySelector(".t-files"), tool, fileLinks);
-    toggle.setAttribute("aria-label", `${shown.name}${tool.isError ? " (error)" : ""}: ${shown.input}. ${open ? "Collapse" : "Expand"} output`);
+    toggle.setAttribute("aria-label", `${shown.name}${tool.running ? " (running)" : tool.isError ? " (error)" : ""}: ${shown.input}. ${open ? "Collapse" : "Expand"} output`);
     let out = box.querySelector(".tool-out");
     if (!open) { out?.remove(); return; }
     if (!out) { out = h(`<div class="tool-out"></div>`); box.appendChild(out); }
+    if (tool.running) { out.innerHTML = `<div class="t-empty"></div>`; setText(out.firstChild, `Running for ${ran}`); return; }
     const text = tool.output ?? "";
     if (!text) { out.innerHTML = `<div class="t-empty">No output</div>`; return; }
     const full = store.showMore.has(k);

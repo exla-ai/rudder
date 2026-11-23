@@ -32,7 +32,7 @@ async function fixture(t) {
 }
 
 function connect(t, fixture, who, { channel = false, defaultJournal = false } = {}) {
-  const child = spawn(fixture.exe, ["fabric", "mcp", "--identity-file", fixture[who],
+  const child = spawn(fixture.exe, ["fabric", "mcp", "--project", fixture.dir, "--run", who, "--identity-file", fixture[who],
     ...(defaultJournal ? [] : ["--journal", fixture.journal]), ...(channel ? ["--channel"] : [])], {
     cwd: root, env: { ...process.env, RUDDER_HOME: fixture.dir, RUDDER_SKIP_AUTO_UPDATE: "1" }, stdio: ["pipe", "pipe", "pipe"],
   });

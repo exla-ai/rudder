@@ -1365,9 +1365,22 @@ pub(crate) fn prepare_agent_tools(
         }
         Err(error) => return Err(error),
     };
+    // Every owned project serves helpers (agents_start, helpers.rs) through
+    // its steer inbox. Only this process's Fabric owner adds the peer tools.
+    let helpers = [
+        "--project".to_string(),
+        repo.display().to_string(),
+        "--run".to_string(),
+        run_id.to_string(),
+    ];
     if record["authority"] != "fabric" || record["pid"].as_u64() != Some(std::process::id() as u64)
     {
-        return Ok(());
+        let config = signals::signals_dir()
+            .context("Rudder home unavailable for agent tools")?
+            .join(format!("{run_id}-agents-mcp.json"));
+        let mut arguments = vec!["fabric".to_string(), "mcp".to_string()];
+        arguments.extend(helpers);
+        return configure_agent_tools(command, backend, &config, arguments);
     }
     anyhow::ensure!(
         record["format_version"] == 1,
@@ -1398,16 +1411,9 @@ pub(crate) fn prepare_agent_tools(
         &broker_socket,
         &read_private::<AgentIdentityFile>(&identity, 16 * 1024)?,
     )?;
-    configure_agent_tools(command, backend, &projected, &broker_socket, &identity, &attempt)?;
-    Ok(())
-}
-
-fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
-    projected: &Path, broker_socket: &Path, identity: &Path, attempt: &str) -> Result<()> {
-    let exe = env::current_exe()?;
     command
         .env
-        .push(("RUDDER_FABRIC_ATTEMPT_ID".into(), attempt.into()));
+        .push(("RUDDER_FABRIC_ATTEMPT_ID".into(), attempt.clone()));
     command.env.push((
         "RUDDER_FABRIC_IDENTITY".into(),
         projected.display().to_string(),
@@ -1416,7 +1422,7 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
         "RUDDER_FABRIC_BROKER_SOCKET".into(),
         broker_socket.display().to_string(),
     ));
-    let arguments = vec![
+    let mut arguments = vec![
         "fabric".to_string(),
         "mcp".into(),
         "--identity-file".into(),
@@ -1424,11 +1430,18 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
         "--broker-socket".into(),
         broker_socket.display().to_string(),
     ];
+    arguments.extend(helpers);
+    configure_agent_tools(command, backend, &identity.with_extension("mcp.json"), arguments)
+}
+
+/// The `rudder_agents` server for one launch; Claude reads it from `config`.
+fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
+    config: &Path, arguments: Vec<String>) -> Result<()> {
+    let exe = env::current_exe()?;
     match backend {
         Backend::Claude => {
-            let config = identity.with_extension("mcp.json");
             write_private(
-                &config,
+                config,
                 &serde_json::json!({"mcpServers":{"rudder_agents":{"type":"stdio","command":exe,"args":arguments}}}),
             )?;
             command
@@ -1446,6 +1459,8 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
                     serde_json::to_string(&arguments)?
                 ),
                 "mcp_servers.rudder_agents.enabled=true".into(),
+                // agents_result waits up to 600 s; Codex's default is 60.
+                "mcp_servers.rudder_agents.tool_timeout_sec=660".into(),
             ];
             command.args.splice(
                 0..0,

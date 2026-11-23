@@ -47,7 +47,7 @@ async function fixture(t) {
   }
   function proxy(who, channel = false) {
     const workerHome = path.join(directory, `empty-worker-${who}-${randomUUID()}`);
-    const args = ["fabric", "mcp", "--identity-file", f[who], "--broker-socket", f[`${who}_socket`], ...(channel ? ["--channel"] : [])];
+    const args = ["fabric", "mcp", "--project", repo, "--run", who, "--identity-file", f[who], "--broker-socket", f[`${who}_socket`], ...(channel ? ["--channel"] : [])];
     assert.ok(!args.includes(f.journal));
     const child = spawn(binary, args, { cwd: repo, env: { ...process.env, RUDDER_HOME: workerHome }, stdio: ["pipe", "pipe", "pipe"] }); children.add(child);
     const messages = [], waiters = new Set(); let next = 0, stderr = "";
@@ -90,7 +90,7 @@ test("real broker MCP preserves tools, authenticated channels, explicit ack hole
   const f = await fixture(t); if (!f) return; await f.broker("a"); await f.broker("b");
   const a = f.proxy("a"), b = f.proxy("b", true); const [initA, initB] = await Promise.all([a.initialize(), b.initialize()]);
   assert.equal(initA.result.capabilities.experimental, undefined); assert.deepEqual(initB.result.capabilities.experimental["claude/channel"], {});
-  const definitions = await a.request("tools/list").promise; assert.equal(definitions.result.tools.length, 12); assert.ok(!JSON.stringify(definitions).includes("journal"));
+  const definitions = await a.request("tools/list").promise; assert.equal(definitions.result.tools.length, 14); assert.ok(!JSON.stringify(definitions).includes("journal"));
   const first = await a.tool("agents_send", send("first")); const notification = await b.waitFor((message) => message.method === "notifications/claude/channel");
   const envelope = JSON.parse(notification.params.content); assert.equal(envelope.authority, "peer"); assert.equal(envelope.message.author, "peer-a"); assert.equal(envelope.message.request.body.text, send("first").message);
   const second = await a.tool("agents_send", send("second")); await b.waitFor((message) => message.params?.meta?.message_id === second.message.message_id);

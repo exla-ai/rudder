@@ -158,6 +158,7 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     };
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-claude.json")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}-agents-mcp.json")));
     let _ = crate::prompt_suggestion::cleanup(&dir, run_id);
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-notify.sh")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.session")));

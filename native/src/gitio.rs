@@ -595,7 +595,12 @@ fn remap_strings(value: &mut serde_json::Value, old_root: Option<&str>, new_root
             }
             for marker in WORKSPACES_MARKERS {
                 if let Some(index) = text.find(marker) {
-                    if !text.starts_with(new_root) {
+                    // Only a path is rebased. Prose that mentions a workspace
+                    // path (a prompt, the task, a summary) keeps every word.
+                    let root_part = &text[..index];
+                    let is_path = root_part.starts_with('/')
+                        && !root_part.contains(char::is_whitespace);
+                    if is_path && !text.starts_with(new_root) {
                         *text = format!("{new_root}{}", &text[index..]);
                     }
                     break;
@@ -4258,6 +4263,30 @@ pub(crate) fn run_attention(run: &AgentRun) -> Option<&'static str> {
         return Some("input");
     }
     None
+}
+
+#[cfg(test)]
+mod heal_moved_repo_paths_tests {
+    use super::heal_moved_repo_paths;
+    use std::path::Path;
+
+    // A restored chat lost the start of its first prompt: the heal treated a
+    // prompt that mentioned a workspace path as a path and cut everything
+    // before it.
+    #[test]
+    fn prose_that_mentions_a_workspace_path_keeps_every_word() {
+        let prompt = "Rudder restore: read /old/repo/.rudder-workspaces/w/notes.txt and discuss it";
+        let mut record = serde_json::json!({
+            "repoRoot": "/new/repo",
+            "workspace": { "path": "/old/repo/.rudder-workspaces/w" },
+            "task": prompt,
+            "turns": [{ "prompt": prompt }],
+        });
+        heal_moved_repo_paths(&mut record, Path::new("/new/repo"));
+        assert_eq!(record["workspace"]["path"], "/new/repo/.rudder-workspaces/w");
+        assert_eq!(record["task"], prompt);
+        assert_eq!(record["turns"][0]["prompt"], prompt);
+    }
 }
 
 #[cfg(test)]

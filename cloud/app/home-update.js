@@ -16,7 +16,8 @@ const POLL_MS = 2000;
 /** Agents an update would interrupt. The same rule as server.ts homeBusyAgents. */
 export function busyAgents(state) {
   const projects = [...(state?.projects || []), ...(state?.coordinator ? [state.coordinator] : [])];
-  return projects.reduce((n, p) => n + (p.agents || []).filter((a) => a && (a.status === "working" || a.status === "starting" || a.asks?.length)).length, 0);
+  return projects.reduce((n, p) => n + (p.agents || []).filter((a) => a && (a.status === "working" || a.status === "starting" || a.asks?.length
+    || (a.status === "waiting" && (a.attention === "input" || a.attention === "permission")))).length, 0);
 }
 
 const agents = (n) => (n === 1 ? "1 agent" : `${n} agents`);

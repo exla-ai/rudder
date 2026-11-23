@@ -5897,13 +5897,20 @@ function controlSnapshot(): ControlSnapshot {
   return { homes, sails, perHome, ws: { worker, client, homeControl: homeControls.size }, ...(builderPool ? { builders: builderPool.snapshot() } : {}) };
 }
 
-// Agents an update would cut off: mid-turn, or holding a prompt (a restart
-// drops the hook holding it). The app counts them the same way (home-update.js).
+// Agents an update would cut off: a turn in flight or starting (working also
+// covers a finished turn still waiting on its background shells, subagents or
+// teammates), or a prompt waiting for its answer (a hook holds it, and a
+// restart drops the hook): one
+// the phone lists in `asks`, or a question or approval the agent reported by
+// itself (`waiting` on input or permission; an interrupted or failed turn has
+// ended). The same rule as the home's own last check (worker agent-status.mjs
+// holdsRestart) and the app's (home-update.js busyAgents).
 function homeBusyAgents(projects: HomeProject[]): number {
   return projects.reduce((busy, project) => busy + (project.agents ?? []).filter((agent) => {
     const status = typeof agent.status === "string" ? agent.status : "";
     const asks = Array.isArray(agent.asks) ? agent.asks.length : 0;
-    return status === "working" || status === "starting" || asks > 0;
+    return status === "working" || status === "starting" || asks > 0
+      || (status === "waiting" && (agent.attention === "input" || agent.attention === "permission"));
   }).length, 0);
 }
 
@@ -5948,7 +5955,7 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       continue;
     }
     if (external) {
-      await updateExternalHome(home, now);
+      await updateExternalHome(home, now, "idle");
       continue;
     }
     if (!flyReady) {
@@ -6072,7 +6079,10 @@ function offerHomeUpdate(homeId: string, ws: WebSocket): void {
 // The home reports the image it runs, and the update travels over its control
 // socket with the same accepted-alongside replacement token as a Fly update.
 // The new tag stays in the repository the host pulls from (externalHomeImage).
-async function updateExternalHome(home: Workspace, now: number, reason = "idle"): Promise<string | null> {
+// An idle update asks the home to check its agents itself, refuse while one is
+// busy, and take the request back if one gets busy before the host restarts
+// it (the pull can take minutes); "update now" restarts them regardless.
+async function updateExternalHome(home: Workspace, now: number, reason: "idle" | "asked to update"): Promise<string | null> {
   const reportedImage = optionalString(homeStates.get(home.id)?.host?.image);
   const targetImage = externalHomeImage(flyWorkerImage, reportedImage);
   if (!externalHomeNeedsUpdate({ reportedImage, targetImage, pendingNextToken: false })) {
@@ -6085,7 +6095,7 @@ async function updateExternalHome(home: Workspace, now: number, reason = "idle")
   try {
     console.log(`[home] ${home.id} ${reason} on ${reportedImage} (external host); updating to ${targetImage}`);
     setNextWorkerToken.run({ homeId: home.id, nextHash, updatedAt: new Date().toISOString() });
-    await homeRpc(home.id, "update", { image: targetImage, workerToken }, 30_000);
+    await homeRpc(home.id, "update", { image: targetImage, workerToken, whenIdle: reason === "idle" }, 30_000);
     return null;
   } catch (error) {
     // A refusal means nothing will ever use the replacement token. An unknown
@@ -6120,6 +6130,23 @@ function noteHomeUpdateFailed(homeId: string, message: Json): void {
   setHomeUpdateError.run({ homeId, error: reason, updatedAt });
   schedulePersistDatabase();
   console.log(`[home] ${homeId} update failed on its host: ${reason}`);
+}
+
+// The home took an idle update back before its host applied it: an agent got
+// busy during the pull (worker home.mjs holdIdleUpdate). Its token will never
+// be used, so it stops blocking the next update, and nothing failed: the next
+// quiet moment updates it.
+function noteHomeUpdateWithdrawn(homeId: string, message: Json): void {
+  const nextHash = stringField(message, "tokenHash") ?? "";
+  if (!/^[0-9a-f]{32}$/.test(nextHash)) {
+    return;
+  }
+  if (clearNextWorkerToken.run({ homeId, nextHash, updatedAt: new Date().toISOString() }).changes === 0) {
+    return;
+  }
+  homeBusyAt.set(homeId, Date.now());
+  schedulePersistDatabase();
+  console.log(`[home] ${homeId} took its idle update back: an agent started working`);
 }
 
 // Fly calls for the build pool. Builders live in the worker app beside the
@@ -6621,6 +6648,10 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
     }
     if (type === "update-failed") {
       noteHomeUpdateFailed(homeId, message);
+      return;
+    }
+    if (type === "update-withdrawn") {
+      noteHomeUpdateWithdrawn(homeId, message);
       return;
     }
     if (type === "update-now") {

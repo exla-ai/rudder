@@ -132,3 +132,25 @@ export function statusFields(record, options = {}) {
     pr: prInfo(record),
   };
 }
+
+// Prompts an agent is blocked on until someone answers: a question (Claude's
+// `agent_needs_input` or an MCP elicitation, OpenCode's question) or an
+// approval. An interrupted or failed turn has ended.
+const OPEN_PROMPT = new Set(["input", "permission"]);
+
+/**
+ * Whether restarting the machine now would cut this agent off: a turn in
+ * flight or starting (working includes a finished turn still waiting on its
+ * background shells, subagents or teammates, `background` above), or a
+ * prompt waiting for its answer (a hook holds it, and a restart drops the
+ * hook). Takes an agent summary as the control plane
+ * gets it. The control plane's idle update (server.ts homeBusyAgents) and
+ * the app's Update now (cloud/app/home-update.js busyAgents) count the same
+ * agents; the home checks again right before its host restarts it.
+ */
+export function holdsRestart(agent) {
+  const status = agent?.status;
+  if (status === "working" || status === "starting") return true;
+  if (Array.isArray(agent?.asks) && agent.asks.length > 0) return true;
+  return status === "waiting" && OPEN_PROMPT.has(agent?.attention);
+}

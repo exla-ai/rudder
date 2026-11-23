@@ -1195,10 +1195,16 @@ serverTest("a home on an old image is updated in place once its agents are idle,
   publish([{ id: "1", status: "working", asks: [] }, { id: "2", status: "done", asks: [{ id: "x" }] }]);
   await sleep(4000);
   assert.ok(!flyCalls.some((call) => call.method === "POST"), `updated mid-turn: ${JSON.stringify(flyCalls)}\n${log()}`);
+  // A question or approval the agent reported itself, with no prompt in
+  // `asks` (an MCP elicitation, an OpenCode question): a restart drops it.
+  publish([{ id: "1", status: "waiting", attention: "input", asks: [] }]);
+  await sleep(3000);
+  assert.ok(!flyCalls.some((call) => call.method === "POST"), `updated while an agent waited on an answer: ${JSON.stringify(flyCalls)}\n${log()}`);
 
-  // Idle: everything done, also reported once and then silence. Within idle
-  // time + a sweep, the machine gets the new image, same config.
-  publish([{ id: "1", status: "done", asks: [] }]);
+  // Idle: everything done, also reported once and then silence. An
+  // interrupted turn has ended. Within idle time + a sweep, the machine gets
+  // the new image, same config.
+  publish([{ id: "1", status: "done", asks: [] }, { id: "2", status: "waiting", attention: "interrupted", asks: [] }]);
   const update = await waitFor(() => flyCalls.find((call) => call.method === "POST"), { timeout: 8000 });
   assert.equal(update.body.config.image, "registry.fly.io/workers:new");
   assert.deepEqual(update.body.config.mounts, [{ volume: "vol_1", path: "/workspace" }]);

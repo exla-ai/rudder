@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
-import { hostInfo, hostUpdatePath, hostUpdateReasonPath, homeUpdateRequestPath, homeUpdateStatusPath, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, validHostImage, validWorkerToken, workerTokenHash, writeHomeUpdateStatus, writeHostUpdate } from "../cloud/worker/home-host.mjs";
+import { createHostUpdates, hostInfo, hostUpdatePath, hostUpdateReasonPath, homeUpdateRequestPath, homeUpdateStatusPath, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, validHostImage, validWorkerToken, withdrawHostUpdate, workerTokenHash, writeHomeUpdateStatus, writeHostUpdate } from "../cloud/worker/home-host.mjs";
 import { HOST_FILES, copyFromFlySteps, hostFilesDir, parseHostArgs, renderHomeEnv, validImage } from "../dist/cloud-host.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -228,6 +228,7 @@ serverTest("an external home never touches Fly: switch, fence, refusals, update 
   hostA.publish(OLD_IMAGE);
   const update = await waitFor(() => hostA.rpcs.find((m) => m.method === "update"));
   assert.equal(update.params.image, NEW_IMAGE);
+  assert.equal(update.params.whenIdle, true, "the home checks its agents again before its host restarts it");
   assert.ok(validWorkerToken(update.params.workerToken));
   assert.notEqual(update.params.workerToken, hostToken);
   await waitFor(() => row("home-a").next === tokenHash(update.params.workerToken));
@@ -316,6 +317,7 @@ serverTest("a busy home asks to update now: Cloud offers the newer image, then u
   ws.send(JSON.stringify({ type: "update-now" }));
   const update = await waitFor(() => messages.find((m) => m.type === "rpc" && m.method === "update"));
   assert.equal(update.params.image, NEW_IMAGE);
+  assert.equal(update.params.whenIdle, false, "the user said to restart busy agents");
   assert.ok(validWorkerToken(update.params.workerToken));
   assert.deepEqual(await waitFor(() => messages.find((m) => m.type === "update-now-result")), { type: "update-now-result", ok: true });
   assert.deepEqual(row(), { hash: tokenHash(token), next: tokenHash(update.params.workerToken) });
@@ -356,6 +358,16 @@ serverTest("a busy home asks to update now: Cloud offers the newer image, then u
   assert.equal((await waitFor(() => results()[4])).ok, true);
   assert.deepEqual(row(), { hash: tokenHash(token), next: tokenHash(third.params.workerToken) });
   assert.ok(![retry, third].some((m) => log().includes(m.params.workerToken)));
+
+  // The home took a request back before its host applied it (an agent got
+  // busy during the pull): its token stops blocking the next update, and
+  // nothing is shown as failed.
+  ws.send(JSON.stringify({ type: "update-withdrawn", tokenHash: tokenHash("rdrw_an_older_request_token") }));
+  ws.send(JSON.stringify({ type: "update-withdrawn", tokenHash: tokenHash(third.params.workerToken) }));
+  await waitFor(() => row().next === null);
+  assert.equal(row().hash, tokenHash(token));
+  assert.equal(db.prepare("select update_error as error from rudder_workspaces where id = 'home-n'").get().error, null);
+  assert.match(log(), /home-n took its idle update back/);
 });
 
 serverTest("Update now from the app: versions, asking before it interrupts agents, the same update, why one failed", async (t) => {
@@ -592,6 +604,45 @@ nodeTest("the worker writes desired.json atomically, 0600, and only with sane va
   assert.deepEqual(hostInfo({ RUDDER_HOST_KIND: "external", RUDDER_HOST_IMAGE: NEW_IMAGE }), { kind: "external", image: NEW_IMAGE });
 });
 
+nodeTest("an idle update waits for the home's own agents and is taken back if one starts", (t) => {
+  const volume = tmpdir("rudder-host-volume-");
+  t.after(() => fs.rmSync(volume, { recursive: true, force: true }));
+  let busy = 1;
+  const withdrawn = [];
+  const updates = createHostUpdates({ volume, busyAgents: () => busy, withdrawn: (hash, n) => withdrawn.push([hash, n]) });
+  const token = "rdrw_idle_update_token_0123456789";
+  const file = hostUpdatePath(volume);
+
+  // Cloud saw it idle, but an agent here is working: refused, nothing written.
+  assert.throws(() => updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: true }), /1 agent is working or waiting on an answer/);
+  assert.ok(!fs.existsSync(file));
+
+  busy = 0;
+  updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: true });
+  updates.check();
+  assert.ok(fs.existsSync(file), "still idle: the host applies it");
+  busy = 2;
+  updates.check();
+  assert.ok(!fs.existsSync(file), "an agent started during the pull");
+  assert.deepEqual(withdrawn, [[workerTokenHash(token), 2]]);
+  updates.check();
+  assert.equal(withdrawn.length, 1, "told once");
+
+  // The host took the request first: nothing to take back, Cloud is not told.
+  busy = 0;
+  updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: true });
+  fs.rmSync(file);
+  busy = 1;
+  updates.check();
+  assert.equal(withdrawn.length, 1);
+
+  // Update now restarts busy agents as the user asked, and stays requested.
+  updates.request({ image: NEW_IMAGE, workerToken: token, whenIdle: false });
+  updates.check();
+  assert.ok(fs.existsSync(file));
+  assert.equal(withdrawn.length, 1);
+});
+
 // A stand-in docker that logs its argv and answers from FAKE_* variables.
 function fakeHost() {
   const root = tmpdir("rudder-host-scripts-");
@@ -607,7 +658,8 @@ printf '%s\\n' "$*" >> "${dockerLog}"
 case "$1" in
   inspect) [ -n "\${FAKE_INSPECT:-}" ] || exit 1; printf '%s\\n' "$FAKE_INSPECT" ;;
   container) [ "\${FAKE_EXISTS:-0}" = 1 ] ;;
-  pull) [ "\${FAKE_PULL_FAIL:-0}" != 1 ] || { echo 'Error response from daemon: Head "https://registry.fly.io/v2/workers/manifests/4.2.1": unauthorized: authentication required' >&2; exit 1; } ;;
+  pull) [ "\${FAKE_PULL_FAIL:-0}" != 1 ] || { echo 'Error response from daemon: Head "https://registry.fly.io/v2/workers/manifests/4.2.1": unauthorized: authentication required' >&2; exit 1; }
+    [ -z "\${FAKE_DURING_PULL:-}" ] || "$FAKE_DURING_PULL" ;;
 esac
 `, { mode: 0o755 });
   const startLog = path.join(root, "start.log");
@@ -678,6 +730,30 @@ nodeTest("rudder-home-apply-update pulls, swaps only the token, and sets bad req
   assert.ok(!fs.existsSync(desired));
   assert.ok(!fs.existsSync(failed) && !fs.existsSync(hostUpdateReasonPath(host.data)));
   assert.equal(readHostUpdateFailure(host.data), null);
+
+  // An idle update the home takes back while the host pulls (an agent started
+  // working; worker home.mjs holdIdleUpdate): the host stops after the pull,
+  // and nothing restarts. A different token's request is left alone.
+  host.reset();
+  const withdrawn = "rdrw_withdrawn_token_abcdefghijklmn";
+  writeHostUpdate({ volume: host.data, image: NEW_IMAGE, workerToken: withdrawn });
+  assert.equal(withdrawHostUpdate(host.data, workerTokenHash(token)), false, "another request's token");
+  assert.ok(fs.existsSync(desired));
+  const during = path.join(host.data, "withdraw.mjs");
+  fs.writeFileSync(during, `#!${process.execPath}
+import assert from "node:assert/strict";
+import { withdrawHostUpdate } from ${JSON.stringify(path.join(cloudDir, "worker", "home-host.mjs"))};
+assert.equal(withdrawHostUpdate(${JSON.stringify(host.data)}, ${JSON.stringify(workerTokenHash(withdrawn))}), true);
+`, { mode: 0o755 });
+  const envBefore = fs.readFileSync(envPath, "utf8");
+  const kept = host.run("rudder-home-apply-update", [], { FAKE_DURING_PULL: during });
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.equal(host.dockerLog().trim(), `pull -q ${NEW_IMAGE}`);
+  assert.equal(host.started(), "", "no restart");
+  assert.equal(fs.readFileSync(envPath, "utf8"), envBefore, "the env file keeps the current token");
+  assert.ok(!fs.existsSync(desired) && !fs.existsSync(failed), "nothing set aside as failed");
+  assert.equal(withdrawHostUpdate(host.data, workerTokenHash(withdrawn)), false, "already gone");
+  fs.rmSync(during);
 
   const refused = (write, pattern, env = {}) => {
     host.reset();

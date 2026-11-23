@@ -55,6 +55,65 @@ export function writeHostUpdate({ volume, image, workerToken }) {
   return file;
 }
 
+/**
+ * Takes back the request whose token hashes to `tokenHash`, while the host
+ * has not applied it yet. The host's apply script reads the token again after
+ * its pull and stops when the request is gone, so an agent that starts working
+ * during a long pull is not restarted. True when this call removed it; false
+ * when the host already took it (or a newer request replaced it).
+ */
+export function withdrawHostUpdate(volume, tokenHash) {
+  const file = hostUpdatePath(volume);
+  let desired;
+  try {
+    desired = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  if (!validWorkerToken(desired?.workerToken) || workerTokenHash(desired.workerToken) !== tokenHash) {
+    return false;
+  }
+  try {
+    fs.unlinkSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  return true;
+}
+
+/**
+ * The `update` RPC on an external host, held to this machine's own agents.
+ * Cloud's idle update goes by the last state it got, and the host pulls the
+ * image (minutes) before it restarts the machine. So an idle request
+ * (`whenIdle`) is refused while `busyAgents()` counts one, and `check()`
+ * (every second) takes it back if one gets busy before the host applies it,
+ * then `withdrawn(tokenHash, busy)` tells Cloud. A user's Update now
+ * (`whenIdle` false) restarts busy agents as they asked.
+ */
+export function createHostUpdates({ volume, busyAgents, withdrawn }) {
+  let idle = null; // the token hash of an idle request the host may not have applied yet
+  return {
+    request({ image, workerToken, whenIdle }) {
+      const busy = whenIdle ? busyAgents() : 0;
+      if (busy) {
+        throw new Error(`update: ${busy === 1 ? "1 agent is" : `${busy} agents are`} working or waiting on an answer`);
+      }
+      writeHostUpdate({ volume, image, workerToken });
+      idle = whenIdle ? workerTokenHash(workerToken) : null;
+    },
+    check() {
+      if (!idle) return;
+      const busy = busyAgents();
+      if (!busy) return;
+      const tokenHash = idle;
+      idle = null;
+      if (withdrawHostUpdate(volume, tokenHash)) withdrawn(tokenHash, busy);
+    },
+  };
+}
+
 /** The hash the control plane keeps for a worker token (server.ts tokenHash). */
 export function workerTokenHash(token) {
   return createHash("sha256").update(token).digest("hex").slice(0, 32);

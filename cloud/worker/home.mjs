@@ -30,7 +30,7 @@ import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { activeUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
-import { phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
+import { holdsRestart, phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner, stripAnsi } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
@@ -46,7 +46,7 @@ import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
 import { createSlashCommands } from "./slash-commands.mjs";
 import { createVibeprintHosts } from "./vibeprint-host.mjs";
-import { hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus, writeHostUpdate } from "./home-host.mjs";
+import { createHostUpdates, hostInfo, offeredHomeUpdate, readHostUpdateFailure, takeHomeUpdateRequest, writeHomeUpdateStatus } from "./home-host.mjs";
 import { createCoordinatorTools, startCoordinatorBroker, writeCoordinatorFiles } from "./coordinator.mjs";
 
 // Rudder's own build, which the home loads its shared modules from: the
@@ -141,6 +141,17 @@ let homeUpdateRequestedAt = 0;
 // the dashboards once, and reported to Cloud once per control connection.
 let hostFailureShown = null;
 let hostFailureReported = null;
+// An external host's updates: an idle one is taken back if an agent starts
+// working (a message from the phone, a background task's result) before the
+// host restarts this machine, and Cloud tries again once it is quiet.
+const hostUpdates = createHostUpdates({
+  volume: VOLUME,
+  busyAgents: () => agentsHoldingRestart(),
+  withdrawn: (tokenHash, busy) => {
+    log(`update: taken back before the host applied it; ${busy === 1 ? "1 agent" : `${busy} agents`} started working`);
+    sendControl({ type: "update-withdrawn", tokenHash });
+  },
+});
 const lastMessageCache = new Map(); // runId -> { mtime, text }
 const previewErrors = new Map(); // runId -> the last preview error logged
 let privatePreviews;
@@ -260,6 +271,7 @@ setInterval(reportHeartbeat, 30_000);
 setHomeUpdate({ current: hostInfo(process.env).image, target: null, state: "current", error: null });
 setInterval(checkHomeUpdateRequest, 1000);
 setInterval(checkHostUpdateFailure, 5000);
+setInterval(() => hostUpdates.check(), 1000);
 reportHeartbeat();
 // Metrics for the observability stack (observability/metrics.md); off unless
 // RUDDER_OTEL_ENDPOINT is set. Paths come from the child env because
@@ -727,6 +739,15 @@ function checkHostUpdateFailure() {
   }
 }
 
+// Agents a restart now would cut off (agent-status.mjs holdsRestart).
+function agentsHoldingRestart() {
+  let busy = 0;
+  for (const project of projects.values()) {
+    if (project.status !== "cloning") busy += project.agents().filter(holdsRestart).length;
+  }
+  return busy;
+}
+
 function sendControl(message) {
   if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
     controlSocket.send(JSON.stringify(message));
@@ -753,8 +774,11 @@ async function handleRpc(method, params) {
     if (process.env.RUDDER_HOST_KIND !== "external") {
       throw new Error("update: this home is not on an external host");
     }
-    writeHostUpdate({ volume: VOLUME, image: params.image, workerToken: params.workerToken });
-    log(`update: ${params.image} requested; the host applies it`);
+    // Cloud's idle update goes by the last state it got; this machine's own
+    // agents are the latest word. A user's Update now restarts them anyway.
+    const whenIdle = params.whenIdle === true;
+    hostUpdates.request({ image: params.image, workerToken: params.workerToken, whenIdle });
+    log(`update: ${params.image} requested${whenIdle ? " while idle" : ""}; the host applies it`);
     return { ok: true };
   }
   if (method === "repos") {

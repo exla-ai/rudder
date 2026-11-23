@@ -1965,7 +1965,9 @@ function updateAgentRow(el, { p, a }) {
   const model = el.querySelector(".c-model");
   setText(model, backendLabel(a)); model.hidden = el._showProject || !backendLabel(a);
   const phase = el.querySelector(".c-phase");
-  const phaseText = a.nodeId ? a.nodeId : (a.phase && a.phase !== a.status ? a.phase : "");
+  const parent = a.parentRunId && (p.agents || []).find((x) => x.id === a.parentRunId);
+  const phaseText = a.parentRunId ? `Helper of ${parent?.title || a.parentRunId}`
+    : a.nodeId ? a.nodeId : (a.phase && a.phase !== a.status ? a.phase : "");
   setText(phase, phaseText); phase.hidden = !phaseText || el._showProject;
   const lock = el.querySelector(".c-lock");
   lock.hidden = a.visibility !== "private" || !hasTeam(store.state);

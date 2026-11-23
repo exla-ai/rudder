@@ -1773,6 +1773,8 @@ function agentSummary(record, options, repoDir) {
     summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
+    // The agent that started this one as its helper (native helpers.rs).
+    parentRunId: record.parentRunId ?? null,
     remoteUrl,
     asks: agentAsks(record),
     ...(record.backend === "codex" && { answerSubmission: codexAnswerQueue.status(repoDir, record.id) }),

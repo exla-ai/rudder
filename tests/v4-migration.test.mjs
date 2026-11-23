@@ -22,7 +22,7 @@ async function fixture(t) {
   const init = spawnSync("jj", ["git", "init", "--colocate", repo], { encoding: "utf8" });
   assert.equal(init.status, 0, init.stderr);
   const version = spawnSync("jj", ["--version"], { encoding: "utf8" }).stdout;
-  assert.match(version, /^jj 0\.40\.0/);
+  assert.match(version, /^(rudder-)?jj 0\.40\.0/);
   await fsp.writeFile(path.join(repo, "user edits ü.txt"), "source edits\n");
   await fsp.mkdir(path.join(repo, "empty"));
   await fsp.symlink("user edits ü.txt", path.join(repo, "source-link"));

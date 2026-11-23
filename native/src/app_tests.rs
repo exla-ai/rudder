@@ -33948,7 +33948,7 @@ fn agents_start_runs_a_linked_helper_on_its_own_model_without_moving_the_default
         (Backend::Antigravity, "gemini-4-neon-xhigh", None)
     );
     assert!(helper.task.contains("Review lib/ and test/ and list the top findings."));
-    assert!(helper.task.contains(&dir.join("parent-ws").display().to_string()), "it reads where its parent works");
+    assert!(helper.task.contains("a copy of that agent's files"), "it reads a copy of its parent's files");
     let helper_id = helper.id.clone();
     // The model new agents start on, and the user's view, did not move.
     assert_eq!((app.backend, app.model.as_str(), app.effort), (Backend::Claude, "opus", Some(EffortLevel::High)));

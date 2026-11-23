@@ -2549,6 +2549,9 @@ struct WorkspacePrepJob {
     /// Branch: the workspace starts from a copy of this agent's files, and
     /// its conversation is forked into it (branch.rs).
     branch: Option<crate::branch::BranchSource>,
+    /// Helper: the workspace starts from a copy of the files in this
+    /// directory, its parent's, uncommitted edits included (helpers.rs).
+    files_of: Option<PathBuf>,
 }
 
 /// Several `__launch-node` calls at once would race on one jj repo. The loop
@@ -2569,9 +2572,10 @@ impl WorkspacePrepJob {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // A branch's copy of its source's files is a jj operation on the
             // same repo, so it runs under the same lock.
-            let base = match &self.branch {
-                Some(source) => crate::branch::copy_code(&source.cwd, &outcome.run_id).map(Some),
-                None => Ok(self.base_change.clone()),
+            let base = match (&self.branch, &self.files_of) {
+                (Some(source), _) => crate::branch::copy_code(&source.cwd, &outcome.run_id).map(Some),
+                (None, Some(cwd)) => crate::branch::copy_code(cwd, &outcome.run_id).map(Some),
+                (None, None) => Ok(self.base_change.clone()),
             };
             base.and_then(|base| {
                 prepare_jj_workspace_as(&self.cwd, &self.label, base.as_deref(), Some(&outcome.run_id))
@@ -9728,6 +9732,7 @@ impl App {
         input: &str,
         explicit_summary: Option<&str>,
         node: Option<PlannedNode>,
+        files_of: Option<PathBuf>,
     ) {
         let planner_title = explicit_summary
             .map(str::trim)
@@ -9873,6 +9878,7 @@ impl App {
             base_change: None,
             stage_claude_session: None,
             branch: None,
+            files_of,
         };
         self.begin_workspace_prep(run_id, PendingLaunchKind::Task { single_run }, job);
     }
@@ -14985,7 +14991,7 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
         self.notice = None;
-        self.start_execute_task_node(input, None, None);
+        self.start_execute_task_node(input, None, None, None);
     }
 
     fn refresh_cloud_workspace_status(&mut self) {
@@ -19733,7 +19739,7 @@ Address the objection directly. If you disagree, say why inside \
                 depends_on.insert_str(0, &swarm_experiment_brief(&node_id, swarm.experiments.len()));
             }
             let prompt = planned_node_worker_prompt(&planner_task, &node, &depends_on);
-            self.start_execute_task_node(&prompt, Some(&title), Some(node));
+            self.start_execute_task_node(&prompt, Some(&title), Some(node), None);
             if experiment.is_some() {
                 self.mark_swarm_experiment(&node_id);
             }
@@ -20327,6 +20333,7 @@ Address the objection directly. If you disagree, say why inside \
             stage_claude_session: (backend == Backend::Claude)
                 .then(|| (source_cwd, session_id.clone())),
             branch: None,
+            files_of: None,
         };
 
         // The row goes in now, in the dashboard checkout with no workspace and

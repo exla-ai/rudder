@@ -308,6 +308,7 @@ impl App {
                 session: session.clone(),
                 claude_projects: roots.claude_projects,
             }),
+            files_of: None,
         };
         let at = index + 1;
         self.agents.insert(at, row);

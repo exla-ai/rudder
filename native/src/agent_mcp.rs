@@ -439,7 +439,7 @@ struct ResultArgs {
 
 fn helper_tool_definitions() -> Value {
     json!([
-        {"name":"agents_start","description":"Start a helper agent in this project on the harness, model and effort you name, for example a review or a second opinion from another model. It works in its own workspace and reads files itself with its own tools, so name the files and directories to read and never paste their contents. The user's default model does not change. Returns the helper's run_id; call agents_result with it to get the helper's reply.","inputSchema":{"type":"object","additionalProperties":false,"required":["task","harness","model"],"properties":{
+        {"name":"agents_start","description":"Start a helper agent in this project on the harness, model and effort you name, for example a review or a second opinion from another model. Its workspace starts as a copy of your files, uncommitted edits included, and it reads them itself with its own tools, so name the files and directories to read and never paste their contents. Its edits never reach your files. The user's default model does not change. Returns the helper's run_id; call agents_result with it to get the helper's reply.","inputSchema":{"type":"object","additionalProperties":false,"required":["task","harness","model"],"properties":{
             "task":{"type":"string","description":"What the helper should do. Name the paths to read; relative paths are taken from your working directory."},
             "harness":{"enum":["claude","codex","antigravity","opencode"]},
             "model":{"type":"string","description":"A model id Rudder lists for that harness, for example claude-opus-5-5, gpt-6.1-sol or gemini-4-neon-xhigh. An unknown id is refused with the list."},

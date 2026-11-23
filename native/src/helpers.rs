@@ -9,9 +9,13 @@
 //!   receipt carries the new run id.
 //! - The row records the agent that asked (`parent_run`, run.json
 //!   `parentRunId`); the agents list and the app show it as that agent's helper.
-//! - The helper reads the files itself, with its own tools, in the asking
-//!   agent's workspace. Nothing is pasted into its prompt, so no message limit
-//!   cuts what it sees (`agy -p` keeps about 200 KB of one message).
+//! - The helper's workspace starts from a copy of the asking agent's files,
+//!   uncommitted edits included (`branch::copy_code`, as a branch's does): an
+//!   overlay fork's files exist only inside its own agent's mount namespace,
+//!   so another agent cannot read them at their path. The helper reads the
+//!   copy itself, with its own tools. Nothing is pasted into its prompt, so no
+//!   message limit cuts what it sees (`agy -p` keeps about 200 KB of one
+//!   message), and its edits never reach the asking agent's files.
 //! - When a helper's turn ends (detect.rs `finish_turn`), its final message is
 //!   read off the App loop from its backend's own session record and appended
 //!   to `.rudder/helpers/<run id>.json`, where `agents_result` reads it. This
@@ -161,7 +165,7 @@ fn known_models_note(backend: Backend) -> String {
 }
 
 /// The helper's task as it starts: the asker's words, then what a helper is.
-pub(crate) fn helper_prompt(task: &str, parent: &str, parent_cwd: &Path) -> String {
+pub(crate) fn helper_prompt(task: &str, parent: &str) -> String {
     let objective = task
         .lines()
         .map(str::trim)
@@ -171,9 +175,8 @@ pub(crate) fn helper_prompt(task: &str, parent: &str, parent_cwd: &Path) -> Stri
     format!(
         "Objective: {objective}\nDone when: your final message answers the request in full.\n\n{task}\n\n\
          Rudder: you are a helper agent. The agent \"{parent}\" started you and reads only your final message of each turn, so put your whole answer in it. \
-         That agent works in {cwd}. Read the files there yourself with your own tools; paths in this request are relative to that directory unless they are absolute. \
-         Do not change anything in that directory.",
-        cwd = parent_cwd.display(),
+         Your working directory starts as a copy of that agent's files, its uncommitted edits included. Read them there with your own tools; \
+         relative paths in this request are taken from there. Your changes stay in your copy and never reach that agent's files."
     )
 }
 
@@ -228,7 +231,8 @@ impl App {
         } else {
             parent.task_summary.clone()
         };
-        let prompt = helper_prompt(&spec.task, &parent_label, &parent.cwd);
+        let parent_cwd = parent.cwd.clone();
+        let prompt = helper_prompt(&spec.task, &parent_label);
         let title = summarize_task(&spec.task);
         // Start on exactly this model the way a routed task does
         // (finish_task_routing): the selection for new agents comes back
@@ -238,7 +242,7 @@ impl App {
         self.model = spec.model.clone();
         self.effort = spec.effort;
         let before = self.agents.len();
-        self.start_execute_task_node(&prompt, Some(&title), None);
+        self.start_execute_task_node(&prompt, Some(&title), None, Some(parent_cwd));
         (self.backend, self.model, self.effort, self.selected_agent, self.focus) = previous;
         if self.agents.len() != before + 1 {
             return Err("the helper's row was not created".to_string());
@@ -410,14 +414,14 @@ mod tests {
     }
 
     #[test]
-    fn the_helper_prompt_points_at_the_parents_files_and_forbids_editing_them() {
-        let prompt = helper_prompt("\n  Review lib/ and test/.\nTop five only.", "ship the parser", Path::new("/repo/ws"));
+    fn the_helper_prompt_names_its_copy_of_the_parents_files() {
+        let prompt = helper_prompt("\n  Review lib/ and test/.\nTop five only.", "ship the parser");
         assert!(prompt.starts_with("Objective: Review lib/ and test/.\nDone when: "), "{prompt}");
         assert!(starts_goal_prompt(&prompt), "manual_goal_prompt keeps it as written");
         assert!(prompt.contains("Top five only."));
         assert!(prompt.contains("\"ship the parser\" started you"));
-        assert!(prompt.contains("works in /repo/ws"));
-        assert!(prompt.contains("Do not change anything in that directory."));
+        assert!(prompt.contains("starts as a copy of that agent's files, its uncommitted edits included"));
+        assert!(prompt.contains("never reach that agent's files"));
     }
 
     #[test]

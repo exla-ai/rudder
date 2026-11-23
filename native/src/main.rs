@@ -5007,10 +5007,6 @@ impl App {
             return Some(format!("{key_name}: no live terminal for this worker yet"));
         }
         let backend = self.agents[index].backend;
-        Self::claude_nav_log(&format!(
-            "{key_name} pressed run={run_id} walk_active={}",
-            self.claude_message_nav_active(run_id)
-        ));
         if !jump_to_latest && self.claude_message_nav_active(run_id) {
             // A walk is still in progress for this pane; let it finish rather
             // than race it.
@@ -5054,7 +5050,6 @@ impl App {
             if inline {
                 // reset_scrollback above already put the pane back at the
                 // live bottom; there is nothing to ask the child for.
-                Self::claude_nav_log("Alt+B: inline pane, reset Rudder's scrollback");
                 self.dirty = true;
                 return None;
             }
@@ -5078,11 +5073,6 @@ impl App {
                 .as_mut()
                 .map(|terminal| Self::scroll_pane_to_previous_question(backend, terminal))
                 .unwrap_or(0);
-            Self::claude_nav_log(&format!(
-                "Alt+V: inline {} pane, scrolled Rudder's own view up {scrolled} rows to offset {:?}",
-                backend.as_str(),
-                run.terminal.as_ref().map(|terminal| terminal.scrollback())
-            ));
             let landed_on_question = run.terminal.as_ref().is_some_and(|terminal| {
                 terminal
                     .visible_lines_snapshot()
@@ -8904,32 +8894,6 @@ impl App {
         }
     }
 
-    /// Append one line to `~/.rudder/logs/claude-nav.log`. The Alt+V walk
-    /// runs blind inside a live TUI where a stall looks like "nothing
-    /// happened"; this is how a report from a real session gets diagnosed.
-    fn claude_nav_log(message: &str) {
-        use std::io::Write as _;
-        let Some(home) = crate::signals::rudder_home() else {
-            return;
-        };
-        let path = home.join("logs").join("claude-nav.log");
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        else {
-            return;
-        };
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let _ = writeln!(file, "{stamp} {message}");
-    }
-
     /// Whether an Alt+V walk is already in flight for `run_id`. A second
     /// press while one runs is dropped rather than queued: the walk reads the
     /// screen as it goes, and two of them would race each other's keystrokes.
@@ -8980,23 +8944,10 @@ impl App {
             return;
         };
         let before = terminal.live_screen_lines();
-        let write = terminal.write_input(CLAUDE_PAGE_UP_BYTES);
-        Self::claude_nav_log(&format!(
-            "start run={run_id}; paging up; pane {}x{}; write={:?}; alt_screen={}; wants_mouse={}; scrollback={}; content_end={}; screen:\n{}",
-            terminal.size().cols,
-            terminal.size().rows,
-            write.as_ref().err().map(|e| e.to_string()),
-            terminal.uses_alternate_screen(),
-            terminal.wants_sgr_mouse_events(),
-            terminal.scrollback(),
-            claude_content_end(&before),
-            before
-                .iter()
-                .enumerate()
-                .map(|(row, line)| format!("  {row:2}| {}", line.chars().take(110).collect::<String>()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+        if let Err(error) = terminal.write_input(CLAUDE_PAGE_UP_BYTES) {
+            self.notice = Some(format!("Alt+V: {error}"));
+            return;
+        }
         self.claude_message_navs.push(ClaudeMessageNav {
             run_id: run_id.to_string(),
             phase: ClaudeNavPhase::PagedUp {
@@ -9031,7 +8982,6 @@ impl App {
                 .find(|run| run.id == nav.run_id)
                 .and_then(|run| run.terminal.as_mut())
             else {
-                Self::claude_nav_log(&format!("drop run={} (no run/terminal)", nav.run_id));
                 finished.push(index);
                 continue;
             };
@@ -9050,14 +9000,10 @@ impl App {
                             // events in one write (bundled wheel events all
                             // land, measured).
                             let notches = (screen.len() / 2).max(1);
-                            Self::claude_nav_log(&format!(
-                                "page up changed nothing after {}ms; trying {notches} wheel-up notches",
-                                sent_at.elapsed().as_millis()
-                            ));
                             let burst: Vec<u8> = CLAUDE_LINE_UP_BYTES.repeat(notches);
                             let write = terminal.write_input(&burst);
                             if let Err(error) = &write {
-                                Self::claude_nav_log(&format!("wheel write failed: {error}"));
+                                self.notice = Some(format!("Alt+V: {error}"));
                             }
                             self.dirty = true;
                             *wheeled = true;
@@ -9070,27 +9016,16 @@ impl App {
                             // always answers when it is listening at all:
                             // Ctrl+Home (jump to the very top). If even that does
                             // nothing, the worker is not taking scroll input and
-                            // the log says so instead of blaming the transcript.
+                            // the walk ends there.
                             if !nav.probed {
                                 nav.probed = true;
-                                let write = terminal.write_input(b"\x1b[1;5H");
-                                Self::claude_nav_log(&format!(
-                                    "neither PageUp nor wheel moved the view; probing Ctrl+Home; write={:?}",
-                                    write.as_ref().err().map(|e| e.to_string())
-                                ));
+                                if let Err(error) = terminal.write_input(b"\x1b[1;5H") {
+                                    self.notice = Some(format!("Alt+V: {error}"));
+                                }
                                 *sent_at = now;
                                 self.dirty = true;
                                 continue;
                             }
-                            Self::claude_nav_log(&format!(
-                                "Ctrl+Home moved nothing either: already at the top, or this worker is not taking scroll input; screen:\n{}",
-                                screen
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(row, line)| format!("  {row:2}| {}", line.chars().take(110).collect::<String>()))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            ));
                             self.notice = Some(if nav.pages == 0 {
                                 "Alt+V: nothing above — the whole conversation is already on screen"
                                     .to_string()
@@ -9108,15 +9043,6 @@ impl App {
                             continue;
                         }
                     }
-                    Self::claude_nav_log(&format!(
-                        "page {} shift={:?} starts={:?} target={:?} before[0..3]={:?} after[0..3]={:?}",
-                        nav.pages,
-                        claude_page_shift(before, &screen),
-                        claude_message_start_rows(&screen),
-                        claude_previous_question_row(before, &screen),
-                        &before[..before.len().min(3)],
-                        &screen[..screen.len().min(3)],
-                    ));
                     // A question on row 0 is ignored, so the walk pages
                     // once more. While scrolled, Claude pins the current
                     // prompt to row 0, and a pinned `❯` line looks exactly
@@ -9141,7 +9067,6 @@ impl App {
                         None => {
                             nav.pages += 1;
                             if nav.pages >= CLAUDE_NAV_MAX_PAGES {
-                                Self::claude_nav_log("gave up: max pages");
                                 self.notice = Some(
                                     "Alt+V: no earlier message found — press ⌥b to return to the latest"
                                         .to_string(),
@@ -9184,7 +9109,6 @@ impl App {
                 } => match step {
                     ClaudeAlignStep::Idle => {
                         if *row <= 1 {
-                            Self::claude_nav_log(&format!("done: {target:?} at row {row}"));
                             finished.push(index);
                             continue;
                         }
@@ -9213,9 +9137,6 @@ impl App {
                                     let _ = terminal.write_input(CLAUDE_LINE_DOWN_BYTES);
                                     *last_sent = now;
                                 } else {
-                                    Self::claude_nav_log(&format!(
-                                        "done: wheel down changed nothing with {target:?} at row {row}"
-                                    ));
                                     finished.push(index);
                                 }
                             }
@@ -9239,10 +9160,6 @@ impl App {
                         } else {
                             // Slid off the top (under the sticky prompt).
                             // Undo that step.
-                            Self::claude_nav_log(&format!(
-                                "{target:?} left the screen from row {row}; rows[0..3]={:?}; restoring",
-                                &screen[..screen.len().min(3)]
-                            ));
                             *sent_screen = screen;
                             *resends = 0;
                             let _ = terminal.write_input(CLAUDE_LINE_UP_BYTES);
@@ -9259,7 +9176,6 @@ impl App {
                                 let _ = terminal.write_input(CLAUDE_LINE_UP_BYTES);
                                 *last_sent = now;
                             } else {
-                                Self::claude_nav_log("done: restore changed nothing");
                                 finished.push(index);
                             }
                             continue;
@@ -9267,10 +9183,6 @@ impl App {
                         if screen.iter().any(|line| line == target)
                             || last_sent.elapsed() > CLAUDE_NAV_REPAINT_TIMEOUT
                         {
-                            Self::claude_nav_log(&format!(
-                                "done: restored, {target:?} at row {:?}",
-                                screen.iter().position(|line| line == target)
-                            ));
                             finished.push(index);
                         }
                     }
@@ -24471,7 +24383,7 @@ impl App {
                 Ok(server) => self.attach_server = Some(server),
                 Err(error) => {
                     self.attach_server_failed = true;
-                    Self::claude_nav_log(&format!("attach server not started: {error:#}"));
+                    self.notice = Some(format!("attach server not started: {error:#}"));
                 }
             }
         }

@@ -1,25 +1,29 @@
 #!/usr/bin/env node
-// Build and push the Rudder Cloud worker image for a published release.
+// Build and push the Rudder Cloud worker image for a release.
 //
-//   node scripts/worker-image.mjs 4.2.0                       # from the npm release
+//   node scripts/worker-image.mjs 4.2.0                       # from the staged npm tarball
 //   node scripts/worker-image.mjs 4.2.0 --compile             # compile from this checkout
 //   node scripts/worker-image.mjs 4.2.0 --label trial-4.2.0   # push under another tag
 //
-// The npm package already carries dist and the linux-x64 rudder-native and
-// rudder-jj that the Release workflow built, so by default the builder fetches
-// it (RUDDER_SOURCE=release) and skips the Rust stage. Fly's own builder pushes
-// straight to registry.fly.io; Depot once reported a push that never arrived,
-// so the image only counts once the registry serves its manifest. It is then
-// copied, blob mounts only, to registry.fly.io/rudder-worker-images, the
-// image-only app external home hosts pull from (cloud/src/home-host.ts).
+// By default it runs in the clean release clone after `node scripts/release.mjs
+// stage`, before the tag: the staged tarball .release/exla-rudder-<version>.tgz
+// (checked against .release/npm.json) is the exact file the Release workflow
+// publishes to npm, and it already carries dist and the linux-x64 rudder-native
+// and rudder-jj. The builder takes them from it (RUDDER_SOURCE=release) and
+// skips the Rust stage, so Cloud can run the release before npm serves it.
+// Fly's own builder pushes straight to registry.fly.io; Depot once reported a
+// push that never arrived, so the image only counts once the registry serves
+// its manifest. It is then copied, blob mounts only, to
+// registry.fly.io/rudder-worker-images, the image-only app external home hosts
+// pull from (cloud/src/home-host.ts).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 
 const APP = process.env.RUDDER_WORKER_APP || "rudder-workers-exla";
 const EXTERNAL_APP = process.env.RUDDER_EXTERNAL_WORKER_APP || "rudder-worker-images";
-const PACKAGE = "@exla/rudder";
 
 const args = process.argv.slice(2);
 const compile = args.includes("--compile");
@@ -80,8 +84,12 @@ try {
   if (compile) {
     if (!fs.existsSync("dist/index.js")) throw new Error("--compile copies ./dist; run `npm run build` first");
   } else {
-    const published = execFileSync("npm", ["view", `${PACKAGE}@${version}`, "version"], { encoding: "utf8" }).trim();
-    if (published !== version) throw new Error(`${PACKAGE}@${version} is not on npm yet; wait for the Release workflow`);
+    const tarball = `exla-rudder-${version}.tgz`;
+    const staged = JSON.parse(fs.readFileSync(".release/npm.json", "utf8"));
+    const sha256 = createHash("sha256").update(fs.readFileSync(path.join(".release", tarball))).digest("hex");
+    if (staged.version !== version || staged.files?.[tarball]?.sha256 !== sha256) {
+      throw new Error(`.release/${tarball} is not the staged ${version} tarball in .release/npm.json; run node scripts/release.mjs stage`);
+    }
   }
   const build = spawnSync("flyctl", [
     "deploy", "--config", config, "--dockerfile", "cloud/worker/Dockerfile",

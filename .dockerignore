@@ -41,3 +41,5 @@ ios
 docs
 tests
 dist/native
+# scripts/release.mjs stage: only the staged npm tarball is a build input.
+.release/work

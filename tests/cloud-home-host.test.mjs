@@ -460,8 +460,10 @@ serverTest("Update now from the app: versions, asking before it interrupts agent
   assert.equal(after.coordinator.dashboard, "running");
 });
 
-serverTest("an external home on GHCR is offered a GHCR image; one on the Fly registry stays there", async (t) => {
+serverTest("an external home on the Fly registry stays there; one elsewhere is offered the image-only app", async (t) => {
   const FLY = "registry.fly.io/rudder-workers-exla";
+  const IMAGES = "registry.fly.io/rudder-worker-images";
+  // Rudder stopped publishing this copy; a host still on it gets the image-only app.
   const GHCR = "ghcr.io/exla-ai/rudder-worker";
   const { port, base, dbPath } = await bootServer(t, {
     RUDDER_WORKER_IMAGE: `${FLY}:4.2.9`,
@@ -501,11 +503,11 @@ serverTest("an external home on GHCR is offered a GHCR image; one on the Fly reg
   publish(`${FLY}:4.2.0`);
   assert.equal((await waitFor(() => offers()[0])).target, `${FLY}:4.2.9`, "an old host keeps its registry");
   publish(`${GHCR}:4.2.8`);
-  assert.deepEqual(await waitFor(() => offers()[1]), { type: "update-available", current: `${GHCR}:4.2.8`, target: `${GHCR}:4.2.9` });
+  assert.deepEqual(await waitFor(() => offers()[1]), { type: "update-available", current: `${GHCR}:4.2.8`, target: `${IMAGES}:4.2.9` });
 
   ws.send(JSON.stringify({ type: "update-now" }));
   const update = await waitFor(() => messages.find((m) => m.type === "rpc" && m.method === "update"));
-  assert.equal(update.params.image, `${GHCR}:4.2.9`);
+  assert.equal(update.params.image, `${IMAGES}:4.2.9`);
   assert.equal((await waitFor(() => messages.find((m) => m.type === "update-now-result"))).ok, true);
 });
 
@@ -555,11 +557,11 @@ libTest("home-host.ts: host kind, env bundle, refusals and the update decision",
   assert.equal(lib.externalHomeNeedsUpdate({ reportedImage: OLD_IMAGE, targetImage: "", pendingNextToken: false }), false);
   const FLY = "registry.fly.io/rudder-workers-exla";
   const GHCR = "ghcr.io/exla-ai/rudder-worker";
-  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${GHCR}:4.2.8`), `${GHCR}:4.2.9`);
-  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
-  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9@sha256:abc`, `${GHCR}:4.2.8@sha256:def`), `${GHCR}:4.2.9`);
-  assert.equal(lib.externalHomeImage(`${GHCR}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
   const IMAGES = "registry.fly.io/rudder-worker-images";
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${GHCR}:4.2.8`), `${IMAGES}:4.2.9`, "Rudder no longer publishes to GHCR");
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${FLY}:4.2.9@sha256:abc`, `${IMAGES}:4.2.8@sha256:def`), `${IMAGES}:4.2.9`);
+  assert.equal(lib.externalHomeImage(`${IMAGES}:4.2.9`, `${FLY}:4.2.0`), `${FLY}:4.2.9`);
   assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`), `${IMAGES}:4.2.9`, "a new host gets the image-only app");
   assert.equal(lib.externalHomeImage(`${FLY}:4.2.9`, "localhost:5000/mine:1"), `${IMAGES}:4.2.9`);
   assert.equal(lib.externalHomeImage(`${FLY}:4.2.10`, `${IMAGES}:4.2.9`), `${IMAGES}:4.2.10`, "a host on it stays there");

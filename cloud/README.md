@@ -264,18 +264,21 @@ docker buildx build --platform linux/arm64 \
   --push .
 ```
 
-For a release, after the Release workflow has published it to npm:
+For a release, in the clean release clone after `node scripts/release.mjs
+stage` (before the tag; see the rudder-ship skill):
 
 ```bash
 node scripts/worker-image.mjs <version>   # -> registry.fly.io/rudder-workers-exla:<version>
 ```
 
-It takes `dist` and the linux-x64 `rudder-native`/`rudder-jj` from the
-published npm package (CI already built them), so no Rust is compiled. It
-builds on Fly's own builder (`--depot=false`) and only succeeds once the
-registry serves the tag. Then bump `RUDDER_WORKER_IMAGE` in `cloud/fly.toml`
-and deploy the control plane; homes update when idle. `--compile` builds the
-native pair from the checkout instead (needs `npm run build` first);
+It takes `dist` and the linux-x64 `rudder-native`/`rudder-jj` from the staged
+npm tarball `.release/exla-rudder-<version>.tgz`, the exact file the tag
+publishes, so no Rust is compiled and it does not wait for npm. It builds on
+Fly's own builder (`--depot=false`) and only succeeds once the registry serves
+the tag. The version commit already pins `RUDDER_WORKER_IMAGE` in
+`cloud/fly.toml`; deploy the control plane from the same clone and homes
+update when idle. `--compile` builds the native pair from the checkout instead
+(needs `npm run build` first);
 `--label <tag>` pushes a trial build under another tag.
 
 The manual equivalent of `--compile`, on Fly's remote builder:

@@ -62,9 +62,8 @@ export type ExternalUpdateInput = {
 // secrets; scripts/worker-image.mjs copies each release there), so an external
 // host logs in to it once with a deploy token for that app alone. Tokens for
 // rudder-workers-exla, which Fly homes run, also reach those homes' machines.
-// The GHCR copy (.github/workflows/worker-image.yml) is private for now.
 export const EXTERNAL_WORKER_REPOSITORY = "registry.fly.io/rudder-worker-images";
-const WORKER_REPOSITORIES = [EXTERNAL_WORKER_REPOSITORY, "ghcr.io/exla-ai/rudder-worker", "registry.fly.io/rudder-workers-exla"];
+const WORKER_REPOSITORIES = [EXTERNAL_WORKER_REPOSITORY, "registry.fly.io/rudder-workers-exla"];
 
 /** An image reference without its tag or digest (as rudder-home-apply-update reads it). */
 export function imageRepository(image: string): string {

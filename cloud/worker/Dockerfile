@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
 ARG WORKER_NODE_IMAGE=node:22-bookworm-slim
 # checkout: compile rudder-native/rudder-jj and copy ./dist from this checkout.
-# release: take dist and the linux-x64 pair CI built from the published npm
-# package @exla/rudder@RUDDER_VERSION (scripts/worker-image.mjs); no Rust stage.
+# release: take dist and the linux-x64 pair from the staged npm tarball
+# .release/exla-rudder-RUDDER_VERSION.tgz (scripts/release.mjs stage), the
+# bytes the Release workflow publishes to npm (scripts/worker-image.mjs); no
+# Rust stage.
 ARG RUDDER_SOURCE=checkout
 FROM rust:1-bookworm AS native-checkout
 WORKDIR /src
@@ -31,9 +33,8 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
 
 FROM ${WORKER_NODE_IMAGE} AS release-package
 ARG RUDDER_VERSION
-RUN test -n "$RUDDER_VERSION" && mkdir /pkg && cd /tmp \
-  && npm pack "@exla/rudder@${RUDDER_VERSION}" --silent \
-  && tar xzf ./*.tgz -C /pkg --strip-components=1 && rm ./*.tgz \
+COPY .release/exla-rudder-${RUDDER_VERSION}.tgz /tmp/rudder.tgz
+RUN mkdir /pkg && tar xzf /tmp/rudder.tgz -C /pkg --strip-components=1 && rm /tmp/rudder.tgz \
   && test -x /pkg/dist/native/linux-x64/rudder-native && test -x /pkg/dist/native/linux-x64/rudder-jj
 
 FROM scratch AS native-release

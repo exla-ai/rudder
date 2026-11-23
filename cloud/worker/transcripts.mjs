@@ -8,12 +8,13 @@
 // All are normalized to { id, role, ts, text, tool } messages; a user message
 // with files sent from the app also has `attachments`.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pidAlive } from "./agent-status.mjs";
 import { contextUsage } from "./context-usage.mjs";
 import { activeGoal } from "./chat-goal.mjs";
-import { promptSuggestion } from "./suggestion.mjs";
+import { promptSuggestion, suggestionFile } from "./suggestion.mjs";
 import { handoffShown } from "./handoff.mjs";
 import { claudeCallFiles, claudeResultFiles, codexChangedFiles, opencodeFiles, setToolFiles, withFiles } from "./tool-files.mjs";
 import { isOpencodeSessionId, opencodeChildSessions, opencodeContextWindow, opencodeDb, opencodeFirstPrompt, opencodeLastText, opencodeMessages, opencodeSessionExists } from "./opencode.mjs";
@@ -31,12 +32,60 @@ const SUBAGENT_OUTPUT_LIMIT = 2_000;
 const SUBAGENT_PROMPT_LIMIT = 6_000;
 // Subagents of subagents are shown this many levels deep.
 const SUBAGENT_DEPTH = 3;
+
+// What the read under way depended on (transcriptPoll at the end of this
+// file): each file it looked at, by size and mtime as stat saw it before the
+// read (null for one not there), when a miss it remembered is looked for
+// again, and the agent's process. Reads made outside a poll record nothing.
+let reading = null; // { files: Map<file, signature>, recheckAt, live: { pid, alive } | null }
+
+function depend(file, stat) {
+  if (reading && !reading.files.has(file)) {
+    reading.files.set(file, fileSignature(stat));
+  }
+}
+
+function dependPath(file) {
+  if (reading) {
+    depend(file, statOrNull(file));
+  }
+}
+
+function dependUntil(at) {
+  if (reading && at < reading.recheckAt) {
+    reading.recheckAt = at;
+  }
+}
+
+function fileSignature(stat) {
+  return stat ? `${stat.size}:${stat.mtimeMs}` : "none";
+}
+
+function statOrNull(file) {
+  try {
+    return fs.statSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return null;
+    }
+    throw error;
+  }
+}
+// Whether the agent's process is up. A kept poll (pollEntry) reads again
+// when that changes, since no file need change when the process dies.
+function processUp(record) {
+  const pid = record.process?.pid;
+  const alive = Number.isInteger(pid) && pidAlive(pid);
+  if (reading && Number.isInteger(pid)) {
+    reading.live = { pid, alive };
+  }
+  return alive;
+}
 // The agent's process is up, so its unfinished subagents and teammates are
 // still running: they go on after the agent's own turn ends. Otherwise they
 // stopped with it.
 function subagentsLive(record) {
-  const pid = record.process?.pid;
-  return Number.isInteger(pid) && pidAlive(pid);
+  return processUp(record);
 }
 
 /**
@@ -55,6 +104,8 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   if (before !== null && after !== null) {
     throw new Error("a chat page is read before a cursor or after one, not both");
   }
+  // Which steps show as still running depends on the process being up.
+  processUp(record);
   if (record.backend === "opencode") {
     return opencodeTranscript(record, { home, limit, before, after });
   }
@@ -81,6 +132,9 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     base.status = record.status || null;
   }
   if (!file) {
+    // No session on disk yet (just launched, or a backend without transcripts):
+    // show the prompts Rudder itself recorded. It can turn up any moment.
+    dependUntil(0);
     base.messages = startingMessages(record);
     return base;
   }
@@ -115,6 +169,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     return base;
   }
   // Claude Code's suggested next prompt, saved by Rudder's Claude plugin.
+  dependPath(suggestionFile(home, record.id));
   base.suggestion = promptSuggestion(home, record.id);
   // A compaction under way. Its session gets nothing until it ends, so this
   // is the dashboard's reading of the pane (run.json `compactingSince`, Unix
@@ -165,7 +220,17 @@ function readCursor(value) {
 // history, then its own rollout (session-lineage.mjs); a Claude session is
 // its one file.
 function sessionSegments(record, file, home) {
-  return record.backend === "codex" ? codexLineage(file, home) : [{ file, end: fs.statSync(file).size }];
+  // Stat before reading, so bytes written meanwhile change the signature.
+  const stat = fs.statSync(file);
+  depend(file, stat);
+  if (record.backend !== "codex") {
+    return [{ file, end: stat.size }];
+  }
+  const segments = codexLineage(file, home);
+  for (const segment of segments) {
+    dependPath(segment.file);
+  }
+  return segments;
 }
 
 // The messages from byte `start` (when given) or about `limit` messages back
@@ -770,6 +835,9 @@ function opencodeConversation(record, home) {
 }
 
 function opencodeTranscript(record, { home, limit, before, after }) {
+  // OpenCode keeps every session in one SQLite database: a write lands in its WAL.
+  dependPath(opencodeDb(home));
+  dependPath(`${opencodeDb(home)}-wal`);
   const conversation = opencodeConversation(record, home);
   const end = before === null ? null : readCursor(before);
   if (end && end.conversation !== conversation) {
@@ -785,6 +853,7 @@ function opencodeTranscript(record, { home, limit, before, after }) {
   }
   const page = conversation ? opencodeSessionPage(record, home, { end: end?.offset ?? null, start, limit, stats: !end }) : null;
   if (!page) {
+    dependUntil(0);
     base.messages = startingMessages(record);
     return base;
   }
@@ -2207,6 +2276,7 @@ const claudeMetas = new Map(); // meta file -> { mtimeMs, size, value }
 
 function claudeSubagentMetas(dir) {
   const metas = new Map(); // toolUseId -> { agentId, meta }
+  dependPath(dir); // a new subagent's files change the folder
   let names;
   try {
     names = fs.readdirSync(dir);
@@ -2231,6 +2301,7 @@ function claudeSubagentMetas(dir) {
 
 function readSubagentMeta(file) {
   const stat = fs.statSync(file);
+  depend(file, stat);
   const hit = claudeMetas.get(file);
   if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
     return hit.value;
@@ -2272,10 +2343,14 @@ function claudeTeammateFile(projectDir, toolUseId, spawn, now = Date.now()) {
     return known.file;
   }
   if (known && now - known.checkedAt < CHILD_RECHECK_MS) {
+    dependUntil(known.checkedAt + CHILD_RECHECK_MS);
     return null;
   }
   const file = spawn.ts === null || spawn.prompt === null ? null : findClaudeTeammate(projectDir, spawn);
   claudeTeammates.set(key, { file, checkedAt: now });
+  if (!file) {
+    dependUntil(now + CHILD_RECHECK_MS);
+  }
   return file;
 }
 
@@ -2413,6 +2488,7 @@ const codexMisses = new Map(); // thread id -> when its rollout was last looked 
 function codexChildFile(home, threadId, now = Date.now()) {
   const missedAt = codexMisses.get(threadId);
   if (missedAt !== undefined && now - missedAt < CHILD_RECHECK_MS) {
+    dependUntil(missedAt + CHILD_RECHECK_MS);
     return null;
   }
   const file = codexRolloutFile(home, threadId);
@@ -2420,6 +2496,7 @@ function codexChildFile(home, threadId, now = Date.now()) {
     codexMisses.delete(threadId);
   } else {
     codexMisses.set(threadId, now);
+    dependUntil(now + CHILD_RECHECK_MS);
   }
   return file;
 }
@@ -2435,10 +2512,12 @@ function followFile(file, makeReader) {
     stat = fs.statSync(file);
   } catch (error) {
     if (error?.code === "ENOENT") {
+      depend(file, null);
       return null;
     }
     throw error;
   }
+  depend(file, stat);
   let state = followed.get(file);
   if (state && stat.size < state.offset) {
     state = null;
@@ -2733,3 +2812,131 @@ function toMillis(value) {
 
 // The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
 export { SUBAGENT_PROMPT_LIMIT, antigravityReader, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
+
+// ---------------------------------------------------------------------------
+// The app's poll. The open chat asks for its newest page every few seconds;
+// most of those polls find nothing new. A read is kept with what it depended
+// on (`reading` above): the run record, the session (or OpenCode's database),
+// each subagent's and teammate's log and metadata, the folders new ones
+// appear in, the suggestion file and whether the agent's process is up. While
+// all of those are as they were, the poll answers from the kept read without
+// reading the session again, and an app that already has it gets a 304
+// (its ETag). Settings and model catalogs that only shape the context and
+// speed numbers are not watched: a change there shows with the chat's next.
+//
+// The poll's messages are the chat as it shows before anything is opened. A
+// tool's output, a subagent card's work (its prompt, messages and full
+// result) and a compaction's summary stay on the home: the message carries
+// a `detail` token instead, and transcriptDetail answers with the whole
+// message when the app opens it. Output up to INLINE_OUTPUT characters comes
+// with the poll, since fetching it would cost more than it saves.
+// ---------------------------------------------------------------------------
+
+const POLL_CACHE_MAX = 24;
+const INLINE_OUTPUT = 300;
+const CARD_RESULT_LIMIT = 300;
+const polls = new Map(); // page key -> { files, recheckAt, live, full, body, etag }
+
+/** The newest page (or the page a cursor names) as the poll sends it: `{ body, etag }`. */
+export function transcriptPoll(repoDir, runId, { limit = 300, home, before = null, after = null }) {
+  const entry = pollEntry(repoDir, runId, { limit, home, before, after });
+  return { body: entry.body, etag: entry.etag };
+}
+
+/**
+ * One message of a page whole: a tool's output, a subagent's work or a
+ * compaction's summary that the poll left out (its `detail`). `before` and
+ * `after` are the page's own cursors, as the poll for it was asked.
+ */
+export function transcriptDetail(repoDir, runId, { id, limit = 300, home, before = null, after = null }) {
+  const entry = pollEntry(repoDir, runId, { limit, home, before, after });
+  const message = entry.full.messages.find((m) => m.id === id);
+  if (!message) {
+    throw new Error("That step is no longer in this part of the chat. Reload the chat to see it.");
+  }
+  return { id, detail: detailToken(message), message };
+}
+
+/** The poll's ETag with the receipts the request asked for folded in. */
+export function transcriptEtag(etag, receipts) {
+  return receipts.length ? `${etag}.${hashOf(JSON.stringify(receipts)).slice(0, 10)}` : etag;
+}
+
+function pollEntry(repoDir, runId, { limit, home, before, after }) {
+  const key = JSON.stringify([repoDir, runId, limit, before, after, home]);
+  const hit = polls.get(key);
+  if (hit && unchanged(hit)) {
+    polls.delete(key);
+    polls.set(key, hit);
+    return hit;
+  }
+  const deps = { files: new Map(), recheckAt: Infinity, live: null };
+  reading = deps;
+  let full;
+  try {
+    // The record first: one written while the session is read changes this.
+    dependPath(path.join(repoDir, ".rudder", "runs", runId, "run.json"));
+    full = readTranscript(repoDir, runId, { limit, home, before, after });
+  } finally {
+    reading = null;
+  }
+  // The app finds an edit by its message (chat-edit.js) and edits the text the
+  // message shows, so an edit's own copy of the prompt stays here.
+  const edits = Array.isArray(full.edits) ? full.edits.map(({ text: _text, ...edit }) => edit) : full.edits;
+  const body = { ...full, messages: full.messages.map(pollMessage), ...(edits ? { edits } : {}) };
+  const entry = { ...deps, full, body, etag: hashOf(JSON.stringify(body)) };
+  polls.delete(key);
+  polls.set(key, entry);
+  if (polls.size > POLL_CACHE_MAX) {
+    polls.delete(polls.keys().next().value);
+  }
+  return entry;
+}
+
+function unchanged(entry) {
+  if (Date.now() >= entry.recheckAt) {
+    return false;
+  }
+  if (entry.live && pidAlive(entry.live.pid) !== entry.live.alive) {
+    return false;
+  }
+  for (const [file, signature] of entry.files) {
+    if (fileSignature(statOrNull(file)) !== signature) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A message as the poll sends it: what shows before it is opened.
+function pollMessage(m) {
+  if (m.subagent) {
+    const { prompt: _prompt, messages: _messages, earlier: _earlier, result, ...card } = m.subagent;
+    return {
+      ...m,
+      detail: detailToken(m),
+      ...(m.tool ? { tool: { ...m.tool, output: null, outputChars: outputLength(m.tool.output) } } : {}),
+      subagent: { ...card, result: typeof result === "string" ? result.slice(0, CARD_RESULT_LIMIT) : result ?? null },
+    };
+  }
+  if (m.tool && typeof m.tool.output === "string" && m.tool.output.length > INLINE_OUTPUT) {
+    return { ...m, detail: detailToken(m), tool: { ...m.tool, output: null, outputChars: m.tool.output.length } };
+  }
+  if (m.kind === "compact" && typeof m.compact?.summary === "string" && m.compact.summary) {
+    return { ...m, detail: detailToken(m), compact: { ...m.compact, summary: null, summaryChars: m.compact.summary.length } };
+  }
+  return m;
+}
+
+function outputLength(output) {
+  return typeof output === "string" ? output.length : null;
+}
+
+// Changes whenever what the message shows opened does.
+function detailToken(m) {
+  return hashOf(JSON.stringify(m)).slice(0, 16);
+}
+
+function hashOf(text) {
+  return crypto.createHash("sha1").update(text).digest("base64url");
+}

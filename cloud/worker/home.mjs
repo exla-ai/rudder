@@ -24,7 +24,7 @@ import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
-import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
+import { lastAssistantText, userTask, transcriptFile, recentConversation, transcriptDetail, transcriptEtag, transcriptPoll } from "./transcripts.mjs";
 import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { activeUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
@@ -779,6 +779,17 @@ function sendControl(message) {
   }
 }
 
+// The chat page a transcript request names: its newest messages, or the page
+// before or from a cursor (transcripts.mjs readTranscript).
+function transcriptPage(params) {
+  return {
+    limit: Number(params.limit) || 300,
+    home: HOME,
+    before: typeof params.before === "string" ? params.before : null,
+    after: typeof params.after === "string" ? params.after : null,
+  };
+}
+
 async function handleRpc(method, params) {
   if (method === "close") {
     const project = projects.get(params.workspaceId);
@@ -947,18 +958,21 @@ async function handleRpc(method, params) {
     return await agentNotes(project.dir, String(params.runId || ""), params.request);
   }
   if (method === "transcript") {
-    const transcript = readTranscript(project.dir, String(params.runId || ""), {
-      limit: Number(params.limit) || 300,
-      home: HOME,
-      before: typeof params.before === "string" ? params.before : null,
-      after: typeof params.after === "string" ? params.after : null,
-    });
+    // The app's chat poll (transcripts.mjs transcriptPoll). `etag` is the one
+    // the app has: when nothing changed the answer is just that, a 304.
+    const poll = transcriptPoll(project.dir, String(params.runId || ""), transcriptPage(params));
     const receipts = [];
     for (const requestId of Array.isArray(params.pending) ? params.pending.slice(0, 40) : []) {
       const receipt = readSteerReceipt(project.dir, requestId);
       if (receipt) receipts.push({ requestId, status: receipt.status, error: receipt.error, code: receipt.code });
     }
-    return { ...transcript, receipts };
+    const etag = transcriptEtag(poll.etag, receipts);
+    if (params.etag === etag) return { notModified: true, etag };
+    return { ...poll.body, receipts, etag };
+  }
+  if (method === "transcriptDetail") {
+    // A tool's output, a subagent's work or a compaction's summary, opened in the chat.
+    return transcriptDetail(project.dir, String(params.runId || ""), { ...transcriptPage(params), id: String(params.id || "") });
   }
   if (method === "slashCommands") {
     return await slashCommands.forRun(project.dir, String(params.runId || ""));

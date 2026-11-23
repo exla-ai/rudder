@@ -27,6 +27,7 @@
 
 import { agentNeeds, type StatusAgent } from "./agent-status.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { pollIfNoneMatch, sendAppNotModified, sendAppPollJson } from "./app-static.js";
 import type Database from "better-sqlite3";
 
 export type Visibility = "team" | "private";
@@ -341,7 +342,7 @@ export function sharesOrg(deps: Pick<TeamDeps, "orgsFor">, viewerId: string, own
 }
 
 // ---------------------------------------------------------------------------
-// HTTP: GET /api/app/team, GET /api/app/team/transcript, POST /api/app/visibility
+// HTTP: GET /api/app/team, GET /api/app/team/transcript (and /detail), POST /api/app/visibility
 // ---------------------------------------------------------------------------
 
 export type TeamApiDeps = TeamDeps & {
@@ -372,7 +373,7 @@ export async function handleTeamApi(
 ): Promise<boolean> {
   const path = url.pathname.replace(/\/+$/, "");
   const method = (req.method || "GET").toUpperCase();
-  if (path !== "/api/app/team" && path !== "/api/app/team/transcript" && path !== "/api/app/visibility") {
+  if (path !== "/api/app/team" && path !== "/api/app/team/transcript" && path !== "/api/app/team/transcript/detail" && path !== "/api/app/visibility") {
     return false;
   }
   try {
@@ -385,7 +386,7 @@ export async function handleTeamApi(
       return true;
     }
 
-    if (path === "/api/app/team/transcript") {
+    if (path === "/api/app/team/transcript" || path === "/api/app/team/transcript/detail") {
       if (method !== "GET") {
         deps.sendJson(res, 405, { error: "method not allowed" });
         return true;
@@ -415,8 +416,24 @@ export async function handleTeamApi(
       // Page cursors (worker/transcripts.mjs readTranscript): the messages before one, or from one on.
       const before = url.searchParams.get("before");
       const after = url.searchParams.get("after");
-      const result = await deps.rpc(homeId, "transcript", { workspaceId, runId, limit, before, after });
-      deps.sendJson(res, 200, { ...body(result), readOnly: ownerId !== account.accountId, owner: { accountId: ownerId, name: deps.displayName(ownerId) } });
+      if (path === "/api/app/team/transcript/detail") {
+        // A tool's output, a subagent's work or a compaction's summary the chat opened.
+        await sendAppPollJson(req, res, await deps.rpc(homeId, "transcriptDetail", { workspaceId, runId, limit, before, after, id: url.searchParams.get("id") ?? "" }));
+        return true;
+      }
+      // The chat poll (worker/transcripts.mjs transcriptPoll): the reader's
+      // copy is current, or the chat with its ETag.
+      const result = body(await deps.rpc(homeId, "transcript", { workspaceId, runId, limit, before, after, etag: pollIfNoneMatch(req) }));
+      const { etag, notModified, ...chat } = result;
+      if (typeof etag !== "string" || !etag) {
+        // A machine older than this Cloud sends the whole chat with no ETag.
+        throw new TeamError(409, `${deps.displayName(ownerId)}'s cloud machine runs an older Rudder. Their chats show here once it updates.`);
+      }
+      if (notModified === true) {
+        sendAppNotModified(res, etag);
+        return true;
+      }
+      await sendAppPollJson(req, res, { ...chat, readOnly: ownerId !== account.accountId, owner: { accountId: ownerId, name: deps.displayName(ownerId) } }, etag);
       return true;
     }
 

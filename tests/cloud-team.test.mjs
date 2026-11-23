@@ -145,7 +145,9 @@ async function stopServer(child) {
 }
 
 // A fake supervisor on a home's control socket: records every rpc, answers a
-// transcript with that run's messages.
+// transcript with that run's messages and ETag (only the ETag when the app
+// has it already), and run-old the way a home older than this Cloud does: the
+// chat with no ETag.
 async function connectHome(base, homeId, workerToken, projects) {
   const control = new WebSocket(`${base.replace("http", "ws")}/api/rudder/home/${homeId}/control`, { headers: { authorization: `Bearer ${workerToken}` } });
   const rpcs = [];
@@ -153,9 +155,12 @@ async function connectHome(base, homeId, workerToken, projects) {
     const message = JSON.parse(data.toString());
     if (message.type !== "rpc") return;
     rpcs.push(message);
-    const result = message.method === "transcript"
-      ? { title: `title of ${message.params.runId}`, status: "working", backend: "claude", messages: [{ id: "m1", role: "assistant", text: `transcript of ${message.params.runId}` }] }
-      : { ok: true };
+    const etag = `tag-${message.params.runId}`;
+    const chat = { title: `title of ${message.params.runId}`, status: "working", backend: "claude", messages: [{ id: "m1", role: "assistant", text: `transcript of ${message.params.runId}` }] };
+    const result = message.method !== "transcript" ? { ok: true }
+      : message.params.runId === "run-old" ? chat
+      : message.params.etag === etag ? { notModified: true, etag }
+      : { ...chat, etag };
     control.send(JSON.stringify({ type: "rpc-result", id: message.id, result }));
   });
   await new Promise((resolve, reject) => { control.on("open", resolve); control.on("error", reject); });
@@ -198,16 +203,16 @@ test("team view, private agents, outsiders and owner-only writes", { timeout: 60
   }
   db.close();
 
-  const call = async (who, method, pathname, body) => {
+  const call = async (who, method, pathname, body, headers = {}) => {
     const res = await fetch(`${base}${pathname}`, {
       method,
-      headers: { authorization: `Bearer rdr_${who}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer rdr_${who}`, "content-type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
-    return { status: res.status, json, text };
+    return { status: res.status, json, text, etag: res.headers.get("etag") };
   };
   const ok = async (...args) => {
     const r = await call(...args);
@@ -282,6 +287,27 @@ test("team view, private agents, outsiders and owner-only writes", { timeout: 60
   assert.equal((await call("bob", "GET", "/api/app/team/transcript?member=acct-alice&workspace=repo-alice&run=run-ghost")).status, 404);
   assert.equal((await call("bob", "GET", "/api/app/team/transcript?member=acct-alice&workspace=repo-bob&run=run-pub")).status, 404);
   assert.deepEqual(alice.rpcs.filter((r) => r.method === "transcript").map((r) => r.params.runId), ["run-pub", "run-priv", "run-priv"]);
+  // The chat poll's ETag: the copy the app has is current, so a 304 with no body.
+  const ownChat = await call("alice", "GET", "/api/app/transcript?workspace=repo-alice&run=run-priv");
+  assert.equal(ownChat.etag, '"tag-run-priv"');
+  assert.equal(ownChat.json.etag, undefined);
+  const again = await call("alice", "GET", "/api/app/transcript?workspace=repo-alice&run=run-priv", undefined, { "if-none-match": ownChat.etag });
+  assert.deepEqual([again.status, again.text, again.etag], [304, "", '"tag-run-priv"']);
+  assert.equal(alice.rpcs.at(-1).params.etag, "tag-run-priv");
+  const teamAgain = await call("bob", "GET", "/api/app/team/transcript?member=acct-alice&workspace=repo-alice&run=run-pub", undefined, { "if-none-match": '"tag-run-pub"' });
+  assert.equal(teamAgain.status, 304);
+  // A home older than this Cloud sends the whole chat with no ETag: one plain line and Update now.
+  const old = await call("alice", "GET", "/api/app/transcript?workspace=repo-alice&run=run-old");
+  assert.equal(old.status, 400);
+  assert.equal(old.json.needsUpdate, true);
+  assert.match(old.json.error, /Update it to see this chat/);
+  // The app's state has an ETag of its own too, and polling it is no change:
+  // the second poll comes after the first moved the machine's activity time.
+  const state = await call("alice", "GET", "/api/app/state");
+  assert.ok(state.etag);
+  await sleep(1100);
+  const stateAgain = await call("alice", "GET", "/api/app/state", undefined, { "if-none-match": state.etag });
+  assert.deepEqual([stateAgain.status, stateAgain.text], [304, ""]);
 
   // An outsider sees no one and reads nothing.
   assert.deepEqual((await ok("eve", "GET", "/api/app/team")).members, []);

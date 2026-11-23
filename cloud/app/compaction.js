@@ -34,7 +34,7 @@ export const COMPACTING_HTML = `<div class="compact cpt live" role="status"><div
 
 /** Whether a marker has anything to show opened. */
 export function compactHasDetail(c) {
-  return !!(c.summary || c.preTokens);
+  return !!(c.summary || c.summaryChars || c.preTokens);
 }
 
 /** The marker's full reading for a screen reader. */
@@ -59,7 +59,7 @@ export function paintCompaction(node, c, { open, backend, markdown }) {
   node.classList.toggle("open", open);
   row.disabled = !detail;
   row.setAttribute("aria-expanded", String(open));
-  row.setAttribute("aria-label", `${aria(c)}.${detail ? ` ${open ? "Hide" : "Show"} ${c.summary ? "the summary the agent continued from" : "the details"}.` : ""}`);
+  row.setAttribute("aria-label", `${aria(c)}.${detail ? ` ${open ? "Hide" : "Show"} ${c.summary || c.summaryChars ? "the summary the agent continued from" : "the details"}.` : ""}`);
   setText(row.querySelector(".cpt-how"), [TRIGGER[c.trigger], c.durationMs ? duration(c.durationMs) : ""].filter(Boolean).join(" · "));
   const both = !!(c.preTokens && c.postTokens);
   node.classList.toggle("sized", both);

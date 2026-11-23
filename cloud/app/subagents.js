@@ -155,7 +155,9 @@ function paintBody(body, s, links) {
   setText(earlier, s.earlier ? `${s.earlier} earlier ${s.earlier === 1 ? "step" : "steps"} not shown` : "");
   const empty = body.querySelector(":scope > .sa-empty");
   empty.hidden = msgs.length > 0;
-  setText(empty, msgs.length ? "" : s.status === "running" ? "Starting" : "Nothing recorded");
+  // The chat poll sends a card without its work (worker/transcripts.mjs
+  // transcriptPoll); app.js fetches it when the card opens.
+  setText(empty, msgs.length ? "" : !s.messages ? "Loading its work" : s.status === "running" ? "Starting" : "Nothing recorded");
   // A call becomes a card once its subagent's log turns up: a new node.
   reconcile(body.querySelector(":scope > .sa-msgs"), msgs, (x) => (x.subagent ? `sa:${x.id}` : x.id), (x) => createInner(x, links), (node, x) => updateInner(node, x, links));
 }

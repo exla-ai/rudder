@@ -2,6 +2,7 @@
 // precompressed copies next to it (name.br / name.gz, written by the build)
 // is sent from those; other text files are compressed on first request and
 // kept in a small in-memory cache keyed by path and mtime.
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -52,7 +53,9 @@ export function acceptedCodings(header: string | string[] | undefined): Coding[]
 
 // State and transcript are fetched every few seconds. Use fast compression for
 // these private, fresh responses instead of the static asset compression level.
-export async function sendAppPollJson(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+// With `etag` the app sends it back as If-None-Match and an unchanged poll is
+// a 304 (sendAppNotModified). The app keeps its own copy: nothing is stored.
+export async function sendAppPollJson(req: IncomingMessage, res: ServerResponse, body: unknown, etag?: string): Promise<void> {
   if (res.destroyed) return;
   const json = Buffer.from(JSON.stringify(body));
   const compressed = json.length >= MIN_BYTES && acceptedCodings(req.headers["accept-encoding"]).includes("gzip");
@@ -63,9 +66,39 @@ export async function sendAppPollJson(req: IncomingMessage, res: ServerResponse,
     "cache-control": "private, no-store",
     vary: "Accept-Encoding",
     "content-length": String(payload.length),
+    ...(etag ? { etag: `"${etag}"` } : {}),
     ...(compressed ? { "content-encoding": "gzip" } : {}),
   });
   res.end(payload);
+}
+
+/** A poll whose answer the app already has (its If-None-Match). */
+export function sendAppNotModified(res: ServerResponse, etag: string): void {
+  if (res.destroyed) return;
+  res.writeHead(304, { "cache-control": "private, no-store", etag: `"${etag}"` });
+  res.end();
+}
+
+/** The ETag a poll's If-None-Match names, without quotes, or null. */
+export function pollIfNoneMatch(req: IncomingMessage): string | null {
+  const header = req.headers["if-none-match"];
+  const match = /^\s*(?:W\/)?"([^"]+)"\s*$/.exec(Array.isArray(header) ? header[0] ?? "" : header ?? "");
+  return match ? match[1] : null;
+}
+
+/** A content ETag for a poll body Cloud builds itself (the app's state). */
+export function pollEtag(json: string): string {
+  return crypto.createHash("sha1").update(json).digest("base64url").slice(0, 20);
+}
+
+/** A poll answer with its ETag: a 304 when the app has it already. */
+export async function sendAppPoll(req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> {
+  const etag = pollEtag(JSON.stringify(body));
+  if (pollIfNoneMatch(req) === etag) {
+    sendAppNotModified(res, etag);
+    return;
+  }
+  await sendAppPollJson(req, res, body, etag);
 }
 
 function etagMatches(header: string | undefined, etag: string): boolean {

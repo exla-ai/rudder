@@ -31,7 +31,7 @@ import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } fr
 import { createHomeWatch, createProductAnalytics, isInternalEmail } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
-import { sendAppPollJson, sendStaticFile } from "./app-static.js";
+import { pollIfNoneMatch, sendAppNotModified, sendAppPoll, sendAppPollJson, sendStaticFile } from "./app-static.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
@@ -6689,6 +6689,30 @@ async function homeRpc(homeId: string, method: string, params: JsonRecord, timeo
   }
 }
 
+// The page a transcript request names (worker/transcripts.mjs readTranscript):
+// its newest messages, or the messages before a cursor or from one on.
+function transcriptPageParams(url: URL): JsonRecord {
+  return {
+    runId: url.searchParams.get("run") ?? "",
+    limit: Math.min(800, Math.max(20, Number(url.searchParams.get("limit") || 300))),
+    before: url.searchParams.get("before"),
+    after: url.searchParams.get("after"),
+  };
+}
+
+// A home's answer to the chat poll: the chat with its ETag, or that the app's
+// copy is current. A home older than this Cloud sends the whole chat with no
+// ETag: it gets one plain line and Update now, not a chat it cannot show.
+function transcriptPollAnswer(homeId: string, result: Json): { etag: string; notModified: boolean; body: JsonRecord } {
+  const record = result && typeof result === "object" && !Array.isArray(result) ? (result as JsonRecord) : null;
+  const etag = record ? optionalString(record.etag) : undefined;
+  if (!record || !etag) {
+    throw Object.assign(new Error(`Your cloud machine runs ${homeRunsLabel(homeId)}, which sends chats in a format this app no longer reads. Update it to see this chat.`), { status: 400, needsUpdate: true });
+  }
+  const { etag: _etag, notModified, ...body } = record;
+  return { etag, notModified: notModified === true, body };
+}
+
 // The Rudder version a worker image is tagged with (`...:5.0.10`), or null.
 function rudderVersion(image: string | null | undefined): string | null {
   return image?.split("@")[0]?.match(/:(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$/)?.[1] ?? null;
@@ -7070,7 +7094,8 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     connected: isOpen(homeControls.get(home.id)),
     failureReason: home.failureReason ?? null,
     activeAgents: home.activeAgents ?? 0,
-    lastActivityAt: home.lastActivityAt ?? null,
+    // Not the machine's lastActivityAt: each state poll moves it (touchHome),
+    // and the poll's ETag would never match. The app has no use for it.
     tailnet: state?.tailnet ?? null,
     credentials: agentListCredentials(state?.credentials),
     logins: state?.logins ?? null,
@@ -7637,7 +7662,9 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
         wakeHomeInBackground(account.accountId);
       }
     }
-    await sendAppPollJson(req, res, {
+    // An ETag of the whole answer: the app polls every few seconds and most
+    // polls find it unchanged (a 304).
+    await sendAppPoll(req, res, {
       email: account.email ?? null,
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
@@ -7898,13 +7925,23 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     const result = await homeRpc(home.id, "transcript", {
       workspaceId: repo.id,
-      runId: url.searchParams.get("run") ?? "",
-      limit: Math.min(800, Math.max(20, Number(url.searchParams.get("limit") || 300))),
-      // Page cursors (worker/transcripts.mjs readTranscript): the messages before one, or from one on.
-      before: url.searchParams.get("before"),
-      after: url.searchParams.get("after"),
+      ...transcriptPageParams(url),
       pending: url.searchParams.getAll("pending").slice(0, 40),
+      // The app's copy (worker/transcripts.mjs transcriptPoll): unchanged, the home says only that.
+      etag: pollIfNoneMatch(req),
     });
+    const { etag, notModified, body } = transcriptPollAnswer(home.id, result);
+    if (notModified) {
+      sendAppNotModified(res, etag);
+      return;
+    }
+    await sendAppPollJson(req, res, body, etag);
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/app/transcript/detail") {
+    // A tool's output, a subagent's work or a compaction's summary the chat opened.
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    const result = await homeRpc(home.id, "transcriptDetail", { workspaceId: repo.id, ...transcriptPageParams(url), id: url.searchParams.get("id") ?? "" });
     await sendAppPollJson(req, res, result);
     return;
   }

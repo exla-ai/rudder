@@ -194,7 +194,8 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
         ? { type: "rpc-result", id: message.id, error: "the libra dashboard is starting" }
         : message.method === "createRepo"
           ? { type: "rpc-result", id: message.id, result: { repo: `${message.params.owner}/${message.params.name}` } }
-          : { type: "rpc-result", id: message.id, result: { ok: true, echo: message.method, params: message.params } };
+          // The chat poll answers with its ETag (worker/transcripts.mjs transcriptPoll).
+          : { type: "rpc-result", id: message.id, result: { ok: true, echo: message.method, params: message.params, ...(message.method === "transcript" ? { etag: "chat-1" } : {}) } };
       control.send(JSON.stringify(reply));
     }
   });
@@ -240,7 +241,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.deepEqual(action.params, { workspaceId: "libra-test", runId: "r1", action: "merge" });
   const pending = "28913cb0-0050-45e9-bac1-59683b9a5b66";
   const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5&pending=${pending}`, { headers: auth })).json();
-  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20, before: null, after: null, pending: [pending] });
+  assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20, before: null, after: null, pending: [pending], etag: null });
 
   // Add project: the repo list and creating a repo run on the home machine.
   const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();

@@ -5,7 +5,7 @@ import {
 } from "/app/render.js";
 
 import {
-  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, toast, confirmDialog, track, showError, openSheet,
+  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, pollApi, toast, confirmDialog, track, showError, openSheet,
   noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn, accountUsageLabel,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
@@ -62,6 +62,11 @@ const store = {
   pending: new Map(),       // `${ws}|${run}` -> [{id,text,ts,state}]
   expanded: new Set(),      // tool message keys
   showMore: new Set(),
+  // `${ws}|${run}|${id}` -> {detail, message} | {detail, loading} | {detail, error}: a
+  // message whole (a tool's output, a subagent's work, a compaction's
+  // summary), fetched when it opens. The chat poll sends each one's `detail`
+  // token in its place (worker/transcripts.mjs transcriptPoll).
+  details: new Map(),
   drafts: ls.get("rudder.drafts", {}),
   badge: -1,
 };
@@ -264,14 +269,24 @@ function notifyNewNeeds(needs) {
 }
 
 let stateInflight = null;
-async function refreshState() {
+// The state the server last sent and its ETag: a poll that finds it unchanged
+// is a 304, and then the timed poll (`poll`) leaves the screen as it is. A
+// refresh after something the person did repaints either way.
+let stateTag = { state: null, etag: null };
+async function refreshState({ poll = false } = {}) {
   if (store.signedOut && !NATIVE) return;
   if (stateInflight) return stateInflight;
   stateInflight = (async () => {
+    let changed = true;
     try {
-      store.state = await api("/api/app/state");
-      // Renames and pins made here until the dashboard publishes them (agent-menu.js).
-      applyAgentEdits(store.state);
+      const { data, etag } = await pollApi("/api/app/state", { etag: stateTag.state && stateTag.state === store.state ? stateTag.etag : null });
+      changed = !poll || !!data || !!store.stateError || store.signedOut;
+      if (data) {
+        store.state = data;
+        stateTag = { state: data, etag };
+        // Renames and pins made here until the dashboard publishes them (agent-menu.js).
+        applyAgentEdits(store.state);
+      }
       store.stateError = null;
       store.signedOut = false;
       noteSignedIn();
@@ -298,7 +313,7 @@ async function refreshState() {
       }
     } finally {
       stateInflight = null;
-      updateScreen();
+      if (changed) updateScreen();
     }
   })();
   return stateInflight;
@@ -4572,12 +4587,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
   });
   const isRunning = (status) => status === "running" || !!statusOf(status).live;
-  // A message sent to an idle agent: its row turns Working only once the
-  // agent takes it, so state is polled fast for a while from the send on.
-  let sentAt = 0;
+  // The app's state is polled fast while this agent works or waits on an
+  // answer, and for a while after a message goes, until the agent is seen
+  // working (pollSoon, noteState).
+  let boostUntil = 0;
   const fastPoll = () => {
     const a = agentNow();
-    return !!a && (isRunning(a.status) || pendingAsks(a).length > 0 || Date.now() - sentAt < SENT_FAST_POLL_MS);
+    return (!!a && (isRunning(a.status) || pendingAsks(a).length > 0)) || Date.now() < boostUntil;
   };
   if (!ro) fastPolls.add(fastPoll);
   if (!ro) pollState();
@@ -4597,8 +4613,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let atBottom = true;
   let firstPaint = true;
   let lastCount = 0;
-  // The status the last paint showed, to catch a turn ending (paint).
-  let paintedStatus = null;
   // When the running compaction's card last left (compaction.js).
   let compactEndedAt = 0;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
@@ -4736,6 +4750,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const box = row.closest(".tool");
       const k = `${key}|${box.dataset.key}`;
       if (store.expanded.has(k)) store.expanded.delete(k); else store.expanded.add(k);
+      // Opening again tries again a detail that failed to load.
+      if (store.expanded.has(k) && store.details.get(`${key}|${box._msg?.id}`)?.error) store.details.delete(`${key}|${box._msg.id}`);
       paintTool(box, box._msg);
       return;
     }
@@ -4962,8 +4978,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       else if (res.status === "delivered" && ranCommand(item)) pollState();
       else {
         item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
-        sentAt = Date.now();
-        pollState();
+        pollSoon();
       }
       item.requestId = res.requestId ?? null;
       // The question card tracks a typed answer through the same receipts.
@@ -4983,6 +4998,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let destroyed = false;
   let lastErr = null;
   let waking = false;
+  // The chat as the server last sent it and its ETag: a poll that finds it
+  // unchanged is a 304 with no body (worker/transcripts.mjs transcriptPoll).
+  let tag = { t: null, etag: null };
   async function loadTranscript({ replace = false } = {}) {
     if (destroyed || closedNow || (inflight && !replace)) return;
     // A message receipt, edit, or explicit refresh needs a snapshot taken
@@ -4993,6 +5011,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // With earlier pages loaded, the newest page starts where they end (its
     // `after` cursor), so messages that scroll out of its last 300 stay shown.
     const pin = store.earlier.get(key)?.pin ?? null;
+    let unchanged = false;
     try {
       const page = new URLSearchParams();
       if (pin) page.set("after", pin);
@@ -5002,10 +5021,21 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       // Edits the home answered "queued" (chat-edit.js): their receipts too.
       for (const id of editAction.queued()) page.append("pending", id);
       const query = page.toString();
-      const t = await api(transcriptUrl(query ? `&${query}` : ""), { signal: controller.signal });
+      const have = store.transcripts.get(key);
+      const { data: t, etag } = await pollApi(transcriptUrl(query ? `&${query}` : ""), { etag: have && have === tag.t ? tag.etag : null, signal: controller.signal });
       if (controller.signal.aborted) return;
       // Asked for before the first earlier page pinned it: the next poll asks again.
       if ((store.earlier.get(key)?.pin ?? null) !== pin) return;
+      if (!t) {
+        // Unchanged. Sent bubbles still settle with time (pending.js).
+        lastErr = null;
+        waking = false;
+        const before = store.pending.get(key)?.length;
+        reconcilePending(have);
+        if (store.pending.get(key)?.length === before) unchanged = true;
+        return;
+      }
+      tag = { t, etag };
       // An edit started a new conversation: the pages loaded above were the old one's.
       if (pin && t.conversation !== store.earlier.get(key).conversation) store.earlier.delete(key);
       store.transcripts.set(key, t);
@@ -5038,7 +5068,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     } finally {
       if (inflight === controller) {
         inflight = null;
-        if (!destroyed) paint();
+        if (!destroyed && !unchanged) paint();
       }
     }
   }
@@ -5072,6 +5102,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     try {
       const page = await api(transcriptUrl(`&before=${encodeURIComponent(e.cursor)}`));
       if (store.earlier.get(key) !== e || page.conversation !== e.conversation) return;
+      // Which page each came from, for the details opened later (detailUrl).
+      e.pages ??= new Map();
+      for (const m of page.messages) e.pages.set(m.id, e.cursor);
       e.messages = [...page.messages, ...e.messages];
       e.edits = [...(page.edits || []), ...e.edits];
       e.cursor = page.earlier;
@@ -5194,10 +5227,6 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     paintClosedChat();
     if (!ro && chatInView(key)) markRead(key);
     const status = header();
-    // The turn just ended, so its reply is on disk: read it now rather than
-    // at the next poll, so the reply shows as Working ends.
-    if (isRunning(paintedStatus) && !isRunning(status)) void loadTranscript({ replace: true });
-    paintedStatus = status;
     paintAsk();
     interruptBtn.hidden = ro || !isRunning(status);
     const agent = agentNow();
@@ -5409,7 +5438,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   // with what the agent continued from, the prompt it ran, the check-in or
   // what Rudder sent behind it.
   function paintCompact(node, m) {
-    if (m.kind === "compact") return paintCompactMarker(node, m.compact || {});
+    if (m.kind === "compact") return paintCompactMarker(node, m);
     const moved = m.kind === "handoff";
     const c = (moved ? m.handoff : { summary: m.kind === "goal" ? m.goal.detail : m.kind === "rudder" ? m.rudder.prompt : m.scheduled.prompt }) || {};
     const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
@@ -5428,10 +5457,14 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary, chatMarkdown); sum.dataset.sig = sig; }
   }
 
-  // The context compacted (compaction.js): opened, its summary.
-  function paintCompactMarker(node, c) {
+  // The context compacted (compaction.js): opened, its summary, fetched then (wholeMessage).
+  function paintCompactMarker(node, m) {
+    const brief = m.compact || {};
+    const open = store.expanded.has(`${key}|${node.dataset.key}`) && compactHasDetail(brief);
+    const loaded = open && m.detail ? wholeMessage(m) : null;
+    const c = loaded ? loaded.compact || {} : open && m.detail ? { ...brief, summary: detailNote(m, "Loading the summary") } : brief;
     paintCompaction(node, c, {
-      open: store.expanded.has(`${key}|${node.dataset.key}`) && compactHasDetail(c),
+      open,
       backend: store.transcripts.get(key)?.backend,
       markdown: (el, text) => {
         const sig = `${text}|${markdownReady()}`;
@@ -5500,12 +5533,66 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     reconcile(list, x.tools.map((m) => ({ kind: "msg", id: m.id, m })), (y) => y.id, createItem, updateItem);
   }
 
+  // A message the chat poll sent without its detail (a long tool output, a
+  // subagent's work, a compaction's summary): the whole of it as last
+  // fetched, or null before the first. A newer `detail` token is fetched
+  // once, the older whole showing until it lands (an open subagent card
+  // keeps its work on screen while it updates).
+  function wholeMessage(m) {
+    const k = `${key}|${m.id}`;
+    const hit = store.details.get(k);
+    if (!hit || (hit.detail !== m.detail && !hit.loading)) void loadDetail(m, k, hit?.message);
+    return store.details.get(k)?.message || null;
+  }
+
+  // Whether the whole shown for `m` is the one its token names.
+  function wholeCurrent(m) {
+    const hit = store.details.get(`${key}|${m.id}`);
+    return hit?.detail === m.detail && !hit.loading;
+  }
+
+  // What shows in its place while it loads, or why it did not.
+  function detailNote(m, text) {
+    const hit = store.details.get(`${key}|${m.id}`);
+    return hit?.detail === m.detail && hit.error ? `Couldn't load this: ${hit.error}` : text;
+  }
+
+  async function loadDetail(m, k, previous) {
+    const entry = { detail: m.detail, loading: true, message: previous };
+    store.details.set(k, entry);
+    try {
+      const res = await api(detailUrl(m.id));
+      if (store.details.get(k) === entry) store.details.set(k, { detail: m.detail, message: res.message });
+    } catch (err) {
+      if (store.details.get(k) === entry) store.details.set(k, { detail: m.detail, error: err.message, message: previous });
+    } finally {
+      if (!destroyed && store.details.get(k)?.detail === m.detail) paint({ hold: true });
+    }
+  }
+
+  // The detail request names the page the message came from: an earlier page
+  // by its cursor, the newest by the start it is pinned to (loadTranscript).
+  function detailUrl(id) {
+    const e = store.earlier.get(key);
+    const cursor = e?.pages?.get(id);
+    const page = cursor ? `&before=${encodeURIComponent(cursor)}` : e?.pin ? `&after=${encodeURIComponent(e.pin)}` : "";
+    const who = ro ? `/api/app/team/transcript/detail?member=${encodeURIComponent(member)}&` : "/api/app/transcript/detail?";
+    return `${who}workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300&id=${encodeURIComponent(id)}${page}`;
+  }
+
   function paintTool(box, m) {
-    if (m.subagent) return paintSubagent(box, m, store.expanded.has(`${key}|${box.dataset.key}`), fileLinks);
+    if (m.subagent) {
+      // Opened, the card shows its work: the whole message, or its line while that loads.
+      const open = store.expanded.has(`${key}|${box.dataset.key}`);
+      return paintSubagent(box, (open && wholeMessage(m)) || m, open, fileLinks);
+    }
     const tool = m.tool || {};
     const k = `${key}|${box.dataset.key}`;
     const open = store.expanded.has(k);
-    const sig = `${tool.name}|${tool.input}|${tool.output?.length}|${tool.isError}|${!!tool.running}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}`;
+    // A long output comes on its own when the row opens (wholeMessage).
+    const whole = open && m.detail ? wholeMessage(m) : null;
+    const loading = open && m.detail && !whole ? detailNote(m, "Loading the output") : "";
+    const sig = `${tool.name}|${tool.input}|${tool.outputChars ?? tool.output?.length}|${tool.isError}|${!!tool.running}|${toolFilesSig(tool)}|${open}|${store.showMore.has(k)}|${m.detail}|${whole ? wholeCurrent(m) : loading}`;
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
     box.classList.toggle("error", !!tool.isError);
@@ -5523,7 +5610,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (!open) { out?.remove(); return; }
     if (!out) { out = h(`<div class="tool-out"></div>`); box.appendChild(out); }
     if (tool.running) { out.innerHTML = `<div class="t-empty"></div>`; out.firstChild.appendChild(runningFor(m.ts)); return; }
-    const text = tool.output ?? "";
+    if (loading) { out.innerHTML = `<div class="t-empty"></div>`; setText(out.firstChild, loading); return; }
+    const text = (whole ? whole.tool?.output : tool.output) ?? "";
     if (!text) { out.innerHTML = `<div class="t-empty">No output</div>`; return; }
     const full = store.showMore.has(k);
     const long = text.length > OUT_LIMIT;
@@ -5536,17 +5624,63 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
   }
 
-  // Polling
+  // Polling. The chat is asked for every CHAT_LIVE_MS while the agent works,
+  // waits on an answer or a message of yours is on its way (fastPoll), else
+  // every CHAT_IDLE_MS, and at once when the app's state shows the agent
+  // changed (noteState). An unchanged chat is a 304 with no body, so a
+  // working agent's reply shows within a second of its write.
+  const CHAT_LIVE_MS = 1000;
+  const CHAT_IDLE_MS = 10000;
+  // After a send, how long the state and the chat stay fast until the agent
+  // is seen working. A Gemini 4 Neon turn can take seconds to start, and a
+  // slash command that starts no turn just runs this out.
+  const BOOST_MS = 20000;
   let timer = null;
+  let ticking = false;
+  const chatLive = () => fastPoll() || (store.pending.get(key) || []).some((p) => p.state !== "failed");
   const tick = async () => {
     if (destroyed || document.hidden) return;
+    ticking = true;
     // A teammate's agent: its title and status come from the team view.
     if (ro) loadTeamFor(member).then(() => { if (!destroyed) paint(); });
-    await loadTranscript();
+    try {
+      await loadTranscript();
+    } finally {
+      ticking = false;
+    }
     // A foreground refresh can overlap an outstanding poll. Keep one timer.
     clearTimeout(timer);
-    if (!destroyed && !document.hidden) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
+    if (!destroyed && !document.hidden) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : chatLive() ? CHAT_LIVE_MS : CHAT_IDLE_MS);
   };
+  // A message just went: the state at once, and the state and the chat fast
+  // until the agent is seen working (noteState) or BOOST_MS passes.
+  function pollSoon() {
+    boostUntil = Date.now() + BOOST_MS;
+    void refreshState();
+    pollState();
+    if (!ticking && !destroyed && !document.hidden) { clearTimeout(timer); timer = setTimeout(tick, CHAT_LIVE_MS); }
+  }
+  // The app's state moved on for this agent: read the chat now, not at the
+  // next idle poll. When it stops working, its last words are read fresh
+  // (an outstanding read may predate them).
+  let stateSig = null;
+  let wasRunning = false;
+  function noteState() {
+    const a = agentNow();
+    if (!a) return;
+    const running = isRunning(a.status);
+    if (running) boostUntil = 0;
+    const sig = [a.status, a.updatedAt, a.phase, a.lastMessage, pendingAsks(a).length].join("|");
+    const moved = stateSig !== null && sig !== stateSig;
+    const before = wasRunning;
+    stateSig = sig;
+    wasRunning = running;
+    if (!moved || destroyed || document.hidden) return;
+    if (before && !running) { loadTranscript({ replace: true }); return; }
+    // Polled every CHAT_LIVE_MS while it worked: that covers it. Otherwise
+    // read now, and the next poll is timed for what the agent does now.
+    if (!before && !ticking) { clearTimeout(timer); timer = setTimeout(tick, 0); }
+  }
   const onVis = () => {
     clearTimeout(timer);
     if (!document.hidden) tick();
@@ -5557,7 +5691,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
 
   return {
     el,
-    update: paint,
+    update: () => { noteState(); paint(); },
     // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     // Alt+V and Alt+B (the keydown listener after mountCommandPalette).
@@ -5568,6 +5702,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       destroyed = true;
       clearTimeout(timer);
       inflight?.abort();
+      for (const k of store.details.keys()) if (k.startsWith(`${key}|`)) store.details.delete(k);
       stopMarkdownReady();
       fastPolls.delete(fastPoll);
       mountedChats.delete(chatEntry);
@@ -5606,15 +5741,11 @@ let stateTimer = null;
 // or waiting on an answer, so a new prompt shows up promptly.
 // Open agent screens that want state polled fast (a live agent, an open prompt).
 const fastPolls = new Set();
-// How long a chat polls fast after a send. A Gemini 4 Neon turn often takes
-// several seconds before its first step, and its row turns Working only once
-// the agent takes the message.
-const SENT_FAST_POLL_MS = 20_000;
 function pollState() {
   clearTimeout(stateTimer);
   if (document.hidden) return;
   stateTimer = setTimeout(async () => {
-    if (!document.hidden) await refreshState();
+    if (!document.hidden) await refreshState({ poll: true });
     pollState();
   }, [...fastPolls].some((f) => f()) ? 1500 : 4000);
 }

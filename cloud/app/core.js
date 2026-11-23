@@ -91,16 +91,33 @@ export async function api(path, { method = "GET", body, raw, signal } = {}) {
   const headers = authHeaders();
   if (raw) headers["Content-Type"] = raw.type || "application/octet-stream";
   else if (body !== undefined) headers["Content-Type"] = "application/json";
-  let res;
+  const res = await request(path, { method, headers, signal, body: raw || (body !== undefined ? JSON.stringify(body) : undefined) });
+  return answer(res);
+}
+
+/**
+ * A poll (the app's state, a chat) with the ETag of the copy the caller has:
+ * `{ data, etag }`, where `data` is null when that copy is still current (a
+ * 304, no body).
+ */
+export async function pollApi(path, { etag = null, signal } = {}) {
+  const headers = authHeaders();
+  if (etag) headers["If-None-Match"] = `"${etag}"`;
+  const res = await request(path, { method: "GET", headers, signal });
+  const tag = (res.headers.get("ETag") || "").replace(/^W\//, "").replace(/"/g, "") || null;
+  if (res.status === 304) return { data: null, etag: tag };
+  return { data: await answer(res), etag: tag };
+}
+
+async function request(path, { method, headers, signal, body }) {
   try {
-    res = await fetch(path, {
-      method, headers, credentials: "same-origin", cache: "no-store",
-      signal,
-      body: raw || (body !== undefined ? JSON.stringify(body) : undefined),
-    });
+    return await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", signal, body });
   } catch {
     throw new ApiError("Can't reach Rudder. Check your connection.", 0);
   }
+}
+
+async function answer(res) {
   if (res.status === 401) { app.onSignedOut?.(); throw new ApiError("Signed out", 401); }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }

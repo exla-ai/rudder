@@ -222,11 +222,11 @@ jobs:
         run: |
           verify_public() {
             local url="$1" file="$2"
-            for _ in {1..6}; do
+            for _ in {1..18}; do
               if curl -fsSL --max-time 20 "$url" -o "$RUNNER_TEMP/$file" && cmp -s "prepared/$file" "$RUNNER_TEMP/$file"; then
                 return 0
               fi
-              sleep 2
+              sleep 5
             done
             echo "::error::$url does not serve the prepared $file"
             return 1

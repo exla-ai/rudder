@@ -34,6 +34,13 @@ case "$action" in
         --notes "Signed and notarized. Download Rudder for Mac at https://rudder.exla.ai/download/mac"
     elif [[ "$existing" != "$GITHUB_SHA" ]]; then
       fail "$tag already points to a different commit"
+    elif gh release view "$tag" >/dev/null 2>&1; then
+      gh release upload "$tag" "$dir/Rudder.dmg" "$dir/appcast.xml" --clobber
+      gh release edit "$tag" --latest --draft=false
+    else
+      gh release create "$tag" "$dir/Rudder.dmg" "$dir/appcast.xml" --target "$GITHUB_SHA" --latest \
+        --title "Rudder for Mac $version ($build)" \
+        --notes "Signed and notarized. Download Rudder for Mac at https://rudder.exla.ai/download/mac"
     fi
     [[ "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" == "$tag" ]] || fail "$tag is not the latest release"
     ;;

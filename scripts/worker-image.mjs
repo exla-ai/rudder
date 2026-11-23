@@ -87,8 +87,9 @@ try {
     const tarball = `exla-rudder-${version}.tgz`;
     const staged = JSON.parse(fs.readFileSync(".release/npm.json", "utf8"));
     const sha256 = createHash("sha256").update(fs.readFileSync(path.join(".release", tarball))).digest("hex");
-    if (staged.version !== version || staged.files?.[tarball]?.sha256 !== sha256) {
-      throw new Error(`.release/${tarball} is not the staged ${version} tarball in .release/npm.json; run node scripts/release.mjs stage`);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    if (staged.version !== version || staged.revision !== head || staged.files?.[tarball]?.sha256 !== sha256) {
+      throw new Error(`.release/${tarball} is not the staged ${version} tarball for ${head} in .release/npm.json; run node scripts/release.mjs stage`);
     }
   }
   const build = spawnSync("flyctl", [

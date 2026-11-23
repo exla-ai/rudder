@@ -43,7 +43,7 @@ const PACKAGE = "@exla/rudder";
 // work/ holds everything else and is outside the image build context.
 export const STAGE = ".release";
 const WORK = path.join(STAGE, "work");
-const WAIT_MS = 40 * 60_000;
+const WAIT_MS = 95 * 60_000;
 const NATIVE_FILES = [...NATIVE_BINARIES, MANIFEST_NAME].sort();
 export const tarballName = version => `exla-rudder-${version}.tgz`;
 const PART_FILES = {
@@ -341,39 +341,56 @@ async function stage() {
   const pushed = await api.ref(`heads/${ctx.branch}`);
   check(pushed === ctx.revision, `${ctx.branch} on GitHub is ${pushed ?? "missing"}, not this checkout's ${ctx.revision}: push it first`);
 
-  await fsp.rm(STAGE, { recursive: true, force: true });
-  const prebuilt = path.resolve(WORK, "prebuilt");
-  await fsp.mkdir(prebuilt, { recursive: true });
-  const env = { ...process.env };
-  delete env.RUDDER_NATIVE_PREBUILTS;
-  delete env.RUDDER_NATIVE_SOURCE_REVISION;
-
-  log("building the linux-x64 pair");
-  run("nice", ["-n", "10", process.execPath, "scripts/build-native.mjs"], { env });
-  const target = path.resolve(env.CARGO_TARGET_DIR || "target", "release");
-  const linux = path.join(prebuilt, "rudder-native-linux-x64");
-  await fsp.mkdir(linux);
-  for (const name of NATIVE_BINARIES) await fsp.copyFile(path.join(target, name), path.join(linux, name));
-  const linuxManifest = await createNativeManifest({ directory: linux, platform: "linux-x64", expectedRevision: ctx.revision });
-
-  let release = await waitForPart(api, ctx, "darwin", "the darwin-arm64 pair from Offstage");
-  const darwinPart = await fetchPart(api, release, ctx, "darwin", path.resolve(WORK, "darwin"));
-  const darwin = path.join(prebuilt, "rudder-native-darwin-arm64");
-  await extractNative(path.resolve(WORK, "darwin", "rudder-native-darwin-arm64.tgz"), darwin);
-  const darwinManifest = await verifyNativeArtifact({ directory: darwin, platform: "darwin-arm64", expectedRevision: ctx.revision });
-  check(isDeepStrictEqual(darwinManifest, darwinPart.native), "The darwin-arm64 pair differs from its darwin.json");
-  const native = { "darwin-arm64": darwinManifest, "linux-x64": linuxManifest };
-
-  log("packing the npm tarball");
-  const packEnv = { ...env, RUDDER_NATIVE_PREBUILTS: prebuilt, RUDDER_NATIVE_SOURCE_REVISION: ctx.revision };
-  run("npm", ["run", "build"], { env: packEnv });
-  const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", STAGE], { encoding: "utf8", env: packEnv }));
+  let release = await theDraft(api, ctx);
+  const existingNpm = await readPart(api, release, ctx, "npm");
   const tarball = path.resolve(STAGE, tarballName(ctx.version));
-  check(packed.length === 1 && packed[0].filename === tarballName(ctx.version), `npm pack made ${packed.map(p => p.filename).join(", ")}, not ${tarballName(ctx.version)}`);
-  const verified = await verifyTarball(tarball, ctx, native);
-  check(verified.integrity === packed[0].integrity, `npm pack reported ${packed[0].integrity}, the tarball hashes to ${verified.integrity}`);
-  release = await theDraft(api, ctx);
-  await putPart(api, release, ctx, "npm", STAGE, { integrity: verified.integrity, native });
+  const localNpmPath = path.resolve(STAGE, "npm.json");
+  let native;
+  let verified;
+  if (
+    existingNpm?.revision === ctx.revision
+    && fs.existsSync(tarball)
+    && fs.existsSync(localNpmPath)
+    && isDeepStrictEqual(JSON.parse(fs.readFileSync(localNpmPath, "utf8")), existingNpm)
+  ) {
+    native = existingNpm.native;
+    verified = await verifyTarball(tarball, ctx, native);
+    check(verified.integrity === existingNpm.integrity, `Local ${tarballName(ctx.version)} hashes to ${verified.integrity}, draft npm.json says ${existingNpm.integrity}`);
+    log(`reusing already-staged ${tarballName(ctx.version)} for ${ctx.revision}`);
+  } else {
+    await fsp.rm(STAGE, { recursive: true, force: true });
+    const prebuilt = path.resolve(WORK, "prebuilt");
+    await fsp.mkdir(prebuilt, { recursive: true });
+    const env = { ...process.env };
+    delete env.RUDDER_NATIVE_PREBUILTS;
+    delete env.RUDDER_NATIVE_SOURCE_REVISION;
+
+    log("building the linux-x64 pair");
+    run("nice", ["-n", "10", process.execPath, "scripts/build-native.mjs"], { env });
+    const target = path.resolve(env.CARGO_TARGET_DIR || "target", "release");
+    const linux = path.join(prebuilt, "rudder-native-linux-x64");
+    await fsp.mkdir(linux);
+    for (const name of NATIVE_BINARIES) await fsp.copyFile(path.join(target, name), path.join(linux, name));
+    const linuxManifest = await createNativeManifest({ directory: linux, platform: "linux-x64", expectedRevision: ctx.revision });
+
+    release = await waitForPart(api, ctx, "darwin", "the darwin-arm64 pair from Offstage");
+    const darwinPart = await fetchPart(api, release, ctx, "darwin", path.resolve(WORK, "darwin"));
+    const darwin = path.join(prebuilt, "rudder-native-darwin-arm64");
+    await extractNative(path.resolve(WORK, "darwin", "rudder-native-darwin-arm64.tgz"), darwin);
+    const darwinManifest = await verifyNativeArtifact({ directory: darwin, platform: "darwin-arm64", expectedRevision: ctx.revision });
+    check(isDeepStrictEqual(darwinManifest, darwinPart.native), "The darwin-arm64 pair differs from its darwin.json");
+    native = { "darwin-arm64": darwinManifest, "linux-x64": linuxManifest };
+
+    log("packing the npm tarball");
+    const packEnv = { ...env, RUDDER_NATIVE_PREBUILTS: prebuilt, RUDDER_NATIVE_SOURCE_REVISION: ctx.revision };
+    run("npm", ["run", "build"], { env: packEnv });
+    const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", STAGE], { encoding: "utf8", env: packEnv }));
+    check(packed.length === 1 && packed[0].filename === tarballName(ctx.version), `npm pack made ${packed.map(p => p.filename).join(", ")}, not ${tarballName(ctx.version)}`);
+    verified = await verifyTarball(tarball, ctx, native);
+    check(verified.integrity === packed[0].integrity, `npm pack reported ${packed[0].integrity}, the tarball hashes to ${verified.integrity}`);
+    release = await theDraft(api, ctx);
+    await putPart(api, release, ctx, "npm", STAGE, { integrity: verified.integrity, native });
+  }
 
   release = await waitForPart(api, ctx, "mac", "the signed Mac app from Offstage");
   const macDir = path.resolve(WORK, "mac");
@@ -427,9 +444,12 @@ async function fetchMac(dir) {
 async function finish() {
   const ctx = ciContext("tag");
   const api = github();
-  const release = await theDraft(api, ctx);
-  await api.request("DELETE", `/repos/${REPO}/releases/${release.id}`, { ok: [204] });
-  log(`deleted the draft release ${ctx.tag} (${release.id})`);
+  const release = await releasesFor(api, ctx);
+  if (release) {
+    check(release.target_commitish === ctx.revision, `The draft release ${ctx.tag} stages ${release.target_commitish}, not ${ctx.revision}`);
+    await api.request("DELETE", `/repos/${REPO}/releases/${release.id}`, { ok: [204] });
+    log(`deleted the draft release ${ctx.tag} (${release.id})`);
+  }
   const branch = await api.ref(`heads/${ctx.branch}`);
   if (branch === null) return;
   check(branch === ctx.revision, `${ctx.branch} moved to ${branch} after ${ctx.revision} was tagged; delete it by hand`);

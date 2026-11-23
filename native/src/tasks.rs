@@ -1678,14 +1678,20 @@ pub(crate) fn summarize_task(task: &str) -> String {
     summarize_task_to(task, 56)
 }
 
+/// Titles `task` off the App loop. `waker` wakes the loop so an idle
+/// dashboard shows the new name at once.
 pub(crate) fn spawn_task_summary_worker(
     tx: mpsc::Sender<TaskSummaryResult>,
+    waker: Option<PtyOutputWaker>,
     run_id: String,
     task: String,
 ) {
     thread::spawn(move || {
         let title = generate_task_summary_title(&task);
         let _ = tx.send(TaskSummaryResult { run_id, title });
+        if let Some(wake) = waker {
+            wake();
+        }
     });
 }
 

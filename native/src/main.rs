@@ -23592,7 +23592,7 @@ What to do\n\
             let started = run.terminal.as_ref().is_some_and(|terminal| !terminal.output_log_snapshot().is_empty())
                 || (run.status != AgentStatus::Running && !self.pending_launches.contains_key(&run_id));
             if started {
-                spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, task);
+                spawn_task_summary_worker(self.task_summary_tx.clone(), self.pty_output_waker.clone(), run_id, task);
             } else {
                 self.pending_titles.push((run_id, task));
             }

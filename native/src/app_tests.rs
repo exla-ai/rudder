@@ -1299,14 +1299,30 @@ branch refs/heads/main\n";
 }
 
 #[test]
-fn parses_json_task_summary_title() {
+fn a_task_title_is_only_a_clean_schema_checked_title() {
+    let result = |title: &str| {
+        serde_json::json!({"type": "result", "is_error": false, "result": "", "structured_output": {"title": title}})
+            .to_string()
+    };
     assert_eq!(
-        task_title_from_summary_output(
-            "Here is the JSON:\n{\"title\":\"Fix Codex worker scrolling.\"}",
-        )
-        .as_deref(),
+        task_title_from_summary_output(&result("Fix Codex worker scrolling.")).as_deref(),
         Some("Fix Codex worker scrolling")
     );
+    // Seen on a row: the model printed a tool call as text.
+    let leaked = "<invoke/> <parameter name=\"tool_name\">Read</parameter> <parameter name=\"file_path\">lib/application.js</parameter>";
+    for bad in [
+        result(leaked),
+        result("Fix"),
+        result("{\"title\":\"Nested JSON\"}"),
+        result("Fix this\nand that"),
+        result("Read `lib/application.js` and reply"),
+        leaked.to_string(),
+        "Here is the JSON:\n{\"title\":\"Fix Codex worker scrolling.\"}".to_string(),
+        r#"{"type":"result","is_error":true,"structured_output":{"title":"Fix Codex worker scrolling"}}"#.to_string(),
+        r#"{"type":"result","is_error":false,"result":"{\"title\":\"Fix Codex worker scrolling\"}"}"#.to_string(),
+    ] {
+        assert_eq!(task_title_from_summary_output(&bad), None, "{bad}");
+    }
 }
 
 #[test]

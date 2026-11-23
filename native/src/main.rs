@@ -146,7 +146,20 @@ mod helpers;
 mod steer_watch;
 use crate::chat_edit::*;
 
+/// How often a pane nobody is watching drains its queued output.
+const UNFOCUSED_DRAIN_INTERVAL: Duration = Duration::from_millis(500);
+/// The main loop's fast tick, while a frame, queued output or a short timer
+/// is due (`App::loop_wait`).
 const TICK_RATE: Duration = Duration::from_millis(33);
+/// The longest the main loop sleeps when nothing is due. Input, PTY output,
+/// the steer inbox, engine control and attach clients wake it at once; this
+/// only bounds state that signals nothing (hook signal files, the cloud
+/// summary, background results, housekeeping).
+const IDLE_TICK: Duration = Duration::from_secs(1);
+/// After a key or mouse event the loop keeps the fast tick this long, so the
+/// short timers a key arms (chords, confirms, background work it started)
+/// land on time.
+const INPUT_FAST_TICK_FOR: Duration = Duration::from_secs(2);
 /// How long injected text sits in a live agent's input box before the deferred
 /// CR submits it. Long enough that Claude's Ink paste detection has closed its
 /// burst window; short enough to be imperceptible.
@@ -381,8 +394,9 @@ fn backed_off_interval(current: Duration, cap: Duration) -> Duration {
     current.saturating_mul(2).clamp(Duration::from_secs(1), cap)
 }
 
-/// Run the scheduler every N poll ticks (a coarse cadence; the tick rate is 33ms).
-const SCHEDULER_TICK_INTERVAL: u64 = 8;
+/// How often poll_agents runs the scheduler and the plan passes: a coarse
+/// wall-clock cadence, since the loop's tick rate changes with activity.
+const SCHEDULER_INTERVAL: Duration = Duration::from_millis(250);
 /// A merge conflict gets this many resolver attempts before it is the user's.
 const MAX_AUTO_RESOLVER_ATTEMPTS: usize = 2;
 /// The turn source a resolver's prompt is recorded under (not "user").
@@ -1990,9 +2004,9 @@ struct App {
     /// ONCE at construction so render/poll/key paths read a per-App field instead of the
     /// process-global env (which races across parallel tests). Tests set it directly.
     interactive_orchestrator: bool,
-    /// Tick counter used to run the scheduler on a coarse cadence rather than on
-    /// every PTY-byte tick.
-    scheduler_tick: u64,
+    /// When poll_agents last ran the scheduler and plan passes
+    /// (`SCHEDULER_INTERVAL`). None until the first pass.
+    scheduler_pass_at: Option<Instant>,
     /// Animation frame for the orchestrator spinner. Advances at most every 100ms.
     spinner_frame: usize,
     last_spinner_advance: Instant,
@@ -3778,7 +3792,7 @@ impl App {
             },
             board_open_rx: None,
             interactive_orchestrator: interactive_orchestrator(),
-            scheduler_tick: 0,
+            scheduler_pass_at: None,
             spinner_frame: 0,
             last_spinner_advance: Instant::now(),
             selected_agent: 0,
@@ -4189,15 +4203,7 @@ impl App {
         if self.reveal_started.is_some_and(|started| now.duration_since(started) >= REVEAL_FOR + ANIM_FRAME * 2) {
             self.reveal_started = None;
         }
-        let interval = if self.has_planning_orchestrator() {
-            SPINNER_FRAME_INTERVAL
-        } else if motion_pending(self, now)
-            || self.notice.as_deref().is_some_and(notice_in_progress)
-            || (self.agents_area.is_some() && self.agents.iter().any(agent_is_busy))
-            || (self.agents_area.is_some() && self.subagent_tree_animating())
-        {
-            ANIM_FRAME
-        } else {
+        let Some(interval) = self.animation_interval(now) else {
             return false;
         };
         if now.duration_since(self.last_spinner_advance) < interval {
@@ -4207,6 +4213,81 @@ impl App {
         self.last_spinner_advance = now;
         self.dirty = true;
         true
+    }
+
+    /// The spinner's frame interval while something on screen moves, or None
+    /// when nothing does.
+    fn animation_interval(&self, now: Instant) -> Option<Duration> {
+        if self.has_planning_orchestrator() {
+            Some(SPINNER_FRAME_INTERVAL)
+        } else if motion_pending(self, now)
+            || self.notice.as_deref().is_some_and(notice_in_progress)
+            || (self.agents_area.is_some() && self.agents.iter().any(agent_is_busy))
+            || (self.agents_area.is_some() && self.subagent_tree_animating())
+        {
+            Some(ANIM_FRAME)
+        } else {
+            None
+        }
+    }
+
+    /// How long the main loop may block before something it draws or polls is
+    /// due. Every input, PTY output, steer and control source wakes it at
+    /// once, so this only has to cover timers. Zero while a watched pane has
+    /// output queued; TICK_RATE while a frame is owed, a launch is preparing or
+    /// a drag autoscroll is held; otherwise the nearest deadline (an unwatched
+    /// pane's next drain, a deferred Enter, an interrupt send, a steer retry, a
+    /// spinner frame, a notice running out, the tab spinner), capped at
+    /// IDLE_TICK. An idle dashboard wakes about once a second instead of 30
+    /// times.
+    fn loop_wait(&self, now: Instant) -> Duration {
+        // Mirrors poll_agents' drain rules: a watched pane drains every pass,
+        // any other one every UNFOCUSED_DRAIN_INTERVAL.
+        let mut pending: Vec<Instant> = Vec::new();
+        for (index, run) in self.agents.iter().enumerate() {
+            let Some(terminal) = run.terminal.as_ref() else { continue };
+            if !terminal.has_pending_output() {
+                continue;
+            }
+            let watched = index == self.selected_agent
+                || (run.mode == AgentMode::RudderPlan && run.status == AgentStatus::Running)
+                || (terminal.exit_observed() && !terminal.is_output_only())
+                || self.attach_clients.iter().any(|client| client.run_id.as_deref() == Some(run.id.as_str()));
+            if watched {
+                return Duration::ZERO;
+            }
+            pending.push(run.last_drain_at.map_or(now, |at| at + UNFOCUSED_DRAIN_INTERVAL));
+        }
+        if self.dirty || !self.pending_launches.is_empty() || self.worker_drag_edge.is_some() {
+            return self.scroll_draw_poll_timeout(TICK_RATE);
+        }
+        // Work that is still queued once due waits on something else (a pane
+        // getting ready, a drain slot): re-check it at the fast tick, never spin.
+        pending.extend(self.pending_enters.iter().map(|enter| enter.due));
+        pending.extend(self.pending_interrupt_sends.iter().map(|send| send.deadline));
+        pending.extend(self.steer_inbox_due);
+        if let Some(interval) = self.animation_interval(now) {
+            // advance_spinner_if_due always moves this once it is due.
+            pending.push(self.last_spinner_advance + interval);
+        }
+        let mut wait = pending.into_iter().fold(IDLE_TICK, |wait, due| {
+            wait.min(if due > now { due - now } else { TICK_RATE })
+        });
+        // One-shot redraws: only a deadline still ahead counts.
+        let mut ahead: Vec<Instant> = Vec::new();
+        if let Some((_, since)) = &self.notice_seen {
+            ahead.extend([*since + NOTICE_PILL_FOR, *since + NOTICE_ERROR_PILL_FOR]);
+        }
+        if !self.engine_headless && self.agents.iter().any(|run| run.status == AgentStatus::Running) {
+            // The tab glyph spins while a row runs, unless a failure glyph
+            // holds it, so a stale stamp means one interval from now.
+            let due = self.tab_spinner_at + TAB_SPINNER_INTERVAL;
+            ahead.push(if due > now { due } else { now + TAB_SPINNER_INTERVAL });
+        }
+        for due in ahead.into_iter().filter(|due| *due > now) {
+            wait = wait.min(due - now);
+        }
+        self.scroll_draw_poll_timeout(wait)
     }
 
     /// True while an orchestrator (a RudderPlan agent) is actively decomposing:
@@ -22722,7 +22803,6 @@ What to do\n\
         // Watched panes receive bounded batches every tick. Limit simultaneous
         // background parsing, choosing the oldest drain first so later rows
         // cannot starve behind a continuously noisy earlier agent.
-        const UNFOCUSED_DRAIN_INTERVAL: Duration = Duration::from_millis(500);
         const BACKGROUND_DRAINS_PER_TICK: usize = 2;
         // The selected pane drains its whole queue before the frame, so moving
         // the selection to a busy agent shows its current screen at once
@@ -23443,10 +23523,15 @@ What to do\n\
         // periodic pass moves newly-ready nodes todo->in progress as slots free.
         // Suppressed while a plan awaits approval: nothing launches until the user
         // approves the DAG at the gate.
-        self.scheduler_tick = self.scheduler_tick.wrapping_add(1);
+        let scheduler_due = self
+            .scheduler_pass_at
+            .is_none_or(|at| at.elapsed() >= SCHEDULER_INTERVAL);
+        if scheduler_due {
+            self.scheduler_pass_at = Some(Instant::now());
+        }
         if !self.plan().awaiting_approval
             && !self.plan().planned_nodes.is_empty()
-            && self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0
+            && scheduler_due
         {
             self.run_scheduler();
         }
@@ -23458,13 +23543,13 @@ What to do\n\
         // is still Done, and integration flips Done -> Merged. If merge ran first, an
         // integrated node would never be ingested. Ingesting first reads the sidecar/PTY while the worker (and its
         // workspace) are intact, then merge unblocks its children on the same tick.
-        if self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0 {
+        if scheduler_due {
             self.maybe_ingest_worker_followups();
         }
         // Integrate clean finished plan nodes on the same cadence so their children
         // unblock and the chain flows without manual m/M. Runs even
         // when the queue is empty (to merge the final nodes), but not at the gate.
-        if !self.plan().awaiting_approval && self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0 {
+        if !self.plan().awaiting_approval && scheduler_due {
             // Mark nodes whose reviewer just finished, so integrate can merge them.
             self.finalize_node_reviews();
             self.integrate_ready_plan_nodes();
@@ -23473,7 +23558,7 @@ What to do\n\
         // Finalize any AI merge-conflict resolver that just finished (auto-spawned or
         // started manually with y): a clean workspace flips the node to Merged and
         // unblocks its children; leftover conflicts drop back to manual.
-        if self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0 {
+        if scheduler_due {
             self.finalize_merge_resolvers();
             // Then give the next conflicted run its resolver: queued one at a
             // time, rebuilt from run status after a restart.
@@ -23481,7 +23566,7 @@ What to do\n\
         }
         // Predict cross-agent collisions and nudge the later agent to coordinate
         // (autonomous; self-throttled to ~5s). No confirm.
-        if self.scheduler_tick % SCHEDULER_TICK_INTERVAL == 0 {
+        if scheduler_due {
             self.maybe_handle_drift();
         }
 
@@ -24169,6 +24254,8 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             app.reveal_started = Some(Instant::now());
         }
 
+        // The last key or mouse event, for INPUT_FAST_TICK_FOR.
+        let mut last_input_at: Option<Instant> = None;
         loop {
             let frame_started = Instant::now();
             // Input that arrived during the last frame goes before the poll, so
@@ -24176,7 +24263,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             // also consumes PtyOutput nudges, which is only safe before the
             // waker reset below: swallowed after poll_agents, a nudge for bytes
             // that arrived mid-poll left them on screen a 33ms tick late.
-            if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx)? {
+            if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx, &mut last_input_at)? {
                 break;
             }
             // Reset the PTY-output waker BEFORE poll_agents drains, so a byte arriving
@@ -24253,15 +24340,18 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             }
             app.render_dashboard_views(shared_changed);
 
-            // PTY readers wake this loop as soon as child output arrives, so the timeout is
-            // only a backstop for timer-driven state and does not need a planner fast path.
-            let poll_timeout = app.scroll_draw_poll_timeout(TICK_RATE);
+            // PTY readers, the terminal reader, the steer watch and the
+            // engine/attach wakers all wake this loop the moment they have
+            // something, so the timeout only covers timers (`App::loop_wait`).
+            let now = Instant::now();
+            let mut poll_timeout = app.loop_wait(now);
+            if last_input_at.is_some_and(|at| now.duration_since(at) < INPUT_FAST_TICK_FOR) {
+                poll_timeout = poll_timeout.min(TICK_RATE);
+            }
             let active_us_before_block = frame_started.elapsed().as_micros() as u64;
-            // Block until a terminal event, a PTY-output nudge, or the tick backstop.
-            // TICK_RATE still bounds worst-case latency for state that
-            // does not signal (cloud polling, timers); PtyOutput just wakes us sooner.
             match signal_rx.recv_timeout(poll_timeout) {
                 Ok(LoopSignal::Term(ev)) => {
+                    last_input_at = Some(Instant::now());
                     if handle_event(&mut app, ev) {
                         break;
                     }
@@ -24269,6 +24359,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
                         &mut app,
                         MAX_EVENTS_PER_FRAME.saturating_sub(1),
                         &signal_rx,
+                        &mut last_input_at,
                     )?;
                     if shutdown {
                         return Ok(());
@@ -24309,11 +24400,13 @@ fn drain_ready_events(
     app: &mut App,
     max_events: usize,
     signal_rx: &mpsc::Receiver<LoopSignal>,
+    last_input_at: &mut Option<Instant>,
 ) -> Result<bool> {
     let mut drained_events = 0_usize;
     while drained_events < max_events {
         match signal_rx.try_recv() {
             Ok(LoopSignal::Term(ev)) => {
+                *last_input_at = Some(Instant::now());
                 if handle_event(app, ev) {
                     app.perf.log(
                         "event_drain",

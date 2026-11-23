@@ -21758,6 +21758,32 @@ fn alt_h_resizes_the_agent_pty_once_each_way() {
 }
 
 #[test]
+fn an_idle_dashboard_sleeps_until_its_next_deadline() {
+    // The loop used to tick 30 times a second with nothing to do. Every input
+    // and output source wakes it, so only timers bound the wait.
+    let mut app = App::new();
+    app.take_dirty(); // the first frame was drawn
+    let now = Instant::now();
+    assert_eq!(app.loop_wait(now), IDLE_TICK, "nothing due: one wakeup a second");
+
+    // A pill that ran out an hour ago is history, not a reason to tick fast.
+    app.notice_seen = Some(("saved".to_string(), now - Duration::from_secs(3600)));
+    assert_eq!(app.loop_wait(now), IDLE_TICK);
+
+    // A deferred Enter is due in 150 ms: wake for it, not a second later.
+    app.pending_enters.push(PendingEnter {
+        run_id: "run".to_string(),
+        instance_id: None,
+        due: now + ENTER_SUBMIT_DELAY,
+    });
+    assert_eq!(app.loop_wait(now), ENTER_SUBMIT_DELAY);
+
+    // A frame is owed: the fast tick.
+    app.dirty = true;
+    assert_eq!(app.loop_wait(now), TICK_RATE);
+}
+
+#[test]
 fn a_diff_summary_miss_never_blocks_the_frame() {
     // `sample` of a live session found 984 of 1030 render frames parked in
     // Command::output waiting for jj to answer this. Render runs on the main

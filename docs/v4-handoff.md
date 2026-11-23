@@ -10,9 +10,12 @@ Helper agents: Claude and Codex agents have `agents_start` and
 isolated worker on exactly the harness, model and effort it names, checked
 against the model catalog; the defaults for new agents do not move. Its row
 carries run.json `parentRunId` and shows as the parent's helper in the list
-and the app. At each helper turn end the dashboard reads its final message
-from the backend's session record into `.rudder/helpers/<id>.json`, which
-`agents_result` returns. The rule in the prompts: send a helper file paths,
+and the app. Its workspace starts from a copy of the parent's files,
+uncommitted edits included (overlay forks are private to each agent's mount
+namespace, so it cannot read the parent's path). At each helper turn end the
+dashboard reads its final message from the backend's session record into
+`.rudder/helpers/<id>.json`, which `agents_result` returns; a failed turn (a
+usage limit) lands there as an error reply. The rule in the prompts: send a helper file paths,
 never pasted contents (`agy -p` keeps about 200 KB of one message). Legacy
 owners now attach a helpers-only `rudder_agents` server. Antigravity and
 OpenCode parents get no per-run MCP, so they cannot start helpers yet.

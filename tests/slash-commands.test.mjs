@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, codexHasVoice,
+  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, claudeListKey, codexHasVoice,
   codexPackageDir, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
 import { rank } from "../cloud/app/slash-rank.js";
@@ -68,12 +68,14 @@ function writeFixture(root) {
   const now = new Date().toISOString();
   write(`${claude}/plugins/known_marketplaces.json`, { testmkt: { source: { source: "directory", path: market }, installLocation: market, lastUpdated: now } });
   write(`${claude}/plugins/installed_plugins.json`, { version: 2, plugins: { "greeter@testmkt": [{ scope: "user", installPath: installed, version: "1.0.0", installedAt: now, lastUpdated: now }] } });
-  write(`${claude}/settings.json`, { enabledPlugins: { "greeter@testmkt": true } });
+  // Accepted once per account, as on a home whose agents run in this mode.
+  write(`${claude}/settings.json`, { enabledPlugins: { "greeter@testmkt": true }, skipDangerousModePermissionPrompt: true });
   write("project/.claude/commands/ship.md", "---\ndescription: Ship this project\n---\nShip\n");
   write("project/.claude/commands/greet-args.md", "---\ndescription: Greet with named arguments\narguments: [who, when]\n---\nGreet $who at $when\n");
   write("mcp-server.mjs", MCP_SERVER);
+  // Never approved for this folder, like a branch workspace below a checkout
+  // with .mcp.json: the agent's bypassPermissions mode starts it unasked.
   write("project/.mcp.json", { mcpServers: { testmcp: { command: process.execPath, args: [path.join(root, "mcp-server.mjs")] } } });
-  write("project/.claude/settings.local.json", { enabledMcpjsonServers: ["testmcp"] });
   // Codex: a catalog whose model has a Fast tier, and a custom prompt that
   // Codex's "/" popup does not list.
   write("home/.codex/config.toml", 'model = "test-model"\n');
@@ -97,6 +99,48 @@ test("a list the app waits on is built before warm-up lists", async () => {
   warm[3].hurry();
   await Promise.all([asked.promise, ...warm.map((w) => w.promise)]);
   assert.deepEqual(ran, ["w1", "asked", "w4", "w2", "w3"]);
+});
+
+test("a branch's workspace shares its checkout's Claude list unless its own files differ", () => {
+  // Claude reads project commands, skills, settings and .mcp.json from the
+  // working folder up to the checkout and counts a name with the same content
+  // once (measured on 2.1.330). A jj workspace below the checkout has no .git.
+  // Built per folder, every new branch waited for a cold Claude Code start.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-slash-key-")));
+  try {
+    const write = (rel, body) => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), body);
+    };
+    write("config/.claude.json", JSON.stringify({ projects: {} }));
+    write("repo/.git/HEAD", "ref: refs/heads/main\n");
+    write("repo/.mcp.json", JSON.stringify({ mcpServers: { docs: { command: "docs-mcp" } } }));
+    write("repo/.claude/commands/ship.md", "Ship it\n");
+    write("repo/.claude/skills/tidy/SKILL.md", "---\nname: tidy\n---\n");
+    const branch = (name) => path.join(root, "repo/.rudder-workspaces/repo-1", name);
+    fs.mkdirSync(branch("empty"), { recursive: true });
+    write("repo/.rudder-workspaces/repo-1/copy/.claude/commands/ship.md", "Ship it\n");
+    write("repo/.rudder-workspaces/repo-1/copy/.mcp.json", fs.readFileSync(path.join(root, "repo/.mcp.json")));
+    write("repo/.rudder-workspaces/repo-1/edited/.claude/commands/ship.md", "Ship it carefully\n");
+    write("repo/.rudder-workspaces/repo-1/more/.claude/commands/lint.md", "Lint\n");
+    const env = { HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: path.join(root, "config") };
+    const key = (cwd, extra = {}, keyEnv = env) => claudeListKey({ cwd, model: "opus", permissionMode: "bypassPermissions", ...extra }, keyEnv);
+    const checkout = key(path.join(root, "repo"));
+    assert.equal(key(branch("empty")), checkout, "a workspace with nothing of its own");
+    assert.equal(key(branch("copy")), checkout, "a workspace holding the checkout's own files");
+    assert.notEqual(key(branch("edited")), checkout, "a command the branch changed");
+    assert.notEqual(key(branch("more")), checkout, "a command only the branch has");
+    assert.notEqual(key(branch("empty"), { model: "haiku" }), checkout, "the menu names the model");
+    assert.notEqual(key(branch("empty"), { permissionMode: "plan" }), checkout, "plan mode asks before starting .mcp.json servers");
+    assert.notEqual(key(branch("empty"), {}, { ...env, CLAUDE_CONFIG_DIR: path.join(root, "other") }), checkout, "another account");
+    // The account's MCP entry for the checkout counts for every folder below it.
+    write("config/.claude.json", JSON.stringify({ projects: { [path.join(root, "repo")]: { disabledMcpjsonServers: ["docs"] } } }));
+    const disabled = key(path.join(root, "repo"));
+    assert.notEqual(disabled, checkout);
+    assert.equal(key(branch("empty")), disabled);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Claude Code's popup is read off its screen", () => {
@@ -235,7 +279,7 @@ test("Claude and Codex '/' lists from the installed CLIs", async () => {
     const started = Date.now();
     let first = null;
     const [menu, answer, binary] = await Promise.all([
-      readClaudeMenu({ bin: claudeBin, cwd, env, onFirst: async (rows) => { first = { rows, at: Date.now() - started }; } }),
+      readClaudeMenu({ bin: claudeBin, cwd, env, permissionMode: "bypassPermissions", onFirst: async (rows) => { first = { rows, at: Date.now() - started }; } }),
       claudeInitialize({ bin: claudeBin, cwd, env }),
       readClaudeBinaryCommands(fs.realpathSync(claudeBin)),
     ]);

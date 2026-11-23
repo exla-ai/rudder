@@ -233,7 +233,8 @@ const freshAccounts = new Set();
 const projects = new Map();
 // The "/" menu of each agent's CLI for the app's chat (slash-commands.mjs).
 const slashCommands = createSlashCommands({
-  env: baseChildEnv,
+  // Each agent's list is built on its own sign-in, as the agent runs.
+  envFor: (backend, account) => loginEnv(backend, account),
   log,
   projectDirs: () => [...projects.values()].filter((p) => p.status !== "cloning").map((p) => p.dir),
   file: path.join(PERSIST_HOME, ".rudder", "slash-commands.json"),

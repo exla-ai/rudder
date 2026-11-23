@@ -48,7 +48,10 @@ if (process.argv[2] === "--version") {
     backend: "opencode", workspace: { path: cwd }, session: { nativeSessionId: "ses_x" },
   }));
   const source = createSlashCommands({
-    env: { ...process.env, RUDDER_OPENCODE_BIN: bin },
+    envFor: (backend, account) => {
+      assert.deepEqual([backend, account], ["opencode", "main"]);
+      return { ...process.env, RUDDER_OPENCODE_BIN: bin };
+    },
     log: () => {},
     projectDirs: () => [],
     file: path.join(root, "commands.json"),

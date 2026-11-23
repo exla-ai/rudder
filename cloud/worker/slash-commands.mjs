@@ -365,12 +365,22 @@ export function parseClaudeMenu(screen) {
 
 /**
  * Claude Code's "/" popup in `cwd`: an interactive session started in a
- * private tmux server with the agent's environment and model and hooks off,
- * sent "/". Returns [{ display, description }] in Claude's order. `onFirst`
- * is awaited with the popup's first reading, before MCP servers' prompts
- * have all joined it.
+ * private tmux server with the agent's environment, model and permission
+ * mode and hooks off, sent "/". Returns [{ display, description }] in
+ * Claude's order. `onFirst` is awaited with the popup's first reading, before
+ * MCP servers' prompts have all joined it.
+ *
+ * The permission mode is the agent's own (launch.rs claude_session_command):
+ * under bypassPermissions Claude starts a project's .mcp.json servers without
+ * asking, so their prompts are in the agent's menu. Without it, a folder whose
+ * .mcp.json servers were never approved opened Claude's "New MCP server found"
+ * dialog, and the probe waited its whole timeout for a prompt (the app's
+ * request gave up first).
  */
-export async function readClaudeMenu({ bin, cwd, env, model = null, onFirst = null, timeoutMs = 45_000 }) {
+export async function readClaudeMenu({ bin, cwd, env, model = null, permissionMode, onFirst = null, timeoutMs = 45_000 }) {
+  if (permissionMode !== "bypassPermissions" && permissionMode !== "plan") {
+    throw new Error(`readClaudeMenu needs the agent's permission mode, not ${JSON.stringify(permissionMode)}`);
+  }
   const tmux = which("tmux", env);
   // tmux leaves its socket behind when the server is killed.
   const socket = path.join(os.tmpdir(), `rudder-slash-${process.pid}-${menuSeq++}`);
@@ -387,17 +397,26 @@ export async function readClaudeMenu({ bin, cwd, env, model = null, onFirst = nu
       "new-session", "-d", "-s", "menu", "-x", String(MENU_COLUMNS), "-y", String(MENU_ROWS), "-c", cwd,
       // Rudder starts every Claude agent with the inline renderer (launch.rs).
       "env", "-u", "TMUX", "-u", "TMUX_PANE", "TERM=xterm-256color", "CLAUDE_CODE_NO_FLICKER=0",
-      bin, "--settings", JSON.stringify({ disableAllHooks: true }), ...(model ? ["--model", model] : []));
+      bin, "--settings", JSON.stringify({ disableAllHooks: true }), "--permission-mode", permissionMode,
+      ...(model ? ["--model", model] : []));
     const panePid = (await t("display-message", "-p", "-t", "menu", "#{pane_pid}")).stdout.trim();
     if (!/^\d+$/.test(panePid)) throw new Error(`tmux gave no process id for Claude Code's pane: "${panePid}"`);
     group = Number(panePid);
     let text = "";
     for (;;) {
       text = await screen();
-      if (/^❯\s/m.test(text)) break;
+      // A dialog before the prompt can put its own "❯" on screen: say which
+      // one at once instead of typing "/" into it and waiting out the timeout.
       if (/Is this a project you created or one you trust/.test(text)) {
         throw new Error(`Claude Code has not been trusted in ${cwd}`);
       }
+      if (/New MCP servers? found in this project/.test(text)) {
+        throw new Error(`Claude Code asks whether to use the project's MCP servers in ${cwd} (${permissionMode} mode)`);
+      }
+      if (/running in Bypass Permissions mode/.test(text)) {
+        throw new Error("Claude Code asks to accept Bypass Permissions mode for this account");
+      }
+      if (/^❯\s/m.test(text)) break;
       const dead = (await t("display-message", "-p", "-t", "menu", "#{pane_dead}")).stdout.trim() === "1";
       if (dead || Date.now() > deadline) {
         const said = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 3).join(" ");
@@ -831,8 +850,17 @@ function fileStamp(file) {
   }
 }
 
-function claudeStamp({ bin, cwd, env }) {
-  const config = env.CLAUDE_CONFIG_DIR?.trim() || path.join(env.HOME || os.homedir(), ".claude");
+// Claude's config dir for `env`: the agent's account (src/accounts.ts).
+function claudeConfigDir(env) {
+  return env.CLAUDE_CONFIG_DIR?.trim() || path.join(env.HOME || os.homedir(), ".claude");
+}
+
+// What every list of one account shares, and changes over time without
+// changing which folders share a list: the CLI, the account's own commands,
+// skills, settings and plugins, and its global config. A change rebuilds the
+// list while it keeps serving.
+function claudeStamp({ bin, env }) {
+  const config = claudeConfigDir(env);
   const parts = [fileStamp(fs.realpathSync(bin)), fs.realpathSync(bin)];
   for (const name of ["settings.json", "settings.local.json", "plugins/installed_plugins.json", "plugins/known_marketplaces.json"]) {
     parts.push(fileStamp(path.join(config, name)));
@@ -841,20 +869,90 @@ function claudeStamp({ bin, cwd, env }) {
   const skills = path.join(config, "skills");
   treeStamp(skills, 2, parts, path.join(skills, "synced"));
   syncedSkillsStamp(path.join(skills, "synced"), parts);
-  // Project commands, skills and settings, here and in each parent.
+  const { skillUsage, oauthAccount, mcpServers } = claudeGlobalConfig(env);
+  parts.push(JSON.stringify([skillUsage, oauthAccount, mcpServers]));
+  return parts.join("\n");
+}
+
+// A file's sha256, read again only when its inode, size or mtime changes.
+const contentHashes = new Map(); // file -> { sig, hash }
+function contentHash(file, stat) {
+  const sig = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  const cached = contentHashes.get(file);
+  if (cached?.sig === sig) return cached.hash;
+  const hash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  contentHashes.set(file, { sig, hash });
+  return hash;
+}
+
+function statOrNull(file) {
+  try {
+    return fs.statSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+// `rel` -> content hash of the file at `file`, or of each file in the folder
+// there, `depth` folder levels down (a folder deeper than that counts by its
+// name).
+function contentTree(file, rel, depth, out) {
+  const stat = statOrNull(file);
+  if (!stat) return;
+  if (stat.isFile()) {
+    out.set(rel, contentHash(file, stat));
+    return;
+  }
+  if (!stat.isDirectory()) return;
+  if (depth === 0) {
+    out.set(rel, "folder");
+    return;
+  }
+  for (const name of fs.readdirSync(file).sort()) {
+    if (out.size > 4000) return;
+    contentTree(path.join(file, name), `${rel}/${name}`, depth - 1, out);
+  }
+}
+
+/**
+ * What a folder's own files add to Claude's menu, from `cwd` up to "/":
+ * project commands, skills and settings, .mcp.json, and the folder's MCP
+ * entries in the account's config. Claude reads these from the working folder
+ * up to the checkout (a jj workspace has no .git of its own), and a name found
+ * twice with the same content counts once. So each file is named by its path
+ * inside its folder, and the view lists each name's distinct contents, the
+ * nearest folder first. A branch's workspace that holds nothing of its own,
+ * or the same files as its checkout, has its checkout's view: they share one
+ * list, built once.
+ */
+function claudeProjectView(cwd, env) {
+  const { projects } = claudeGlobalConfig(env);
+  const view = new Map(); // name -> [hash, ...]
   for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    const found = new Map();
+    contentTree(path.join(dir, ".mcp.json"), ".mcp.json", 0, found);
     const claude = path.join(dir, ".claude");
-    parts.push(fileStamp(claude));
-    if (fs.existsSync(claude)) {
-      parts.push(fileStamp(path.join(claude, "settings.json")), fileStamp(path.join(claude, "settings.local.json")));
-      treeStamp(path.join(claude, "commands"), 4, parts);
-      treeStamp(path.join(claude, "skills"), 2, parts);
+    if (statOrNull(claude)?.isDirectory()) {
+      for (const name of ["settings.json", "settings.local.json"]) {
+        contentTree(path.join(claude, name), `.claude/${name}`, 0, found);
+      }
+      contentTree(path.join(claude, "commands"), ".claude/commands", 4, found);
+      contentTree(path.join(claude, "skills"), ".claude/skills", 2, found);
     }
-    parts.push(fileStamp(path.join(dir, ".mcp.json")));
+    const project = projects?.[dir];
+    const mcp = project && [project.mcpServers, project.enabledMcpjsonServers, project.disabledMcpjsonServers, project.disabledMcpServers];
+    if (mcp?.some((value) => value !== undefined)) {
+      found.set("projects", createHash("sha256").update(JSON.stringify(mcp)).digest("hex"));
+    }
+    for (const [name, hash] of found) {
+      const hashes = view.get(name) ?? [];
+      if (!hashes.includes(hash)) hashes.push(hash);
+      view.set(name, hashes);
+    }
     if (path.dirname(dir) === dir) break;
   }
-  parts.push(claudeGlobalStamp(env, path.resolve(cwd)));
-  return parts.join("\n");
+  return [...view].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 // claude.ai skills (skills/synced/<account>/). Each Claude Code sync round
@@ -887,29 +985,35 @@ function syncedSkillsStamp(dir, out) {
   }
 }
 
-// The parts of Claude's global config the menu shows: the most used skills
-// lead it, and the account and MCP servers gate rows. The file changes all
-// the time for other reasons, so only these parts count.
-const globalConfigCache = new Map(); // file -> { mtimeMs, config }
-function claudeGlobalStamp(env, cwd) {
+/**
+ * Which Claude list an agent gets: one per account, model ("Switch model
+ * (currently …)"), permission mode and project view (claudeProjectView), not
+ * one per folder, so a new branch's workspace gets the list its checkout
+ * already has.
+ */
+export function claudeListKey({ cwd, model, permissionMode }, env) {
+  return `claude\n${createHash("sha256").update(JSON.stringify({
+    config: claudeConfigDir(env), model: model ?? null, permissionMode, project: claudeProjectView(cwd, env),
+  })).digest("hex")}`;
+}
+
+// The account's global config (.claude.json): the most used skills lead the
+// menu, and the sign-in and MCP servers gate rows. The file changes all the
+// time for other reasons, so only those parts count.
+const globalConfigCache = new Map(); // file -> { sig, config }
+function claudeGlobalConfig(env) {
   const file = env.CLAUDE_CONFIG_DIR?.trim()
     ? path.join(env.CLAUDE_CONFIG_DIR.trim(), ".claude.json")
     : path.join(env.HOME || os.homedir(), ".claude.json");
-  let stat;
-  try {
-    stat = fs.statSync(file);
-  } catch (error) {
-    if (error.code === "ENOENT") return `${file}:-`;
-    throw error;
-  }
+  const stat = statOrNull(file);
+  if (!stat) return {};
+  const sig = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
   let cached = globalConfigCache.get(file);
-  if (cached?.mtimeMs !== stat.mtimeMs) {
-    cached = { mtimeMs: stat.mtimeMs, config: JSON.parse(fs.readFileSync(file, "utf8")) };
+  if (cached?.sig !== sig) {
+    cached = { sig, config: JSON.parse(fs.readFileSync(file, "utf8")) };
     globalConfigCache.set(file, cached);
   }
-  const { skillUsage, oauthAccount, mcpServers, projects } = cached.config;
-  const project = projects?.[cwd] ?? {};
-  return JSON.stringify([skillUsage, oauthAccount, mcpServers, project.mcpServers, project.enabledMcpjsonServers, project.disabledMcpjsonServers, project.disabledMcpServers]);
+  return cached.config;
 }
 
 function codexStamp({ bin, cwd, env }) {
@@ -1031,9 +1135,10 @@ const newEntry = (backend, input) => ({
   backend, input, stamp: null, value: null, error: null, builtAt: 0, checkedAt: 0, building: null, ready: null, hurry: null, settling: false,
 });
 
-// The lists `file` holds (saveLists), for folders that still exist. Each is
-// checked against its inputs when first asked for, and served meanwhile.
-export function loadLists(file, log) {
+// The lists `file` holds (saveLists), for folders that still exist and whose
+// inputs still give the key they were saved under (`keyOf`). Each is checked
+// against its inputs when first asked for, and served meanwhile.
+export function loadLists(file, log, keyOf) {
   const lists = new Map();
   let saved;
   try {
@@ -1044,6 +1149,14 @@ export function loadLists(file, log) {
   }
   for (const [key, { backend, input, stamp, value, builtAt }] of Object.entries(saved)) {
     if (!fs.existsSync(input.cwd)) continue;
+    let current;
+    try {
+      current = keyOf(backend, input);
+    } catch (error) {
+      log(`slash commands: dropping the saved list for ${input.cwd}: ${error.message}`);
+      continue;
+    }
+    if (current !== key) continue;
     lists.set(key, { ...newEntry(backend, input), stamp, value, builtAt });
   }
   return lists;
@@ -1064,10 +1177,11 @@ export function saveLists(file, lists) {
 /**
  * The home's "/" lists, kept in `file` across restarts. `projectDirs()` names
  * the open projects; their recent agents get a list at start, and a new agent
- * within WARM_MS. `forRun(repoDir, runId)` answers the app.
+ * within WARM_MS. `forRun(repoDir, runId)` answers the app. `envFor(backend,
+ * account)` is the environment an agent on that account runs with (its
+ * CLAUDE_CONFIG_DIR or CODEX_HOME), so each list is the agent's own.
  */
-export function createSlashCommands({ env, log, projectDirs, file }) {
-  const lists = loadLists(file, log);
+export function createSlashCommands({ envFor, log, projectDirs, file }) {
   let saveTimer = null;
   const save = () => {
     saveTimer ??= setTimeout(() => {
@@ -1083,7 +1197,7 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
   const binaryCache = new Map(); // claude realpath -> Promise<Map>
   // Codex reads its state in milliseconds; it does not wait behind Claude.
   const queues = { claude: buildQueue(), codex: buildQueue(), opencode: buildQueue() };
-  const opencodeBinary = () => which(env.RUDDER_OPENCODE_BIN?.trim() || "opencode", env);
+  const opencodeBinary = (env) => which(env.RUDDER_OPENCODE_BIN?.trim() || "opencode", env);
 
   const claudeBinary = (bin) => {
     const real = fs.realpathSync(bin);
@@ -1095,38 +1209,38 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
     return binaryCache.get(real);
   };
 
+  const claudeBin = (env) => which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env);
   const sources = {
     claude: {
-      // The menu names the agent's model ("Switch model (currently …)").
-      key: ({ cwd, model }) => `claude\n${cwd}\n${model ?? ""}`,
-      stamp: ({ cwd }) => claudeStamp({ bin: which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env), cwd, env }),
+      key: claudeListKey,
+      stamp: (input, env) => claudeStamp({ bin: claudeBin(env), env }),
       // The popup's first reading is published about a second in; the list
       // replaces it once MCP servers' prompts have joined.
-      build: async ({ cwd, model }, publish) => {
-        const bin = which(env.RUDDER_CLAUDE_BIN?.trim() || "claude", env);
+      build: async ({ cwd, model, permissionMode }, publish, env) => {
+        const bin = claudeBin(env);
         const info = Promise.all([claudeInitialize({ bin, cwd, env }), claudeBinary(bin)]);
         const shape = async (menu) => {
           const [answer, binary] = await info;
           return { version: answer.version, commands: buildClaudeCommands({ menu, headless: answer.commands, binary }) };
         };
         // Both settle before the build ends, so no probe outlives its build.
-        const [menu] = await settled([readClaudeMenu({ bin, cwd, env, model, onFirst: async (rows) => publish(await shape(rows)) }), info]);
+        const [menu] = await settled([readClaudeMenu({ bin, cwd, env, model, permissionMode, onFirst: async (rows) => publish(await shape(rows)) }), info]);
         return shape(menu);
       },
     },
     codex: {
-      key: ({ cwd, plugins }) => `codex\n${cwd}\n${plugins}`,
-      stamp: ({ cwd }) => codexStamp({ bin: which(env.RUDDER_CODEX_BIN?.trim() || "codex", env), cwd, env }),
-      build: async ({ cwd, plugins }) => {
+      key: ({ cwd, account, plugins }) => `codex\n${account}\n${cwd}\n${plugins}`,
+      stamp: ({ cwd }, env) => codexStamp({ bin: which(env.RUDDER_CODEX_BIN?.trim() || "codex", env), cwd, env }),
+      build: async ({ cwd, plugins }, publish, env) => {
         const bin = which(env.RUDDER_CODEX_BIN?.trim() || "codex", env);
         return readCodexState({ bin, cwd, env, plugins });
       },
     },
     opencode: {
       key: ({ cwd }) => `opencode\n${cwd}`,
-      stamp: ({ cwd }) => opencodeStamp({ bin: opencodeBinary(), cwd, env }),
-      build: async ({ cwd }) => {
-        const bin = opencodeBinary();
+      stamp: ({ cwd }, env) => opencodeStamp({ bin: opencodeBinary(env), cwd, env }),
+      build: async ({ cwd }, publish, env) => {
+        const bin = opencodeBinary(env);
         const version = (await run(bin, ["--version"], { cwd, env })).stdout.trim();
         if (version !== OPENCODE_VERSION) throw new Error(`OpenCode ${version} has an unverified command list`);
         const commands = await readOpencodeCommands({ bin, cwd, env });
@@ -1139,11 +1253,21 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
       },
     },
   };
+  const keyOf = (backend, input) => {
+    const source = sources[backend];
+    if (!source) throw new Error(`no "/" list for ${backend}`);
+    if (typeof input?.account !== "string" || !input.account) throw new Error("the list names no account");
+    return source.key(input, envFor(backend, input.account));
+  };
+  const lists = loadLists(file, log, keyOf);
 
   async function ensure(backend, input, { wait }) {
     const source = sources[backend];
-    const key = source.key(input);
+    const env = envFor(backend, input.account);
+    const key = source.key(input, env);
     let entry = lists.get(key);
+    // Rebuilt in the folder of whichever agent asked last, one that exists.
+    if (entry) entry.input = input;
     const now = Date.now();
     if (entry?.building) {
       if (wait && !entry.value) {
@@ -1156,7 +1280,7 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
     if (entry && (entry.error ? !wait && now - entry.checkedAt < CHECK_MS : now - entry.checkedAt < CHECK_MS)) {
       return entry;
     }
-    const stamp = source.stamp(input);
+    const stamp = source.stamp(input, env);
     if (entry && !entry.error && entry.stamp === stamp && now - entry.builtAt < FULL_MS) {
       entry.checkedAt = now;
       return entry;
@@ -1173,7 +1297,7 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
       firstReading();
     };
     // A rebuild of a list already served is not urgent: it keeps serving.
-    const job = queues[backend].add(() => source.build(input, publish), wait && !entry.value);
+    const job = queues[backend].add(() => source.build(input, publish, env), wait && !entry.value);
     entry.hurry = job.hurry;
     entry.building = job.promise.then(
       (value) => Object.assign(entry, { value, error: null, settling: false, stamp, builtAt: Date.now(), checkedAt: Date.now() }),
@@ -1197,9 +1321,15 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
     if (typeof cwd !== "string" || !cwd) {
       throw new Error("this agent has no working directory yet");
     }
-    if (backend === "claude") return { backend, input: { cwd, model: record.model?.trim() || null } };
-    if (backend === "codex") return { backend, input: { cwd, plugins: codexPluginsFor(record.mode) } };
-    if (backend === "opencode") return { backend, input: { cwd } };
+    // A run.json without an account ran on the CLI's own dir (home.mjs agentSummary).
+    const account = record.account ?? "main";
+    if (backend === "claude") {
+      // As launch.rs claude_session_command resumes it.
+      const permissionMode = record.mode === "plan" ? "plan" : "bypassPermissions";
+      return { backend, input: { cwd, account, model: record.model?.trim() || null, permissionMode } };
+    }
+    if (backend === "codex") return { backend, input: { cwd, account, plugins: codexPluginsFor(record.mode) } };
+    if (backend === "opencode") return { backend, input: { cwd, account } };
     throw new Error(`the app has no "/" list for ${backend} agents`);
   }
 
@@ -1218,7 +1348,7 @@ export function createSlashCommands({ env, log, projectDirs, file }) {
       const { version, withSession, withoutSession } = entry.value;
       return { backend, version, commands: record.session?.nativeSessionId ? withSession : withoutSession };
     }
-    const { models, configModel } = readCodexModels(env);
+    const { models, configModel } = readCodexModels(envFor(backend, input.account));
     const model = record.model || configModel;
     const commands = buildCodexCommands({ ...entry.value, models, model });
     return { backend, version: entry.value.version, model, commands };

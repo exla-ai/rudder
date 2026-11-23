@@ -1894,7 +1894,9 @@ fn antigravity_terminal_done_ends_a_workers_turn_only() {
     use signals::SignalState;
     assert_eq!(signals::antigravity_status_signal(&status("done"), false), Some(SignalState::Done));
     assert_eq!(signals::antigravity_status_signal(&status("done"), true), None, "an orchestrator's plan ends its turn");
-    assert_eq!(signals::antigravity_status_signal(&status("idle"), false), None, "agy starts idle");
+    // A sign-in that resolved at startup (`blocked:auth`, then `idle`) lifts
+    // the wait it latched.
+    assert_eq!(signals::antigravity_status_signal(&status("idle"), false), Some(SignalState::Working));
     assert_eq!(signals::antigravity_status_signal(&status("working"), true), Some(SignalState::Working));
 }
 

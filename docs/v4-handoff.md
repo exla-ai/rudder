@@ -456,6 +456,11 @@ For every harness, the home answers a send to an idle agent only once its
 run.json says running (up to 2 s, `waitRunWorking`), so the state the app
 reads on the answer already shows Working. Answering on the receipt alone left
 Working 3.3 s late on Neon follow-ups and missing on short turns.
+agy's OSC 7501 `idle` lifts a wait like `working`: a signed-in agy sometimes
+reports `blocked:auth` ("Sign in required") at startup while it loads its
+token, then `idle` about 50 ms later (5 of 58 measured launches). That latch held
+a new row at "needs you" for about 0.6 s, and now holds it for 45 ms. A
+signed-out agy reports `blocked:auth` alone and still shows as waiting.
 Remote Control on a new conversation is typed, not a flag: agy with
 `-i` and `--remote-control` makes a second, empty conversation at startup and
 the pane can show that one, so the prompt lands in a chat nobody sees. Rudder

@@ -899,7 +899,13 @@ printf '{{}}'
 
 /// The wait an Antigravity OSC 7501 status describes. `blocked` on a
 /// permission prompt is `Permission`; blocked on anything else (a question,
-/// a sign-in) waits for an answer. `working` lifts a wait. `done` is the end
+/// a sign-in) waits for an answer. `working` lifts a wait, and so does `idle`,
+/// which says nothing blocks it any more: on 5 of 58 measured launches a
+/// signed-in agy 1.5.15 reported `blocked:auth` ("Sign in required") while it
+/// loaded its token and `idle` about 50 ms later, and the row showed "needs you"
+/// until its first spinner. A signed-out agy reports `blocked:auth` alone.
+/// This mapping is read only while the row runs, so `idle` never reopens a
+/// finished turn. `done` is the end
 /// of a turn whose subagents or background tasks outlived its `Stop` hook:
 /// agy reports it once that work ends (daemon tasks such as dev servers do
 /// not count). An orchestrator reads no turn signals (its plan ends its
@@ -912,7 +918,7 @@ pub(crate) fn antigravity_status_signal(
     match (status.state.as_str(), status.kind.as_str()) {
         ("blocked", "permission") => Some(SignalState::Permission),
         ("blocked", _) => Some(SignalState::Input),
-        ("working", _) => Some(SignalState::Working),
+        ("working" | "idle", _) => Some(SignalState::Working),
         ("done", _) if !orchestrator => Some(SignalState::Done),
         _ => None,
     }

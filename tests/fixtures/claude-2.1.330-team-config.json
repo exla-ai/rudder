@@ -1,0 +1,59 @@
+{
+  "name": "session-9ae11dea",
+  "createdAt": 1795423174854,
+  "leadAgentId": "team-lead@session-9ae11dea",
+  "leadSessionId": "9ae11dea-ffef-4096-93e6-aa173a0ec95d",
+  "leadProcess": {
+    "pid": 1085718,
+    "pidSpace": "8edd225a7d0378#pid:[4026532752]",
+    "claimedAt": 1795423174854,
+    "procStart": "157769187"
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-9ae11dea",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1795423174854,
+      "tmuxPaneId": "leader",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "hunt-turns@session-9ae11dea",
+      "name": "hunt-turns",
+      "color": "yellow",
+      "joinedAt": 1795424839277,
+      "tmuxPaneId": "%2",
+      "subscriptions": [],
+      "model": "claude-opus-5-5",
+      "planModeRequired": false,
+      "backendType": "tmux",
+      "isActive": false
+    },
+    {
+      "agentId": "fix-session@session-9ae11dea",
+      "name": "fix-session",
+      "color": "green",
+      "joinedAt": 1795425525627,
+      "tmuxPaneId": "%9",
+      "subscriptions": [],
+      "model": "claude-opus-5-5",
+      "planModeRequired": false,
+      "backendType": "tmux",
+      "isActive": true
+    },
+    {
+      "agentId": "fix-status@session-9ae11dea",
+      "name": "fix-status",
+      "color": "pink",
+      "joinedAt": 1795426146414,
+      "tmuxPaneId": "%13",
+      "subscriptions": [],
+      "model": "claude-opus-5-5",
+      "planModeRequired": false,
+      "backendType": "tmux",
+      "isActive": true
+    }
+  ]
+}

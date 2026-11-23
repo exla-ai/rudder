@@ -8661,6 +8661,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -10932,6 +10933,7 @@ fn delete_agent_requires_second_d() {
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -12406,6 +12408,97 @@ fn poll_loop_consumes_the_official_done_signal_for_a_live_worker() {
     );
 
     let _ = std::fs::remove_file(&sig);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_turn_that_ends_with_background_work_out_waits_on_it_not_review() {
+    // 20% of Claude lead turn ends were restarted by a <task-notification>: the
+    // row rang "ready for review" while a background shell or subagent still
+    // ran. The real scan thread reads a transcript in the fixture's shapes.
+    let mut env = env_guard();
+    let root = unique_test_repo("background-wait");
+    env.set_home(&root, &root.join("home"));
+    std::env::set_var("RUDDER_HOME", root.join("rudder"));
+    let run_id = "background-wait-itest";
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude).unwrap();
+    let sig = crate::signals::signal_path(run_id).unwrap();
+    let cwd = root.join("repo");
+    fs::create_dir_all(&cwd).unwrap();
+    let session = "5e55105e-0000-4000-8000-000000000001";
+    let dir = root.join("home/.claude/projects").join(encode_claude_project_dir(&cwd));
+    fs::create_dir_all(&dir).unwrap();
+    let transcript = dir.join(format!("{session}.jsonl"));
+    // Written after this process spawned: the fixture's lines, dated ahead.
+    let fixture = include_str!("../../tests/fixtures/claude-2.1.330-background.jsonl")
+        .replace("2026-11-23T", "2099-11-23T");
+    let through = |marker: &str| -> String {
+        let lines: Vec<&str> = fixture.lines().collect();
+        let end = lines.iter().position(|line| line.contains(marker)).unwrap();
+        format!("{}\n", lines[..=end].join("\n"))
+    };
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "sleep 30"])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 10, cols: 80 },
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = cwd.clone();
+    let mut run = test_agent_run(run_id, "run the suite in the background");
+    run.cwd = cwd.clone();
+    run.session_id = Some(session.to_string());
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    let signal = |state: &str| fs::write(&sig, format!("{{\"state\":\"{state}\"}}")).unwrap();
+    let poll_until = |app: &mut App, what: &str, done: &dyn Fn(&AgentRun) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.poll_agents();
+            if done(&app.agents[0]) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{what}: {:?} {:?}", app.agents[0].status, app.agents[0].wait_signal);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let record = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(native_run_dir(&cwd, run_id).join("run.json")).unwrap()).unwrap()
+    };
+
+    // The turn ends with a background Bash and an async subagent out.
+    fs::write(&transcript, through("stop-1")).unwrap();
+    signal("done");
+    poll_until(&mut app, "stop with work out", &|run| !sig.exists());
+    assert_eq!(app.agents[0].status, AgentStatus::Running, "not review");
+    assert_eq!(app.agents[0].wait_signal, Some(WaitSignal::Background));
+    assert_eq!(crate::render::agent_status_text(&app.agents[0]), "waiting on 1 helper and 1 command");
+    assert!(!crate::render::agent_needs_you(&app.agents[0]));
+    let saved = record();
+    assert_eq!(saved["status"], "running");
+    assert_eq!(saved["background"], serde_json::json!({"shells": 1, "agents": 1, "teammates": 0}));
+    assert!(saved["attention"].is_null(), "{saved}");
+
+    // The shell's notification starts a turn: working again.
+    fs::write(&transcript, through("stop-2")).unwrap();
+    signal("working");
+    poll_until(&mut app, "notification turn", &|run| run.wait_signal.is_none());
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(record()["background"].is_null());
+
+    // Its last turn ends with everything finished: review.
+    fs::write(&transcript, through("stop-3")).unwrap();
+    signal("done");
+    poll_until(&mut app, "last stop", &|run| run.status == AgentStatus::Done);
+    assert_eq!(app.agents[0].wait_signal, None);
+    assert!(record()["background"].is_null());
+
+    for run in app.agents.iter_mut() {
+        run.terminal = None;
+    }
 }
 
 #[cfg(not(windows))]
@@ -29224,7 +29317,8 @@ fn home_machine_boot_reopens_paused_rows_without_a_new_turn() {
     let _ = fs::remove_dir_all(&dir);
 
     assert!(main_live, "the paused main row is live again");
-    assert_eq!(main_status, AgentStatus::Running, "as it was before the stop");
+    // No turn runs on the resumed session, so no turn end will ever come.
+    assert_eq!(main_status, AgentStatus::Done, "done at its prompt, not working");
     assert_eq!(main_turns, 1, "no new turn was recorded");
     assert!(!stopped_live, "an explicit stop is respected");
     assert!(!gone_live, "a row whose workspace is gone is left alone");
@@ -32680,7 +32774,8 @@ fn home_boot_continues_only_runs_that_were_mid_turn() {
     let busy_codex = argv("busy-codex");
     let activity = app.activity_log.clone();
     let flags: Vec<bool> = app.agents.iter().map(|run| run.resume_turn).collect();
-    let running = app.agents.iter().all(|run| run.status == AgentStatus::Running && run.terminal.is_some());
+    let reopened = app.agents.iter().all(|run| run.terminal.is_some());
+    let statuses: Vec<AgentStatus> = app.agents.iter().map(|run| run.status).collect();
     let records: Vec<serde_json::Value> = ["busy-claude", "idle-claude", "busy-codex"].iter().map(|id| record(id)).collect();
     for run in app.agents.iter_mut() {
         run.terminal = None;
@@ -32693,7 +32788,11 @@ fn home_boot_continues_only_runs_that_were_mid_turn() {
     assert!(!idle_claude.contains(&prompt), "an idle row reopens with no turn: {idle_claude:?}");
     assert!(idle_claude.contains(&"session-idle-claude".to_string()));
     assert_eq!(after(&busy_codex, "resume"), Some(prompt.clone()), "{busy_codex:?}");
-    assert!(running, "every row is back");
+    assert!(reopened, "every row is back");
+    // The idle row runs no turn, so no turn end will ever come: it is done at
+    // its prompt, not working (it used to read as working across every boot).
+    assert_eq!(statuses, vec![AgentStatus::Running, AgentStatus::Done, AgentStatus::Running]);
+    assert_eq!(records[1]["status"], "completed", "{}", records[1]);
     assert_eq!(flags, vec![false, false, false], "the flag is spent");
     for record in &records {
         assert!(record.get("resumeTurn").is_none(), "cleared on disk too: {record}");

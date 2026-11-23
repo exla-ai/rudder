@@ -54,6 +54,16 @@ nodeTest("finished rows: delivery blocked fails, a merged PR is merged, work out
   assert.equal(phoneStatus({ status: "migrated" }), "done");
 });
 
+nodeTest("a working row whose turn ended on background work says what it waits on", () => {
+  const record = { status: "running", lifecyclePhase: "working", attention: null, process: { pid: 7 }, background: { shells: 1, agents: 1, teammates: 2 } };
+  const fields = statusFields(record, { alive });
+  assert.equal(fields.status, "working");
+  assert.deepEqual(fields.background, { shells: 1, agents: 1, teammates: 2 });
+  // Not working once its dashboard or process is gone; nothing waits then.
+  assert.equal(statusFields(record, { alive: dead }).background, null);
+  assert.equal(statusFields({ ...record, background: null }, { alive }).background, null);
+});
+
 nodeTest("statusFields carries the raw facts; a PR without observedState has an unknown state", () => {
   const fields = statusFields({ status: "merge-conflict", lifecyclePhase: "integration-blocked", publish: { number: 9, url: "u" } });
   assert.equal(fields.conflict, true);

@@ -132,6 +132,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: None,
         parked: None,

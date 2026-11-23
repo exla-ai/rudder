@@ -616,6 +616,9 @@ pub struct TerminalPane {
     /// Stable for this process attempt. A resumed pane gets a fresh identity,
     /// even if the OS reuses a PID or the backend resumes the same conversation.
     instance_id: String,
+    /// When the process spawned (Unix ms). Claude's background tasks die with
+    /// their process, so only transcript lines written since count (background.rs).
+    spawned_at_ms: u64,
     execution_profile: Option<String>,
     agent_link_launch_json: Option<String>,
     /// Launched with `TYPED_REMOTE_CONTROL_ENV`: the app still has to type
@@ -1203,6 +1206,9 @@ impl TerminalPane {
             builder.cwd(cwd);
         }
 
+        let spawned_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
         let child = pair
             .slave
             .spawn_command(builder)
@@ -1237,6 +1243,7 @@ impl TerminalPane {
 
         Ok(Self {
             instance_id,
+            spawned_at_ms,
             execution_profile,
             agent_link_launch_json,
             remote_control_to_type,
@@ -1284,6 +1291,10 @@ impl TerminalPane {
 
     pub fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    pub fn spawned_at_ms(&self) -> u64 {
+        self.spawned_at_ms
     }
 
     pub fn execution_profile(&self) -> Option<&str> {

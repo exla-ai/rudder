@@ -135,6 +135,7 @@ use crate::home_update::*;
 mod agent_sync;
 use crate::agent_sync::*;
 mod subagents;
+mod background;
 mod codex_rollout;
 mod chat_edit;
 mod agent_life;
@@ -2159,6 +2160,13 @@ struct App {
     codex_rollout_rx: Option<mpsc::Receiver<Vec<codex_rollout::ScanResult>>>,
     last_codex_rollout_scan: Instant,
     codex_waits: HashMap<String, Vec<codex_rollout::CodexWait>>,
+    /// Background work (background.rs): the scan in flight, when the last one
+    /// started, whether a Stop is waiting on the next one, and each live Claude
+    /// agent's latest result.
+    background_scan_rx: Option<mpsc::Receiver<Vec<background::ScanResult>>>,
+    last_background_scan: Instant,
+    background_scan_due: bool,
+    background_scans: HashMap<String, background::ScanResult>,
     /// Agents whose subagent tree is open in the sidebar (Tab), by run id, so
     /// it stays open however the list re-sorts.
     subagent_trees_open: HashSet<String>,
@@ -2441,6 +2449,12 @@ enum WaitSignal {
     /// reported one. Lifted exactly like the other waits: the human sends a new
     /// prompt, or the agent is visibly working again.
     Error(Option<String>),
+    /// Claude's turn ended (`Stop`) while work it started in the background
+    /// still runs (`AgentRun::background`, background.rs). Each piece restarts
+    /// the agent when it finishes, so the row is not ready for review: it is
+    /// lifted by the `working` signal of the turn a notification starts, or a
+    /// spinner, like the other waits.
+    Background,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2829,6 +2843,10 @@ struct AgentRun {
     /// sign. Persisted as run.json `compactingSince` for the phone's
     /// "Compacting context" row.
     compacting_since: Option<u64>,
+    /// What the agent last had running in the background (background.rs),
+    /// from the scan after its turn ended. Read only while `wait_signal` is
+    /// `Background`; persisted then as run.json `background`.
+    background: background::BackgroundWork,
     /// A wait the BACKEND reported through its own hook, latched until something
     /// deterministic lifts it: the human answering, the agent visibly resuming,
     /// or the turn ending.
@@ -3221,6 +3239,7 @@ fn fork_row(
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -3792,6 +3811,10 @@ impl App {
             codex_rollout_rx: None,
             last_codex_rollout_scan: Instant::now(),
             codex_waits: HashMap::new(),
+            background_scan_rx: None,
+            last_background_scan: Instant::now(),
+            background_scan_due: false,
+            background_scans: HashMap::new(),
             subagent_trees_open: HashSet::new(),
             subagent_cursor: None,
             subagent_row_map: Vec::new(),
@@ -6029,7 +6052,11 @@ impl App {
                 // Clearing only the derived flags was useless: the latch put them
                 // straight back on the next tick, so answering an agent never
                 // cleared its badge. Answering IS the thing that ends the wait.
-                run.wait_signal = None;
+                // Work still running in the background is not answered by a
+                // keystroke; the prompt it sends lifts that wait.
+                if run.wait_signal != Some(WaitSignal::Background) {
+                    run.wait_signal = None;
+                }
                 self.dirty = true;
                 // run.json's `attention` is what the phone shows; clearing the
                 // badge here without writing it left "needs input" on the phone.
@@ -6302,6 +6329,50 @@ impl App {
             let _ = tx.send(subagents::scan(&runs));
         });
         self.subagent_scan_rx = Some(rx);
+    }
+
+    /// Background work (background.rs): apply a finished scan and start the
+    /// next one on its cadence, or at once when a Stop waits on it. The scan
+    /// thread does the file IO.
+    fn poll_background(&mut self) {
+        if let Some(rx) = &self.background_scan_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.background_scan_rx = None;
+                    for result in results {
+                        if let Some(run) = self.agents.iter_mut().find(|run| run.id == result.run_id) {
+                            // A row waiting on its background work shows what is
+                            // still out, as it changes.
+                            if run.wait_signal == Some(WaitSignal::Background) && run.background != result.work {
+                                run.background = result.work;
+                                let _ = save_native_run_record(&self.cwd, run);
+                                self.dirty = true;
+                            }
+                        }
+                        self.background_scans.insert(result.run_id.clone(), result);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.background_scan_rx = None,
+            }
+        }
+        if !self.background_scan_due && self.last_background_scan.elapsed() < background::SCAN_INTERVAL {
+            return;
+        }
+        self.background_scan_due = false;
+        self.last_background_scan = Instant::now();
+        let requests: Vec<background::ScanRequest> =
+            self.agents.iter().filter_map(background_scan_request).collect();
+        self.background_scans
+            .retain(|run_id, _| requests.iter().any(|request| &request.run_id == run_id));
+        if requests.is_empty() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(background::scan(&requests));
+        });
+        self.background_scan_rx = Some(rx);
     }
 
     /// Codex rollouts (codex_rollout.rs): apply a finished background scan
@@ -9580,6 +9651,7 @@ impl App {
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -9744,6 +9816,7 @@ impl App {
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10258,6 +10331,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -10361,6 +10435,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -11584,6 +11659,7 @@ Address the objection directly. If you disagree, say why inside \
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -12174,15 +12250,20 @@ Address the objection directly. If you disagree, say why inside \
                     .unwrap_or_else(|| run.cwd.clone()),
                 fresh_prompt: continue_turn.then(|| HOME_BOOT_CONTINUE_PROMPT.to_string()),
             };
-            // Back to Running, as it was before the stop: the resumed session runs
-            // no turn, and the idle backstop says so ("idle at its prompt").
-            let was_done = run.status == AgentStatus::Done;
+            // Without a "continue" turn the resumed session runs nothing: it sits
+            // at its prompt, so its turn is over, whatever the row showed when the
+            // machine stopped (idle, a question or a failed turn, none of which
+            // survives the process). Back to Running, no turn end ever came, and
+            // the row read as working on every later boot. A plan node stays on
+            // that path: Done merges it, and its work never said it was finished.
+            let settle_done = !continue_turn && !run.plan_may_merge();
             if self.spawn_claude_resume_for(index, &entry) {
-                if was_done {
-                    // Reopened idle: it ran no turn, so it is still done.
+                if settle_done {
                     let cwd = self.cwd.clone();
                     if let Some(run) = self.agents.get_mut(index) {
                         run.status = AgentStatus::Done;
+                        run.completed_at = Some(Instant::now());
+                        run.wait_signal = None;
                         let _ = save_native_run_record(&cwd, run);
                     }
                 }
@@ -14828,6 +14909,7 @@ Address the objection directly. If you disagree, say why inside \
             codex_goal_menu: None,
             codex_rate_limit_menu: None,
             compacting_since: None,
+            background: Default::default(),
             wait_signal: None,
             worker_exit_note: None,
             parked: None,
@@ -22140,6 +22222,7 @@ What to do\n\
         self.drain_workspace_preps();
         self.drain_chat_edits();
         self.poll_subagents();
+        self.poll_background();
         self.emit_dashboard_opened_once();
         self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();
@@ -22579,6 +22662,13 @@ What to do\n\
                     run.needs_user_input = true;
                     changed = true;
                 }
+                // The work a finished turn left running has all ended, and for a
+                // minute no notification has started a turn: the agent is done
+                // (settled below, with no signal pending).
+                let background_over = run.wait_signal == Some(WaitSignal::Background)
+                    && !run.background.any()
+                    && run.last_output_at.elapsed() >= IDLE_WITHOUT_SIGNAL
+                    && terminal_at_idle_prompt(run.backend, &terminal.live_lines_snapshot());
                 if run.needs_permission != previous_needs_permission
                     || run.needs_user_input != previous_needs_user_input
                 {
@@ -22662,16 +22752,39 @@ What to do\n\
                         hook_signal_seen |= signal.is_some();
                         match signal {
                             Some(signals::SignalState::Done) => {
-                                signals::clear_signal(&run.id);
-                                run.wait_signal = None;
-                                // A turn that only answered a /sync is not new
-                                // work to review: no ping.
-                                if sync_reply_ended(&mut self.sync_deliveries, run) {
-                                    mark_run_done_quietly(run);
+                                let scan = self.background_scans.get(&run.id);
+                                // No scan has read the transcript since the Stop
+                                // hook wrote this, so a task launched just before
+                                // the turn ended may not be counted yet: the
+                                // signal waits on disk for the next scan.
+                                let unscanned = background_scan_request(run).is_some()
+                                    && scan.is_none_or(|scan| {
+                                        background::signal_written_at(&run.id)
+                                            .is_some_and(|written| scan.read_at < written)
+                                    });
+                                if unscanned {
+                                    self.background_scan_due = true;
                                 } else {
-                                    mark_run_done(run);
+                                    signals::clear_signal(&run.id);
+                                    run.wait_signal = None;
+                                    let work = scan.map(|scan| scan.work).unwrap_or_default();
+                                    if work.any() {
+                                        // The turn ended, the work it started did
+                                        // not: each piece restarts the agent when
+                                        // it finishes. Not review, and no ping.
+                                        run.wait_signal = Some(WaitSignal::Background);
+                                        run.background = work;
+                                        run.needs_user_input = false;
+                                        run.needs_permission = false;
+                                    } else if sync_reply_ended(&mut self.sync_deliveries, run) {
+                                        // A turn that only answered a /sync is not
+                                        // new work to review: no ping.
+                                        mark_run_done_quietly(run);
+                                    } else {
+                                        mark_run_done(run);
+                                    }
+                                    changed = true;
                                 }
-                                changed = true;
                             }
                             // Each of these is consumed the way Done always was.
                             // Leaving them on disk was the bug: the file was re-read
@@ -22759,6 +22872,11 @@ What to do\n\
                                         "worker lifecycle hooks were not installed; refusing to guess completion from terminal output"
                                             .to_string(),
                                     );
+                                    changed = true;
+                                }
+                                if background_over {
+                                    run.wait_signal = None;
+                                    mark_run_done(run);
                                     changed = true;
                                 }
                             }
@@ -23807,6 +23925,22 @@ fn merged_workspace_is_sweepable(
         .and_then(|mtime| now.duration_since(mtime).ok())
         .map(|age| age >= grace)
         .unwrap_or(false)
+}
+
+/// What the background scan reads for a live Claude agent (background.rs):
+/// None for any other row, whose turn end needs no scan.
+fn background_scan_request(run: &AgentRun) -> Option<background::ScanRequest> {
+    if run.backend != Backend::Claude || run.plain_process || run.is_orchestrator() {
+        return None;
+    }
+    let terminal = run.terminal.as_ref()?;
+    Some(background::ScanRequest {
+        run_id: run.id.clone(),
+        cwd: run.cwd.clone(),
+        session_id: run.session_id.clone().filter(|sid| !sid.trim().is_empty())?,
+        since_ms: terminal.spawned_at_ms(),
+        pid: terminal.child_process_id(),
+    })
 }
 
 /// Encode a working directory the way Claude Code names its session-transcript folder

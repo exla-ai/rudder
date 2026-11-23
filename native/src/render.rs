@@ -6548,6 +6548,9 @@ pub(crate) fn agent_status_text(agent: &AgentRun) -> String {
     if let Some(label) = agent.publish.label() {
         return label;
     }
+    if agent.status == AgentStatus::Running && agent.wait_signal == Some(WaitSignal::Background) {
+        return agent.background.label();
+    }
     let label = agent_status_label(agent).to_string();
     // A row that says "working" says exactly the same thing whether the agent
     // is mid-thought or has been parked for a day and a half. In ~/code/battery
@@ -6601,6 +6604,10 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         // Silent at its composer for a minute with the row still "running":
         // the turn ended (or never ran) and nothing reported it.
         "idle at its prompt"
+    } else if agent.wait_signal == Some(WaitSignal::Background) {
+        // The turn ended; work it started still runs (`agent_status_text`
+        // says what).
+        "working in background"
     } else if agent.wait_signal == Some(WaitSignal::Interrupted) {
         // You stopped the turn (Esc, or rejecting a tool call). Claude reports
         // nothing for that, so this row used to read "working" for as long as

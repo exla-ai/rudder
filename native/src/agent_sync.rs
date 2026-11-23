@@ -153,6 +153,9 @@ fn sync_status(run: &AgentRun) -> &'static str {
         }
         AgentStatus::Running if integrating => "merging",
         AgentStatus::Running if run.wait_signal == Some(WaitSignal::Idle) => "idle at its prompt",
+        AgentStatus::Running if run.wait_signal == Some(WaitSignal::Background) => {
+            "waiting on work it started in the background"
+        }
         AgentStatus::Running
             if run.needs_permission || run.needs_user_input || run.wait_signal.is_some() =>
         {

@@ -348,6 +348,7 @@ pub(crate) fn create_main_agent(
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: None,
         parked: None,
@@ -926,6 +927,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         codex_goal_menu: None,
         codex_rate_limit_menu: None,
         compacting_since: None,
+        background: Default::default(),
         wait_signal: None,
         worker_exit_note: parked.as_ref().map(ParkedNote::card_note),
         parked,
@@ -1454,6 +1456,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // What a live row is waiting on, for readers outside the dashboard (the
         // phone app): the flags themselves are in-memory only.
         "attention": run_attention(run),
+        // The turn ended while work it started still runs in the background
+        // (background.rs): `{shells, agents, teammates}`, null otherwise.
+        "background": (run.status == AgentStatus::Running && run.wait_signal == Some(WaitSignal::Background))
+            .then(|| run.background.to_json()),
         // The phone shows a Codex plan's card only while this is true: Esc on
         // the menu writes nothing to the rollout (`App::poll_codex_rollouts`).
         "codexPlanMenu": run.codex_plan_menu,

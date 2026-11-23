@@ -121,6 +121,17 @@ const needsYou = (a) => {
   return a.status === "waiting" || a.status === "review" || a.status === "failed";
 };
 const prState = (a) => a?.pr?.state || null;
+// A working agent whose turn ended while work it started still runs
+// (agent-status.mjs backgroundWork): it is waiting on that, not typing.
+const backgroundLabel = (b) => {
+  const helpers = (b.agents || 0) + (b.teammates || 0);
+  const shells = b.shells || 0;
+  const n = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  if (helpers && shells) return `Waiting on ${n(helpers, "helper")} and ${n(shells, "command")}`;
+  if (helpers) return `Waiting on ${n(helpers, "helper")}`;
+  if (shells) return `Waiting on ${n(shells, "background command")}`;
+  return "Waiting on background work";
+};
 // The row's label: the prompt it is blocked on, why it needs you, what its PR
 // is doing, or (from a sleeping machine) when it was last seen.
 const agentStatus = (a) => {
@@ -136,6 +147,7 @@ const agentStatus = (a) => {
   if ((a?.status === "review" || a?.status === "done") && (pr === "open" || pr === "draft")) {
     return { label: pr === "draft" ? "Draft PR" : "PR open", cls: "s-accent" };
   }
+  if (a?.status === "working" && a.background) return { label: backgroundLabel(a.background), cls: "s-working", live: true };
   return statusOf(a?.status);
 };
 const backendLabel = (a) => agentModelLabel(a);
@@ -4994,7 +5006,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const anchor = seen.find((s) => kept.has(s.node.dataset.key));
     paintEarlier(t, earlier);
     reconcile(msgsEl, items, (x) => x.id, createItem, updateItem);
-    typing.hidden = status !== "working" || !!t.compacting;
+    typing.hidden = status !== "working" || !!t.compacting || !!agent?.background;
 
     const count = (t.messages || []).length;
     if (follow) { toBottom(false); requestAnimationFrame(() => toBottom(false)); }

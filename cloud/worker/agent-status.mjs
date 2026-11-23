@@ -105,12 +105,28 @@ export function phoneStatus(record, { dashboardRunning = true, alive = pidAlive 
   return status || "done";
 }
 
+/**
+ * What a working row's finished turn left running: background shells and
+ * Monitors, async subagents and busy teammates (`{shells, agents, teammates}`,
+ * dashboard background.rs). The agent is waiting on them, not ready for review;
+ * each restarts it when it finishes. Null otherwise.
+ */
+export function backgroundWork(record) {
+  const work = record?.background;
+  if (!work || typeof work !== "object") {
+    return null;
+  }
+  return { shells: work.shells, agents: work.agents, teammates: work.teammates };
+}
+
 /** The status fields of an agent summary (the rest is title, preview, asks). */
 export function statusFields(record, options = {}) {
+  const status = phoneStatus(record, options);
   return {
-    status: phoneStatus(record, options),
+    status,
     phase: record?.lifecyclePhase ?? null,
     attention: record?.attention ?? null,
+    background: status === "working" ? backgroundWork(record) : null,
     conflict: hasConflict(record),
     notInTrunk: record?.status === "merged" && notInTrunk(record),
     pr: prInfo(record),

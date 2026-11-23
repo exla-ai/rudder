@@ -179,3 +179,20 @@ test("OpenCode: background Tasks show their own status, activity and nested sess
   assert.equal(cards[`call_${done}`].result, "Looks good.");
   assert.equal(cards[`call_${unrelated}`], undefined);
 });
+
+test("OpenCode: a reply that ended on an error says so, and a stopped one says Stopped", (t) => {
+  const { home, repo } = setup(t, (_db, addMessage) => {
+    addMessage(SESSION, "msg_06", 7000, { role: "user" }, { type: "text", text: "try again" });
+    addMessage(SESSION, "msg_07", 7100, { role: "assistant", time: { created: 7100, completed: 7400 }, error: { name: "APIError", data: { message: "Too Many Requests: Rate limit exceeded", statusCode: 429, isRetryable: true } } });
+    addMessage(SESSION, "msg_08", 8000, { role: "user" }, { type: "text", text: "once more" });
+    addMessage(SESSION, "msg_09", 8100, { role: "assistant", time: { created: 8100, completed: 8300 }, error: { name: "MessageAbortedError", data: { message: "The operation was aborted." } } }, { type: "text", text: "Starting on" });
+  });
+  const shown = readTranscript(repo, "run_o", { home, limit: 300 }).messages.slice(-5).map((m) => [m.role, m.kind ?? null, m.level ?? null, m.text]);
+  assert.deepEqual(shown, [
+    ["user", null, null, "try again"],
+    ["system", "notice", "error", "Too Many Requests: Rate limit exceeded"],
+    ["user", null, null, "once more"],
+    ["assistant", null, null, "Starting on"],
+    ["system", "notice", "info", "Stopped"],
+  ]);
+});

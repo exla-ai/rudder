@@ -351,11 +351,39 @@ function showUserTask(messages, record) {
       return message;
     }
     const moved = showHandoff(message);
-    if (moved !== message || !RUDDER_FRAMING.test(message.text)) {
+    if (moved !== message) {
       return moved;
+    }
+    const rudder = rudderPrompt(message, record);
+    if (rudder || !RUDDER_FRAMING.test(message.text)) {
+      return rudder ?? message;
     }
     return task ? { ...message, text: task } : message;
   });
+}
+
+// Prompts Rudder itself types into an agent show as from Rudder, one marker
+// with the prompt behind it, not as the user's words: the turn a session
+// resumes on after the home restarted to update (native main.rs
+// HOME_BOOT_CONTINUE_PROMPT) or after a move off a machine did not finish,
+// and the brief a migrated or restored chat starts a fresh session from
+// (run.json `migration.freshPrompt`), which goes in framed as a task.
+const RUDDER_PROMPTS = [
+  [/^Rudder restarted this machine to update it\. Continue the task where you left off\./, "Rudder restarted this machine to update it"],
+  [/^The move off this machine did not finish\. Continue the original task here from the existing workspace: /, "Rudder resumed this chat here after a move did not finish"],
+];
+
+function rudderPrompt(message, record) {
+  let text = RUDDER_PROMPTS.find(([prompt]) => prompt.test(message.text))?.[1] ?? null;
+  // The session's prompt is the brief, framed: its start is in the brief,
+  // also when it lost the brief's opening (the 11-23 restore's did).
+  const fresh = record.migration?.freshPrompt;
+  const framed = typeof fresh === "string" && fresh && !text ? RUDDER_FRAMING.exec(message.text) : null;
+  const head = framed ? message.text.slice(0, framed.index > 0 ? Math.min(framed.index, 200) : 200).trim() : "";
+  if (head && fresh.includes(head)) {
+    text = "Rudder started this session from a brief";
+  }
+  return text ? { id: message.id, role: "system", kind: "rudder", ts: message.ts, text, rudder: { prompt: message.text } } : null;
 }
 
 // A chat moved here from another harness opens with the handoff its new
@@ -464,8 +492,10 @@ function readRunRecord(repoDir, runId) {
 // MISS_RECHECK_MS. Where the session would appear now is checked every time
 // (Claude: its own folder, one stat; Codex: today's folders), so a session
 // that starts writing after a miss (a new agent, a branch) shows at once.
+// A branch copies its parent's Claude session, id and all, into its own
+// folder, so the path is remembered per workspace too.
 const MISS_RECHECK_MS = 30_000;
-const transcriptPaths = new Map(); // sessionId -> { file, checkedAt }
+const transcriptPaths = new Map(); // `${workspace path}|${sessionId}` -> { file, checkedAt }
 
 export function transcriptFile(record, home, now = Date.now()) {
   const sessionId = record?.session?.nativeSessionId;
@@ -487,19 +517,20 @@ export function transcriptFile(record, home, now = Date.now()) {
     }
     return null;
   }
-  const known = transcriptPaths.get(sessionId);
+  const key = `${record.workspace?.path ?? ""}|${sessionId}`;
+  const known = transcriptPaths.get(key);
   if (known?.file && fs.existsSync(known.file)) {
     return known.file;
   }
   if (known && !known.file && now - known.checkedAt < MISS_RECHECK_MS) {
     const file = record.backend === "codex" ? codexNewRollout(home, sessionId, now) : claudeCwdTranscript(record, home, sessionId);
     if (file) {
-      transcriptPaths.set(sessionId, { file, checkedAt: now });
+      transcriptPaths.set(key, { file, checkedAt: now });
     }
     return file;
   }
   const file = findTranscript(record, home, sessionId);
-  transcriptPaths.set(sessionId, { file, checkedAt: now });
+  transcriptPaths.set(key, { file, checkedAt: now });
   return file;
 }
 
@@ -611,9 +642,20 @@ function antigravityReader({ stats = null } = {}) {
         // model after it (<ADDITIONAL_METADATA>: the time;
         // <USER_SETTINGS_CHANGE>: a model switch). The chat shows the request.
         const request = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/.exec(content);
-        const text = request ? request[1].trim() : content;
+        const cut = request ? null : AGY_CUT_REQUEST.exec(content);
+        const text = request ? request[1].trim() : cut ? cut[1].trim() : content;
         if (text) {
           reader.messages.push({ id, role: "user", ts, text });
+        }
+        if (cut) {
+          const kb = (bytes) => `${Math.round(bytes / 1024)} KB`;
+          reader.messages.push(noticeMessage(`${id}.cut`, ts, `Antigravity kept only the first ${kb(Buffer.byteLength(cut[1]))} of this message and cut the last ${kb(Number(cut[2]))}. The agent got it cut short too.`, "warning"));
+        }
+      } else if (step.type === "ERROR_MESSAGE") {
+        // An error agy hit (a model with no capacity, an API failure). A retry
+        // that answers follows it; without one, it is all the chat has.
+        if (typeof step.error === "string" && step.error.trim()) {
+          reader.messages.push(noticeMessage(id, ts, step.error.trim(), "error"));
         }
       } else if (step.type === "PLANNER_RESPONSE") {
         if (content) {
@@ -637,6 +679,11 @@ function antigravityReader({ stats = null } = {}) {
   };
   return reader;
 }
+
+// agy saves at most about 190 KB of a step, even in transcript_full.jsonl. A
+// longer prompt loses its end, the closing </USER_REQUEST> with it, and ends
+// on agy's note of how much it cut; the model got the same cut prompt.
+const AGY_CUT_REQUEST = /^<USER_REQUEST>([\s\S]*?)\n<truncated (\d+) bytes>\n\nNOTE: The output was truncated because it was too long\.[^\n]*$/;
 
 // The row's one line for an agy tool call: the command or path it acts on,
 // else agy's own summary of the call.
@@ -823,6 +870,15 @@ function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
         }
       }
     });
+    // A reply that ended on an error (a rate limit, an overloaded provider)
+    // or was stopped says so after what it got out.
+    const error = data.error;
+    if (error?.name === "MessageAbortedError") {
+      messages.push(stoppedNotice(`${row.id}:error`, toMillis(data.time?.completed) ?? ts));
+    } else if (error) {
+      const said = String(error.data?.message || error.name || JSON.stringify(error)).trim();
+      messages.push(noticeMessage(`${row.id}:error`, toMillis(data.time?.completed) ?? ts, said, "error"));
+    }
   }
   if (turn?.last) {
     endTurn();
@@ -1086,6 +1142,17 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       }
       return;
     }
+    // Claude Code's own notes ("Unknown command: /x", "Goal paused · usage
+    // limit reached", "Remote Control disconnected", a hook loop overridden)
+    // show as notices: one can be the only trace of a message it ate. "Compacted
+    // while idle" follows the compaction's boundary, whose marker shows it.
+    if (entry.type === "system" && entry.subtype === "informational") {
+      const text = String(entry.content || "").trim();
+      if (own && text && !text.startsWith("Compacted while idle")) {
+        push(noticeMessage(entry.uuid || `notice-${offset}`, toMillis(entry.timestamp), text, entry.level === "warning" ? "warning" : "info"));
+      }
+      return;
+    }
     // Claude Code saves a session's cost-state as its process exits.
     if (sub && entry.type === "cost-state") {
       reader.exited = true;
@@ -1103,9 +1170,10 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       if (peers) {
         pushPeers(entry.uuid, toMillis(entry.timestamp), peers);
       } else if (queued.commandMode === "prompt" && queued.origin?.kind === "human") {
+        const images = claudeImages(queued.prompt);
         const text = cleanUserText(prompt);
-        if (text) {
-          push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text });
+        if (text || images.length) {
+          push({ id: entry.uuid, role: "user", ts: toMillis(entry.timestamp), text: images.length ? withoutImageRefs(text) : text, ...(images.length ? { images } : {}) });
         }
       }
       return;
@@ -1180,11 +1248,19 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       }
       return clean;
     };
-    // A user turn is the user's words, or what other agents sent.
+    // A user turn is the user's words with the images they pasted, Claude's
+    // note that a turn was stopped, or what other agents sent.
+    const images = entry.type === "user" ? claudeImages(content) : [];
+    let imagesShown = false;
     const say = (id, text) => {
       const peers = entry.type === "user" && text ? peerMessages(text, entry.origin) : null;
       if (peers) {
         pushPeers(id, ts, peers);
+      } else if (entry.type === "user" && CLAUDE_INTERRUPT.test(text)) {
+        push(stoppedNotice(id, ts));
+      } else if (entry.type === "user" && images.length && !imagesShown) {
+        imagesShown = true;
+        push({ id, role: "user", ts, text: withoutImageRefs(text), images });
       } else if (text) {
         push({ id, role: entry.type === "user" ? "user" : "assistant", ts, text });
       }
@@ -1201,6 +1277,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       if (block?.type === "text") {
         const text = entry.type === "user" ? userText(block.text) : String(block.text || "").trim();
         say(id, entry.isApiErrorMessage ? inAppWords(text) : text);
+      } else if (block?.type === "image" && entry.type === "user" && !imagesShown && !content.some((part) => part?.type === "text")) {
+        // Images with no words.
+        say(id, "");
       } else if (block?.type === "thinking" && entry.type === "assistant" && entry.thinkingDisplay === "updates") {
         // Claude Code's "updates" display stores the notes the agent writes
         // to the user between tool calls as thinking; its terminal shows them.
@@ -1360,12 +1439,21 @@ const COORDINATOR_OUTRO = /\n+Address this before completing your current task\.
 function peerMessages(text, origin) {
   if (origin?.kind === "peer") {
     const body = origin.handback ? origin.handbackReportText : origin.body;
-    return typeof origin.name === "string" && typeof body === "string" ? [{ from: origin.name, summary: null, idle: false, failure: null, body }] : null;
+    return typeof origin.name === "string" && typeof body === "string" ? [{ from: origin.name, summary: null, idle: false, failure: null, body: withoutHarnessBanner(body) }] : null;
   }
   if (origin?.kind === "coordinator") {
     return [{ from: "the lead", summary: null, idle: false, failure: null, body: text.replace(COORDINATOR_INTRO, "").replace(COORDINATOR_OUTRO, "") }];
   }
   return origin ? null : teammateMessages(text);
+}
+
+// When a subagent's report looks like instructions, Claude Code warns its
+// model in a banner over it and escapes the report's tags ("<" -> "<\").
+// The card shows the report as it was written.
+const HARNESS_BANNER = /^\[harness: subagent output matched instruction-shaped pattern\(s\):[^\n]*\]\n+/;
+
+function withoutHarnessBanner(body) {
+  return HARNESS_BANNER.test(body) ? body.replace(HARNESS_BANNER, "").replace(/<\\/g, "<") : body;
 }
 
 function teammateMessages(text) {
@@ -1379,7 +1467,7 @@ function teammateMessages(text) {
       const note = JSON.parse(message.body);
       message.idle = true;
       message.failure = typeof note.failureReason === "string" ? note.failureReason : null;
-      message.body = typeof note.result === "string" ? note.result : "";
+      message.body = typeof note.result === "string" ? withoutHarnessBanner(note.result) : "";
     }
     found.push(message);
   }
@@ -1406,6 +1494,20 @@ function turnMessage(id, ts, durationMs) {
   return { id, role: "system", kind: "turn", ts, text: "", durationMs };
 }
 
+// A small note in the chat that is nobody's words: what the CLI itself said
+// (an unknown command, a paused goal, Remote Control taken over), a turn
+// that was stopped, an error the backend recorded. `level` is "info",
+// "warning" or "error".
+function noticeMessage(id, ts, text, level = "info") {
+  return { id, role: "system", kind: "notice", ts, text, level };
+}
+
+// A turn that was stopped (the user's Stop, Esc in the terminal). A
+// subagent's card reads it as stopped too (claudeInterrupted).
+function stoppedNotice(id, ts) {
+  return { ...noticeMessage(id, ts, "Stopped"), stopped: true };
+}
+
 const COMPACT_PREAMBLE = /^This session is being continued from a previous conversation that ran out of context\.[^\n]*\n+(?:Summary:\s*\n)?/;
 const COMPACT_TRAILER = /\n+(?:If you need specific details from before compaction|Continue the conversation from where it left off|Please continue the conversation from where we left)[\s\S]*$/;
 
@@ -1414,6 +1516,16 @@ export function compactSummaryText(content) {
     ? content
     : Array.isArray(content) ? content.map((part) => (part?.type === "text" ? part.text : "")).join("\n") : "";
   return String(raw || "").trim().replace(COMPACT_PREAMBLE, "").replace(COMPACT_TRAILER, "").trim();
+}
+
+// Claude's note in place of a user turn when one was stopped.
+const CLAUDE_INTERRUPT = /^\[Request interrupted by user(?: for tool use)?\]$/;
+
+// The images pasted into a Claude prompt (content blocks of type "image").
+// Claude keeps them in the session itself, as base64, and no file the app
+// can open holds them, so the chat shows a chip for each, with no path.
+function claudeImages(content) {
+  return Array.isArray(content) ? content.filter((part) => part?.type === "image").map(() => ({ path: null })) : [];
 }
 
 function cleanUserText(text) {
@@ -1595,11 +1707,15 @@ function codexReader({ stats = null, child = false } = {}) {
       return;
     }
     // Codex ends a turn with task_complete, which says how long it took. A
-    // stopped turn (turn_aborted) shows no time.
+    // stopped turn (turn_aborted) shows no time, but a Stopped note.
     if (entry.type === "event_msg" && entry.payload?.type === "task_complete") {
       if (Number(entry.payload.duration_ms) > 0) {
         messages.push(turnMessage(id, ts, Number(entry.payload.duration_ms)));
       }
+      return;
+    }
+    if (entry.type === "event_msg" && entry.payload?.type === "turn_aborted") {
+      messages.push(stoppedNotice(id, ts));
       return;
     }
     if (entry.type !== "response_item") {
@@ -1607,14 +1723,13 @@ function codexReader({ stats = null, child = false } = {}) {
     }
     const payload = entry.payload || {};
     if (payload.type === "message") {
-      const text = (payload.content || [])
-        .map((part) => part?.text || "")
-        .join("\n")
-        .trim();
-      if (!text) {
+      const { text, images } = payload.role === "user" ? codexUserParts(payload.content) : { text: (payload.content || []).map((part) => part?.text || "").join("\n").trim(), images: [] };
+      if (!text && !images.length) {
         return;
       }
-      if (payload.role === "user") {
+      if (payload.role === "user" && !text) {
+        messages.push({ id: payload.id || id, role: "user", ts, text: "", images });
+      } else if (payload.role === "user") {
         // Codex (0.170) tells the model about the goal as the user: what
         // /goal changed (`user_goal`), and each turn it starts to keep at the
         // goal (`goal`, its standing instructions). The chat shows notes, like
@@ -1627,7 +1742,7 @@ function codexReader({ stats = null, child = false } = {}) {
         } else if (internal?.[1] === "goal") {
           messages.push({ id: payload.id || id, role: "system", kind: "goal", ts, text: "Continuing toward the goal", goal: { detail: "" } });
         } else if (codexTypedText(text)) {
-          messages.push({ id: payload.id || id, role: "user", ts, text: codexQuestionReply(text) });
+          messages.push({ id: payload.id || id, role: "user", ts, text: codexQuestionReply(text), ...(images.length ? { images } : {}) });
         }
       } else if (payload.role === "assistant") {
         messages.push({ id, role: "assistant", ts, text });
@@ -1684,6 +1799,43 @@ function codexReader({ stats = null, child = false } = {}) {
 
 const CODEX_GOAL_CONTEXT = /^<codex_internal_context source="(user_goal|goal)">\n?([\s\S]*?)\n?<\/codex_internal_context>$/;
 
+// A Codex user message's words and pasted images. Codex sends each image as
+// `<image name=[Image #1] path="...">`, the image, `</image>`, and the words
+// name it with the same placeholder. The chat shows the words and an image
+// chip for each, with its saved path when there is one.
+const CODEX_IMAGE_OPEN = /^<image name=\[Image #\d+\](?: path="([^"]*)")?>$/;
+
+function codexUserParts(content) {
+  const words = [];
+  const images = [];
+  let saved = null;
+  for (const part of content || []) {
+    const text = part?.text || "";
+    const open = part?.type === "input_text" ? CODEX_IMAGE_OPEN.exec(text) : null;
+    if (open) {
+      saved = open[1] ?? null;
+    } else if (part?.type === "input_image") {
+      images.push({ path: saved });
+      saved = null;
+    } else if (text !== "</image>" && text) {
+      words.push(text);
+    }
+  }
+  const text = words.join("\n").trim();
+  return { text: images.length ? withoutImageRefs(text) : text, images };
+}
+
+// The words of a message with pasted images, without the `[Image #N]`
+// placeholders the CLIs put where each was pasted: the images show as chips.
+// Only the lines that had one change.
+function withoutImageRefs(text) {
+  return text
+    .split("\n")
+    .map((line) => (/\[Image #\d+\]/.test(line) ? line.replace(/[ \t]*\[Image #\d+\][ \t]*/g, " ").trim() : line))
+    .join("\n")
+    .trim();
+}
+
 // An answer to a `request_user_input_async` question comes back as a user
 // message, `<send_user_message_question_reply>[{answer, question,
 // questionItemId}]</…>`. The chat shows the answers as they were given.
@@ -1706,10 +1858,19 @@ function codexArguments(payload) {
 }
 
 // Codex tool output is a string, a JSON string ({output, metadata}), or an
-// array of content parts ([{type:"input_text", text}]).
+// array of content parts ([{type:"input_text", text}]). Code-mode output
+// (codeModeOutput) is either of the first and the last.
 function codexOutput(value) {
   let parsed = value;
   if (typeof value === "string") {
+    const head = CODE_MODE_HEAD.exec(value);
+    if (head) {
+      return codeModeOutput(head[1], [value.slice(head[0].length)]);
+    }
+    // A call Codex dropped before running it.
+    if (value === "aborted before dispatch") {
+      return { output: "Did not run: Codex stopped it before it started.", isError: true };
+    }
     try {
       parsed = JSON.parse(value);
     } catch {
@@ -1717,7 +1878,12 @@ function codexOutput(value) {
     }
   }
   if (Array.isArray(parsed)) {
-    return { output: parsed.map((part) => part?.text ?? "").filter(Boolean).join("\n"), isError: false };
+    const texts = parsed.map((part) => (part?.type === "input_image" ? "[image]" : part?.text ?? ""));
+    const head = CODE_MODE_HEAD.exec(texts[0] ?? "");
+    if (head) {
+      return codeModeOutput(head[1], [texts[0].slice(head[0].length), ...texts.slice(1)]);
+    }
+    return { output: texts.filter(Boolean).join("\n"), isError: false };
   }
   if (parsed && typeof parsed === "object") {
     if (typeof parsed.output === "string") {
@@ -1726,6 +1892,95 @@ function codexOutput(value) {
     return { output: JSON.stringify(parsed, null, 2), isError: false };
   }
   return { output: String(parsed ?? ""), isError: false };
+}
+
+// Code-mode Codex runs tools from a script (summarizeCodexInput), and the
+// call's output is the script's: a header ("Script completed", "Script
+// failed", "Script running with cell ID 3", then its wall time and
+// "Output:"), what the script printed (one content part or line per print),
+// and "Script error:\n..." when it threw. A script mostly prints the tools'
+// own results as JSON: an exec_command result ({chunk_id, wall_time_seconds,
+// exit_code, output}), an MCP tool's ({content, isError}), or either as a
+// Promise.allSettled entry ({status, value} or {status, reason}, under the
+// script's own index or label). The row shows each tool's output in their
+// place, with "Exit code N" over a command that failed, and fails when the
+// script did or any command exited non-zero.
+const CODE_MODE_HEAD = /^Script (completed|failed|running with cell ID \d+)\nWall time [^\n]*\nOutput:\n?/;
+
+function codeModeOutput(status, prints) {
+  let failed = status === "failed";
+  const shown = [];
+  for (const print of prints) {
+    if (print.startsWith("Script error:\n")) {
+      failed = true;
+      shown.push(print.trim());
+      continue;
+    }
+    for (const line of print.split("\n")) {
+      const result = printedResult(line);
+      if (!result) {
+        shown.push(line);
+        continue;
+      }
+      failed ||= result.failed;
+      shown.push(result.output);
+    }
+  }
+  return { output: shown.join("\n").replace(/\n{3,}/g, "\n\n").trim(), isError: failed };
+}
+
+// A tool's result a code-mode script printed as one line of JSON, as
+// { output, failed }, or null for anything else it printed.
+function printedResult(line) {
+  if (!line.startsWith("{") && !line.startsWith("[")) {
+    return null;
+  }
+  try {
+    return resultOf(JSON.parse(line), 0);
+  } catch {
+    return null; // not JSON, or JSON Codex cut in the middle ("…N tokens truncated…")
+  }
+}
+
+function resultOf(value, depth) {
+  if (depth > 3) {
+    return null;
+  }
+  // Promise.allSettled's entries, or a [label, result] pair: each in turn,
+  // and anything else in it as the script printed it.
+  if (Array.isArray(value)) {
+    const results = value.map((item) => (typeof item === "string" ? { output: item, failed: false, label: true } : resultOf(item, depth + 1)));
+    if (!results.some((result) => result && !result.label)) {
+      return null;
+    }
+    return {
+      output: results.map((result, index) => result?.output ?? JSON.stringify(value[index])).join("\n"),
+      failed: results.some((result) => result?.failed),
+    };
+  }
+  if (!value || typeof value !== "object") {
+    return typeof value === "string" ? { output: value, failed: false } : null;
+  }
+  // A settled promise, and the index or label the script put on it.
+  if (value.status === "rejected" && "reason" in value) {
+    const reason = value.reason;
+    const said = typeof reason === "string" ? reason : typeof reason?.message === "string" ? reason.message : JSON.stringify(reason);
+    return { output: said && said !== "{}" ? said : "The call failed.", failed: true };
+  }
+  if (value.status === "fulfilled" && "value" in value) {
+    return resultOf(value.value, depth + 1);
+  }
+  if (value.result && typeof value.result === "object" && Object.keys(value).length <= 2) {
+    return resultOf(value.result, depth + 1);
+  }
+  if (typeof value.output === "string" && ("chunk_id" in value || "wall_time_seconds" in value || "exit_code" in value)) {
+    const code = Number(value.exit_code ?? 0);
+    return code !== 0 ? { output: `Exit code ${value.exit_code}\n${value.output}`.trimEnd(), failed: true } : { output: value.output.trimEnd(), failed: false };
+  }
+  if (Array.isArray(value.content) && value.content.every((part) => typeof part?.text === "string" || part?.type === "image")) {
+    return { output: value.content.map((part) => part.text ?? "[image]").join("\n"), failed: value.isError === true };
+  }
+  return null;
 }
 
 function summarizeCodexInput(payload) {
@@ -1912,10 +2167,9 @@ function claudeSubagentsDir(session) {
 }
 
 // A subagent stopped from outside (TaskStop, Esc in its pane) ends on Claude's
-// interrupt note and is never marked finished.
+// interrupt note (a Stopped notice) and is never marked finished.
 function claudeInterrupted(reader) {
-  const last = reader?.messages[reader.messages.length - 1];
-  return last?.role === "user" && last.text.startsWith("[Request interrupted by user");
+  return reader?.messages[reader.messages.length - 1]?.stopped === true;
 }
 
 // Teammate spawn -> its session log, found once. A miss (its session is not

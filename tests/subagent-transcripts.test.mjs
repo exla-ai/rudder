@@ -213,7 +213,7 @@ test("Claude: notes between tool calls show, and a pasted message shows once wit
   ]);
 });
 
-test("A finished turn shows how long it took: Claude's turn_duration, Codex's task_complete; a running or stopped turn shows none", (t) => {
+test("A finished turn shows how long it took: Claude's turn_duration, Codex's task_complete; a running turn shows none and a stopped one says Stopped", (t) => {
   const session = "5e551011-0000-4000-8000-00000000000a";
   const claude = setup(t, { id: "run_tc", backend: "claude", status: "running", session: { nativeSessionId: session } });
   const project = path.join(claude.home, ".claude", "projects", "-x");
@@ -253,12 +253,13 @@ test("A finished turn shows how long it took: Claude's turn_duration, Codex's ta
     event(8, 20, { type: "task_started", turn_id: "t3" }),
     said(9, 20, "user", "try again"),
   ]));
-  assert.deepEqual(readTranscript(codex.repo, "run_tx", { home: codex.home }).messages.map((m) => [m.role, m.kind ?? null, m.durationMs ?? null]), [
-    ["user", null, null],
-    ["assistant", null, null],
+  assert.deepEqual(readTranscript(codex.repo, "run_tx", { home: codex.home }).messages.map((m) => [m.role, m.kind ?? null, m.durationMs ?? m.text]), [
+    ["user", null, "list ports"],
+    ["assistant", null, "Three ports."],
     ["system", "turn", 4_210],
-    ["user", null, null],
-    ["user", null, null],
+    ["user", null, "and docker"],
+    ["system", "notice", "Stopped"],
+    ["user", null, "try again"],
   ]);
 });
 

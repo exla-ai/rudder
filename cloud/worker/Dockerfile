@@ -249,6 +249,7 @@ COPY cloud/worker/home.mjs ./home.mjs
 COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/home-host.mjs ./home-host.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
+COPY cloud/worker/transcript-search.mjs ./transcript-search.mjs
 COPY cloud/worker/handoff.mjs ./handoff.mjs
 COPY cloud/worker/account-usage.mjs ./account-usage.mjs
 COPY cloud/worker/subagents.mjs ./subagents.mjs

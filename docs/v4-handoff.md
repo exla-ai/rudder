@@ -510,6 +510,17 @@ shared app pauses state and chat polling in the background, compresses both
 responses, and loads Markdown and syntax coloring where they are used. A
 send refreshes its receipt even when an earlier chat poll is still running.
 
+Cmd+F (Ctrl+F) in a chat opens the chat's own find (`cloud/app/chat-find.js`):
+matches are highlighted with CSS highlights, stepping older loads earlier
+pages, and other screens keep the browser's find. Cmd+Shift+F opens Search
+everything (`cloud/app/global-search.js`): agents and projects by name from app
+state, and messages from `GET /api/app/search`, which calls the worker's
+`searchChats` (`cloud/worker/transcript-search.mjs`). It scans Claude, Codex
+and Antigravity session files raw and parses only the lines that hit: user and
+assistant text only, 50 results, 5 per chat, 4 seconds. An older worker shows
+the update sheet. In the Mac app, Edit > Find opens the chat's find on a chat,
+and Edit > Search Everything opens the panel.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

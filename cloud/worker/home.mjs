@@ -25,6 +25,7 @@ import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask, transcriptFile, recentConversation } from "./transcripts.mjs";
+import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { activeUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
@@ -855,6 +856,11 @@ async function handleRpc(method, params) {
   }
   if (method === "tailscaleDisconnect") {
     return await tailscale.disconnect();
+  }
+  // The app's Search everything: messages in every chat on this machine (transcript-search.mjs).
+  if (method === "searchChats") {
+    const open = [...projects.values()].filter((p) => p.status !== "cloning").map((p) => ({ workspaceId: p.workspaceId, dir: p.dir }));
+    return await searchChats(open, { home: HOME, query: String(params.query || "") });
   }
   const project = projects.get(params.workspaceId);
   if (!project) {

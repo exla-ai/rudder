@@ -10,6 +10,8 @@
 // /app/__mock/close/<ok|fail> (Close an agent, or the dashboard refusing it),
 // /app/__mock/harness/<ok|old> (move a chat to another harness, or a home too old to),
 // /app/__mock/notes/<ok|old> (a chat's notes, or a home too old to keep them),
+// /app/__mock/search/<ok|old|slow> (Search everything's messages, a home too old to search them, or a slow one;
+// run_a4 is a 900-message chat whose word "kestrel" is on its first, second and third pages, for Cmd+F),
 // /app/__mock/file-ref/<ok|old> (files a chat message names, or a home too old to open them),
 // /app/__mock/all/<ok|old|stuck|lost|codex> (the All agents chat and the ways it fails to start),
 // /app/__mock/update/<ok|fail> (how the next Update now of an old machine goes: home-update.js),
@@ -49,6 +51,9 @@ let closeMode = "ok";
 let harnessMode = "ok";
 let notesMode = "ok";
 let fileRefMode = "ok";
+// /app/__mock/search/<ok|old|slow>: Search everything's messages, a home too
+// old to search them, or one that takes a while (global-search.js).
+let searchMode = "ok";
 // Who the machine's agent accounts sign in as (each harness a list, "main"
 // first, as home.mjs checkCredentials reports), and sign-ins in flight.
 const PLANS = { claude: "max", codex: "pro" };
@@ -305,6 +310,44 @@ function baseTranscript(a) {
   return msgs;
 }
 
+// A chat three pages long (Cmd+F past the loaded page, chat-find.js): "kestrel"
+// in messages 40, 41, 455 and 880 of 900, so the newest page has one, the one
+// before has one and the first page two.
+function longTranscript(a) {
+  const start = toMsMock(a.updatedAt) - 900 * 60_000;
+  const topics = ["the reaper sweep", "heartbeat 410s", "a soft delete flag", "the deletion queue", "volume snapshots", "the audit log"];
+  return Array.from({ length: 900 }, (_, i) => {
+    const user = i % 2 === 0;
+    const topic = topics[Math.floor(i / 2) % topics.length];
+    const bird = [40, 41, 455, 880].includes(i) ? " The kestrel test fixture covers it." : "";
+    return {
+      id: `l${i}`, role: user ? "user" : "assistant", ts: start + i * 60_000,
+      text: user ? `Step ${i / 2 + 1}: what about ${topic}?${bird}` : `For ${topic}, I checked the worker and the control plane. Nothing else changes.${bird}`,
+    };
+  });
+}
+
+// Search everything's messages (worker/transcript-search.mjs searchChats):
+// every mock chat, newest first, five a chat.
+function mockSearch(q) {
+  const needle = q.toLowerCase();
+  const results = [];
+  for (const p of [...projects, ...(coordinator ? [coordinator] : [])]) {
+    for (const a of p.agents) {
+      const t = transcriptFor(p.workspaceId, a.id);
+      const hits = (t?.msgs || []).filter((m) => (m.role === "user" || m.role === "assistant") && m.text?.toLowerCase().includes(needle)).reverse().slice(0, 5);
+      for (const m of hits) {
+        const flat = m.text.replace(/\s+/g, " ").trim();
+        const at = flat.toLowerCase().indexOf(needle);
+        const from = Math.max(0, at - 50);
+        const to = Math.min(flat.length, at + needle.length + 110);
+        results.push({ workspaceId: p.workspaceId, runId: a.id, messageId: m.id, role: m.role, ts: m.ts, snippet: `${from ? "…" : ""}${flat.slice(from, to)}${to < flat.length ? "…" : ""}` });
+      }
+    }
+  }
+  return { results: results.sort((x, y) => y.ts - x.ts).slice(0, 50), partial: false };
+}
+
 // A compaction as worker/transcripts.mjs reads Claude Code's (compactMessage).
 function compactMarker(id, ts, { pre = 367_082, post = 24_989, ms = 63_301 } = {}) {
   return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger: "auto", preTokens: pre, postTokens: post, durationMs: ms,
@@ -533,6 +576,7 @@ function transcriptFor(ws, run) {
   if (!a) return null;
   if (!transcripts.has(run) && realTranscript && a === projects[0].agents[0]) transcripts.set(run, realTranscript.messages);
   if (!transcripts.has(run) && SUBAGENT_DEMO.has(run)) transcripts.set(run, subagentTranscript(a));
+  if (!transcripts.has(run) && run === "run_a4") transcripts.set(run, longTranscript(a));
   if (!transcripts.has(run)) transcripts.set(run, a.fresh ? [{ id: "m1", role: "user", ts: a.createdAt, text: a.task }] : baseTranscript(a));
   return { a, msgs: transcripts.get(run) };
 }
@@ -1034,6 +1078,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { Location: "/app" });
     return res.end();
   }
+  if (p.startsWith("/app/__mock/search/")) {
+    searchMode = p.split("/").pop();
+    if (searchMode === "old") homeVersion = "5.0.9";
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
   if (p === "/app/__mock/notes/ok" || p === "/app/__mock/notes/old") {
     notesMode = p.split("/").pop();
     if (notesMode === "old") homeVersion = "5.0.9";
@@ -1220,6 +1270,14 @@ const server = http.createServer(async (req, res) => {
       // Receipts of the requests the app asks after (home.mjs transcript), once there is one.
       const receipts = url.searchParams.getAll("pending").filter((id) => steerReceipts.has(id)).map((id) => ({ requestId: id, ...steerReceipts.get(id) }));
       return json(res, 200, { ...page, title: t.a.title, backend: t.a.backend, status: t.a.status, edits: mockEdits(t.msgs), stats: mockStats(t.a), context: mockContext(t.a), compacting, suggestion: suggestions.get(t.a.id) ?? null, goal: goals.get(t.a.id) ?? null, receipts });
+    }
+    if (p === "/api/app/search" && req.method === "GET") {
+      if (homeMode !== "running") return json(res, 503, { error: "Waking the cloud machine…", waking: true });
+      if (searchMode === "old" && homeVersion !== CLOUD_VERSION) return json(res, 400, { error: `Your cloud machine runs Rudder ${homeVersion}, which does not have this yet.`, needsUpdate: true });
+      const q = (url.searchParams.get("q") || "").replace(/\s+/g, " ").trim();
+      if (q.length < 2) return json(res, 400, { error: "q needs at least 2 characters" });
+      if (searchMode === "slow") await new Promise((r) => setTimeout(r, 1500));
+      return json(res, 200, mockSearch(q));
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {

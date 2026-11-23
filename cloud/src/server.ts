@@ -7867,6 +7867,17 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     await sendAppPollJson(req, res, result);
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/app/search") {
+    // Search everything (cloud/app/global-search.js): messages in every chat
+    // on the home that say `q` (cloud/worker/transcript-search.mjs). A home
+    // without it answers with its project lookup: Update now (homeNeedsUpdate).
+    const query = (url.searchParams.get("q") ?? "").replace(/\s+/g, " ").trim();
+    if (query.length < 2) {
+      throw badRequest("q needs at least 2 characters");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "searchChats", { query: query.slice(0, 200) }));
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/app/slash-commands") {
     // The chat's "/" menu: the commands of the agent's own CLI (cloud/worker/slash-commands.mjs).
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");

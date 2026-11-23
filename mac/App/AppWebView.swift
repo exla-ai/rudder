@@ -23,6 +23,8 @@ import WebKit
 ///   "xcode"; answered with `window.rudderOpenedPath({path, app, ok})`.
 /// - `appearance {value}`: Settings > Appearance ("system", "light", "dark"),
 ///   sent on every page load; the whole app follows it.
+/// - `findInChat`: a chat's own find opened (cloud/app/chat-find.js); the
+///   page's find bar closes (AppModel.pageOpenedChatFind).
 struct AppWebView: NSViewRepresentable {
     let model: AppModel
     let token: String
@@ -174,6 +176,8 @@ struct AppWebView: NSViewRepresentable {
                 if let value = body["value"] as? String, let appearance = Appearance(rawValue: value) {
                     appearance.apply()
                 }
+            case "findInChat":
+                model.pageOpenedChatFind()
             case "openPath":
                 guard let path = body["path"] as? String, let app = body["app"] as? String else { return }
                 if app == "dashboard" {

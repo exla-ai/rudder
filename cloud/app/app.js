@@ -19,6 +19,8 @@ import { NOTES_ICON, followNotes, notesButton, openNotes } from "/app/notes.js";
 import { followTerminal, setTerminal, terminalOpen } from "/app/terminal-panel.js";
 import { followFileLink, mountFileRefs } from "/app/file-link.js";
 import { mountCommandPalette } from "/app/command-palette.js";
+import { chatFind, mountChatFindKey } from "/app/chat-find.js";
+import { mountGlobalSearch, openGlobalSearch } from "/app/global-search.js";
 import { Tabs } from "/app/tabs.js";
 import { agentModelLabel, openModelPicker, modelChip, mountChatModelControl } from "/app/model-picker.js";
 import { mountPromptSuggestion } from "/app/prompt-suggest.js";
@@ -4519,6 +4521,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // The terminal (on a phone, its only way in; Cmd+K has it too), then the
     // header buttons a narrow bar hides (.agent-bar in agent-stats.css).
     add(`<button type="button" role="menuitem">${icon("terminal")}<span>${terminalOpen(ws, run) ? "Close terminal" : "Open terminal"}</span></button>`, () => setTerm(!terminalOpen(ws, run)));
+    // Cmd+F's find, for a phone with no keyboard.
+    if (find) add(`<button type="button" role="menuitem">${icon("search")}<span>Find in chat</span></button>`, () => find.open());
     const priv = lockBtn.classList.contains("on");
     const tucked = [
       [bar.querySelector(".fp-toggle"), "Files"],
@@ -4703,6 +4707,13 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
   }
   el.querySelector(".load-earlier").addEventListener("click", loadEarlier);
+  // Cmd+F: find in this chat, earlier pages too (chat-find.js).
+  const find = chatFind({
+    wrap: el.querySelector(".chat-wrap"), scroller, msgsEl, loadEarlier,
+    earlier: () => { const e = store.earlier.get(key); return { cursor: e ? e.cursor : store.transcripts.get(key)?.earlier ?? null, loading: !!e?.loading }; },
+    loaded: () => store.transcripts.has(key),
+    settle: () => { atBottom = isAtBottom(); },
+  });
 
   function paintEarlier(t, e) {
     const cursor = e ? e.cursor : t.earlier;
@@ -5072,6 +5083,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     // Alt+V and Alt+B (the keydown listener after mountCommandPalette).
     chat: { previous: previousMessage, newest: newestMessage },
+    // Cmd+F and Search everything's messages (mountChatFindKey, mountGlobalSearch).
+    find,
     destroy() {
       destroyed = true;
       clearTimeout(timer);
@@ -5085,6 +5098,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       goalChip.destroy();
       tray?.destroy();
       quoteReply?.destroy();
+      find?.destroy();
       if (screen?.el === el) document.title = "Rudder";
     },
   };
@@ -5153,6 +5167,9 @@ function paletteCommands() {
   }
   const chat = route.name === "agent" ? findAgent(route.ws, route.run) : null;
   if (chat && !chat.pending) rows.push({ label: "Notes", detail: chat.title || chat.task || "Untitled agent", icon: NOTES_ICON, run: () => openNotes({ ws: route.ws, run: route.run, findAgent }) });
+  const find = screen?.find;
+  if (find) rows.push({ label: "Find in chat", detail: /Mac/.test(navigator.platform) ? "Cmd+F" : "Ctrl+F", icon: icon("search"), keywords: ["search"], run: () => find.open() });
+  rows.push({ label: "Search everything", detail: "Agents, projects and messages", icon: icon("search"), keywords: ["find", "messages"], run: openGlobalSearch });
   rows.push(
     { label: "All agents", detail: "One chat with every agent", icon: icon("agents"), run: go(ALL_PATH) },
     { label: "All projects", icon: icon("code"), keywords: ["home"], run: go("/app") },
@@ -5178,6 +5195,16 @@ function paletteCommands() {
   return rows;
 }
 mountCommandPalette(paletteCommands);
+// Cmd+F finds in the chat on screen (chat-find.js); Cmd+Shift+F searches
+// every agent, project and chat (global-search.js). The Mac app's Edit menu
+// calls them too (window.rudderFindInChat, window.rudderSearchEverything).
+mountChatFindKey(() => (store.signedOut ? null : screen?.find || null));
+mountGlobalSearch({
+  state: () => (store.signedOut ? null : store.state),
+  navigate,
+  openChat: (path) => { navigate(path); return screen?.find || null; },
+  agentPath, projectPath, agentStatus,
+});
 // Ctrl+` opens and closes the agent's terminal from anywhere, the terminal
 // itself included, as in VS Code. Esc stays with the terminal's programs.
 document.addEventListener("keydown", (e) => {

@@ -37,16 +37,15 @@ struct RudderMacApp: App {
             }
             // One window: no File > New Window.
             CommandGroup(replacing: .newItem) {}
-            // Edit > Find, as in Safari: the page's find bar (Find.swift). The
+            // Edit > Find, as in Safari: the page's find bar (Find.swift), or a
+            // chat's own find when the page shows one (AppModel.showFind). The
             // items stay enabled because the web view is not observed, so a
             // disabled state would never follow it; without a page they beep.
+            // Search Everything is the app's Cmd+Shift+F (AppModel.searchEverything).
             CommandGroup(replacing: .textEditing) {
                 Menu("Find") {
-                    Button("Find…") {
-                        model.showMainWindow()
-                        model.find.show()
-                    }
-                    .keyboardShortcut("f", modifiers: .command)
+                    Button("Find…") { model.showFind() }
+                        .keyboardShortcut("f", modifiers: .command)
                     Button("Find Next") { model.find.next() }
                         .keyboardShortcut("g", modifiers: .command)
                     Button("Find Previous") { model.find.previous() }
@@ -54,6 +53,8 @@ struct RudderMacApp: App {
                     Button("Use Selection for Find") { model.find.useSelection() }
                         .keyboardShortcut("e", modifiers: .command)
                 }
+                Button("Search Everything") { model.searchEverything() }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
             }
             CommandGroup(before: .toolbar) {
                 Button("Reload") { model.reload() }

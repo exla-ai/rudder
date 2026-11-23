@@ -2380,4 +2380,4 @@ function toMillis(value) {
 }
 
 // The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
-export { SUBAGENT_PROMPT_LIMIT, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, shownMessages, subagentsLive };
+export { SUBAGENT_PROMPT_LIMIT, antigravityReader, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };

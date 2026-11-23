@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// Edit > Find for the page in the main window, the way Safari finds.
+/// Edit > Find for the page in the main window, the way Safari finds. A chat
+/// on the page has a find of its own, which AppModel.showFind opens instead.
 ///
 /// WebKit's own find (`WKWebView.find`) selects the match, scrolls it into
 /// view and paints its yellow find highlight. It starts at the current match,
@@ -60,6 +61,10 @@ final class PageFind {
         wantsFocus = false
     }
 
+    /// The page's cleanup after the bar last closed, for a caller that hands
+    /// the page's keyboard to a chat's own find once it is done (AppModel.showFind).
+    @ObservationIgnored private(set) var closing: Task<Void, Never>?
+
     /// Done or Esc: the match stays selected and the page has the keyboard again.
     func close() {
         guard isVisible else { return }
@@ -74,7 +79,7 @@ final class PageFind {
         // public call to hide it, so search once for text no page shows. The
         // miss also drops the selection: the match is put back, as Safari leaves it.
         let current = generation
-        Task {
+        closing = Task {
             do {
                 _ = try await webView.callAsyncJavaScript(Self.keepScript, contentWorld: .defaultClient)
                 _ = try await webView.find(Self.unmatchable)

@@ -1,0 +1,45 @@
+/* Find in a chat (chat-find.js): a bar floating at the top right of the
+   conversation, over it, so the chat never moves when it opens. The words
+   found are CSS highlights, yellow with the current one orange, in dark ink
+   on any bubble or theme, as browsers paint their own find. */
+.cf {
+  position: absolute; top: 8px; right: 12px; z-index: 6;
+  display: flex; align-items: center; gap: 2px;
+  width: min(380px, calc(100% - 24px)); height: 42px; padding: 0 6px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px;
+  box-shadow: var(--shadow-2);
+}
+.cf[hidden] { display: none; }
+.cf-in {
+  flex: 1; min-width: 0; height: 30px; margin-right: 4px; padding: 0 8px;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface-2); border-radius: 8px;
+}
+.cf-in:focus-within { box-shadow: 0 0 0 2px var(--accent-soft); }
+.cf-in svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.cf-in input {
+  flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: none;
+  font: inherit; font-size: 14px; color: var(--ink);
+}
+.cf-in input::placeholder { color: var(--faint); }
+.cf-n { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cf-b {
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+  border: 0; border-radius: 8px; background: none; color: var(--ink-2); cursor: pointer;
+}
+.cf-b svg { width: 17px; height: 17px; }
+.cf-b:hover:not(:disabled) { background: var(--surface-2); }
+.cf-b:disabled { opacity: 0.35; cursor: default; }
+/* iOS zooms into a field under 16px. */
+@media (pointer: coarse) { .cf-in input { font-size: 16px; } }
+
+::highlight(chat-find) { background-color: #ffe27a; color: #1b1a17; }
+::highlight(chat-find-current) { background-color: #ff9f2e; color: #1b1a17; }
+
+/* Search everything opened the chat at this message. */
+.msg.cf-flash { animation: cf-flash 1.8s ease-out; border-radius: 14px; }
+@keyframes cf-flash {
+  0%, 30% { box-shadow: 0 0 0 6px var(--accent-soft); background: var(--accent-soft); }
+  100% { box-shadow: 0 0 0 6px transparent; background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .msg.cf-flash { animation: none; } }

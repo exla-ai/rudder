@@ -115,6 +115,68 @@ final class AppModel {
         webView.load(URLRequest(url: url))
     }
 
+    // MARK: Find
+
+    /// Edit > Find… (Cmd+F). A chat on the page has a find of its own
+    /// (cloud/app/chat-find.js), which reaches the chat's earlier pages, so a
+    /// chat gets that one; any other page gets the page's find bar
+    /// (Find.swift). While the page has the keyboard it takes Cmd+F itself;
+    /// this is the menu, or Cmd+F from the find bar's field.
+    func showFind() {
+        showMainWindow()
+        guard let webView, case .ready = webState else { return find.show() }
+        Task {
+            do {
+                let chat = try await webView.callAsyncJavaScript("return window.rudderFindInChat?.(false) === true", contentWorld: .page)
+                guard chat as? Bool == true else {
+                    find.show()
+                    return
+                }
+                find.close()
+                _ = await find.closing?.value
+                webView.window?.makeFirstResponder(webView)
+                _ = try await webView.callAsyncJavaScript("window.rudderFindInChat(true)", contentWorld: .page)
+            } catch {
+                NSSound.beep()
+            }
+        }
+    }
+
+    /// The page opened a chat's find with its own Cmd+F (its `findInChat`
+    /// message): one find at a time, so the find bar closes, and the chat's
+    /// find has the keyboard again once the bar's cleanup is done.
+    func pageOpenedChatFind() {
+        guard find.isVisible, let webView else { return }
+        find.close()
+        Task {
+            _ = await find.closing?.value
+            do {
+                _ = try await webView.callAsyncJavaScript("window.rudderFindInChat?.(true)", contentWorld: .page)
+            } catch {
+                NSSound.beep()
+            }
+        }
+    }
+
+    /// Edit > Search Everything (Shift+Cmd+F): agents, projects and what was
+    /// said in every chat (cloud/app/global-search.js). While the page has
+    /// the keyboard it takes the keys itself.
+    func searchEverything() {
+        showMainWindow()
+        guard let webView, case .ready = webState else { return NSSound.beep() }
+        Task {
+            find.close()
+            _ = await find.closing?.value
+            webView.window?.makeFirstResponder(webView)
+            do {
+                let opened = try await webView.callAsyncJavaScript("return window.rudderSearchEverything?.() === true", contentWorld: .page)
+                if opened as? Bool != true { NSSound.beep() }
+            } catch {
+                NSSound.beep()
+            }
+        }
+    }
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func openSettings() { open(path: "/app/settings") }

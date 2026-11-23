@@ -1,0 +1,22 @@
+/* Search everything (global-search.js): the Cmd+K palette's box
+   (command-palette.css), wider for messages, with its results in groups. */
+dialog.cmdk.gs { max-width: min(680px, calc(100vw - 32px)); }
+.gs .cmdk-box { max-height: min(560px, calc(var(--vvh) - var(--sat) - min(12vh, 120px) - 24px)); }
+.gs-h {
+  padding: 10px 10px 4px; font-size: 12px; font-weight: 600; color: var(--muted);
+}
+.gs-h:first-child { padding-top: 4px; }
+.gs-note { padding: 8px 10px 10px; font-size: 13.5px; line-height: 1.4; color: var(--muted); }
+.gs-note.gs-err { color: var(--failed); }
+.gs-wait::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 8px 1px 2px; border-radius: 50%;
+  background: currentColor; opacity: 0.5; vertical-align: middle;
+}
+.gs-msg { align-items: flex-start; padding-top: 8px; padding-bottom: 8px; }
+.gs-msg .cmdk-ic { margin-top: 1px; }
+.gs-msg .gs-snip {
+  white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  line-height: 1.4; overflow-wrap: anywhere;
+}
+.gs-msg .cmdk-d { margin-top: 2px; }
+.gs mark { background: #ffe27a; color: #1b1a17; border-radius: 3px; padding: 0 1px; }

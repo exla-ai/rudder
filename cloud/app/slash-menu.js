@@ -108,8 +108,13 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
   let painted = null;
 
   const list = listFor(workspace, run);
-  // Rudder has no "/" list for Antigravity agents (cloud/worker/slash-commands.mjs).
-  const ask = () => agent()?.backend !== "antigravity" && refresh(workspace, run, list, agent()?.model ?? null, paint);
+  // Asked once the agent's row is in (a chat opened by its URL comes before
+  // the app's state; opening the menu asks again). Rudder has no "/" list for
+  // Antigravity agents (cloud/worker/slash-commands.mjs).
+  const ask = () => {
+    const a = agent();
+    if (a && a.backend !== "antigravity") refresh(workspace, run, list, a.model ?? null, paint);
+  };
   ask();
   // Until the home answers: the list this device saved (the agent's row may
   // load after the chat, so its CLI is looked up when the list is wanted).

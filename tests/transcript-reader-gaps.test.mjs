@@ -158,3 +158,57 @@ test("Two agents on copies of one Claude session (a branch's) each read their ow
   assert.equal(readTranscript(repo, "run_a", { home }).messages[0].text, "main copy");
   assert.equal(readTranscript(repo, "run_b", { home }).messages[0].text, "branch copy");
 });
+
+// A scratch repo and home with one run record per agent; `lines` (Claude
+// session entries, chained) become that agent's session file when given.
+function scratch(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-reader-gaps-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, "home");
+  const repo = path.join(root, "repo");
+  const agent = (id, record, lines = null) => {
+    const session = `93bcacfa-0000-4000-8000-${String(id.length).padStart(12, "0")}`;
+    fs.mkdirSync(path.join(repo, ".rudder", "runs", id), { recursive: true });
+    fs.writeFileSync(path.join(repo, ".rudder", "runs", id, "run.json"), JSON.stringify({ id, backend: "claude", session: { nativeSessionId: session }, workspace: { path: `/w/${id}` }, ...record }));
+    if (lines) {
+      const project = path.join(home, ".claude", "projects", `/w/${id}`.replace(/[^A-Za-z0-9-]/g, "-"));
+      fs.mkdirSync(project, { recursive: true });
+      const chained = lines.map((entry, index) => JSON.stringify({ parentUuid: index ? lines[index - 1].uuid : null, isSidechain: false, timestamp: at(index), ...entry }));
+      fs.writeFileSync(path.join(project, `${session}.jsonl`), `${chained.join("\n")}\n`);
+    }
+  };
+  return { home, repo, agent, shown: (id) => readTranscript(repo, id, { home }).messages };
+}
+
+test("Before its session is on disk a new chat shows the user's own task, never Rudder's framing, and a chat that went on shows nothing", (t) => {
+  const { agent, shown } = scratch(t);
+  const framed = "Objective: Say hello in five words\nDone when: the task is implemented and works as asked\n\nSay hello in five words";
+  agent("new", { task: framed, turns: [{ prompt: framed, ts: at(0) }] });
+  agent("main", { task: "how is it going?", turns: [{ prompt: "Rudder discussion scope:\nYou own one discussion or planning session in this project.\n\nhow is it going?", ts: at(0) }] });
+  agent("untitled", { task: "", turns: [{ prompt: framed, ts: at(0) }] });
+  // Resumed on a new session that is not written yet: its prompts alone are not its history.
+  agent("resumed", { task: "fix the menu", turns: [{ prompt: "fix the menu", ts: at(0) }, { prompt: "and the footer", ts: at(9) }] });
+  assert.deepEqual(shown("new").map((m) => [m.role, m.text]), [["user", "Say hello in five words"]]);
+  assert.deepEqual(shown("main").map((m) => [m.role, m.text]), [["user", "how is it going?"]]);
+  assert.deepEqual(shown("untitled"), []);
+  assert.deepEqual(shown("resumed"), []);
+});
+
+test("A call with no result yet shows running while the agent lives, until its turn ends or a prompt follows it", (t) => {
+  const { agent, shown } = scratch(t);
+  const use = (uuid, id, command) => ({ type: "assistant", uuid, message: { content: [{ type: "tool_use", id, name: "Bash", input: { command } }] } });
+  const lines = [
+    { type: "user", uuid: "u1", message: { role: "user", content: "list the files" } },
+    use("a1", "t0", "ls"),
+    { type: "user", uuid: "r1", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t0", content: "README.md" }] } },
+    use("a2", "t1", "npm test"),
+    { type: "user", uuid: "i1", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] } },
+    { type: "user", uuid: "u2", message: { role: "user", content: "just wait 20 seconds" } },
+    use("a3", "t2", "sleep 20"),
+  ];
+  agent("live", { process: { pid: process.pid } }, lines);
+  agent("gone", {}, lines);
+  const calls = (id) => shown(id).filter((m) => m.role === "tool").map((m) => [m.tool.input, m.tool.running === true]);
+  assert.deepEqual(calls("live"), [["ls", false], ["npm test", false], ["sleep 20", true]]);
+  assert.deepEqual(calls("gone"), [["ls", false], ["npm test", false], ["sleep 20", false]]);
+});

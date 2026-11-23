@@ -81,9 +81,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     base.status = record.status || null;
   }
   if (!file) {
-    // No session on disk yet (just launched, or a backend without transcripts):
-    // show the prompts Rudder itself recorded.
-    base.messages = showAttachments(recordedTurns(record).map(showHandoff));
+    base.messages = startingMessages(record);
     return base;
   }
   const backend = record.backend || "claude";
@@ -104,6 +102,9 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
     attachCodexSubagents(page.reader, { home, live, shown, depth: 0 });
   } else if (backend === "claude") {
     attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
+  }
+  if (!end) {
+    base.messages = markRunning(base.messages, live);
   }
   // The prompts the app may offer to edit (chat-edit.js), an earlier page's
   // too: the app adds them to the newest page's, whose last is the latest.
@@ -399,6 +400,40 @@ function showHandoff(message) {
 // The prompts Rudder recorded for an agent, as chat messages.
 // `recorded`: Rudder's own copy of what it typed, not the agent's record of
 // what it took, so it never settles a message the app sent (app pending.js).
+// Before an agent's session is on disk (just launched, or a new session not
+// written yet) the one real thing is the user's own task. A chat that already
+// went on in a session would show its prompts without the replies, a wrong
+// history, so it shows nothing until its session is there. Rudder's framing
+// never shows as the user's words.
+function startingMessages(record) {
+  const turns = recordedTurns(record);
+  if (turns.length !== 1 || record.session?.previousSessionIds?.length) {
+    return [];
+  }
+  return showAttachments(showUserTask(turns, record)).filter((message) => message.role !== "user" || !RUDDER_FRAMING.test(message.text));
+}
+
+// A call with no result yet runs while the agent's process lives and nothing
+// after it ended its turn: a turn's end, a Stopped marker, a marker such as a
+// compaction or a check-in, or a later prompt. The newest page only; copies,
+// so the reader's messages stay as read.
+function markRunning(messages, live) {
+  if (!live) {
+    return messages;
+  }
+  const shown = messages.slice();
+  for (let index = shown.length - 1; index >= 0; index -= 1) {
+    const message = shown[index];
+    if (message.role === "user" || message.stopped || (message.role === "system" && message.kind && message.kind !== "notice")) {
+      break;
+    }
+    if (message.role === "tool" && !message.subagent && message.tool?.output === null) {
+      shown[index] = { ...message, tool: { ...message.tool, running: true } };
+    }
+  }
+  return shown;
+}
+
 function recordedTurns(record) {
   return (record.turns || []).map((turn, index) => ({
     id: `turn-${index}`,
@@ -750,11 +785,15 @@ function opencodeTranscript(record, { home, limit, before, after }) {
   }
   const page = conversation ? opencodeSessionPage(record, home, { end: end?.offset ?? null, start, limit, stats: !end }) : null;
   if (!page) {
-    base.messages = showAttachments(recordedTurns(record).map(showHandoff));
+    base.messages = startingMessages(record);
     return base;
   }
-  attachOpencodeSubagents(page.spawns, { home, parentId: conversation, live: subagentsLive(record), depth: 1 });
+  const live = subagentsLive(record);
+  attachOpencodeSubagents(page.spawns, { home, parentId: conversation, live, depth: 1 });
   base.messages = showAttachments(showUserTask(page.messages, record));
+  if (!end) {
+    base.messages = markRunning(base.messages, live);
+  }
   base.earlier = page.start > 0 ? `${conversation}:${page.start}:` : null;
   // An OpenCode chat is not edited from an earlier turn (the dashboard's
   // chat edit forks Claude and Codex conversations only).

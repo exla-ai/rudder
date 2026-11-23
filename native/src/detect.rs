@@ -97,25 +97,42 @@ pub(crate) fn codex_goal_menu_from_lines(lines: &[String]) -> Option<(String, bo
     })?;
     // Codex centers the dialog on top of the existing screen. Ignore anything
     // to its left, including the previous assistant output and its prompt glyph.
-    let mut rows = lines[header + 1..].iter().map(|row| {
-        let mut width = 0;
-        row.char_indices()
-            .find_map(|(offset, ch)| {
-                if width >= column {
-                    return Some(row[offset..].trim());
-                }
-                width += ch.width().unwrap_or(0);
-                None
-            })
-            .unwrap_or("")
-    });
-    let start = rows.next()?.strip_prefix("New objective:")?.trim();
-    let objective = std::iter::once(start)
-        .chain(rows.by_ref().take_while(|row| !row.is_empty()))
-        .filter(|row| !row.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let first = rows.by_ref().find(|row| !row.is_empty())?;
+    let rows: Vec<&str> = lines[header + 1..]
+        .iter()
+        .map(|row| {
+            let mut width = 0;
+            row.char_indices()
+                .find_map(|(offset, ch)| {
+                    if width >= column {
+                        return Some(row[offset..].trim_end());
+                    }
+                    width += ch.width().unwrap_or(0);
+                    None
+                })
+                .unwrap_or("")
+        })
+        .collect();
+    let start = rows.first()?.trim().strip_prefix("New objective:")?.trim();
+    // The dialog's rows start where its title does. A narrow pane (80
+    // columns, 11-23) keeps text of the screen under the dialog further
+    // right, on any row: it is neither the objective nor an option.
+    let dialog = |row: &str| !row.trim().is_empty() && row.len() - row.trim_start().len() <= 4;
+    let option = |row: &str| is_numbered_option(row.strip_prefix('\u{203a}').unwrap_or(row));
+    let mut objective = vec![start];
+    let mut next = 1;
+    while let Some(row) = rows.get(next) {
+        let text = row.trim();
+        if text.is_empty() || option(text) {
+            break;
+        }
+        if dialog(row) {
+            objective.push(text);
+        }
+        next += 1;
+    }
+    let objective = objective.join(" ");
+    let mut rows = rows[next..].iter().filter(|row| dialog(row)).map(|row| row.trim());
+    let first = rows.next()?;
     let second = rows.next()?;
     let selected = if first.starts_with("› 1. Replace current goal") && second.starts_with("2. Cancel") {
         true
@@ -124,7 +141,7 @@ pub(crate) fn codex_goal_menu_from_lines(lines: &[String]) -> Option<(String, bo
     } else {
         return None;
     };
-    (rows.any(|row| row == "enter select · esc back") && !objective.is_empty())
+    (rows.any(|row| row.starts_with("enter select · esc back")) && !objective.is_empty())
         .then_some((objective, selected))
 }
 
@@ -807,7 +824,12 @@ pub(crate) fn terminal_composer_shown(backend: Backend, lines: &[String]) -> boo
     let rows = lines.iter().map(|line| normalize_terminal_line(line)).collect::<Vec<_>>();
     match backend {
         Backend::Claude => claude_composer_top(&rows).is_some(),
-        Backend::Codex => codex_composer_row(&rows).is_some(),
+        // `codex resume` draws its composer under "Resuming session…" at once
+        // and loads the conversation about 2 s later (0.170). Its goal dialog
+        // comes with the conversation, so what is typed before goes to it.
+        Backend::Codex => {
+            codex_composer_row(&rows).is_some() && !rows.iter().any(|row| row.starts_with("Resuming session"))
+        }
         Backend::Opencode | Backend::Antigravity => true,
     }
 }

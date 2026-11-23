@@ -12767,7 +12767,8 @@ Address the objection directly. If you disagree, say why inside \
         // delivery guard below, and comparing the already-overwritten value
         // against Done was always false — stale delivery evidence survived a
         // fresh non-delivery turn. (The sibling sites read status first.)
-        let was_done_before_spawn = self.agents[main_index].status == AgentStatus::Done;
+        let status_before_spawn = self.agents[main_index].status;
+        let was_done_before_spawn = status_before_spawn == AgentStatus::Done;
         match wired.and_then(|()| TerminalPane::spawn_shell_or_command(Some(command), options)) {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
@@ -12776,7 +12777,13 @@ Address the objection directly. If you disagree, say why inside \
                 run.cwd = cwd;
                 run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
-                run.status = AgentStatus::Running;
+                // Reopened for a message with no turn of its own (a Codex
+                // command, typed once the composer shows), it is at rest.
+                run.status = if continue_session && bootstrap.is_empty() {
+                    resting_status(status_before_spawn)
+                } else {
+                    AgentStatus::Running
+                };
                 run.session_id = session_id;
                 run.completed_at = None;
                 run.last_output_at = Instant::now();
@@ -16975,12 +16982,13 @@ Address the objection directly. If you disagree, say why inside \
 
     /// Whether a typed message for the agent at `index` waits in the inbox
     /// before it is typed: a Codex command needs its conversation reopened
-    /// first, the CLI is still starting, a Codex goal dialog is being
-    /// answered, or a draft in its composer is still settling.
+    /// first, a Codex goal dialog is being answered (it hides the composer,
+    /// so it goes before the starting check), the CLI is still starting, or
+    /// a draft in its composer is still settling.
     fn typed_input_waits(&mut self, index: usize, instruction: &str) -> bool {
         self.reopen_for_typed_command(index, instruction)
-            || self.agent_is_starting(index)
             || self.answer_paused_goal_dialog(index)
+            || self.agent_is_starting(index)
             || self.draft_settling(index)
     }
 
@@ -17085,10 +17093,13 @@ Address the objection directly. If you disagree, say why inside \
         }
         let backend = run.backend;
         run.terminal.as_mut().is_some_and(|terminal| {
-            terminal.is_alive()
-                && !terminal.is_output_only()
-                && terminal.age() < delivery::STARTUP_WAIT
-                && !terminal_composer_shown(backend, &terminal.live_screen_lines())
+            if !terminal.is_alive() || terminal.is_output_only() || terminal.age() >= delivery::STARTUP_WAIT {
+                return false;
+            }
+            // A dialog or menu in place of the composer means the CLI has
+            // started; the refusal check answers for it at once.
+            let lines = terminal.live_screen_lines();
+            !terminal_composer_shown(backend, &lines) && terminal_composer_blocked(backend, &lines).is_none()
         })
     }
 

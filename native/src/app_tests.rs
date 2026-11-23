@@ -31341,6 +31341,32 @@ fn codex_goal_dialogs_hold_or_refuse_a_typed_message() {
     ]);
     assert!(!codex_paused_goal_dialog(&replace));
     assert_eq!(terminal_composer_blocked(Backend::Codex, &replace), Some(InputBlock::GoalMenu));
+    // An 80-column pane (a chat in the background) keeps text of the screen
+    // under the dialog; it is neither the objective nor an option.
+    let narrow = screen(&[
+        "      Replace goal?",
+        "\u{203a} As  New objective: write a limerick about cats into cats.txt",
+        "",
+        "  GP                                                                        at",
+        "  is\u{203a} 1. Replace current goal  Set the new objective and start it now",
+        "      2. Cancel                Keep the current goal",
+        "      enter select \u{b7} esc back",
+    ]);
+    assert_eq!(
+        codex_goal_menu_from_lines(&narrow),
+        Some(("write a limerick about cats into cats.txt".to_string(), true))
+    );
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &narrow), Some(InputBlock::GoalMenu));
+    // `codex resume` draws its composer before the conversation (and the
+    // dialog) loads.
+    let resuming = screen(&[
+        "  /workspace/rudder-scratch/fix-delivery/goalproj",
+        "  Resuming session\u{2026}",
+        "\u{203a} Ask Codex to do anything",
+        "  ? for shortcuts",
+    ]);
+    assert!(!terminal_composer_shown(Backend::Codex, &resuming));
+    assert!(terminal_composer_shown(Backend::Codex, &resuming[2..]));
     assert_eq!(InputBlock::GoalMenu.code().as_str(), "goal_menu");
 }
 

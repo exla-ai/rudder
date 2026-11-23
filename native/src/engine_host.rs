@@ -1013,8 +1013,21 @@ fn read_control(stream: &UnixStream) -> Result<ControlRequest> {
     while line.len() <= CONTROL_LIMIT {
         let remaining = deadline.saturating_duration_since(Instant::now());
         anyhow::ensure!(!remaining.is_zero(), "engine control request timed out");
-        // A partial read must not restart the entire request's deadline.
-        stream.set_read_timeout(Some(remaining))?;
+        // A partial read must not restart the entire request's deadline. Wait
+        // with poll, not a fresh SO_RCVTIMEO per read: Darwin refuses
+        // setsockopt (EINVAL) once the peer has closed, even while the rest
+        // of its request is still buffered.
+        let mut ready = libc::pollfd { fd: std::os::fd::AsRawFd::as_raw_fd(stream), events: libc::POLLIN, revents: 0 };
+        let wait_ms = remaining.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+        match unsafe { libc::poll(&mut ready, 1, wait_ms) } {
+            0 => anyhow::bail!("engine control request timed out"),
+            n if n < 0 => {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted { continue; }
+                return Err(error.into());
+            }
+            _ => {}
+        }
         let capacity = part.len().min(CONTROL_LIMIT + 1 - line.len());
         let count = match reader.read(&mut part[..capacity]) {
             Ok(count) => count,

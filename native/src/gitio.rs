@@ -1521,9 +1521,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // Written every time (null once awake): the carry-over below keeps any
         // key this projection leaves out, which would keep a woken row asleep.
         "parked": run.parked.as_ref().map(ParkedNote::to_json),
-        // The agent that started this one as its helper (helpers.rs).
-        "parentRunId": run.parent_run,
     });
+    // The agent that started this one as its helper (helpers.rs). Set
+    // outside the literal above, which is at json!'s recursion limit.
+    record["parentRunId"] = serde_json::json!(run.parent_run);
     if let Some(gam) = run.gam.as_ref() {
         record["gam"] = gam_state_to_json(gam);
     }

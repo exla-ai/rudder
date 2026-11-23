@@ -203,25 +203,35 @@ export async function createNativeManifest({ directory: dir, platform, cwd = pro
   return manifest;
 }
 
+async function verifiedDirectory(dir, platform, revision) {
+  await artifactDirectory(dir);
+  const manifest = await readManifest(path.join(dir, MANIFEST_NAME));
+  validateManifest(manifest, platform, revision);
+  const files = [];
+  for (const name of NATIVE_BINARIES) {
+    const file = path.join(dir, name);
+    await readNativeBinary(file, manifest.files[name]);
+    files.push({ name, path: file, ...manifest.files[name] });
+  }
+  return { platform, manifest, files };
+}
+
+/** One platform's directory, as a single build host stages it. */
+export async function verifyNativeArtifact({ directory: dir, platform, cwd = process.cwd(), expectedRevision } = {}) {
+  requireValue(NATIVE_PLATFORMS.includes(platform), "Unsupported native artifact platform");
+  const revision = checkedSourceRevision({ cwd, expectedRevision });
+  const { manifest } = await verifiedDirectory(dir, platform, revision);
+  requireValue(checkedSourceRevision({ cwd, expectedRevision }) === revision, "Native source changed during artifact verification");
+  return manifest;
+}
+
 export async function verifyNativeArtifacts({ root, cwd = process.cwd(), expectedRevision } = {}) {
   const revision = checkedSourceRevision({ cwd, expectedRevision });
   await directory(root);
   const names = NATIVE_PLATFORMS.map(key => `rudder-native-${key}`).sort();
-  requireValue(JSON.stringify((await fs.readdir(root)).sort()) === JSON.stringify(names), "Release prebuilts require exactly all three supported platform artifacts");
+  requireValue(JSON.stringify((await fs.readdir(root)).sort()) === JSON.stringify(names), "Release prebuilts require exactly one artifact per supported platform");
   const artifacts = [];
-  for (const platform of NATIVE_PLATFORMS) {
-    const dir = path.join(root, `rudder-native-${platform}`);
-    await artifactDirectory(dir);
-    const manifest = await readManifest(path.join(dir, MANIFEST_NAME));
-    validateManifest(manifest, platform, revision);
-    const files = [];
-    for (const name of NATIVE_BINARIES) {
-      const file = path.join(dir, name);
-      await readNativeBinary(file, manifest.files[name]);
-      files.push({ name, path: file, ...manifest.files[name] });
-    }
-    artifacts.push({ platform, manifest, files });
-  }
+  for (const platform of NATIVE_PLATFORMS) artifacts.push(await verifiedDirectory(path.join(root, `rudder-native-${platform}`), platform, revision));
   requireValue(checkedSourceRevision({ cwd, expectedRevision }) === revision, "Native source changed during artifact verification");
   return { sourceRevision: revision, artifacts };
 }

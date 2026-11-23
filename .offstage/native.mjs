@@ -25,7 +25,7 @@ function log(line) {
   appendFileSync(logPath, `${line}\n`)
 }
 
-const timeoutMs = 45 * 60_000
+const timeoutMs = 20 * 60_000
 const queueTimeoutMs = 15 * 60_000
 const task = await Task.create({
   repo,

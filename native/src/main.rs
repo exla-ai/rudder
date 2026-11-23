@@ -123,6 +123,7 @@ use crate::antigravity::antigravity_session_exists;
 mod plan_stream;
 mod redact;
 mod telemetry;
+mod test_home;
 
 mod prompt_suggestion;
 mod signals;
@@ -3621,7 +3622,7 @@ impl App {
             gam_transcript_visible: true,
             // Tests never read the user's own pair (it would change what the
             // picker offers from one machine to the next).
-            gam_last: if (cfg!(test) && std::env::var_os("RUDDER_HOME").is_none()) {
+            gam_last: if test_home::on_shared_test_rudder_home() {
                 None
             } else {
                 load_rudder_config()

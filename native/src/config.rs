@@ -270,8 +270,8 @@ pub(crate) fn config_gam_last_pair(config: &serde_json::Value) -> Option<GamLast
 /// Remember the pair a `/gam` just launched, so the picker can offer it again
 /// and `/gam again` can rerun it in the next session too.
 pub(crate) fn save_gam_last_pair(pair: &GamLastPair) -> Result<()> {
-    // Tests drive real launches; they must never write the user's own config.
-    if cfg!(test) && std::env::var_os("RUDDER_HOME").is_none() {
+    // Tests drive real launches; one must not hand its pair to the next.
+    if crate::test_home::on_shared_test_rudder_home() {
         return Ok(());
     }
     let path = rudder_config_path().context("could not determine Rudder config path")?;

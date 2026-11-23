@@ -163,10 +163,13 @@ impl EnvGuard {
     /// Point HOME at `home`, created here, inside `root`: a temp dir this test
     /// owns and must not remove itself. The guard removes `root` after it puts
     /// HOME back, so tests outside the lock never see HOME name a missing dir.
+    /// The Rudder home follows it to `home/.rudder`, as it would outside tests
+    /// (test_home.rs points RUDDER_HOME at a per-process dir otherwise).
     fn set_home(&mut self, root: &Path, home: &Path) {
         assert!(home.starts_with(root), "{} is not inside {}", home.display(), root.display());
         fs::create_dir_all(home).expect("create test HOME");
         std::env::set_var("HOME", home);
+        std::env::set_var("RUDDER_HOME", home.join(".rudder"));
         self.home_roots.push(root.to_path_buf());
     }
 }

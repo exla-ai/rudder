@@ -9870,6 +9870,7 @@ fn worker_enter_with_a_typed_draft_still_sends_it() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    agent_takes_all(&mut app);
 
     assert!(app.agents[0].terminal.is_some());
     assert_eq!(app.agents[0].status, AgentStatus::Running);

@@ -100,12 +100,12 @@ export const PARALLEL_WORK_RULE =
 // Waiting and reading guidance. Mirrors the Rust `wait_and_read_rule!` in
 // native/src/tasks.rs; keep the text in parity (PLAN.md section 20).
 export const WAIT_AND_READ_RULE =
-  "Run one targeted check; add tests for bugs or tricky logic. Full suites only when asked. Wait on commands directly (Codex: write_stdin up to 300000 ms when supported); avoid sleeps and repeated polls. Size builds from CPU, memory and container limits; honor explicit budgets and shared build locks. Cap long output (`| tail -50`). Read targeted ranges. No CI babysitting unless delivery requires it; no git archaeology.";
+  "Run one targeted check; add tests only for bugs or tricky logic. Wait on commands directly (Codex: write_stdin up to 300000 ms); no sleeps or poll loops. Size builds to CPU/RAM limits; honor shared build locks. Cap long output (`| tail -50`); read targeted ranges. No CI babysitting or git archaeology.";
 
 // Second opinions go through a helper agent that reads files itself. Mirrors
 // the Rust `helper_rule!` in native/src/tasks.rs; keep the text in parity.
 export const HELPER_RULE =
-  "For a review or second opinion from another model, start a helper with the agents_start tool and give it file paths, never pasted file contents: `agy -p` and other print modes keep only about 200 KB of one message.";
+  "For another model's review, call agents_start with file paths, not pasted contents (print CLIs cut at ~200 KB).";
 
 // Where the user reads the agent. Mirrors the Rust `chat_app_rule!` in
 // native/src/tasks.rs; keep the text in parity.

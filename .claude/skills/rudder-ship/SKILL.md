@@ -76,8 +76,8 @@ git clone --depth 1 --branch "release-check/$v" https://github.com/exla-ai/rudde
 cd /workspace/rudder-scratch/release/src
 npm ci && npm --prefix cloud ci
 npm run check
-npm test
 npm --prefix cloud run build
+npm test
 cargo test --workspace --locked --no-fail-fast
 npm run build
 RUDDER_NATIVE_BIN="$CARGO_TARGET_DIR/release/rudder-native" npm run test:tui

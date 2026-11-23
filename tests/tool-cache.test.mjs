@@ -16,7 +16,7 @@ function tempDir(t) {
 
 test("agents and the builder share one read-write sccache and the same stores", (t) => {
   const root = tempDir(t);
-  const env = { HOME: path.join(root, "home") };
+  const env = { HOME: path.join(root, "home"), JJ_CONFIG: "/u/jj.toml" };
   const agent = toolCacheEnv("agent", { root, env, hasTool: () => true });
   const builder = toolCacheEnv("builder", { root, env, hasTool: () => true });
   assert.equal(agent.SCCACHE_LOCAL_RW_MODE, "READ_WRITE");
@@ -38,10 +38,26 @@ test("the tool cache stays in one place, so CARGO_HOME never moves under a build
 
 test("sccache strips the build directory from its keys so workspaces share crates", (t) => {
   const root = tempDir(t);
-  const env = { HOME: path.join(root, "home") };
+  const env = { HOME: path.join(root, "home"), JJ_CONFIG: "/u/jj.toml" };
   assert.equal(toolCacheEnv("agent", { root, env, hasTool: () => true, workspace: "/w/agent-1" }).SCCACHE_BASEDIRS, "/w/agent-1");
   assert.equal(toolCacheEnv("builder", { root, env, hasTool: () => true }).SCCACHE_BASEDIRS, undefined);
   assert.equal(toolCacheEnv("agent", { root, env, hasTool: (name) => name !== "sccache", workspace: "/w/a" }).SCCACHE_BASEDIRS, undefined);
+});
+
+// Antigravity runs commands in a terminal, where a pager waits for a key.
+test("agents never page: git and jj print straight through, the user's jj config still loads", (t) => {
+  const root = tempDir(t);
+  const user = ["/u/.config/jj/config.toml", "/u/.config/jj/conf.d"];
+  const env = { HOME: root, JJ_CONFIG: user.join(path.delimiter) };
+  const agent = toolCacheEnv("agent", { root, env, hasTool: () => true });
+  const file = path.join(root, "jj-agent.toml");
+  assert.equal(agent.PAGER, "cat");
+  assert.equal(agent.GIT_PAGER, "cat");
+  assert.equal(agent.JJ_CONFIG, [...user, file].join(path.delimiter));
+  assert.equal(fs.readFileSync(file, "utf8"), '[ui]\npaginate = "never"\n');
+  // A launch from inside an agent lists the file once.
+  assert.equal(toolCacheEnv("agent", { root, env: { ...env, JJ_CONFIG: agent.JJ_CONFIG }, hasTool: () => true }).JJ_CONFIG, agent.JJ_CONFIG);
+  assert.equal(toolCacheEnv("builder", { root, env, hasTool: () => true }).PAGER, undefined);
 });
 
 test("missing tools are skipped", (t) => {
@@ -74,7 +90,7 @@ test("prune removes least recently used files until under the limit", (t) => {
 // e.g. `inherit = "core"`), so the cache vars go into the policy itself.
 test("Codex gets every tool cache variable through its shell environment policy", (t) => {
   const root = tempDir(t);
-  const env = toolCacheEnv("agent", { root, env: { HOME: root }, hasTool: () => true });
+  const env = toolCacheEnv("agent", { root, env: { HOME: root, JJ_CONFIG: "/u/jj.toml" }, hasTool: () => true });
   const args = codexShellEnvConfigArgs(env);
   assert.equal(args.length, Object.keys(env).length * 2);
   for (const [key, value] of Object.entries(env)) {

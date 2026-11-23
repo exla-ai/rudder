@@ -12,6 +12,7 @@
 // server also never sees entries another server adds after it started. So
 // sccache is read-write for everyone and parallel agents reuse each other's
 // compiled crates.
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -102,6 +103,30 @@ export function toolCacheEnv(role: ToolCacheRole, options: ToolCacheOptions = {}
   if (has("cargo") && use("CARGO_HOME", "cargo")) prepareCargoHome(out.CARGO_HOME, env);
   use("TURBO_CACHE_DIR", "turbo");
   use("NX_CACHE_DIRECTORY", "nx");
+  if (role === "agent") Object.assign(out, agentPagerEnv(root, env, has("jj")));
+  return out;
+}
+
+const AGENT_JJ_CONFIG = '[ui]\npaginate = "never"\n';
+
+// Agents can run commands in a terminal of their own (Antigravity always
+// does). There jj and git page long output through `less`, which waits for a
+// key nobody presses and hangs the agent. jj ignores PAGER, so its setting is
+// a config file listed after the user's own config files, which JJ_CONFIG
+// keeps loading.
+function agentPagerEnv(root: string, env: NodeJS.ProcessEnv, hasJj: boolean): Record<string, string> {
+  const out: Record<string, string> = { PAGER: "cat", GIT_PAGER: "cat" };
+  if (!hasJj) return out;
+  const file = path.join(root, "jj-agent.toml");
+  if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== AGENT_JJ_CONFIG) {
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, AGENT_JJ_CONFIG);
+    fs.renameSync(temp, file);
+  }
+  const user = env.JJ_CONFIG
+    ? env.JJ_CONFIG.split(path.delimiter)
+    : execFileSync("jj", ["config", "path", "--user"], { env, encoding: "utf8" }).split("\n");
+  out.JJ_CONFIG = [...user.filter((entry) => entry && entry !== file), file].join(path.delimiter);
   return out;
 }
 

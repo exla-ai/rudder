@@ -73,3 +73,13 @@ test("a message that waits too long says where it is stuck, and still settles wh
   const late = [{ id: "u6", role: "user", ts: now + skew + 11 * 60_000, text: "and the tests" }];
   assert.deepEqual(settlePending([waiting], late, now + 13 * 60_000, false), []);
 });
+
+test("only the agent's own conversation settles a message, not Rudder's copy of what it typed", () => {
+  // A resumed agent with no session file yet: the transcript is the prompts
+  // the dashboard recorded (worker/transcripts.mjs recordedTurns).
+  const sent = { id: "p7", text: "Are you still there?", ts: now, state: "sent", after: now + skew };
+  const typed = [{ id: "turn-3", role: "user", ts: now + skew + 300, text: "Are you still there?", recorded: true }];
+  assert.deepEqual(settlePending([sent], typed, now + 2000, false), [sent]);
+  const own = [{ id: "u7", role: "user", ts: now + skew + 9000, text: "Are you still there?" }];
+  assert.deepEqual(settlePending([sent], own, now + 12_000, false), []);
+});

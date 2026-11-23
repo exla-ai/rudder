@@ -879,7 +879,7 @@ nodeTest("agent stats: output speed over the last five responses and context lef
 nodeTest("an agent with no session yet shows the prompts Rudder recorded", () => {
   const repo = fixtureRepo({ id: "run-3", backend: "claude", task: "t", turns: [{ ts: "1789425365440", prompt: "start here", source: "user" }] });
   const transcript = readTranscript(repo, "run-3", { home: os.tmpdir() });
-  assert.deepEqual(transcript.messages, [{ id: "turn-0", role: "user", ts: 1789425365440, text: "start here" }]);
+  assert.deepEqual(transcript.messages, [{ id: "turn-0", role: "user", ts: 1789425365440, text: "start here", recorded: true }]);
 });
 
 // The supervisor itself must boot. 2.16.5 shipped a home.mjs that crashed in

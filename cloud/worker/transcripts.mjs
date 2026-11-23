@@ -397,12 +397,15 @@ function showHandoff(message) {
 }
 
 // The prompts Rudder recorded for an agent, as chat messages.
+// `recorded`: Rudder's own copy of what it typed, not the agent's record of
+// what it took, so it never settles a message the app sent (app pending.js).
 function recordedTurns(record) {
   return (record.turns || []).map((turn, index) => ({
     id: `turn-${index}`,
     role: "user",
     ts: toMillis(turn.ts),
     text: String(turn.prompt || ""),
+    recorded: true,
   }));
 }
 

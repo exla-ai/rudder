@@ -79,7 +79,9 @@ const recorded = (m) => {
  * current step began; `busy` says whether the agent is working now.
  */
 export function settlePending(list, messages, now, busy) {
-  const shown = (messages || []).filter((m) => m.ts != null && (m.role === "user" || recorded(m)));
+  // Rudder's copy of a prompt it typed (worker/transcripts.mjs recordedTurns)
+  // is not the agent's: only the agent's own record settles a message.
+  const shown = (messages || []).filter((m) => m.ts != null && !m.recorded && (m.role === "user" || recorded(m)));
   const taken = new Set();
   return list.filter((p) => {
     if (p.state === "failed") return true;

@@ -783,6 +783,15 @@ pub(crate) fn antigravity_resume_command(run: &AgentRun, session_id: &str) -> Te
     TerminalCommand::with_args(antigravity_program(), args)
 }
 
+/// Continue an Antigravity conversation with `prompt` as its next turn. agy
+/// drops what is typed into its pane while it starts, so the turn goes in as
+/// `-i`, which agy sends into the reopened conversation.
+pub(crate) fn antigravity_continue_command(run: &AgentRun, session_id: &str, prompt: &str) -> TerminalCommand {
+    let mut command = antigravity_resume_command(run, session_id);
+    push_antigravity_prompt(&mut command.args, Some(prompt));
+    command
+}
+
 /// Antigravity forks a conversation only from inside it (`/fork` in its pane)
 /// and has no command to copy one into another process, so a handoff or a
 /// branch of an Antigravity chat is refused with this reason.

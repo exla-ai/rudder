@@ -1690,6 +1690,10 @@ fn antigravity_resumes_its_conversation_and_refuses_to_fake_a_fork() {
         .any(|w| w[0] == "--conversation" && w[1] == "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"));
     assert!(resume.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
     assert!(!resume.args.iter().any(|arg| arg == "--effort"), "{:?}", resume.args);
+    // A new goal goes in at launch: agy drops what is typed while it starts.
+    let regoal = antigravity_continue_command(&run, "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10", "now fix the lint");
+    assert!(regoal.args.windows(2).any(|w| w[0] == "--conversation" && w[1] == "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"));
+    assert!(regoal.args.windows(2).any(|w| w[0] == "-i" && w[1] == "now fix the lint"), "{:?}", regoal.args);
 
     let refused = fork_command(Backend::Antigravity, "", None, "7f0c2a52", Some("go"));
     assert_eq!(refused.err().as_deref(), Some(ANTIGRAVITY_NO_FORK));

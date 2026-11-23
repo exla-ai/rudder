@@ -20941,14 +20941,13 @@ Address the objection directly. If you disagree, say why inside \
             let (mut command, deliver_after, new_session) = if let Some(sid) = session.as_deref() {
                 // Resume the SAME session; the new goal arrives as the next turn.
                 // OpenCode's TUI takes no typed-ahead turn into a session it
-                // opens; its plugin sends it.
+                // opens (its plugin sends it), and agy drops what is typed while
+                // it starts, so both take the goal at launch.
                 match backend {
                     Backend::Claude => (claude_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
                     Backend::Codex => (codex_resume_command(run, sid), Some(new_goal.to_string()), session.clone()),
                     Backend::Opencode => (opencode_continue_command(run, sid, new_goal), None, session.clone()),
-                    Backend::Antigravity => {
-                        (antigravity_resume_command(run, sid), Some(new_goal.to_string()), session.clone())
-                    }
+                    Backend::Antigravity => (antigravity_continue_command(run, sid, new_goal), None, session.clone()),
                 }
             } else {
                 // No session to resume: fresh spawn carrying a handoff. Files persist

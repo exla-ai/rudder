@@ -11491,7 +11491,10 @@ fn scheduler_launches_ready_root_but_holds_blocked_dependent() {
 #[test]
 fn deleting_a_launched_nodes_agent_unblocks_its_hard_dependents() {
     let mut app = App::new();
-    app.cwd = std::env::temp_dir();
+    // Its own repo: a delete closes the row into <repo>/.rudder/closed, which a
+    // shared temp dir would keep for the next run to collide with.
+    let repo = unique_test_repo("delete-node-unblocks");
+    app.cwd = repo.clone();
     // n0 launched (agent exists), n1 queued hard-dep'ing on n0.
     app.plan_mut().planned_nodes = vec![test_planned_node("n1", &["n0"])];
     app.plan_mut()
@@ -11520,6 +11523,8 @@ fn deleting_a_launched_nodes_agent_unblocks_its_hard_dependents() {
         .next_node_to_launch(4)
         .expect("dependent unblocked by the deletion");
     assert_eq!(app.plan().planned_nodes[position].id, "n1");
+
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[test]

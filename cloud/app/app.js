@@ -1321,7 +1321,8 @@ function DesktopShell() {
   }, { signal: life.signal, capture: true });
   const paintAgent = (a, { p, a: ag, showProject }) => {
     const st = agentStatus(ag);
-    a.className = `ds-agent ${st.cls}`;
+    // A row being renamed keeps saying so through every refresh (renameRow).
+    a.className = `ds-agent ${st.cls}${isRenaming(a.querySelector(".ds-an")) ? " renaming" : ""}`;
     a.querySelector(".dot").classList.toggle("live", !!st.live);
     if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
     const target = { ws: p.workspaceId, run: ag.id };
@@ -4615,6 +4616,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     return { tone: "err", head: "Not sent", why: `${why.charAt(0).toUpperCase()}${why.slice(1)}${/[.!?]$/.test(why) ? "" : "."}`, acts: [["retry", "Retry"], ["drop", "Remove"]] };
   }
   const PROBLEMS = new Set(["failed", "stuck", "lost"]);
+  // Esc presses "Close menu and send" makes before it leaves the menu to you.
+  const MENU_ESCS = 3;
   const noteHtml = (n, acting) => `<div class="m-note"><div class="m-head">${icon("alert")}<span>${escapeHtml(n.head)}</span></div><p class="m-why">${escapeHtml(n.why)}</p><div class="m-acts">${n.acts.map(([action, label], i) => `<button type="button" class="btn small${i === 0 ? " accent" : ""}" data-act="${action}"${acting ? " disabled" : ""}>${escapeHtml(label)}</button>`).join("")}</div></div>`;
 
   async function onProblem(id, action) {
@@ -4627,14 +4630,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     try {
       // A queued message goes back first, so it cannot also arrive late.
       if (item.state === "stuck" && !(await withdraw(item))) return;
-      store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
-      if (action === "drop") return;
-      // Esc closes the menu, or declines the prompt, the way it would in the
-      // terminal; the pane redraws before the message goes in.
-      if (action === "close-send" || action === "decline-send") {
-        await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
-        await new Promise((resolve) => setTimeout(resolve, 700));
-      }
+      if (action === "drop") return unlist(item);
+      if (action === "close-send") return await closeMenuAndSend(item);
+      // Esc declines the prompt, the way it would in the terminal.
+      if (action === "decline-send") await pressEsc();
+      unlist(item);
       item.acting = false;
       void send(item.text, [], item);
     } catch (err) {
@@ -4642,6 +4642,23 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     } finally {
       item.acting = false;
       paint();
+    }
+  }
+
+  const unlist = (item) => store.pending.set(key, (store.pending.get(key) || []).filter((x) => x !== item));
+  // Esc in the agent's terminal, then time for the pane to redraw.
+  const pressEsc = async () => {
+    await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  };
+  // Esc closes a menu as it would in the terminal, but some take more than
+  // one (Claude's /config goes back a level first). Esc goes in until the
+  // dashboard stops refusing the message for a menu, at most MENU_ESCS times.
+  async function closeMenuAndSend(item) {
+    for (let n = 0; n < MENU_ESCS && item.blocked === "menu"; n++) {
+      await pressEsc();
+      unlist(item);
+      await send(item.text, [], item);
     }
   }
 

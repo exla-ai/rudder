@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { loadConfig, saveConfig } from "./state.js";
+import { rudderHome } from "./util.js";
 
 const POSTHOG_HOST = "https://us.i.posthog.com";
 /** Project write key. Public by design; overridable so forks can point elsewhere. */
@@ -164,7 +165,7 @@ export function sanitizeProperties(properties: EventProperties): EventProperties
  * worth surfacing, and never worth retrying (the next session will tell the
  * same story). Returns true only when PostHog accepted it, for tests.
  */
-export async function capture(event: string, properties: EventProperties = {}): Promise<boolean> {
+export async function capture(event: string, properties: EventProperties = {}, at = new Date()): Promise<boolean> {
   if (!(await telemetryEnabled())) {
     return false;
   }
@@ -173,7 +174,7 @@ export async function capture(event: string, properties: EventProperties = {}): 
     event,
     distinct_id: await installId(),
     properties: { ...(await baseProperties()), ...sanitizeProperties(properties) },
-    timestamp: new Date().toISOString(),
+    timestamp: at.toISOString(),
   };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CAPTURE_TIMEOUT_MS);
@@ -190,4 +191,60 @@ export async function capture(event: string, properties: EventProperties = {}): 
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The spool native dashboards append their events to (native/src/telemetry.rs). */
+export function eventSpoolPath(home = rudderHome()): string {
+  return path.join(home, "telemetry", "events.jsonl");
+}
+
+/**
+ * Send the events native dashboards spooled, then forget them: like `capture`,
+ * a failed send is never retried. The spool is claimed by rename first, so two
+ * senders never send one event twice, and a line a dashboard appends meanwhile
+ * starts the next spool.
+ */
+export async function flushEventSpool(spool = eventSpoolPath()): Promise<void> {
+  const claimed = `${spool}.${process.pid}.sending`;
+  try {
+    await fsp.rename(spool, claimed);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  const raw = await fsp.readFile(claimed, "utf8");
+  await fsp.rm(claimed);
+  for (const line of raw.split("\n")) {
+    const event = spooledEvent(line);
+    if (event) {
+      await capture(event.name, event.properties, event.at);
+    }
+  }
+}
+
+/** One spool line: `{event, properties, root, at}`. The dashboard's root is
+ *  only ever sent as its hash. A line that is not one is skipped. */
+function spooledEvent(line: string): { name: string; properties: EventProperties; at: Date } | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  const entry = value as { event?: unknown; properties?: unknown; root?: unknown; at?: unknown } | null;
+  if (typeof entry?.event !== "string" || !entry.event || typeof entry.root !== "string" || typeof entry.at !== "number") {
+    return undefined;
+  }
+  const properties: EventProperties = {};
+  if (entry.properties && typeof entry.properties === "object") {
+    for (const [key, item] of Object.entries(entry.properties)) {
+      if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+        properties[key] = item;
+      }
+    }
+  }
+  properties.project = projectHash(entry.root);
+  return { name: entry.event, properties, at: new Date(entry.at) };
 }

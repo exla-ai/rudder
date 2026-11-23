@@ -91,7 +91,7 @@
     {"name": "auth login", "replacement": "rudder login", "adapter": "login", "owner": "v4 command cut", "expires": "2027-02-01"},
     {"name": "project cloud", "replacement": "rudder cloud", "adapter": "cloud", "owner": "v4 command cut", "expires": "2027-02-01"}
   ],
-  "callbacks": ["__migrate-v4", "__open-project-files", "done", "remember", "share", "context", "engine", "__fabric-fetch", "__claude-sdk", "__worker", "__route-task", "__launch-node", "__graph-mirror", "__sync-checkout", "__pull-export", "__adopt-moved", "__models", "__refresh-models", "__event"],
+  "callbacks": ["__migrate-v4", "__open-project-files", "done", "remember", "share", "context", "engine", "__fabric-fetch", "__claude-sdk", "__worker", "__route-task", "__launch-node", "__graph-mirror", "__sync-checkout", "__pull-export", "__adopt-moved", "__models", "__refresh-models"],
   "developer": ["board", "serve", "telemetry", "project-files", "restart", "merge", "sync", "cleanup", "gc", "undo"],
   "retired": ["tmux", "tui", "shell", "interactive", "legacy-shell", "improve"],
   "retired_slash": ["/ask", "/run", "/gam", "/nudge", "/tell"],

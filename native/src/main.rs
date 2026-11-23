@@ -13388,7 +13388,7 @@ Address the objection directly. If you disagree, say why inside \
             .unwrap_or_default()
             .to_string();
         if name.starts_with('/') && name.len() > 1 {
-            telemetry::emit_event("command_used", serde_json::json!({ "name": name }));
+            telemetry::emit_event(&self.cwd, "command_used", serde_json::json!({ "name": name }));
         }
     }
 
@@ -21295,6 +21295,7 @@ Address the objection directly. If you disagree, say why inside \
     /// reaches "done" and never merges is the failure mode users complain about.
     fn emit_merge_finished(&mut self, ok: bool, conflict: bool, planned: bool) {
         telemetry::emit_event(
+            &self.cwd,
             "merge_finished",
             serde_json::json!({
                 "ok": ok,
@@ -22697,13 +22698,14 @@ What to do\n\
         }
         self.dashboard_open_emitted = true;
         telemetry::emit_event(
+            &self.cwd,
             "dashboard_opened",
             serde_json::json!({
                 "backend": self.backend.as_str(),
                 "model": self.model,
                 "agents_restored": self.agents.len(),
-                // `project` is added by the CLI (one hash implementation, in
-                // src/analytics.ts); the detached child inherits this cwd.
+                // `project` is added from the root when the spool is sent
+                // (one hash implementation, in src/analytics.ts).
             }),
         );
     }

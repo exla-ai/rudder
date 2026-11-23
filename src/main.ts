@@ -10,10 +10,10 @@ import { runCloudCommand } from "./cloud.js";
 import { printContextAudit } from "./context-audit.js";
 import { currentBranch, findRepoRoot } from "./git.js";
 import { runGc } from "./gc.js";
-import { capture, pendingTelemetryNotice, projectHash, setTelemetryEnabled, telemetryEnabled, TELEMETRY_NOTICE } from "./analytics.js";
+import { flushEventSpool, pendingTelemetryNotice, setTelemetryEnabled, telemetryEnabled, TELEMETRY_NOTICE } from "./analytics.js";
 import { submitFeedback } from "./feedback.js";
 import type { FeedbackContext } from "./feedback.js";
-import { dashboardRoot, runHandoff } from "./handoff.js";
+import { runHandoff } from "./handoff.js";
 import { ensureBoardRunning } from "./daemon.js";
 import { ensureJjAvailable } from "./jj-binary.js";
 import {
@@ -98,8 +98,6 @@ type Parsed = {
     contextFile?: string;
     /** `--no-issue` opts out of filing a GitHub issue for a feedback report. */
     issue?: boolean;
-    /** `rudder __event <name> --props '{json}'` (hidden telemetry emitter). */
-    props?: string;
     /** Report options */
     format?: "table" | "json" | "markdown" | "csv";
     status?: string;
@@ -479,13 +477,6 @@ export async function main(): Promise<void> {
       await runFeedbackCommand(parsed);
       return;
     }
-    case "__event": {
-      // Hidden: the native dashboard shells out to this so one telemetry
-      // implementation serves both halves of Rudder. Fire-and-forget by design —
-      // it must never fail loudly or delay the caller.
-      await runEventCommand(parsed);
-      return;
-    }
     case "handoff": {
       // Run from inside a live claude/codex chat: queues THIS conversation for
       // the dashboard, which forks it into an agent pane with all of its context.
@@ -522,7 +513,7 @@ export function isInternalCommand(command: string | undefined): boolean {
 }
 
 // These commands need no jj installation. Completion only writes its evidence.
-const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "update", "help", "done", "remember", "share"]);
+const JJ_FREE_COMMANDS = new Set(["__route-task", "engine", "telemetry", "feedback", "login", "logout", "update", "help", "done", "remember", "share"]);
 const RETIRED_CALLBACKS = new Set(["done", "remember", "share"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
@@ -638,14 +629,6 @@ function parseArgs(argv: string[]): Parsed {
     }
     if (arg.startsWith("--context=")) {
       parsed.flags.contextFile = arg.slice("--context=".length);
-      continue;
-    }
-    if (takesValue(arg, "--props")) {
-      parsed.flags.props = readValue(argv, ++i, arg);
-      continue;
-    }
-    if (arg.startsWith("--props=")) {
-      parsed.flags.props = arg.slice("--props=".length);
       continue;
     }
     if (takesValue(arg, "--port", "-p")) {
@@ -946,6 +929,12 @@ async function runNativeDashboard(): Promise<boolean> {
       console.warn(`rudder board daemon did not start: ${(err as Error)?.message ?? err}`);
     }
   }
+  // The dashboard spools its product events (native/src/telemetry.rs); this
+  // process sends them, so an event costs the dashboard no process of its own.
+  // Best-effort like every capture: telemetry never fails a session.
+  const sendEvents = (): Promise<void> => flushEventSpool().catch(() => undefined);
+  const eventSender = setInterval(() => void sendEvents(), EVENT_SPOOL_SEND_MS);
+  eventSender.unref();
   try {
     const code = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(nativeBinary, process.argv.slice(2), {
@@ -955,6 +944,8 @@ async function runNativeDashboard(): Promise<boolean> {
       child.on("error", reject);
       child.on("exit", (exitCode) => resolve(exitCode));
     });
+    clearInterval(eventSender);
+    await sendEvents();
     process.exitCode = code ?? 1;
     // The in-process board daemon keeps the event loop alive, so without closing it
     // the CLI would hang after the foreground TUI exits. Close it before returning.
@@ -962,11 +953,15 @@ async function runNativeDashboard(): Promise<boolean> {
     restoreNativeTuiEnv(previousNativeTui);
     return true;
   } catch {
+    clearInterval(eventSender);
     await board?.handle?.close().catch(() => undefined);
     restoreNativeTuiEnv(previousNativeTui);
     return false;
   }
 }
+
+/** How often the CLI beside a dashboard sends the events it spooled. */
+const EVENT_SPOOL_SEND_MS = 60_000;
 
 function restoreNativeTuiEnv(previous: string | undefined): void {
   if (previous === undefined) {
@@ -1202,31 +1197,6 @@ async function runFeedbackCommand(parsed: Parsed): Promise<void> {
   for (const reason of report.skipped) {
     console.log(`  note: ${reason}`);
   }
-}
-
-async function runEventCommand(parsed: Parsed): Promise<void> {
-  const event = parsed.args[0]?.trim();
-  if (!event) {
-    return;
-  }
-  let properties: Record<string, string | number | boolean> = {};
-  const raw = parsed.flags.props;
-  if (raw) {
-    try {
-      const parsedProps = JSON.parse(raw) as Record<string, unknown>;
-      for (const [key, value] of Object.entries(parsedProps)) {
-        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-          properties[key] = value;
-        }
-      }
-    } catch {
-      properties = {};
-    }
-  }
-  // Stamp the project id here so ONE implementation owns it: the dashboard
-  // shells out with its repo as cwd, and CLI invocations resolve the same root.
-  properties.project ??= projectHash(dashboardRoot());
-  await capture(event, properties);
 }
 
 /** Read all of stdin when it is piped (never when interactive), with a short

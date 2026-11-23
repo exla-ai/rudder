@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { projectHash, sanitizeProperties, TELEMETRY_NOTICE, telemetryEnabled } from "../dist/analytics.js";
+import { eventSpoolPath, flushEventSpool, projectHash, sanitizeProperties, TELEMETRY_NOTICE, telemetryEnabled } from "../dist/analytics.js";
 import { issueBody, issueTitle, parseGithubSlug, redactText, submitFeedback } from "../dist/feedback.js";
 import { isInternalCommand } from "../dist/main.js";
 
@@ -128,10 +129,57 @@ test("issueTitle / issueBody: a scannable title and a context block with no code
   assert.match(body, /_Filed by `rudder feedback`\._/);
 });
 
+test("flushEventSpool: sends each spooled dashboard event once, its root only as a hash", async (t) => {
+  // The dashboard appends events instead of spawning a CLI per event; the CLI
+  // beside it sends them. Telemetry goes to a local stand-in for PostHog here.
+  const home = await mkdtemp(path.join(tmpdir(), "rudder-event-spool-"));
+  const bodies = [];
+  const server = http.createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => {
+      bodies.push(JSON.parse(body));
+      response.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const saved = { RUDDER_HOME: process.env.RUDDER_HOME, RUDDER_TELEMETRY: process.env.RUDDER_TELEMETRY, RUDDER_POSTHOG_HOST: process.env.RUDDER_POSTHOG_HOST, CI: process.env.CI };
+  t.after(async () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    server.close();
+    await rm(home, { recursive: true, force: true });
+  });
+  process.env.RUDDER_HOME = home;
+  process.env.RUDDER_TELEMETRY = "1";
+  process.env.RUDDER_POSTHOG_HOST = `http://127.0.0.1:${server.address().port}`;
+  delete process.env.CI;
+
+  const spool = eventSpoolPath();
+  await mkdir(path.dirname(spool), { recursive: true });
+  // The line native/src/telemetry.rs `append_event` writes, and one torn line.
+  const at = 1_700_000_000_000;
+  await writeFile(spool, `${JSON.stringify({ event: "dashboard_opened", properties: { backend: "claude", agents_restored: 2 }, root: "/repo/one", at })}\n{"event":\n`);
+  await flushEventSpool();
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].event, "dashboard_opened");
+  assert.equal(bodies[0].properties.backend, "claude");
+  assert.equal(bodies[0].properties.agents_restored, 2);
+  assert.equal(bodies[0].properties.project, projectHash("/repo/one"));
+  assert.equal(bodies[0].timestamp, new Date(at).toISOString());
+  assert.ok(!JSON.stringify(bodies[0]).includes("/repo/one"), "the root never leaves the machine");
+
+  await flushEventSpool();
+  assert.equal(bodies.length, 1, "a sent spool is gone");
+});
+
 test("an unknown internal command is inert, not a task", () => {
-  // The dashboard shells out to `rudder __event`, resolving `rudder` from PATH —
-  // which can be an OLDER install than the binary calling it. Without this the
-  // fallback would spawn a real agent named "__event dashboard_opened …".
+  // The dashboard runs `rudder` callbacks from PATH, which can be a different
+  // install than the binary calling it. An older dashboard still shells out to
+  // the retired `__event`; without this the fallback would spawn a real agent
+  // named "__event dashboard_opened …".
   assert.equal(isInternalCommand("__event"), true);
   assert.equal(isInternalCommand("__does_not_exist_yet"), true);
   assert.equal(isInternalCommand("merge"), false);

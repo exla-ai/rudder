@@ -189,6 +189,10 @@ fn finish_turn(run: &mut AgentRun, announce: bool) {
                 request.repo_root = dashboard_root(&request.cwd);
                 let _ = crate::timeline::compute_timeline(&request);
             });
+            // A helper's answer goes to the agent that started it.
+            if announce {
+                crate::helpers::spawn_helper_reply(run);
+            }
         }
         run.needs_permission = false;
         run.needs_user_input = false;

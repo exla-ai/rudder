@@ -377,6 +377,7 @@ pub(crate) fn create_main_agent(
         done_summary: None,
         tokens_in: 0,
         tokens_out: 0,
+        parent_run: None,
         gam: None,
     }
 }
@@ -962,6 +963,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
             .map(ToOwned::to_owned),
         tokens_in,
         tokens_out,
+        parent_run: record.get("parentRunId").and_then(serde_json::Value::as_str).map(ToOwned::to_owned),
         gam: gam_state_from_record(&record),
     };
     // A record persisted with the resolver labels ("Resolve merge conflicts: …")
@@ -1519,6 +1521,8 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // Written every time (null once awake): the carry-over below keeps any
         // key this projection leaves out, which would keep a woken row asleep.
         "parked": run.parked.as_ref().map(ParkedNote::to_json),
+        // The agent that started this one as its helper (helpers.rs).
+        "parentRunId": run.parent_run,
     });
     if let Some(gam) = run.gam.as_ref() {
         record["gam"] = gam_state_to_json(gam);

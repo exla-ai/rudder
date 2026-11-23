@@ -8688,6 +8688,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         done_summary: None,
         tokens_in: 0,
         tokens_out: 0,
+        parent_run: None,
         gam: None,
     }
 }
@@ -10960,6 +10961,7 @@ fn delete_agent_requires_second_d() {
         done_summary: None,
         tokens_in: 0,
         tokens_out: 0,
+        parent_run: None,
         gam: None,
     });
 
@@ -33893,4 +33895,95 @@ fn initial_selection_needs_a_chosen_backend() {
     std::fs::write(home.join("config.json"), r#"{"version":1,"defaultBackend":"codex"}"#).unwrap();
     assert_eq!(initial_selection().unwrap().backend, Backend::Codex);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn agents_start_runs_a_linked_helper_on_its_own_model_without_moving_the_defaults() {
+    assert!(execution_prompt("fix it").contains(HELPER_RULE) && main_task_prompt("fix it").contains(HELPER_RULE));
+    let mut env = env_guard();
+    let dir = unique_test_repo("helper-start");
+    let home = dir.join("home");
+    env.set_home(&dir, &home);
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    fs::create_dir_all(home.join(".rudder")).unwrap();
+    // The catalog this account lists: agy names one slug per effort.
+    let models = serde_json::json!({"status": "SUCCESS", "command": {"name": "models", "data": {"models": [
+        {"id": "gemini-4-neon-low", "label": "Gemini 4 Neon (Low)"},
+        {"id": "gemini-4-neon-xhigh", "label": "Gemini 4 Neon (XHigh)"},
+    ]}}});
+    fs::write(home.join(".rudder/antigravity-models.json"), models.to_string()).unwrap();
+    // The workspace never arrives here: the row stays as agents_start left it.
+    let fake_cli = dir.join("fake-rudder.sh");
+    write_fake_bin(&fake_cli, "#!/bin/sh\nexit 1\n");
+    std::env::set_var("RUDDER_CLI", &fake_cli);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.workspace_prep_inline = false;
+    app.backend = Backend::Claude;
+    app.model = "opus".to_string();
+    app.effort = Some(EffortLevel::High);
+    let mut parent = test_agent_run("parent-run", "ship the parser");
+    parent.cwd = dir.join("parent-ws");
+    app.agents.push(parent);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Agents;
+
+    let started = app.deliver_helper_request(
+        "parent-run",
+        "antigravity gemini-4-neon-xhigh\nReview lib/ and test/ and list the top findings.",
+        "helper-0123456789",
+    );
+    if let Some(SteerDelivery::Failed(why)) = &started {
+        panic!("the helper was refused: {why}");
+    }
+    assert!(started.is_none());
+    assert_eq!(app.agents.len(), 2);
+    let helper = &app.agents[1];
+    assert_eq!(helper.parent_run.as_deref(), Some("parent-run"));
+    assert_eq!(
+        (helper.backend, helper.model.as_str(), helper.effort),
+        (Backend::Antigravity, "gemini-4-neon-xhigh", None)
+    );
+    assert!(helper.task.contains("Review lib/ and test/ and list the top findings."));
+    assert!(helper.task.contains(&dir.join("parent-ws").display().to_string()), "it reads where its parent works");
+    let helper_id = helper.id.clone();
+    // The model new agents start on, and the user's view, did not move.
+    assert_eq!((app.backend, app.model.as_str(), app.effort), (Backend::Claude, "opus", Some(EffortLevel::High)));
+    assert_eq!((app.selected_agent, app.focus), (0, FocusPane::Agents));
+    // The receipt names the run, and its record waits for replies.
+    let receipt: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.join(".rudder/steer-receipts/helper-0123456789.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["status"], "delivered");
+    assert_eq!(receipt["runId"], helper_id.as_str());
+    let record = crate::helpers::read_helper_record(&dir, &helper_id).unwrap();
+    assert_eq!((record.parent_run_id.as_str(), record.model.as_str()), ("parent-run", "gemini-4-neon-xhigh"));
+    assert!(record.replies.is_empty());
+    // The link survives a restart.
+    save_native_run_record(&dir, &app.agents[1]).unwrap();
+    let loaded = load_persisted_agents(&dir);
+    assert_eq!(loaded.iter().find(|run| run.id == helper_id).and_then(|run| run.parent_run.as_deref()), Some("parent-run"));
+    assert!(render_screen(&mut app, 140, 40).contains("helper of"), "the list shows whose helper it is");
+
+    // Refused with the reason, and nothing starts.
+    let refused = |app: &mut App, parent: &str, instruction: &str| match app.deliver_helper_request(parent, instruction, "helper-9876543210") {
+        Some(SteerDelivery::Failed(why)) => why,
+        _ => panic!("{instruction:?} started a helper"),
+    };
+    let why = refused(&mut app, "parent-run", "antigravity gemini-4-neon xhigh\nreview");
+    assert!(why.contains("unknown antigravity model: gemini-4-neon") && why.contains("gemini-4-neon-xhigh"), "{why}");
+    let why = refused(&mut app, "parent-run", "antigravity gemini-4-neon-xhigh high\nreview");
+    assert!(why.contains("cannot run at high effort"), "{why}");
+    let why = refused(&mut app, "parent-run", "gemini3 gemini-4-neon-xhigh\nreview");
+    assert!(why.contains("unknown harness: gemini3"), "{why}");
+    let why = refused(&mut app, "parent-run", "antigravity gemini-4-neon-xhigh\n  ");
+    assert!(why.contains("task is empty"), "{why}");
+    let why = refused(&mut app, &helper_id, "antigravity gemini-4-neon-low\nreview");
+    assert!(why.contains("cannot start helpers"), "{why}");
+    let why = refused(&mut app, "gone-run", "antigravity gemini-4-neon-low\nreview");
+    assert!(why.contains("not in this dashboard"), "{why}");
+    assert_eq!(app.agents.len(), 2);
+    let _ = fs::remove_dir_all(&dir);
 }

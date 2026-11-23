@@ -159,6 +159,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         done_summary: None,
         tokens_in: 0,
         tokens_out: 0,
+        parent_run: None,
         gam: None,
     }
 }

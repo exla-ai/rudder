@@ -365,7 +365,7 @@ pub(crate) fn codex_home() -> Result<PathBuf, String> {
 }
 
 /// `<sessions>/YYYY/MM/DD/rollout-<time>-<thread>.jsonl`.
-fn codex_rollout_file(sessions: &Path, thread: &str) -> Result<PathBuf, String> {
+pub(crate) fn codex_rollout_file(sessions: &Path, thread: &str) -> Result<PathBuf, String> {
     let suffix = format!("-{thread}.jsonl");
     let mut dirs = vec![(sessions.to_path_buf(), 0)];
     while let Some((dir, depth)) = dirs.pop() {

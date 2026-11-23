@@ -140,6 +140,7 @@ mod codex_rollout;
 mod chat_edit;
 mod agent_life;
 mod branch;
+mod helpers;
 mod steer_watch;
 use crate::chat_edit::*;
 
@@ -2974,6 +2975,9 @@ struct AgentRun {
     /// This run's half of a `/gam` generator/adversarial pair. `Some` on both
     /// sides of an active pair; the round loop reads it from the GENERATOR row.
     gam: Option<GamState>,
+    /// The run that started this one as its helper (`agents_start`,
+    /// helpers.rs). Persisted as run.json `parentRunId`.
+    parent_run: Option<String>,
 }
 
 #[derive(Debug)]
@@ -3268,6 +3272,7 @@ fn fork_row(
         done_summary: None,
         tokens_in: 0,
         tokens_out: 0,
+        parent_run: None,
         gam: None,
     }
 }
@@ -9679,6 +9684,7 @@ impl App {
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: None,
         };
 
@@ -9845,6 +9851,7 @@ impl App {
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: None,
         };
 
@@ -10360,6 +10367,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: Some(GamState::new(
                 GamRole::Generator,
                 adversarial_id.clone(),
@@ -10464,6 +10472,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: Some(GamState::new(
                 GamRole::Adversarial,
                 generator_id,
@@ -11686,6 +11695,7 @@ Address the objection directly. If you disagree, say why inside \
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: None,
         };
 
@@ -14938,6 +14948,7 @@ Address the objection directly. If you disagree, say why inside \
             done_summary: None,
             tokens_in: 0,
             tokens_out: 0,
+            parent_run: None,
             gam: None,
         };
         match TerminalPane::spawn_shell_or_command(Some(command), options) {
@@ -16574,6 +16585,15 @@ Address the objection directly. If you disagree, say why inside \
                 // on the next line when there is one. Accepted branches
                 // answer when they start (finish_branch_launch).
                 "branch" => match self.deliver_branch_request(&task_id, &instruction, &request_id) {
+                    Some(result) => result,
+                    None => {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                },
+                // An agent's `agents_start`: a helper on the model it names
+                // (helpers.rs). Accepted ones answer with the new run id.
+                "helper" => match self.deliver_helper_request(&task_id, &instruction, &request_id) {
                     Some(result) => result,
                     None => {
                         let _ = std::fs::remove_file(&path);

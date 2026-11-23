@@ -742,6 +742,16 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
     }
 
     let mut extra: Vec<Vec<Span<'a>>> = Vec::new();
+    if let Some(parent) = agent.parent_run.as_deref() {
+        let parent = app
+            .agents
+            .iter()
+            .find(|run| run.id == parent)
+            .map(|run| short_task(if run.task_summary.trim().is_empty() { &run.task } else { &run.task_summary }))
+            .unwrap_or_else(|| parent.to_string());
+        let model = agent_model_label(agent.backend, &agent.model, agent.effort);
+        extra.push(vec![Span::styled(format!("↳ helper of {parent} · {model}"), muted_style(focused))]);
+    }
     if let Some(detail) = integration_detail(agent) {
         extra.push(vec![Span::styled(detail, muted_style(focused))]);
     }

@@ -47,7 +47,9 @@ async function userRepo(t) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    await fsp.rm(root, { recursive: true, force: true });
+    // On macOS a jj or git process the merge started can still be writing in
+    // the repo for a moment after it returns (ENOTEMPTY on the first try).
+    await fsp.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
   const repo = path.join(root, "repo");
   git(root, ["init", "-q", "-b", "main", repo]);

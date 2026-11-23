@@ -470,6 +470,9 @@ body.desktop.mac .ds-top { padding-top: 28px; }
 .ro-bar .rb-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .ro-bar .rb-t { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ro-bar .rb-s { font-size: 13px; color: var(--muted); }
+/* A chat closed while open (app.js paintClosedChat): the same bar, with Reopen. */
+.closed-bar[hidden], .closed-bar .cb-reopen[hidden] { display: none; }
+.closed-bar .cb-reopen { flex: none; }
 
 /* A pinned agent in the sidebar: the cleanup of untouched agents leaves it alone. */
 .ds-apin { display: grid; place-items: center; color: var(--faint); }

@@ -498,6 +498,12 @@ a { color: var(--accent); }
 .agent .a-top { display: flex; align-items: baseline; gap: 8px; }
 .agent .a-title { flex: 1; min-width: 0; font-weight: 600; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent .a-time { font-size: 12.5px; color: var(--faint); flex: none; }
+/* Finished or needs you since its chat was last open (app.js unreadAgents). */
+.row.agent.unread .a-title, .ds-agent.unread .ds-an { font-weight: 650; }
+.row.agent.unread .a-title::before, .ds-agent.unread .ds-an::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%;
+  background: var(--accent); vertical-align: 0.14em;
+}
 .agent .a-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
 .agent .a-msg {
   margin-top: 6px; font-size: 14px; color: var(--muted); line-height: 1.4;
@@ -539,9 +545,11 @@ a { color: var(--accent); }
 }
 .composer form:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-strong)); box-shadow: 0 0 0 3px var(--accent-soft); }
 .composer.drop-over form { border-style: dashed; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* The box scrolls by whole lines: its space around the text is margin, not
+   padding, so a full box never shows a line cut in half at its top. */
 .composer textarea {
   flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent;
-  font-size: 16px; line-height: 22px; padding: 7px 0; max-height: 168px; min-height: 36px;
+  font-size: 16px; line-height: 22px; padding: 0; margin: 7px 0; max-height: 154px; min-height: 22px;
 }
 .composer textarea::placeholder { color: var(--faint); }
 .composer form.with-attach { padding-left: 4px; }
@@ -599,6 +607,8 @@ a { color: var(--accent); }
 .bubble a { color: inherit; text-decoration: underline; }
 .bubble code { background: rgba(255,255,255,0.14); color: inherit; }
 .bubble pre { background: rgba(0,0,0,0.22); }
+/* Your own message, as you typed it (render.js renderTyped). */
+.md.typed { white-space: pre-wrap; }
 .msg.pending .bubble { opacity: 0.92; }
 .msg.queued .bubble { border: 1px dashed var(--muted); background: var(--surface-2); color: var(--ink); opacity: 1; }
 .msg .m-foot { font-size: 11.5px; color: var(--faint); margin-top: 4px; padding: 0 4px; display: flex; gap: 8px; align-items: center; }
@@ -654,6 +664,19 @@ a { color: var(--accent); }
 .msg-edit .me-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .msg.assistant .md { font-size: 15.5px; line-height: 1.58; color: var(--ink); padding: 0 2px; }
+/* A question the agent asked you, and your answer (app.js paintAsked). */
+.msg.asked { display: flex; flex-direction: column; gap: 6px; }
+.asked-head { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.asked-head svg { width: 14px; height: 14px; flex: none; }
+.asked-list, .asked-row { display: flex; flex-direction: column; }
+.asked-list { gap: 12px; }
+.asked-row { gap: 8px; }
+.asked-q { padding: 0 2px; font-size: 15.5px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.asked-a {
+  align-self: flex-end; max-width: 86%; padding: 7px 13px; border-radius: 18px 18px 6px 18px;
+  background: var(--bubble-user); color: var(--bubble-user-ink); font-size: 15px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.asked-a.none { padding: 0 4px; background: none; color: var(--muted); font-size: 12.5px; }
 .msg.system { text-align: center; }
 .msg.system .sys { display: inline-block; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border-radius: 10px; padding: 6px 12px; max-width: 92%; text-align: left; }
 .msg.system .sys p { margin: 0; }
@@ -701,8 +724,14 @@ div.compact { margin: 18px 0; }
 .md pre { margin: 0; }
 .md img { max-width: 100%; border-radius: 10px; }
 .table-wrap { overflow-x: auto; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; -webkit-overflow-scrolling: touch; }
+/* A table still wider than the message (a long path in a cell) scrolls
+   sideways, and fades on the side there is more of (render.js tableEdges). */
+.table-wrap.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent); }
+.table-wrap.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent); }
+.table-wrap.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent); }
 .md table { border-collapse: collapse; font-size: 13.5px; min-width: 100%; }
-.md th, .md td { padding: 7px 11px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+/* Cells wrap between words, never inside one. */
+.md th, .md td { padding: 7px 11px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); overflow-wrap: normal; word-break: normal; }
 .md th { background: var(--surface-2); font-weight: 600; }
 .md tr:last-child td { border-bottom: 0; }
 
@@ -712,7 +741,9 @@ div.compact { margin: 18px 0; }
 .copy-btn { border: 0; background: transparent; color: var(--muted); height: 30px; padding: 0 8px; border-radius: 8px; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; }
 .copy-btn:active { background: var(--surface-3); }
 .copy-btn svg { width: 14px; height: 14px; }
-.codeblock pre { overflow-x: auto; padding: 11px 13px 12px; -webkit-overflow-scrolling: touch; }
+/* The pre sets the code's size and spacing: its own line box, at the prose's
+   size, made every line of the smaller code take a prose line. */
+.codeblock pre { overflow-x: auto; padding: 11px 13px 12px; -webkit-overflow-scrolling: touch; font-size: 12.5px; line-height: 1.55; }
 .codeblock code, .tool-out pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--code-ink); background: none; padding: 0; border-radius: 0; white-space: pre; }
 
 /* Tool rows */
@@ -872,6 +903,9 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
   animation: toast-in 200ms cubic-bezier(.2,.7,.2,1);
 }
 .toast.error { background: var(--failed); color: #fff; }
+/* Its action: Open, Update now (core.js toast). */
+.toast-act { flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
+.toast-act:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .toast.out { opacity: 0; transform: translateY(-6px); transition: opacity 180ms, transform 180ms; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 

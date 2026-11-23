@@ -60,6 +60,8 @@ export function mountSubagentTray({ workspace, run }) {
   let inflight = false;
   let again = false;
   let destroyed = false;
+  // A closed chat (AgentScreen): no polls, nothing shown, until it reopens.
+  let paused = false;
 
   button.addEventListener("click", () => {
     shown = !shown;
@@ -108,7 +110,7 @@ export function mountSubagentTray({ workspace, run }) {
   function paint() {
     const running = list.length;
     // One that finished while open stays until Back.
-    button.hidden = !running && !outdated && !open;
+    button.hidden = paused || (!running && !outdated && !open);
     if (button.hidden) shown = false;
     el.hidden = !shown;
     button.classList.toggle("live", running > 0);
@@ -178,7 +180,7 @@ export function mountSubagentTray({ workspace, run }) {
     if (inflight) { again = true; return; }
     clearTimeout(timer);
     timer = null;
-    if (destroyed) return;
+    if (destroyed || paused) return;
     inflight = true;
     const asked = open;
     try {
@@ -215,13 +217,13 @@ export function mountSubagentTray({ workspace, run }) {
     } finally {
       inflight = false;
     }
-    if (destroyed) return;
+    if (destroyed || paused) return;
     paint();
     if (again) { again = false; poll(); return; }
     const live = open || list.length > 0;
     timer = setTimeout(tick, live ? POLL_LIVE_MS : POLL_IDLE_MS);
   }
-  const tick = () => { if (document.hidden) timer = setTimeout(tick, POLL_IDLE_MS); else poll(); };
+  const tick = () => { if (paused) return; if (document.hidden) timer = setTimeout(tick, POLL_IDLE_MS); else poll(); };
   // Running time counts up between polls.
   const clock = setInterval(() => {
     if (!document.hidden && shown && list.length) paint();
@@ -233,6 +235,11 @@ export function mountSubagentTray({ workspace, run }) {
   return {
     el,
     button,
+    pause(on) {
+      if (paused === on) return;
+      paused = on;
+      if (on) { clearTimeout(timer); timer = null; paint(); } else poll();
+    },
     destroy() {
       destroyed = true;
       clearTimeout(timer);

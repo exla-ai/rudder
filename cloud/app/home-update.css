@@ -25,10 +25,6 @@
 .hu-sheet .hu-go { width: 100%; min-height: 46px; }
 .hu-sheet .hu-line, .hu-sheet .hu-fail { max-width: none; }
 
-/* Update now on an error toast. */
-.toast-act { flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; }
-.toast-act:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-
 /* Settings: the Update section's card, left aligned like the rest of Settings. */
 .set-update { padding: 14px 16px; }
 .set-update .su-title { font-size: 15px; font-weight: 600; color: var(--ink); }

@@ -1,9 +1,10 @@
-/* Find in a chat (chat-find.js): a bar floating at the top right of the
-   conversation, over it, so the chat never moves when it opens. The words
-   found are CSS highlights, yellow with the current one orange, in dark ink
-   on any bubble or theme, as browsers paint their own find. */
+/* Find in a chat (chat-find.js): a bar at the top right, above the
+   conversation, so it covers none of it; the conversation keeps its place
+   on screen as it opens and closes. The words found are CSS highlights,
+   yellow with the current one orange, in dark ink on any bubble or theme, as
+   browsers paint their own find. */
 .cf {
-  position: absolute; top: 8px; right: 12px; z-index: 6;
+  position: relative; z-index: 6; flex: none; align-self: flex-end; margin: 8px 12px 6px;
   display: flex; align-items: center; gap: 2px;
   width: min(380px, calc(100% - 24px)); height: 42px; padding: 0 6px;
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px;

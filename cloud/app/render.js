@@ -85,6 +85,26 @@ export function renderMarkdown(el, text, { fileRefs = false } = {}) {
   if (fileRefs) markFileRefs(el);
 }
 
+// A web address in typed text, without the punctuation that ends a sentence.
+const WEB_ADDRESS = /\bhttps?:\/\/[^\s<>"'`]*[^\s<>"'`.,;:!?)\]}]/g;
+
+/** Text as a person typed it (their own chat messages): its spaces, line
+ * breaks and Markdown characters shown as they are, web addresses as links. */
+export function renderTyped(el, text) {
+  const src = String(text ?? "");
+  el.classList.add("typed");
+  el.replaceChildren();
+  let at = 0;
+  for (const m of src.matchAll(WEB_ADDRESS)) {
+    const a = document.createElement("a");
+    a.href = m[0];
+    a.textContent = m[0];
+    el.append(src.slice(at, m.index), a);
+    at = m.index + m[0].length;
+  }
+  el.append(src.slice(at));
+}
+
 const PREVIEW_BLOCKS = "blockquote, div, h1, h2, h3, h4, h5, h6, li, ol, p, pre, table, tbody, td, th, thead, tr, ul";
 
 function markdownExcerpt(text) {
@@ -117,12 +137,29 @@ export async function markdownPreview(text, limit) {
   return (libs ? markdownExcerpt(text).textContent : text).replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
+// Which sides of a sideways-scrolling table have more to show (styles.css
+// .table-wrap.more-left/.more-right). Measured as its box changes size, which
+// covers it first being laid out; a table taken off the page is let go.
+function paintTableEdges(wrap) {
+  const max = wrap.scrollWidth - wrap.clientWidth;
+  wrap.classList.toggle("more-left", max > 1 && wrap.scrollLeft > 1);
+  wrap.classList.toggle("more-right", max > 1 && wrap.scrollLeft < max - 1);
+}
+const tableEdges = new ResizeObserver((entries) => {
+  for (const { target } of entries) {
+    if (target.isConnected) paintTableEdges(target);
+    else tableEdges.unobserve(target);
+  }
+});
+
 function enhance(root) {
   for (const table of root.querySelectorAll("table")) {
     const wrap = document.createElement("div");
     wrap.className = "table-wrap";
     table.replaceWith(wrap);
     wrap.appendChild(table);
+    wrap.addEventListener("scroll", () => paintTableEdges(wrap), { passive: true });
+    tableEdges.observe(wrap);
   }
   for (const pre of root.querySelectorAll("pre")) {
     const code = pre.querySelector("code");

@@ -187,24 +187,26 @@ export function noteSignedIn() {
 /* Toasts + dialogs --------------------------------------------------- */
 
 let lastToast = { text: "", at: 0 };
-export function toast(text, { error = false } = {}) {
+/** A short message at the top. `action`: { label, run }, a button on it
+ * (Open, Update now), and it stays longer. */
+export function toast(text, { error = false, action = null } = {}) {
   const box = document.getElementById("toasts");
   if (!box) return;
   if (text === lastToast.text && Date.now() - lastToast.at < 2500) return;
   lastToast = { text, at: Date.now() };
   const el = h(`<div class="toast${error ? " error" : ""}"></div>`);
   el.textContent = text;
-  const offerUpdate = error && needsUpdateMessages.has(text);
-  if (offerUpdate) {
-    const act = h(`<button type="button" class="toast-act">Update now</button>`);
-    act.addEventListener("click", () => {
-      el.remove();
-      void import("/app/home-update.js").then((m) => m.openUpdateSheet(text));
-    });
-    el.append(act);
+  const act = error && needsUpdateMessages.has(text)
+    ? { label: "Update now", run: () => void import("/app/home-update.js").then((m) => m.openUpdateSheet(text)) }
+    : action;
+  if (act) {
+    const b = h(`<button type="button" class="toast-act"></button>`);
+    b.textContent = act.label;
+    b.addEventListener("click", () => { el.remove(); act.run(); });
+    el.append(b);
   }
   box.appendChild(el);
-  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, offerUpdate ? 9000 : error ? 4200 : 2800);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, act ? (error ? 9000 : 6000) : error ? 4200 : 2800);
 }
 
 export function confirmDialog({ title, body, confirm = "Confirm", danger = false }) {

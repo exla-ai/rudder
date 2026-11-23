@@ -1,6 +1,7 @@
 // Cmd+F on a chat (Ctrl+F off a Mac): find in this conversation, not the
-// sidebar or the panels beside it. A bar over the top of the chat: type to
-// find, "3 of 12", Enter or the up button for the next older match,
+// sidebar or the panels beside it. A bar at the top of the chat, above the
+// conversation rather than over it: type to find, "3 of 12", Enter or the up
+// button for the next older match,
 // Shift+Enter or the down button for the next newer one (Cmd+G and
 // Shift+Cmd+G too), Esc to close and give the keyboard back. Elsewhere Cmd+F
 // is the browser's (or the Mac app's) own find.
@@ -11,12 +12,18 @@
 // before (the chat's own Load earlier messages) until a page has one or the
 // conversation starts. "12+" says pages before are still to load.
 //
+// Tool cards are searched too: their input, and their output once typing
+// pauses, when the chat opens the cards whose output has the words
+// (`openTools`). The ones it opened close again when the words change or the
+// find closes, except the card of the match you were on.
+//
 // The words found are painted with the CSS Custom Highlight API, never by
 // changing the chat's DOM, which its paint owns. The highlights are the
 // page's, not a pane's, so one find is open at a time.
 //
 // Search everything (global-search.js) opens a chat at a message with
-// `reveal`, loading earlier pages until it is shown.
+// `reveal`, loading earlier pages until it is shown. That find is the
+// search's: scrolling the chat closes it. Sending a message closes any find.
 import { h, icon, setText } from "/app/render.js";
 import { coarse, postNative, toast, track } from "/app/core.js";
 
@@ -24,14 +31,20 @@ const MAC = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 const SUPPORTED = typeof CSS !== "undefined" && !!CSS.highlights && typeof Highlight === "function";
 const ALL = "chat-find";
 const CURRENT = "chat-find-current";
-// The message text searched: the user's and the agents' words, a reply's quote.
-const BOXES = ":scope > .msg .md, :scope > .msg .qr-text";
+// The text searched: the user's and the agents' words, a reply's quote, a
+// question the agent asked and its answer, and tool cards' input and output.
+const BOXES = [
+  ":scope > .msg .md", ":scope > .msg .qr-text", ":scope > .msg .asked-q", ":scope > .msg .asked-a",
+  ":scope > .tool .t-input", ":scope > .tool .tool-out pre",
+  ":scope > .steps .tool .t-input", ":scope > .steps .tool .tool-out pre",
+].join(", ");
 // Inside them, a code block's language and Copy button are not the message.
 const SKIP = ".cb-head, button";
-// Room above a match for the bar, and below for the composer's shadow.
-const ROOM_TOP = 64;
+// Room above a match, and below for the composer's shadow.
+const ROOM_TOP = 24;
 const ROOM_BOTTOM = 24;
-// A query typed with no match loaded looks further back once typing pauses.
+// A query typed with no match loaded looks further back once typing pauses,
+// and the tool cards with the words open then.
 const LOOK_BACK_MS = 400;
 
 const mod = (e) => (MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey);
@@ -76,10 +89,13 @@ export function mountChatFindKey(current) {
  * The find of one chat (AgentScreen). `wrap` holds the bar, `scroller` and
  * `msgsEl` are the chat's; `earlier()` is { cursor, loading } of the page
  * before the oldest shown, `loadEarlier()` loads it, `loaded()` says the
- * first page came, and `settle()` tells the chat its view moved. Null where
- * the browser cannot paint highlights: Cmd+F stays the browser's.
+ * first page came, and `settle()` tells the chat its view moved.
+ * `openTools(query, keep)` opens the tool cards whose input or output has
+ * `query` and closes the ones it opened before that do not, all of them for
+ * "", except the card holding the node `keep`. Null where the browser cannot
+ * paint highlights: Cmd+F stays the browser's.
  */
-export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded, settle }) {
+export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded, settle, openTools }) {
   if (!SUPPORTED) return null;
   const bar = h(`<div class="cf" role="search" hidden>
     <label class="cf-in">${icon("search")}<input type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" placeholder="Find in chat" aria-label="Find in chat"><span class="cf-n" role="status"></span></label>
@@ -87,7 +103,7 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
     <button type="button" class="cf-b" data-step="newer" aria-label="Newer match" title="Newer match (Shift+Enter)">${icon("down")}</button>
     <button type="button" class="cf-b" data-act="close" aria-label="Close find" title="Close (Esc)">${icon("x")}</button>
   </div>`);
-  wrap.append(bar);
+  wrap.prepend(bar);
   const input = bar.querySelector("input");
   const countEl = bar.querySelector(".cf-n");
   const olderBtn = bar.querySelector('[data-step="older"]');
@@ -103,6 +119,11 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
   let returnTo = null;
   let destroyed = false;
   let queued = false;
+  // The query the tool cards were opened for, and the wait for typing to pause.
+  let deep = "";
+  let deepTimer = 0;
+  // Opened by Search everything: the user's next scroll closes it.
+  let transient = false;
 
   const isOpen = () => !bar.hidden;
 
@@ -113,9 +134,25 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
     queued = true;
     requestAnimationFrame(() => {
       queued = false;
-      if (isOpen()) { recompute(); paint(); }
+      if (!isOpen()) return;
+      // Pages loaded above hold tool cards too.
+      if (deep && deep === query) openTools(deep, null);
+      recompute();
+      paint();
     });
   });
+
+  // Once typing pauses: the tool cards with the words open, and are searched.
+  function dig() {
+    clearTimeout(deepTimer);
+    deepTimer = setTimeout(() => {
+      if (!isOpen() || !query) return;
+      deep = query;
+      openTools(query, null);
+      recompute();
+      show();
+    }, LOOK_BACK_MS);
+  }
 
   function collect() {
     const found = [];
@@ -227,6 +264,7 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
 
   async function older() {
     if (!isOpen() || !query) return;
+    transient = false;
     const mine = ++run;
     clearTimeout(lookBack);
     if (current > 0) { current -= 1; show(); return; }
@@ -241,6 +279,7 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
 
   function newer() {
     if (!isOpen() || !matches.length) return;
+    transient = false;
     ++run;
     clearTimeout(lookBack);
     current = current < matches.length - 1 ? current + 1 : 0;
@@ -252,11 +291,14 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
     const line = was ? was.range.getBoundingClientRect().top : null;
     query = input.value;
     const mine = ++run;
+    clearTimeout(deepTimer);
+    if (!query && deep) { deep = ""; openTools("", null); }
     matches = [];
     current = -1;
     recompute(line);
     show();
     clearTimeout(lookBack);
+    if (query) dig();
     if (!query || matches.length || !earlier().cursor) return;
     lookBack = setTimeout(async () => {
       if (await loadUntil(() => matches.length > 0, mine) && mine === run) {
@@ -273,7 +315,11 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
     if (!isOpen()) {
       const at = document.activeElement;
       returnTo = at && at !== document.body && !bar.contains(at) ? at : null;
+      // The conversation stays where it is on screen: its top slides under the bar's row.
+      const top = scroller.getBoundingClientRect().top;
       bar.hidden = false;
+      scroller.scrollTop += scroller.getBoundingClientRect().top - top;
+      settle();
       observer.observe(msgsEl, { childList: true, subtree: true, characterData: true });
       if (input.value) typed();
       else paint();
@@ -287,10 +333,17 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
 
   function close({ restore = true } = {}) {
     if (!isOpen()) return;
+    const top = scroller.getBoundingClientRect().top;
     bar.hidden = true;
+    scroller.scrollTop += scroller.getBoundingClientRect().top - top;
+    settle();
     ++run;
     clearTimeout(lookBack);
+    clearTimeout(deepTimer);
+    transient = false;
     observer.disconnect();
+    const keep = matches[current]?.box ?? null;
+    if (deep) { deep = ""; openTools("", keep); }
     matches = [];
     current = -1;
     searching = false;
@@ -307,6 +360,7 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
   async function reveal({ messageId, query: words }) {
     input.value = words;
     open();
+    transient = true;
     // Opened from Search everything, which is gone: Esc leaves the page the keyboard.
     returnTo = null;
     query = words;
@@ -342,7 +396,11 @@ export function chatFind({ wrap, scroller, msgsEl, earlier, loadEarlier, loaded,
     msg.addEventListener("animationend", () => msg.classList.remove("cf-flash"), { once: true });
   }
 
-  input.addEventListener("input", typed);
+  input.addEventListener("input", () => { transient = false; typed(); });
+  // Scrolling away from what Search everything opened ends its find.
+  const scrolled = () => { if (transient) close({ restore: false }); };
+  scroller.addEventListener("wheel", scrolled, { passive: true });
+  scroller.addEventListener("touchmove", scrolled, { passive: true });
   input.addEventListener("keydown", (e) => {
     if (e.isComposing) return;
     if (e.key === "Enter") {

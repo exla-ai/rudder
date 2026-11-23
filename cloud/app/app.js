@@ -1,6 +1,6 @@
 // Rudder phone app. Plain ES modules, no build step.
 import {
-  icon, toolIcon, h, setText, reconcile, renderMarkdown, loadMarkdown, onMarkdownReady,
+  icon, toolIcon, h, setText, reconcile, renderMarkdown, renderTyped, loadMarkdown, onMarkdownReady,
   markdownReady, markdownPreview, renderMarkdownExcerpt, copyText, escapeHtml,
 } from "/app/render.js";
 
@@ -79,6 +79,8 @@ const STATUS = {
   orphaned: { label: "Orphaned", cls: "s-idle" },
 };
 const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1) : "Unknown", cls: "s-idle" };
+// A chat closed while open (AgentScreen paintClosedChat).
+const CLOSED_STATUS = { label: "Closed", cls: "s-idle" };
 // Prompts the agent is blocked on (permission, question, plan), newest last.
 // Ones answered from this phone are hidden at once, before the state agrees.
 // A finished turn shorter than this shows no "Worked for" line.
@@ -182,26 +184,83 @@ Object.assign(app, {
   openSignInPage: (url) => openSignInPage(url),
 });
 
-// The Mac shell posts a notification when an agent newly needs you (the
-// same rows as the Needs you list). The first state is the baseline.
-let notifiedNeeds = null;
+// When an agent you are not looking at newly needs you (the same rows as the
+// Needs you list) or finishes its turn, its rows get an unread dot until its
+// chat is opened. The Mac shell posts a notification for one that needs you;
+// the web app and the phone say both in a toast with Open. The first state is
+// the baseline.
+let seenAgents = null; // `${ws}|${run}` -> { live, needs }
+const unreadAgents = new Set();
+const agentKey = (ws, run) => `${ws}|${run}`;
+const isUnread = (ws, run) => unreadAgents.has(agentKey(ws, run));
+// The agent screens mounted now (AgentScreen): a chat in view is read as it changes.
+const mountedChats = new Set();
+const chatInView = (key) => !document.hidden
+  && [...mountedChats].some((c) => c.key === key && c.el.isConnected && c.el.getClientRects().length > 0);
+function markRead(key) {
+  if (unreadAgents.delete(key)) queueMicrotask(updateScreen);
+}
+// What a row waits on, as its preview: the question or request, else the
+// agent's last words, else the task as it was typed.
+function askPreview(ask) {
+  const input = ask?.input && typeof ask.input === "object" ? ask.input : null;
+  if (!input) return null;
+  if (Array.isArray(input.questions)) {
+    const text = input.questions.map((q) => q?.question).filter((q) => typeof q === "string" && q).join(" ");
+    return text ? { text, plain: true } : null;
+  }
+  if (ask.kind === "plan" && typeof input.plan === "string") return { text: input.plan, plain: false };
+  const what = [input.command, input.file_path, input.path, input.url].find((v) => typeof v === "string" && v);
+  return what ? { text: `${ask.tool}: ${what}`, plain: true } : null;
+}
+function rowPreview(a) {
+  const ask = askPreview(pendingAsks(a)[0]);
+  if (ask) return ask;
+  const said = (a.lastMessage || a.summary || "").trim();
+  return said ? { text: said, plain: false } : { text: (a.task || "").trim(), plain: true };
+}
+// Called with each new state's Needs you rows (refreshState).
 function notifyNewNeeds(needs) {
-  if (PLATFORM !== "mac" || !NATIVE?.notifications) return;
-  const keys = new Set(needs.map(({ p, a }) => `${p.workspaceId}|${a.id}`));
-  if (notifiedNeeds) {
-    for (const { p, a } of needs) {
-      const key = `${p.workspaceId}|${a.id}`;
-      if (notifiedNeeds.has(key)) continue;
-      const path = `/app/p/${encodeURIComponent(p.workspaceId)}/a/${encodeURIComponent(a.id)}`;
-      // Already looking at it: no need to be told.
-      if (document.hasFocus() && location.pathname === path) continue;
-      markdownPreview(String(a.lastMessage || "Waiting for you"), 160).then((body) => {
-        if (document.hasFocus() && location.pathname === path) return;
+  const needing = new Set(needs.map(({ p, a }) => agentKey(p.workspaceId, a.id)));
+  const seen = new Map();
+  const events = [];
+  for (const p of store.state?.projects || []) {
+    for (const a of p.agents || []) {
+      if (a.pending) continue;
+      const key = agentKey(p.workspaceId, a.id);
+      const now = { live: !!statusOf(a.status).live, needs: needing.has(key) };
+      seen.set(key, now);
+      if (!seenAgents) continue;
+      const was = seenAgents.get(key) || { live: false, needs: false };
+      const kind = now.needs && !was.needs ? "needs"
+        : was.live && !now.live && (a.status === "done" || a.status === "merged") ? "done" : null;
+      if (!kind || chatInView(key)) continue;
+      unreadAgents.add(key);
+      events.push({ kind, p, a });
+    }
+  }
+  seenAgents = seen;
+  if (!events.length) return;
+  if (PLATFORM === "mac" && NATIVE?.notifications) {
+    for (const { kind, p, a } of events) {
+      if (kind !== "needs") continue;
+      const path = agentPath(p.workspaceId, a.id);
+      const preview = rowPreview(a);
+      markdownPreview(preview.text || "Waiting for you", 160).then((body) => {
+        if (chatInView(agentKey(p.workspaceId, a.id))) return;
         postNative({ type: "notify", title: `${a.title || "An agent"} needs you · ${p.name || p.repo || ""}`.replace(/ · $/, ""), body: body || "Waiting for you", path });
       });
     }
+    return;
   }
-  notifiedNeeds = keys;
+  const first = events.find((e) => e.kind === "needs") || events[0];
+  const name = (a) => `"${(a.title || a.task || "An agent").replace(/\s+/g, " ").slice(0, 60)}"`;
+  const needCount = events.filter((e) => e.kind === "needs").length;
+  const text = events.length === 1
+    ? (first.kind === "needs" ? `${name(first.a)} needs you: ${agentStatus(first.a).label}` : `${name(first.a)} finished`)
+    : needCount ? `${needCount} ${needCount === 1 ? "agent needs" : "agents need"} you${events.length > needCount ? `, ${events.length - needCount} finished` : ""}`
+      : `${events.length} agents finished`;
+  toast(text, { action: { label: "Open", run: () => navigate(agentPath(first.p.workspaceId, first.a.id)) } });
 }
 
 let stateInflight = null;
@@ -1323,6 +1382,7 @@ function DesktopShell() {
     const st = agentStatus(ag);
     // A row being renamed keeps saying so through every refresh (renameRow).
     a.className = `ds-agent ${st.cls}${isRenaming(a.querySelector(".ds-an")) ? " renaming" : ""}`;
+    a.classList.toggle("unread", isUnread(p.workspaceId, ag.id));
     a.querySelector(".dot").classList.toggle("live", !!st.live);
     if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
     const target = { ws: p.workspaceId, run: ag.id };
@@ -1993,6 +2053,7 @@ function updateAgentRow(el, { p, a }) {
   el._target = { p, a };
   if (a.pending) el.removeAttribute("href"); else el.href = agentPath(p.workspaceId, a.id);
   el.className = `row agent tap ${st.cls}`;
+  el.classList.toggle("unread", isUnread(p.workspaceId, a.id));
   el.querySelector(".dot").classList.toggle("live", !!st.live);
   const titleEl = el.querySelector(".a-title");
   if (!isRenaming(titleEl)) setText(titleEl, a.title || a.task || "Untitled agent");
@@ -2010,11 +2071,12 @@ function updateAgentRow(el, { p, a }) {
   const lock = el.querySelector(".c-lock");
   lock.hidden = a.visibility !== "private" || !hasTeam(store.state);
   lock.title = "Only you can see this agent. Teammates see only its status.";
-  const msg = (a.lastMessage || a.summary || a.task || "").trim();
+  const preview = rowPreview(a);
   const m = el.querySelector(".a-msg");
-  const previewSig = `${markdownReady()}|${msg}`;
+  const previewSig = `${markdownReady()}|${preview.plain}|${preview.text}`;
   if (m.dataset.sig !== previewSig) {
-    renderMarkdownExcerpt(m, msg);
+    if (preview.plain) setText(m, preview.text.replace(/\s+/g, " "));
+    else renderMarkdownExcerpt(m, preview.text);
     m.hidden = !m.textContent.trim();
     m.dataset.sig = previewSig;
   }
@@ -3640,6 +3702,22 @@ function groupOf(a) {
   return "earlier";
 }
 
+// Reopen a closed chat (Show closed, or the chat's own screen): the
+// dashboard's reopen_closed_agent, through the home's `reopen` action.
+// Resolves whether the home took it.
+async function reopenChat(ws, chat) {
+  try {
+    const res = await api("/api/app/action", { method: "POST", body: { workspace: ws, run: chat.id, action: "reopen" } });
+    toast(res?.status === "queued" ? "Reopening. Its dashboard is busy, so it comes back in a moment" : `Reopened "${chat.title}"`);
+    return true;
+  } catch (err) {
+    if (err.status !== 401) toast(`Couldn't reopen "${chat.title}": ${err.message}`, { error: true });
+    return false;
+  } finally {
+    refreshState();
+  }
+}
+
 // "closed just now", "closed 2h ago": a closed chat is kept a day.
 function closedAgo(t) {
   const r = rel(t);
@@ -3666,7 +3744,7 @@ function ProjectScreen(ws) {
         <div class="closed-group" hidden>
           <div class="section-head"><h2>Closed</h2><span class="count"></span></div>
           <div class="list grouped card closed-list"></div>
-          <p class="hint">A deleted chat is kept here for a day with its conversation and workspace.</p>
+          <p class="hint">A closed chat is kept here for a day with its conversation and workspace.</p>
         </div>
       </div>
     </div></section>`);
@@ -3760,8 +3838,7 @@ function ProjectScreen(ws) {
   const portsEl = el.querySelector(".ports");
   const emptySlot = el.querySelector(".p-empty");
   const statusSlot = el.querySelector(".status-slot");
-  // Show closed: chats deleted in the last day, each with Reopen (the
-  // dashboard's reopen_closed_agent, through the home's `reopen` action).
+  // Show closed: chats closed in the last day, each with Reopen (reopenChat).
   const closedSec = el.querySelector(".closed-sec");
   const closedToggle = el.querySelector(".closed-toggle");
   const closedGroup = el.querySelector(".closed-group");
@@ -3772,14 +3849,7 @@ function ProjectScreen(ws) {
   async function reopen(chat) {
     reopening.add(chat.id);
     update();
-    try {
-      const res = await api("/api/app/action", { method: "POST", body: { workspace: ws, run: chat.id, action: "reopen" } });
-      toast(res?.status === "queued" ? "Reopening. Its dashboard is busy, so it comes back in a moment" : `Reopened "${chat.title}"`);
-    } catch (err) {
-      reopening.delete(chat.id);
-      if (err.status !== 401) toast(`Couldn't reopen "${chat.title}": ${err.message}`, { error: true });
-    }
-    refreshState();
+    if (!await reopenChat(ws, chat)) reopening.delete(chat.id);
   }
   function paintClosed(p) {
     const closed = p.closed || [];
@@ -4241,7 +4311,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     draftKey: `msg:${key}`,
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
     attachments: true,
-    onSubmit: (text, files, interrupt) => { send(quoteReply?.wrap(text) ?? text, files, null, interrupt); return true; },
+    onSubmit: (text, files, interrupt) => { find?.close({ restore: false }); send(quoteReply?.wrap(text) ?? text, files, null, interrupt); return true; },
     onResize: (grew) => followComposer(grew),
   });
   // With the sidebar (DesktopShell), Alt+[ and Alt+] step between agents. The
@@ -4283,6 +4353,64 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     setText(roBar.querySelector(".rb-t"), `${m ? memberName(m) : "A teammate"}'s agent · Read only`);
     setText(roBar.querySelector(".rb-s"), `You can read along. Only ${m ? firstName(m) : "they"} can message it, answer it or change it.`);
   };
+
+  // Closed on another device (or in another tab): the project lists it under
+  // Show closed and no longer among its agents. The conversation stays
+  // readable, polling stops, and the composer gives way to what happened,
+  // with Reopen while the chat is kept. `goneError`: its transcript failed
+  // while the state listed it nowhere, so it is not kept any more.
+  const canClose = !ro && !allAgents;
+  let closedNow = null;
+  let goneError = null;
+  let reopeningClosed = false;
+  const closedBar = canClose ? h(`<div class="composer ro-bar closed-bar" role="status" hidden><div class="rb-in"><span class="rb-ic">${icon("trash")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span><button type="button" class="btn small cb-reopen">Reopen</button></div></div>`) : null;
+  if (closedBar) {
+    composer.el.after(closedBar);
+    closedBar.querySelector(".cb-reopen").addEventListener("click", async () => {
+      if (reopeningClosed || !closedNow?.kept) return;
+      reopeningClosed = true;
+      paintClosedChat();
+      if (!await reopenChat(ws, closedNow.kept)) { reopeningClosed = false; paintClosedChat(); }
+    });
+  }
+  function closedState() {
+    const p = canClose ? findProject(ws) : null;
+    if (!p?.agents || p.agents.some((a) => a.id === run)) return null;
+    const kept = (p.closed || []).find((c) => c.id === run);
+    return kept ? { kept } : goneError ? { kept: null } : null;
+  }
+  function paintClosedChat() {
+    if (!closedBar) return;
+    const was = !!closedNow;
+    closedNow = closedState();
+    const closed = !!closedNow;
+    if (!closed) { goneError = null; reopeningClosed = false; }
+    closedBar.hidden = !closed;
+    composer.el.hidden = closed;
+    askSlot.hidden = closed;
+    el.querySelector(".more").hidden = closed;
+    tray?.pause(closed);
+    if (was && !closed) void loadTranscript({ replace: true });
+    if (!closed) return;
+    find?.close({ restore: false });
+    const kept = closedNow.kept;
+    setText(closedBar.querySelector(".rb-t"), "This chat was closed");
+    setText(closedBar.querySelector(".rb-s"), kept ? "It's kept a day under Show closed. Reopen it to keep going." : "It's no longer kept, so it can't be reopened.");
+    const reopen = closedBar.querySelector(".cb-reopen");
+    reopen.hidden = !kept;
+    reopen.disabled = reopeningClosed;
+    setText(reopen, reopeningClosed ? "Reopening" : "Reopen");
+  }
+  // A transcript read that failed for a chat the state lists nowhere among
+  // its agents: closed, which the chat says in place, with no toast.
+  function closedRead(err) {
+    const p = canClose ? findProject(ws) : null;
+    if (!p?.agents || p.agents.some((a) => a.id === run)) return false;
+    goneError = err.message;
+    if (!store.transcripts.has(key)) store.transcripts.set(key, { messages: [], error: "This chat was closed, so its conversation can't be shown." });
+    void refreshState();
+    return true;
+  }
 
   // Your own agent: private hides it from teammates (team.ts). Shown once
   // you are in an org, since before that nobody else could see it anyway.
@@ -4453,6 +4581,9 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   };
   if (!ro) fastPolls.add(fastPoll);
   if (!ro) pollState();
+  // In view, it is read: no unread dot for it (notifyNewNeeds).
+  const chatEntry = { key, el };
+  if (!ro) mountedChats.add(chatEntry);
 
   // `/`: what the agent's own CLI offers there (slash-menu.js). The message is
   // typed into the agent's terminal, so its commands work.
@@ -4797,7 +4928,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const name = a?.title || "this agent";
     const ok = await confirmDialog(action === "merge"
       ? { title: "Merge this agent's work?", body: `Rudder merges "${name}" into the project's main checkout.`, confirm: "Merge" }
-      : { title: "Stop this agent?", body: `"${name}" stops now. Its workspace is kept, so you can resume later.`, confirm: "Stop", danger: true });
+      : { title: "Stop this agent?", body: `"${name}" stops now. Its conversation and workspace are kept: send it a message to start it again.`, confirm: "Stop", danger: true });
     if (!ok) return;
     try {
       await api("/api/app/action", { method: "POST", body: { workspace: ws, run, action } });
@@ -4853,7 +4984,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let lastErr = null;
   let waking = false;
   async function loadTranscript({ replace = false } = {}) {
-    if (destroyed || (inflight && !replace)) return;
+    if (destroyed || closedNow || (inflight && !replace)) return;
     // A message receipt, edit, or explicit refresh needs a snapshot taken
     // after the action, even if a background read is still pending.
     inflight?.abort();
@@ -4895,6 +5026,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         store.transcripts.set(key, { ...(prev || {}), messages: err.status === 404 ? [] : prev?.messages || [], error: text, roNotice: text });
         return;
       }
+      if (closedRead(err)) return;
       if (err.waking) {
         waking = true;
         const prev = store.transcripts.get(key);
@@ -4958,7 +5090,56 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     earlier: () => { const e = store.earlier.get(key); return { cursor: e ? e.cursor : store.transcripts.get(key)?.earlier ?? null, loading: !!e?.loading }; },
     loaded: () => store.transcripts.has(key),
     settle: () => { atBottom = isAtBottom(); },
+    openTools: openToolsFor,
   });
+  // Find in a tool card's output (chat-find.js openTools): the cards, and the
+  // runs of steps around them, whose input or output has the words are opened
+  // (Show more too, for words past the first part of the output). The ones it
+  // opened close again when the words change; with no words they all do, but
+  // the card holding `keep` stays open as if clicked.
+  const findOpened = { expanded: new Set(), more: new Set() };
+  function openToolsFor(query, keep) {
+    const words = query.toLowerCase();
+    const want = { expanded: new Set(), more: new Set() };
+    const hit = (m) => {
+      if (!words || m.subagent || m.tool?.ask) return false;
+      const output = String(m.tool?.output ?? "").toLowerCase();
+      const at = output.indexOf(words);
+      if (at >= OUT_LIMIT) want.more.add(String(m.id));
+      return at >= 0 || String(m.tool?.input ?? "").toLowerCase().includes(words);
+    };
+    for (const node of msgsEl.querySelectorAll(":scope > .steps")) {
+      const hits = (node._steps?.tools || []).filter(hit);
+      if (!hits.length) continue;
+      want.expanded.add(node.dataset.key);
+      for (const m of hits) want.expanded.add(String(m.id));
+    }
+    for (const node of msgsEl.querySelectorAll(":scope > .tool")) if (node._msg && hit(node._msg)) want.expanded.add(node.dataset.key);
+    const card = keep?.closest?.(".tool");
+    if (card) {
+      want.expanded.add(card.dataset.key);
+      const steps = card.closest(".steps");
+      if (steps) want.expanded.add(steps.dataset.key);
+    }
+    let changed = false;
+    for (const [kind, set] of [["expanded", store.expanded], ["more", store.showMore]]) {
+      for (const k of findOpened[kind]) {
+        if (want[kind].has(k)) continue;
+        findOpened[kind].delete(k);
+        set.delete(`${key}|${k}`);
+        changed = true;
+      }
+      for (const k of want[kind]) {
+        if (set.has(`${key}|${k}`)) continue;
+        set.add(`${key}|${k}`);
+        findOpened[kind].add(k);
+        changed = true;
+      }
+      // Closed with a card kept: it is open now as if clicked.
+      if (!words) findOpened[kind].clear();
+    }
+    if (changed) paint({ hold: true });
+  }
 
   function paintEarlier(t, e) {
     const cursor = e ? e.cursor : t.earlier;
@@ -4982,8 +5163,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (!ro && !allAgents) titleEl.setAttribute("aria-label", `${title}. Rename`);
     // Of two agents side by side, the focused one names the window.
     if (screen?.el === el) document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
-    const status = a?.status || t?.status;
-    const st = a ? agentStatus(a) : statusOf(status);
+    const status = closedNow ? "closed" : a?.status || t?.status;
+    const st = closedNow ? CLOSED_STATUS : a ? agentStatus(a) : statusOf(status);
     const sub = el.querySelector(".subtitle");
     sub.className = `subtitle ${st.cls}`;
     sub.querySelector(".dot").classList.toggle("live", !!st.live);
@@ -5010,6 +5191,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     // keeps the view even at the bottom.
     const follow = !hold && (firstPaint || (atBottom && !editAction.editing()));
     const seen = follow ? [] : onScreen();
+    paintClosedChat();
+    if (!ro && chatInView(key)) markRead(key);
     const status = header();
     // The turn just ended, so its reply is on disk: read it now rather than
     // at the next poll, so the reply shows as Working ends.
@@ -5052,7 +5235,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         const d = new Date(m.ts).toDateString();
         if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; steps = null; }
       }
-      if (m.role === "tool" && !m.subagent) {
+      // A question the agent asked you is part of the conversation, not a step.
+      if (m.role === "tool" && !m.subagent && !m.tool?.ask) {
         if (!steps) { steps = { kind: "steps", id: `steps-${m.id}`, tools: [] }; items.push(steps); }
         steps.tools.push(m);
         continue;
@@ -5115,6 +5299,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
         <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button><div class="steps-list" hidden></div></div>`);
     }
     const role = x.m.role;
+    if (role === "tool" && x.m.tool?.ask) return h(`<div class="msg asked"><div class="asked-head">${icon("inbox")}<span></span></div><div class="asked-list"></div></div>`);
     if (role === "tool") {
       // The toggle covers the row; the file links in it (tool-files.js) sit above it.
       const box = h(`<div class="tool"><div class="tool-row"><button type="button" class="t-toggle" aria-expanded="false"></button>
@@ -5153,8 +5338,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const md = node.querySelector(".md");
       // A reply's quote goes above the bubble (quote-reply.js).
       const body = paintQuote(node, p.text);
-      const sig = `${body}|${markdownReady()}`;
-      if (md.dataset.sig !== sig) { renderMarkdown(md, body, chatMarkdown); md.dataset.sig = sig; }
+      if (md.dataset.sig !== body) { renderTyped(md, body); md.dataset.sig = body; }
       md.hidden = !body;
       paintAttachments(node.querySelector(".atts"), p.files || []);
       const uploading = (p.files || []).filter((f) => !f.path).length;
@@ -5172,6 +5356,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (x.kind === "steps") return paintSteps(node, x);
     if (x.kind === "compacting") return paintCompacting(node, x.since, x.before);
     const m = x.m;
+    if (m.role === "tool" && m.tool?.ask) return paintAsked(node, m.tool);
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
     if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled" || m.kind === "goal" || m.kind === "rudder") { node._msg = m; return paintCompact(node, m); }
     if (m.kind === "notice") return paintNotice(node, m);
@@ -5185,8 +5370,36 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       paintAttachments(node.querySelector(".atts"), [...(m.attachments || []).map((path) => ({ path })), ...pastedImages(m)]);
       editAction(node, m, chatEdits);
     }
-    const sig = `${text}|${markdownReady()}`;
-    if (md.dataset.sig !== sig) { renderMarkdown(md, text, chatMarkdown); md.dataset.sig = sig; }
+    // Your own messages read as you typed them; the agents' are Markdown.
+    const sig = m.role === "user" ? text : `${text}|${markdownReady()}`;
+    if (md.dataset.sig !== sig) {
+      if (m.role === "user") renderTyped(md, text); else renderMarkdown(md, text, chatMarkdown);
+      md.dataset.sig = sig;
+    }
+  }
+
+  // A question the agent asked you (worker/transcripts.mjs `tool.ask`): each
+  // question, then the answer you gave as your own small bubble. While it is
+  // open, the card above the composer takes the answer.
+  function paintAsked(node, tool) {
+    const { questions, answers } = tool.ask;
+    const sig = JSON.stringify([questions, answers, tool.output ? tool.isError : null]);
+    if (node.dataset.sig === sig) return;
+    node.dataset.sig = sig;
+    setText(node.querySelector(".asked-head span"), questions.length > 1 ? "Asked you" : "Asked you a question");
+    const list = node.querySelector(".asked-list");
+    list.replaceChildren(...questions.map((q) => {
+      const row = h(`<div class="asked-row"><div class="asked-q"></div><div class="asked-a"></div></div>`);
+      setText(row.querySelector(".asked-q"), q.question);
+      const a = row.querySelector(".asked-a");
+      const answer = answers?.[q.question];
+      if (answer) setText(a, answer);
+      else {
+        a.classList.add("none");
+        setText(a, !tool.output ? "Waiting for your answer" : answers ? "No answer" : "Not answered");
+      }
+      return row;
+    }));
   }
 
   // A compacted context (compaction.js), a chat moved here from another
@@ -5357,6 +5570,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       inflight?.abort();
       stopMarkdownReady();
       fastPolls.delete(fastPoll);
+      mountedChats.delete(chatEntry);
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();
       agentStats.destroy();

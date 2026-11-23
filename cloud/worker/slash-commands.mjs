@@ -796,7 +796,6 @@ export async function readCodexState({ bin, cwd, env, plugins }) {
 // ---------------------------------------------------------------------------
 
 const CHECK_MS = 60_000; // how often known lists check their inputs
-const FULL_MS = 30 * 60_000; // rebuilt anyway (claude.ai skills, feature flags)
 const WARM_MS = 5_000; // how soon a new agent's list starts building
 const WARM_AGE_MS = 24 * 3600_000; // agents active this recently get a list at start
 const SAVE_MS = 2_000; // built lists reach the disk this soon after a build
@@ -817,8 +816,7 @@ function which(name, env) {
 }
 
 // mtime and size of each file under `dir` (a few levels), as one string.
-// `skip` is a path under `dir` left out.
-function treeStamp(dir, depth = 4, out = [], skip = null) {
+function treeStamp(dir, depth = 4, out = []) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -828,7 +826,6 @@ function treeStamp(dir, depth = 4, out = [], skip = null) {
   }
   for (const entry of entries) {
     const file = path.join(dir, entry.name);
-    if (file === skip) continue;
     if (entry.isDirectory() || entry.isSymbolicLink()) {
       out.push(fileStamp(file));
       if (depth > 0) treeStamp(file, depth - 1, out);
@@ -857,20 +854,28 @@ function claudeConfigDir(env) {
 
 // What every list of one account shares, and changes over time without
 // changing which folders share a list: the CLI, the account's own commands,
-// skills, settings and plugins, and its global config. A change rebuilds the
-// list while it keeps serving.
-function claudeStamp({ bin, env }) {
+// skills, settings and plugins, and the sign-in and MCP servers in its global
+// config. Files count by content: Claude Code rewrites some of them
+// unchanged. A change rebuilds the list while it keeps serving; nothing else
+// does. Skill usage, which orders the most used skills first in Claude's own
+// popup, is left out: it changes on every skill an agent runs, and the rows
+// are the same.
+export function claudeStamp({ bin, env }) {
   const config = claudeConfigDir(env);
-  const parts = [fileStamp(fs.realpathSync(bin)), fs.realpathSync(bin)];
+  const real = fs.realpathSync(bin);
+  const files = new Map();
   for (const name of ["settings.json", "settings.local.json", "plugins/installed_plugins.json", "plugins/known_marketplaces.json"]) {
-    parts.push(fileStamp(path.join(config, name)));
+    contentTree(path.join(config, name), name, 0, files);
   }
-  treeStamp(path.join(config, "commands"), 4, parts);
+  contentTree(path.join(config, "commands"), "commands", 4, files);
   const skills = path.join(config, "skills");
-  treeStamp(skills, 2, parts, path.join(skills, "synced"));
+  for (const name of statOrNull(skills)?.isDirectory() ? fs.readdirSync(skills).sort() : []) {
+    if (name !== "synced") contentTree(path.join(skills, name), `skills/${name}`, 1, files);
+  }
+  const parts = [real, fileStamp(real), JSON.stringify([...files])];
   syncedSkillsStamp(path.join(skills, "synced"), parts);
-  const { skillUsage, oauthAccount, mcpServers } = claudeGlobalConfig(env);
-  parts.push(JSON.stringify([skillUsage, oauthAccount, mcpServers]));
+  const { oauthAccount, mcpServers } = claudeGlobalConfig(env);
+  parts.push(JSON.stringify([oauthAccount, mcpServers]));
   return parts.join("\n");
 }
 
@@ -997,9 +1002,9 @@ export function claudeListKey({ cwd, model, permissionMode }, env) {
   })).digest("hex")}`;
 }
 
-// The account's global config (.claude.json): the most used skills lead the
-// menu, and the sign-in and MCP servers gate rows. The file changes all the
-// time for other reasons, so only those parts count.
+// The account's global config (.claude.json): the sign-in and MCP servers
+// gate rows. The file changes all the time for other reasons, so only those
+// parts count.
 const globalConfigCache = new Map(); // file -> { sig, config }
 function claudeGlobalConfig(env) {
   const file = env.CLAUDE_CONFIG_DIR?.trim()
@@ -1276,12 +1281,14 @@ export function createSlashCommands({ envFor, log, projectDirs, file }) {
       }
       return entry;
     }
-    // A failed build is not served for long: a request tries again.
-    if (entry && (entry.error ? !wait && now - entry.checkedAt < CHECK_MS : now - entry.checkedAt < CHECK_MS)) {
+    // A list is built again only when an input changed, or when it failed
+    // and a request (not the warm-up) asks for it.
+    const retry = wait && entry?.error;
+    if (entry && !retry && now - entry.checkedAt < CHECK_MS) {
       return entry;
     }
     const stamp = source.stamp(input, env);
-    if (entry && !entry.error && entry.stamp === stamp && now - entry.builtAt < FULL_MS) {
+    if (entry && !retry && entry.stamp === stamp) {
       entry.checkedAt = now;
       return entry;
     }

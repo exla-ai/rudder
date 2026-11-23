@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, claudeListKey, codexHasVoice,
+  CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, claudeListKey, claudeStamp, codexHasVoice,
   codexPackageDir, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
 import { rank } from "../cloud/app/slash-rank.js";
@@ -138,6 +138,54 @@ test("a branch's workspace shares its checkout's Claude list unless its own file
     const disabled = key(path.join(root, "repo"));
     assert.notEqual(disabled, checkout);
     assert.equal(key(branch("empty")), disabled);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Claude list is rebuilt only when what its menu shows changes", () => {
+  // Rebuilt every 30 minutes and on every rewrite or skill use, 36 lists on a
+  // home started a 300 MB Claude Code about once a minute (perf audit §9).
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-slash-stamp-")));
+  try {
+    const write = (rel, body) => {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), body);
+    };
+    const later = (rel) => {
+      const at = new Date(Date.now() + 60_000);
+      fs.utimesSync(path.join(root, rel), at, at);
+    };
+    write("bin/claude", "#!/bin/sh\n");
+    write("config/.claude.json", JSON.stringify({ oauthAccount: { accountUuid: "a" }, skillUsage: {}, numStartups: 1 }));
+    write("config/settings.json", "{}\n");
+    write("config/commands/hello.md", "Say hello\n");
+    write("config/skills/tidy/SKILL.md", "---\nname: tidy\n---\n");
+    write("config/skills/synced/acct/manifest.json", "{\"skills\":[]}\n");
+    const env = { HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: path.join(root, "config") };
+    const stamp = () => claudeStamp({ bin: path.join(root, "bin/claude"), env });
+    const first = stamp();
+
+    // Rewritten unchanged, used, or counted: the same rows.
+    for (const rel of ["config/settings.json", "config/commands/hello.md", "config/skills/tidy/SKILL.md", "config/skills/synced/acct/manifest.json"]) later(rel);
+    write("config/.claude.json", JSON.stringify({ oauthAccount: { accountUuid: "a" }, skillUsage: { tidy: { usageCount: 3, lastUsedAt: Date.now() } }, numStartups: 9 }));
+    assert.equal(stamp(), first);
+
+    const changes = [
+      () => write("config/settings.json", "{\"enabledPlugins\":{\"x@y\":true}}\n"),
+      () => write("config/commands/hello.md", "Say hello warmly\n"),
+      () => write("config/skills/lint/SKILL.md", "---\nname: lint\n---\n"),
+      () => write("config/skills/synced/acct/manifest.json", "{\"skills\":[\"standup\"]}\n"),
+      () => write("config/plugins/installed_plugins.json", "{}\n"),
+      () => write("config/.claude.json", JSON.stringify({ oauthAccount: { accountUuid: "b" } })),
+    ];
+    let previous = first;
+    for (const change of changes) {
+      change();
+      const next = stamp();
+      assert.notEqual(next, previous, change.toString());
+      previous = next;
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

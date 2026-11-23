@@ -1713,6 +1713,15 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     if record_content_unchanged(&record, &existing_record) {
         return Ok(());
     }
+    // A new name is not activity either: a renamed row kept jumping to the
+    // top of every list, out from under the pointer in the app's sidebar.
+    if same_apart_from(&record, &existing_record, &["updatedAt", "taskSummary"]) {
+        if let (Some(map), Some(at)) =
+            (record.as_object_mut(), existing_record.get("updatedAt"))
+        {
+            map.insert("updatedAt".to_string(), at.clone());
+        }
+    }
     write_run_record(&record_path, &record)
 }
 
@@ -1759,10 +1768,22 @@ pub(crate) fn record_content_unchanged(
     record: &serde_json::Value,
     existing: &serde_json::Value,
 ) -> bool {
+    same_apart_from(record, existing, &["updatedAt"])
+}
+
+/// Whether a run record says the same thing as the one on disk once `keys`
+/// are left out of both.
+fn same_apart_from(
+    record: &serde_json::Value,
+    existing: &serde_json::Value,
+    keys: &[&str],
+) -> bool {
     let strip = |value: &serde_json::Value| {
         let mut value = value.clone();
         if let Some(map) = value.as_object_mut() {
-            map.remove("updatedAt");
+            for key in keys {
+                map.remove(*key);
+            }
         }
         value
     };

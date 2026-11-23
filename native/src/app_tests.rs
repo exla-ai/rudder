@@ -32050,6 +32050,12 @@ fn an_unchanged_save_does_not_bump_updated_at() {
         "a reconcile re-save of an unchanged row must not pull it back into 'recent'"
     );
 
+    run.task_summary = "A new name".to_string();
+    save_native_run_record(&repo, &run).expect("rename");
+    let renamed = read_run_json(&repo, "stamp");
+    assert_eq!(renamed["taskSummary"], "A new name");
+    assert_eq!(renamed["updatedAt"], "1000", "a rename must not move the row to the top of the lists");
+
     run.status = AgentStatus::Failed;
     save_native_run_record(&repo, &run).expect("changed save");
     let after = read_run_json(&repo, "stamp");

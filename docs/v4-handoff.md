@@ -403,6 +403,11 @@ resume and read it. Its turn state comes from hooks in
 and each agent's own workspace folder is trusted through `trustedWorkspaces`
 in its `settings.json` (agy asks again in any subfolder of a trusted one, and
 that dialog swallowed the first follow-up).
+Remote Control on a new conversation is typed, not a flag: agy with
+`-i` and `--remote-control` makes a second, empty conversation at startup and
+the pane can show that one, so the prompt lands in a chat nobody sees. Rudder
+types `/remote-control` into the pane once the SessionStart hook names the
+conversation. A resumed one (`--conversation`) keeps the flag.
 Rudder refuses with a plain reason where agy has no way in: fork, branch and
 handoff (agy has no command-line fork), prompt edits, the gam reviewer (it has
 no read-only sandbox) and peer MCP (agy reads MCP servers from one global

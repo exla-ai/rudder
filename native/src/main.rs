@@ -8861,6 +8861,30 @@ impl App {
         self.pending_enters = remaining;
     }
 
+    /// Type `/remote-control` into an Antigravity agent that started a new
+    /// conversation without the flag (signals.rs says why), once its
+    /// SessionStart hook has named that conversation. Once per pane.
+    fn start_typed_remote_control(&mut self) {
+        let mut typed = Vec::new();
+        for run in &mut self.agents {
+            let Some(terminal) = run.terminal.as_mut().filter(|terminal| terminal.remote_control_to_type()) else {
+                continue;
+            };
+            if signals::read_antigravity_session(&run.id).is_none() || !matches!(terminal.try_wait(), Ok(None)) {
+                continue;
+            }
+            terminal.remote_control_typed();
+            // Text only; the submitting CR is deferred (see queue_enter_for).
+            match terminal.write_input(b"/remote-control") {
+                Ok(()) => typed.push(run.id.clone()),
+                Err(error) => self.notice = Some(format!("{}: could not turn on Remote Control: {error}", run.id)),
+            }
+        }
+        for run_id in typed {
+            self.queue_enter_for(&run_id);
+        }
+    }
+
     /// Append one line to `~/.rudder/logs/claude-nav.log`. The Alt+V walk
     /// runs blind inside a live TUI where a stall looks like "nothing
     /// happened"; this is how a report from a real session gets diagnosed.
@@ -22081,6 +22105,7 @@ What to do\n\
         self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();
         self.flush_pending_enters();
+        self.start_typed_remote_control();
         self.flush_pending_syncs();
         self.drive_claude_message_navs();
         self.maybe_start_queued_reconcile();

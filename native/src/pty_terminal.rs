@@ -547,6 +547,11 @@ impl Default for TerminalSize {
     }
 }
 
+/// Set to `1` on an agent's launch when it starts without its Remote Control
+/// flag and the app types `/remote-control` into it later (Antigravity, see
+/// the native signals module).
+pub const TYPED_REMOTE_CONTROL_ENV: &str = "RUDDER_TYPED_REMOTE_CONTROL";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalCommand {
     pub program: String,
@@ -613,6 +618,9 @@ pub struct TerminalPane {
     instance_id: String,
     execution_profile: Option<String>,
     agent_link_launch_json: Option<String>,
+    /// Launched with `TYPED_REMOTE_CONTROL_ENV`: the app still has to type
+    /// `/remote-control` into this agent.
+    remote_control_to_type: bool,
     before_terminate: Option<Arc<dyn Fn() + Send + Sync>>,
     master: Box<dyn MasterPty + Send>,
     child: OwnedPtyChild,
@@ -1163,6 +1171,7 @@ impl TerminalPane {
         };
         let execution_profile = launch_env("RUDDER_EXECUTION_PROFILE");
         let agent_link_launch_json = launch_env("RUDDER_AGENT_LINK_LAUNCH");
+        let remote_control_to_type = launch_env(TYPED_REMOTE_CONTROL_ENV).as_deref() == Some("1");
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(options.size.pty_size())
@@ -1230,6 +1239,7 @@ impl TerminalPane {
             instance_id,
             execution_profile,
             agent_link_launch_json,
+            remote_control_to_type,
             before_terminate: None,
             master: pair.master,
             child,
@@ -1282,6 +1292,16 @@ impl TerminalPane {
 
     pub fn agent_link_launch_json(&self) -> Option<&str> {
         self.agent_link_launch_json.as_deref()
+    }
+
+    /// True until [`remote_control_typed`](Self::remote_control_typed) for
+    /// a pane launched with `TYPED_REMOTE_CONTROL_ENV=1`.
+    pub fn remote_control_to_type(&self) -> bool {
+        self.remote_control_to_type
+    }
+
+    pub fn remote_control_typed(&mut self) {
+        self.remote_control_to_type = false;
     }
 
     /// Invalidate control capabilities before any PTY process-tree teardown,

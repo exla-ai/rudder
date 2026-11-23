@@ -712,6 +712,16 @@ pub(crate) fn read_antigravity_session(run_id: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+fn remove_antigravity_session_report(run_id: &str) -> Result<()> {
+    let path = antigravity_session_path(run_id).context("no home directory for the run's signals")?;
+    match std::fs::remove_file(&path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("could not remove {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The hook events Rudder's global `rudder` entry listens on, in
 /// `~/.gemini/config/hooks.json`. Each command passes the event name to the
 /// run's script, since Antigravity 1.5.0's payload does not name its event.
@@ -1093,7 +1103,26 @@ pub(crate) fn augment_worker_command(
             // and on the web, like Claude's. It takes no name, so the app lists
             // it under the machine.
             if remote_control_enabled() && antigravity_remote_control_available() {
-                command.args.push("--remote-control".to_string());
+                if command.args.iter().any(|arg| arg == "--conversation") {
+                    // A reopened conversation is live before the connection
+                    // starts, and the connection follows it.
+                    command.args.push("--remote-control".to_string());
+                } else {
+                    // agy 1.5.14 with `--remote-control` and no conversation
+                    // yet makes two at startup, one for the first prompt and
+                    // one for the connection, and shows whichever came last.
+                    // The prompt then sits in a chat the pane does not show.
+                    // So the App types `/remote-control` once the SessionStart
+                    // hook names the conversation (start_typed_remote_control);
+                    // agy runs it at once, even mid-turn, on that conversation.
+                    // A report left from an earlier conversation would set it
+                    // off before this one exists.
+                    remove_antigravity_session_report(run_id)?;
+                    command.env.push((
+                        rudder_native::pty_terminal::TYPED_REMOTE_CONTROL_ENV.to_string(),
+                        "1".to_string(),
+                    ));
+                }
             }
         }
     }

@@ -117,7 +117,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every process-global var the harness injects. `EnvGuard` snapshots these on
 /// acquisition and puts them back on drop, so the list must stay a superset of what
 /// the tests set — a var missing here is a var that can leak.
-const GUARDED_ENV: [&str; 16] = [
+const GUARDED_ENV: [&str; 17] = [
     "CODEX_HOME",
     "HOME",
     "PATH",
@@ -130,6 +130,7 @@ const GUARDED_ENV: [&str; 16] = [
     "RUDDER_HOME",
     "RUDDER_INTERACTIVE_ORCHESTRATOR",
     "RUDDER_NATIVE_PERF",
+    "RUDDER_REMOTE_CONTROL",
     "RUDDER_SAIL_ID",
     "RUDDER_WORKSPACE_ID",
     "RUDDER_WORKER_TOKEN",
@@ -1694,6 +1695,72 @@ fn antigravity_resumes_its_conversation_and_refuses_to_fake_a_fork() {
     assert_eq!(refused.err().as_deref(), Some(ANTIGRAVITY_NO_FORK));
     assert!(chat_edit::edit_unsupported(Backend::Antigravity).is_some_and(|why| why.contains("/rewind")));
     assert!(fork_command(Backend::Claude, "opus", None, "abc", None).is_ok());
+}
+
+/// agy 1.5.14 launched with `-i` and `--remote-control` makes two
+/// conversations, the prompt's and the connection's, and its pane shows
+/// whichever came last. A new conversation launches without the flag and
+/// gets `/remote-control` typed once SessionStart names it; a reopened one
+/// keeps the flag.
+#[cfg(not(windows))]
+#[test]
+fn antigravity_remote_control_starts_on_the_prompts_conversation() {
+    let mut env = env_guard();
+    let root = unique_test_repo("agy-remote-control");
+    env.set_home(&root, &root.join("home"));
+    std::env::set_var("RUDDER_HOME", root.join("home").join(".rudder"));
+    std::env::set_var("RUDDER_REMOTE_CONTROL", "1");
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let typed = root.join("typed");
+    write_fake_bin(&bin.join("agy"), &format!("#!/bin/sh\nexec /bin/cat > '{}'\n", typed.display()));
+    let launch = |mut command: TerminalCommand| {
+        command.env.push(("PATH".into(), bin.display().to_string()));
+        signals::augment_worker_command(&mut command, Backend::Antigravity, AgentMode::Execute, "run-agy", None)
+            .unwrap();
+        command
+    };
+    let marked = |command: &TerminalCommand| {
+        command.env.iter().any(|(key, value)| key == rudder_native::pty_terminal::TYPED_REMOTE_CONTROL_ENV && value == "1")
+    };
+    let report = signals::antigravity_session_path("run-agy").unwrap();
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, "0b7d5c1e-old").unwrap();
+
+    let fresh = launch(agent_command(Backend::Antigravity, "gemini-3.8-flash-low", None, "fix the tests", AgentMode::Execute, None));
+    assert!(fresh.args.windows(2).any(|w| w[0] == "-i" && w[1].contains("fix the tests")));
+    assert!(!fresh.args.iter().any(|arg| arg == "--remote-control"), "{:?}", fresh.args);
+    assert!(marked(&fresh));
+    assert!(!report.exists(), "an earlier conversation's report would start it before this one exists");
+
+    let mut run = test_agent_run("run-agy", "fix the tests");
+    run.backend = Backend::Antigravity;
+    let resumed = launch(antigravity_resume_command(&run, "7f0c2a52-1b9e-4c55-9f43-2d0a8e6c1b10"));
+    assert!(resumed.args.iter().any(|arg| arg == "--remote-control"), "{:?}", resumed.args);
+    assert!(!marked(&resumed));
+
+    let options = TerminalPaneOptions { cwd: Some(root.clone()), ..TerminalPaneOptions::default() };
+    let pane = TerminalPane::spawn_shell_or_command(Some(fresh), options).unwrap();
+    assert!(pane.remote_control_to_type());
+    let mut app = App::new();
+    run.cwd = root.clone();
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    app.start_typed_remote_control();
+    assert!(app.pending_enters.is_empty(), "nothing is typed before SessionStart");
+    fs::write(&report, "924378bf-e746-48a3-b2bf-7a5675b50f06").unwrap();
+    app.start_typed_remote_control();
+    app.start_typed_remote_control();
+    std::thread::sleep(ENTER_SUBMIT_DELAY + Duration::from_millis(50));
+    app.flush_pending_enters();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&typed).unwrap_or_default().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read_to_string(&typed).unwrap(), "/remote-control\n", "typed once, then submitted");
+    assert!(!app.agents[0].terminal.as_ref().unwrap().remote_control_to_type());
+    app.agents.clear();
+    signals::cleanup_run_signals("run-agy");
 }
 
 #[test]

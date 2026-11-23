@@ -26,8 +26,11 @@ const BARE_EXTENSIONS = new Set(("md markdown mdx txt rst adoc ts tsx mts cts js
   + "rs toml yaml yml py pyi swift kt kts java scala c h cc cpp cxx hpp hh cs rb php lua dart ex exs erl hs "
   + "sh bash zsh fish ps1 css scss sass less html htm xml svg vue svelte astro graphql gql proto tf hcl nix zig "
   + "ini plist pbxproj gradle csv tsv patch diff ipynb png jpg jpeg gif webp avif").split(" "));
-// Receivers that make `x.json` or `x.html` a property, not a file (`res.json`).
+// Receivers that make `x.json` or `x.html` a member, not a file (`res.json`,
+// `$.css`). Only these extensions double as member names: `request.js` and
+// `response.js` are files.
 const RECEIVERS = new Set(["res", "req", "resp", "response", "request", "console", "process", "window", "document", "this", "self", "JSON", "Math", "$", "jQuery"]);
+const MEMBER_EXTENSIONS = new Set(["json", "html", "css", "xml"]);
 // Files without an extension that are still files.
 const NAMED = new Set(["Makefile", "Dockerfile", "Containerfile", "Procfile", "Gemfile", "Rakefile", "Justfile", "Brewfile",
   "Vagrantfile", "Caddyfile", "LICENSE", "README", "CHANGELOG", "CODEOWNERS", "NOTICE", "AUTHORS",
@@ -99,7 +102,8 @@ export function fileRefOfCode(text) {
     // A bare name: `README.md`, `Dockerfile`. Not `.map`, `res.json` or `v2.1`.
     if (NAMED.has(name)) return fileRef(path, line, col);
     const stem = ext ? name.slice(0, ext.index) : "";
-    if (!ext || !stem || !BARE_EXTENSIONS.has(ext[1].toLowerCase()) || RECEIVERS.has(stem)) return null;
+    const kind = ext?.[1].toLowerCase();
+    if (!ext || !stem || !BARE_EXTENSIONS.has(kind) || (RECEIVERS.has(stem) && MEMBER_EXTENSIONS.has(kind))) return null;
     return fileRef(path, line, col);
   }
   // A path with folders: its last part has an extension (`/api/app/files` is

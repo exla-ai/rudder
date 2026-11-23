@@ -35,13 +35,15 @@ test("inline code is a file reference only when it is exactly a path", () => {
     ["animation.gif", ref("animation.gif")],
     ["logo.webp", ref("logo.webp")],
     ["cover.avif", ref("cover.avif")],
+    ["request.js", ref("request.js")],
+    ["response.js", ref("response.js")],
     ["Dockerfile", ref("Dockerfile")],
     ["cloud/Dockerfile", ref("cloud/Dockerfile")],
     ["app/[id]/page.tsx", ref("app/[id]/page.tsx")],
     ["file:///workspace/rudder-scratch/notes.md", ref("/workspace/rudder-scratch/notes.md")],
   ]) assert.deepEqual(fileRefOfCode(code), want, code);
   for (const code of [
-    "console.log", "res.json", "mutex.lock", ".map", "e.target", "v1.2.3", "0.5", "localhost:3000", "12:30",
+    "console.log", "res.json", "response.json", "$.css", "mutex.lock", ".map", "e.target", "v1.2.3", "0.5", "localhost:3000", "12:30",
     "/api/app/file-ref", "text/plain", "origin/main", "@types/node", "src/", "src/**/*.ts", "npm run check",
     "std::fs::read", "https://example.com/a.md", "C:\\code\\a.ts", "~", "..", "src/../a.ts", "a//b.ts", "",
   ]) assert.equal(fileRefOfCode(code), null, code);

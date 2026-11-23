@@ -22262,6 +22262,7 @@ What to do\n\
         let now = Instant::now();
         let repo_root = self.cwd.clone();
         let mut any_dirty = false;
+        let mut hook_signal_seen = false;
         let mut context_dirty = false;
         let mut completed_rudder_plans = Vec::new();
         let mut drain_perf: Vec<(Duration, serde_json::Value)> = Vec::new();
@@ -22690,6 +22691,7 @@ What to do\n\
                                     signals::antigravity_status_signal(status, is_orchestrator)
                                 })
                             });
+                        hook_signal_seen |= signal.is_some();
                         match signal {
                             Some(signals::SignalState::Done) => {
                                 signals::clear_signal(&run.id);
@@ -22982,6 +22984,15 @@ What to do\n\
         // mirror_graph then makes this a real shell-out ONLY when the DAG signature
         // actually changed (it is not per-tick: terminal-byte churn does not move
         // the signature, which excludes volatile output). Non-fatal.
+        // A hook signal means the backend just reported its session too (agy
+        // writes it at SessionStart, Claude and OpenCode with their hooks).
+        // Adopt it now, not on the minute tick: until then the app has no
+        // conversation to show, so a short first turn read "Ready for review"
+        // over an empty chat for up to a minute.
+        if hook_signal_seen {
+            self.adopt_reported_sessions();
+        }
+
         if any_dirty
             && (!self.plan().planned_nodes.is_empty()
                 || self.agents.iter().any(|run| run.node_id.is_some()))

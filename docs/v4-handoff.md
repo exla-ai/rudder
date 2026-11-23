@@ -452,6 +452,10 @@ Every launch passes `--settings '{"queuedMessages":"send-immediately"}'`
 (session only, never saved): agy's default `Queue` held a message typed
 mid-turn until the whole turn ended (51 s in a measured Neon run), while
 send-immediately joins it after the step in flight (5.6 s), as Claude does.
+For every harness, the home answers a send to an idle agent only once its
+run.json says running (up to 2 s, `waitRunWorking`), so the state the app
+reads on the answer already shows Working. Answering on the receipt alone left
+Working 3.3 s late on Neon follow-ups and missing on short turns.
 Remote Control on a new conversation is typed, not a flag: agy with
 `-i` and `--remote-control` makes a second, empty conversation at startup and
 the pane can show that one, so the prompt lands in a chat nobody sees. Rudder

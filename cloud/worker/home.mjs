@@ -39,7 +39,7 @@ import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
-import { blockedBy, queueSteer, readSteerReceipt, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
+import { blockedBy, queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
@@ -114,6 +114,10 @@ const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
 // 1.5s: a prompt an agent is blocked on should reach the phone quickly.
 const STATE_INTERVAL_MS = 1500;
+// How long a send to an idle agent waits for its row to turn Working before
+// it answers (steer). A resumed agent that starts its process first takes
+// the longest.
+const TURN_START_WAIT_MS = 2000;
 
 // Set by configureGitCredentials, which runs during boot: declared up here so
 // boot never reaches it uninitialized (2.16.5 crashed on exactly that).
@@ -1575,9 +1579,21 @@ async function deliver(project, { kind, taskId, instruction }) {
   if (!project.term) {
     throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
   }
+  // A message to an idle agent starts a turn, which its row shows only once
+  // the agent takes it. A local slash command starts none.
+  const startsTurn = (kind === "steer" && !instruction.trim().startsWith("/")) || kind === "opencode-prompt";
+  const record = startsTurn && typeof taskId === "string" && /^[A-Za-z0-9._-]+$/.test(taskId) ? readRunJson(path.join(project.dir, ".rudder", "runs", taskId, "run.json")) : null;
+  const idle = !!record && record.status !== "running";
   const requestId = queueSteer(project.dir, { kind, taskId, instruction });
   const receipt = await waitSteerReceipt(project.dir, requestId, 12_000);
   if (receipt?.status === "delivered") {
+    // The answer waits for the row to turn Working (about 200 ms after the
+    // receipt), so the state the app reads on it already shows the turn.
+    // Published with the receipt alone, Working showed 3.3 s after a send on
+    // Gemini 4 Neon follow-ups, or never on a short turn.
+    if (idle) {
+      await waitRunWorking(project.dir, taskId, TURN_START_WAIT_MS);
+    }
     // The state goes out before the answer, on the same socket, so Cloud's
     // copy already shows the change (a closed agent gone, a new name) when
     // the app refreshes on the answer. Waiting for the next publish brought

@@ -58,6 +58,41 @@ export function waitSteerReceipt(repoDir, requestId, timeoutMs) {
 
 const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
+/**
+ * Resolves true once the agent's run.json says "running", or false after
+ * `timeoutMs`. A message typed into an idle agent turns its row Working only
+ * when the agent takes it (its turn-start hook, about 200 ms after the
+ * receipt), so a state sent with the receipt still shows it idle.
+ */
+export function waitRunWorking(repoDir, runId, timeoutMs) {
+  const dir = path.join(repoDir, ".rudder", "runs", runId);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (finish) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      watcher.close();
+      finish();
+    };
+    const check = () => {
+      if (readRunStatus(path.join(dir, "run.json")) === "running") settle(() => resolve(true));
+    };
+    const watcher = fs.watch(dir, check);
+    watcher.on("error", (error) => settle(() => reject(error)));
+    const timer = setTimeout(() => settle(() => resolve(false)), timeoutMs);
+    check();
+  });
+}
+
+function readRunStatus(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8")).status;
+  } catch {
+    // Caught mid-write: the rename that finishes it wakes the watch again.
+    return null;
+  }
+}
 /** Read a completed receipt for a send that previously timed out. */
 export function readSteerReceipt(repoDir, requestId) {
   if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) return null;

@@ -2341,13 +2341,13 @@ struct App {
     /// Runs the user named by hand this session. The haiku title for a new
     /// run lands seconds after it starts and must not replace a typed name.
     renamed_runs: HashSet<String>,
-    diff_summary_cache: HashMap<String, (Instant, Option<String>)>,
+    diff_summary_cache: HashMap<String, DiffSummary>,
     /// Diff summaries still being computed off-thread, so N frames asking for the
     /// same row spawn ONE subprocess rather than one each.
     diff_summary_inflight: HashSet<String>,
     /// Results from those background computations, drained on the next tick.
-    diff_summary_rx: Option<mpsc::Receiver<(String, Option<String>)>>,
-    diff_summary_tx: Option<mpsc::Sender<(String, Option<String>)>>,
+    diff_summary_rx: Option<mpsc::Receiver<(String, DiffRevision, Option<String>)>>,
+    diff_summary_tx: Option<mpsc::Sender<(String, DiffRevision, Option<String>)>>,
     dirty: bool,
     last_tab_emoji: Option<char>,
     /// Frame of the rotating tab glyph, and when it last advanced.
@@ -2385,6 +2385,36 @@ struct MigratedAgent {
     session_id: String,
     workspace_path: PathBuf,
     fresh_prompt: Option<String>,
+}
+
+/// How often a running row re-asks for its "+N -M" between turn ends.
+const DIFF_SUMMARY_RUNNING_REFRESH: Duration = Duration::from_secs(60);
+
+/// The row state a diff summary was computed against. Only a turn or a hook
+/// moves it: the status, the kind of wait, and when the last turn finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiffRevision {
+    status: AgentStatus,
+    wait: Option<std::mem::Discriminant<WaitSignal>>,
+    completed_at: Option<Instant>,
+}
+
+impl DiffRevision {
+    fn of(run: &AgentRun) -> Self {
+        Self {
+            status: run.status,
+            wait: run.wait_signal.as_ref().map(std::mem::discriminant),
+            completed_at: run.completed_at,
+        }
+    }
+}
+
+/// One row's cached "+N -M" (`App::cached_diff_summary`).
+#[derive(Clone, Debug)]
+struct DiffSummary {
+    at: Instant,
+    revision: DiffRevision,
+    value: Option<String>,
 }
 
 /// Which kind of wait a backend hook reported. A question and an approval are
@@ -4136,21 +4166,31 @@ impl App {
             })
     }
 
-    /// The "+12 -3" summary for one row. Costs TWO git subprocesses on a miss, and
-    /// the sidebar asks for every row on every render, so the miss policy is what
-    /// decides whether a long session stays usable.
+    /// The "+12 -3" summary for one row. A miss costs a `jj diff --stat` with a
+    /// full working-copy snapshot (about 0.4 CPU-s in a big repo), and the
+    /// sidebar asks for every drawn row on every render, so the miss policy
+    /// decides what an idle dashboard costs.
     ///
-    /// `live` means the row's workspace can still change. A settled row (merged,
-    /// failed, stopped, done) has a diff that is FINAL, so its first answer is kept
-    /// for the rest of the session; only live rows re-ask on the TTL. Before this,
-    /// every row re-spawned two git processes every 1.5s: measured at 200 rows, boot
-    /// took 61s and keystrokes 61ms, against 0.4s and 2.3ms on an empty repo.
-    fn cached_diff_summary(&mut self, id: &str, cwd: &Path, live: bool, change: Option<&str>) -> Option<String> {
-        const TTL: Duration = Duration::from_millis(1500);
+    /// A row's diff only moves while its agent works, so an answer holds until
+    /// the row's `DiffRevision` moves: its turn ends, a hook reports a wait, or
+    /// it starts again. A running row also re-asks at most once a minute for
+    /// edits made mid-turn. A settled row (merged, failed, stopped, done) keeps
+    /// its answer until its state moves again. A fixed 1.5 s TTL per live row
+    /// cost 238 jj spawns in 10 minutes on one home, 14% of a core.
+    fn cached_diff_summary(
+        &mut self,
+        id: &str,
+        cwd: &Path,
+        revision: DiffRevision,
+        running: bool,
+        change: Option<&str>,
+    ) -> Option<String> {
         let now = Instant::now();
-        if let Some((stamp, value)) = self.diff_summary_cache.get(id) {
-            if !live || now.duration_since(*stamp) < TTL {
-                return value.clone();
+        if let Some(entry) = self.diff_summary_cache.get(id) {
+            if entry.revision == revision
+                && (!running || now.duration_since(entry.at) < DIFF_SUMMARY_RUNNING_REFRESH)
+            {
+                return entry.value.clone();
             }
         }
         // MISS: compute off-thread and show the previous answer (or nothing) until it
@@ -4161,8 +4201,7 @@ impl App {
         let stale = self
             .diff_summary_cache
             .get(id)
-            .map(|(_, value)| value.clone())
-            .unwrap_or(None);
+            .and_then(|entry| entry.value.clone());
         if self.diff_summary_inflight.contains(id) {
             return stale;
         }
@@ -4185,29 +4224,31 @@ impl App {
                     Some(change) => change_diff_short_summary(&path, &change),
                     None => diff_short_summary_at(&path),
                 };
-                let _ = tx.send((key, value));
+                let _ = tx.send((key, revision, value));
             })
             .ok();
         stale
     }
 
     /// Absorb finished background diff summaries. Called on the poll tick; a row
-    /// whose answer arrived redraws with it on the next frame.
+    /// whose answer arrived redraws with it on the next frame. Each answer keeps
+    /// the revision it was asked for, so a row whose state moved while jj ran is
+    /// asked again on that frame.
     fn drain_diff_summaries(&mut self) {
         let Some(rx) = self.diff_summary_rx.as_ref() else {
             return;
         };
-        let mut received: Vec<(String, Option<String>)> = Vec::new();
+        let mut received: Vec<(String, DiffRevision, Option<String>)> = Vec::new();
         while let Ok(item) = rx.try_recv() {
             received.push(item);
         }
         if received.is_empty() {
             return;
         }
-        let now = Instant::now();
-        for (id, value) in received {
+        let at = Instant::now();
+        for (id, revision, value) in received {
             self.diff_summary_inflight.remove(&id);
-            self.diff_summary_cache.insert(id, (now, value));
+            self.diff_summary_cache.insert(id, DiffSummary { at, revision, value });
         }
         self.dirty = true;
     }

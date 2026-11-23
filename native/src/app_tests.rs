@@ -12679,8 +12679,10 @@ fn agents_pane_scrolls_to_follow_the_selection() {
     app.agents = agents;
     // Seed the diff cache so render doesn't shell out to git/jj 30 times per frame.
     for a in &app.agents {
-        app.diff_summary_cache
-            .insert(a.id.clone(), (Instant::now(), None));
+        app.diff_summary_cache.insert(
+            a.id.clone(),
+            DiffSummary { at: Instant::now(), revision: DiffRevision::of(a), value: None },
+        );
     }
 
     // A short pane (height 24) cannot show all 30 multi-line rows at once. Selecting
@@ -20229,7 +20231,11 @@ fn an_open_drawer_card_shows_its_diff_stat() {
     app.agents[paused].status = AgentStatus::Paused;
     app.diff_summary_cache.insert(
         "run-f".to_string(),
-        (Instant::now(), Some("2 files changed, 4 insertions(+), 1 deletion(-)".to_string())),
+        DiffSummary {
+            at: Instant::now(),
+            revision: DiffRevision::of(&app.agents[paused]),
+            value: Some("2 files changed, 4 insertions(+), 1 deletion(-)".to_string()),
+        },
     );
     app.drawer_cursor = Some(Bucket::Closed);
     app.open_drawer(Bucket::Closed);
@@ -21376,9 +21382,10 @@ fn a_diff_summary_miss_never_blocks_the_frame() {
     let repo = unique_test_repo("diff-summary-async");
     let mut app = App::new();
     app.cwd = repo.clone();
+    let revision = DiffRevision::of(&test_agent_run("row-1", "work"));
 
     let started = std::time::Instant::now();
-    let first = app.cached_diff_summary("row-1", &repo, true, None);
+    let first = app.cached_diff_summary("row-1", &repo, revision, true, None);
     let elapsed = started.elapsed();
     assert!(first.is_none(), "nothing cached yet, so nothing to show");
     assert!(
@@ -21391,7 +21398,7 @@ fn a_diff_summary_miss_never_blocks_the_frame() {
     );
 
     // A second ask while it is still running must NOT spawn another subprocess.
-    let _ = app.cached_diff_summary("row-1", &repo, true, None);
+    let _ = app.cached_diff_summary("row-1", &repo, revision, true, None);
     assert_eq!(
         app.diff_summary_inflight.len(),
         1,
@@ -21414,30 +21421,44 @@ fn a_diff_summary_miss_never_blocks_the_frame() {
 }
 
 #[test]
-fn a_settled_row_is_answered_from_cache_without_recomputing() {
-    // A merged/failed row's diff is final. Re-asking spends two subprocesses for an
-    // answer that cannot have changed.
-    let repo = unique_test_repo("diff-summary-settled");
+fn a_rows_diff_is_asked_again_only_when_its_turn_or_a_hook_moves_it() {
+    // Each ask is a jj diff with a full working-copy snapshot. A 1.5 s TTL per
+    // live row cost 238 spawns in 10 minutes on one home; the answer only
+    // moves when the agent works, and a turn end must still refresh it.
+    let repo = unique_test_repo("diff-summary-revision");
     let mut app = App::new();
     app.cwd = repo.clone();
-    app.diff_summary_cache.insert(
-        "settled".to_string(),
-        (
-            Instant::now() - Duration::from_secs(3600),
-            Some("+3 -1".to_string()),
-        ),
-    );
+    let mut run = test_agent_run("row", "work");
+    run.status = AgentStatus::Running;
+    let working = DiffRevision::of(&run);
+    let seed = |app: &mut App, age: Duration, revision: DiffRevision| {
+        app.diff_summary_inflight.clear();
+        app.diff_summary_cache.insert(
+            "row".to_string(),
+            DiffSummary { at: Instant::now() - age, revision, value: Some("+3 -1".to_string()) },
+        );
+    };
 
-    let value = app.cached_diff_summary("settled", &repo, false, None);
-    assert_eq!(
-        value.as_deref(),
-        Some("+3 -1"),
-        "an hour-old answer still serves"
-    );
-    assert!(
-        app.diff_summary_inflight.is_empty(),
-        "and nothing was recomputed for it"
-    );
+    seed(&mut app, Duration::from_secs(30), working);
+    assert_eq!(app.cached_diff_summary("row", &repo, working, true, None).as_deref(), Some("+3 -1"));
+    assert!(app.diff_summary_inflight.is_empty(), "a running row inside its minute is not re-asked");
+
+    seed(&mut app, DIFF_SUMMARY_RUNNING_REFRESH, working);
+    assert_eq!(app.cached_diff_summary("row", &repo, working, true, None).as_deref(), Some("+3 -1"));
+    assert!(app.diff_summary_inflight.contains("row"), "a running row re-asks once a minute");
+
+    // The Stop hook ends the turn: asked again at once, the old answer shown meanwhile.
+    seed(&mut app, Duration::from_secs(1), working);
+    mark_run_done(&mut run);
+    let done = DiffRevision::of(&run);
+    assert_ne!(done, working);
+    assert_eq!(app.cached_diff_summary("row", &repo, done, false, None).as_deref(), Some("+3 -1"));
+    assert!(app.diff_summary_inflight.contains("row"), "a turn end refreshes the count");
+
+    // Settled and unchanged, an hour-old answer still serves.
+    seed(&mut app, Duration::from_secs(3600), done);
+    assert_eq!(app.cached_diff_summary("row", &repo, done, false, None).as_deref(), Some("+3 -1"));
+    assert!(app.diff_summary_inflight.is_empty(), "nothing was recomputed for it");
 }
 
 /// After a merge the worker's workspace sits on a fresh empty change (src/jj.ts
@@ -29589,7 +29610,11 @@ fn sync_summary_covers_running_and_review_agents_but_not_merged_ones() {
     app.agents = vec![main, running, review, blocked, merged, stopped];
     app.diff_summary_cache.insert(
         "run-sync".to_string(),
-        (Instant::now(), Some("3 files changed, 40 insertions(+), 2 deletions(-)".to_string())),
+        DiffSummary {
+            at: Instant::now(),
+            revision: DiffRevision::of(app.agents.iter().find(|run| run.id == "run-sync").unwrap()),
+            value: Some("3 files changed, 40 insertions(+), 2 deletions(-)".to_string()),
+        },
     );
 
     let message = app.sync_message_for(1).expect("two or more agents to share");

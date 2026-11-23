@@ -326,7 +326,7 @@ impl App {
         let changes = (!shared_checkout)
             .then(|| self.diff_summary_cache.get(&run.id))
             .flatten()
-            .and_then(|(_, stat)| stat.as_deref())
+            .and_then(|entry| entry.value.as_deref())
             .map(short_diff_stat);
         SyncEntry {
             name,

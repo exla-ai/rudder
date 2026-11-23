@@ -716,7 +716,16 @@ fn build_agent_command(
     }
 }
 
-/// The permission flags an Antigravity launch carries for `mode`.
+/// The flags every Antigravity launch carries for `mode`: its permissions and
+/// how it takes a message typed while it works.
+///
+/// agy's default `Queue` holds a message typed mid-turn until the whole turn
+/// ends, subagents and background tasks included: a follow-up typed 5 s into
+/// a Gemini 4 Neon turn reached the model 51 s later. `send-immediately` joins
+/// it to the current turn after the step in flight (5.6 s in the same run),
+/// the way Claude and Codex read a message typed while they work.
+/// `--settings` applies to this session only and never writes the user's
+/// settings.json.
 ///
 /// Workers, main agents and the interactive conductor run with
 /// `--dangerously-skip-permissions`, the same unattended footing as Claude's
@@ -730,7 +739,7 @@ fn build_agent_command(
 /// gam reviewer (main.rs refuses that pairing); the arm below only keeps the
 /// match whole.
 pub(crate) fn antigravity_mode_args(mode: AgentMode, orchestrator_interactive: bool) -> Vec<String> {
-    match mode {
+    let mut args = match mode {
         AgentMode::Execute | AgentMode::ReviewAll | AgentMode::Main | AgentMode::OneOff => {
             vec!["--dangerously-skip-permissions".to_string()]
         }
@@ -740,7 +749,10 @@ pub(crate) fn antigravity_mode_args(mode: AgentMode, orchestrator_interactive: b
         AgentMode::RudderPlan | AgentMode::Plan | AgentMode::GamAdversarial => {
             vec!["--mode".to_string(), "plan".to_string()]
         }
-    }
+    };
+    args.push("--settings".to_string());
+    args.push(r#"{"queuedMessages":"send-immediately"}"#.to_string());
+    args
 }
 
 /// `--model` when set: an empty model means the model chosen in

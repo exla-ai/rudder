@@ -1667,7 +1667,14 @@ fn antigravity_workers_run_unattended_and_planners_plan_first() {
         worker.args
     );
 
+    // A message typed mid-turn joins that turn instead of waiting for its end.
+    let immediate = |args: &[String]| {
+        args.windows(2).any(|w| w[0] == "--settings" && w[1] == r#"{"queuedMessages":"send-immediately"}"#)
+    };
+    assert!(immediate(&worker.args), "{:?}", worker.args);
+
     let planner = antigravity_planner_command("", "decompose this");
+    assert!(immediate(&planner.args), "{:?}", planner.args);
     assert!(planner.args.windows(2).any(|w| w[0] == "--mode" && w[1] == "plan"));
     assert!(!planner.args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
     assert!(

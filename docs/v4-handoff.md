@@ -428,6 +428,10 @@ cut chat). A turn starts at `PreInvocation` with `invocationNum` 0: agy
 1.5.14 counts each turn's model calls from 0. And each agent's own workspace folder is trusted through `trustedWorkspaces`
 in its `settings.json` (agy asks again in any subfolder of a trusted one, and
 that dialog swallowed the first follow-up).
+Every launch passes `--settings '{"queuedMessages":"send-immediately"}'`
+(session only, never saved): agy's default `Queue` held a message typed
+mid-turn until the whole turn ended (51 s in a measured Neon run), while
+send-immediately joins it after the step in flight (5.6 s), as Claude does.
 Remote Control on a new conversation is typed, not a flag: agy with
 `-i` and `--remote-control` makes a second, empty conversation at startup and
 the pane can show that one, so the prompt lands in a chat nobody sees. Rudder

@@ -7385,16 +7385,10 @@ fn key_spans(keys: &[(&str, &str)]) -> Vec<Span<'static>> {
 pub(crate) const NOTICE_PILL_FOR: Duration = Duration::from_secs(4);
 pub(crate) const NOTICE_ERROR_PILL_FOR: Duration = Duration::from_secs(10);
 
-/// A notice that ends in an ellipsis is work in progress ("refining the
-/// plan…"), so its pill carries the spinner.
-pub(crate) fn notice_in_progress(text: &str) -> bool {
-    let text = text.trim_end();
-    text.ends_with('\u{2026}') || text.ends_with("...")
-}
-
 /// True while the current notice still shows as a pill. Remembers when each
 /// distinct notice first appeared.
 pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
+    let in_progress = app.notice_in_progress();
     let Some(text) = app.notice.as_deref() else {
         app.notice_seen = None;
         return false;
@@ -7412,7 +7406,7 @@ pub(crate) fn notice_pill_visible(app: &mut App, now: Instant) -> bool {
     // A pending confirmation ("press d again") and a long notice (a /help
     // listing) are meant to be acted on or read: they stay up until Esc or the
     // next notice instead of shrinking into the footer.
-    notice_in_progress(text)
+    in_progress
         || kind == NoticeKind::Confirm
         || text.chars().count() > 140
         || now.duration_since(since) < ttl
@@ -7475,7 +7469,7 @@ pub(crate) fn render_notice_pill(frame: &mut Frame<'_>, area: Rect, app: &mut Ap
     };
     let kind = notice_kind(&text);
     let colors = notice_pill_colors(kind);
-    let glyph = if notice_in_progress(&text) {
+    let glyph = if app.notice_in_progress() {
         app.spinner_glyph()
     } else {
         match kind {

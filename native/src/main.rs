@@ -2019,6 +2019,10 @@ struct App {
     model: String,
     effort: Option<EffortLevel>,
     notice: Option<String>,
+    /// The notice that names work still running ("refining the plan…"): its
+    /// pill stays up with a spinner until that work replaces the notice. Only
+    /// `set_progress_notice` sets it, so any later notice ends it.
+    progress_notice: Option<String>,
     /// The notice text last drawn and when it first appeared, so it shows as a
     /// pill for a few seconds and then settles into the footer.
     notice_seen: Option<(String, Instant)>,
@@ -3801,6 +3805,7 @@ impl App {
             model: selection.model,
             effort: selection.effort,
             notice: opencode_plugin_notice,
+            progress_notice: None,
             notice_seen: None,
             show_keys: false,
             reveal_started: None,
@@ -4221,7 +4226,7 @@ impl App {
         if self.has_planning_orchestrator() {
             Some(SPINNER_FRAME_INTERVAL)
         } else if motion_pending(self, now)
-            || self.notice.as_deref().is_some_and(notice_in_progress)
+            || self.notice_in_progress()
             || (self.agents_area.is_some() && self.agents.iter().any(agent_is_busy))
             || (self.agents_area.is_some() && self.subagent_tree_animating())
         {
@@ -11963,7 +11968,7 @@ Address the objection directly. If you disagree, say why inside \
             run.plan_output_cache = Some(RudderPlanOutputCache::default());
         }
         if self.relaunch_orchestrator_with(index, command, feedback) {
-            self.notice = Some("refining the plan with your feedback…".to_string());
+            self.set_progress_notice("refining the plan with your feedback…".to_string());
         } else {
             // The planner could not be relaunched: drop back to the existing plan so
             // the user is not stuck (they can still approve it or try again).
@@ -16430,6 +16435,18 @@ Address the objection directly. If you disagree, say why inside \
     /// Append a one-line entry to the conductor activity log (bounded) and surface it
     /// as the current notice. This is how every AUTONOMOUS action stays visible
     /// without a confirm gate.
+    /// Show `text` as work in progress: its pill carries the spinner until
+    /// the next notice replaces it. A notice that merely ends in an ellipsis
+    /// (a task cut to fit) is not in progress.
+    fn set_progress_notice(&mut self, text: String) {
+        self.progress_notice = Some(text.clone());
+        self.notice = Some(text);
+    }
+
+    pub(crate) fn notice_in_progress(&self) -> bool {
+        self.notice.is_some() && self.notice == self.progress_notice
+    }
+
     fn push_activity(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         self.notice = Some(msg.clone());
@@ -20674,7 +20691,7 @@ Address the objection directly. If you disagree, say why inside \
                 .map(str::to_string)
                 .to_vec(),
         };
-        self.notice = Some(format!(
+        self.set_progress_notice(format!(
             "deleting {} from Rudder Cloud…",
             cloud_delete_target_label(&confirm.target)
         ));

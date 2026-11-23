@@ -9336,11 +9336,32 @@ fn a_steer_notice_quotes_only_the_start_of_a_long_message() {
     let url = format!("https://example.com/{}", "a".repeat(200));
     assert_eq!(steer_preview(&url).chars().count(), STEER_PREVIEW_CHARS + 1);
 
-    // The notice built from it reads as done, not as work in progress (an
-    // ellipsis at the very end keeps the pill up with a spinner).
     let notice = format!("steered context-check-i-think-09cdb: \"{preview}\"");
-    assert!(!notice_in_progress(&notice), "{notice}");
     assert_eq!(notice_kind(&notice), NoticeKind::Info);
+}
+
+#[test]
+fn only_a_progress_notice_spins_and_the_next_notice_ends_it() {
+    // "re-goaled n1: Reply with the single w..." ends in a task cut to fit, and
+    // a trailing ellipsis used to mean work in progress: the pill kept a
+    // spinner, never settled into the footer, and an idle dashboard drew
+    // spinner frames every 90 ms for as long as that notice stood.
+    let mut app = App::new();
+    app.push_activity(format!("re-goaled n1: {}", short_task("Reply with the single word OK. Do not run any tools.")));
+    assert!(app.notice.as_deref().is_some_and(|text| text.ends_with("...")));
+    assert!(!app.notice_in_progress());
+    let now = Instant::now();
+    assert_eq!(app.animation_interval(now), None);
+    assert!(notice_pill_visible(&mut app, now));
+    assert!(!notice_pill_visible(&mut app, now + NOTICE_PILL_FOR), "it settles into the footer");
+
+    app.set_progress_notice("refining the plan with your feedback\u{2026}".to_string());
+    assert!(app.notice_in_progress());
+    assert!(app.animation_interval(now).is_some());
+    assert!(notice_pill_visible(&mut app, now + Duration::from_secs(60)), "work in progress stays up");
+
+    app.push_activity("plan ready");
+    assert!(!app.notice_in_progress(), "the next notice ends it");
 }
 
 #[test]

@@ -4382,9 +4382,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     }
   });
   const isRunning = (status) => status === "running" || !!statusOf(status).live;
+  // A message sent to an idle agent: its row turns Working only once the
+  // agent takes it, so state is polled fast for a while from the send on.
+  let sentAt = 0;
   const fastPoll = () => {
     const a = agentNow();
-    return !!a && (isRunning(a.status) || pendingAsks(a).length > 0);
+    return !!a && (isRunning(a.status) || pendingAsks(a).length > 0 || Date.now() - sentAt < SENT_FAST_POLL_MS);
   };
   if (!ro) fastPolls.add(fastPoll);
   if (!ro) pollState();
@@ -4401,6 +4404,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   let atBottom = true;
   let firstPaint = true;
   let lastCount = 0;
+  // The status the last paint showed, to catch a turn ending (paint).
+  let paintedStatus = null;
   // When the running compaction's card last left (compaction.js).
   let compactEndedAt = 0;
   const isAtBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 72;
@@ -4650,6 +4655,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt } });
       item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
       item.requestId = res.requestId;
+      sentAt = Date.now();
+      pollState();
       // The question card tracks a typed answer through the same receipts.
       if (res?.answered) {
         localAnswerSubmission = res;
@@ -4830,6 +4837,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const follow = !hold && (firstPaint || (atBottom && !editAction.editing()));
     const seen = follow ? [] : onScreen();
     const status = header();
+    // The turn just ended, so its reply is on disk: read it now rather than
+    // at the next poll, so the reply shows as Working ends.
+    if (isRunning(paintedStatus) && !isRunning(status)) void loadTranscript({ replace: true });
+    paintedStatus = status;
     paintAsk();
     interruptBtn.hidden = ro || !isRunning(status);
     const agent = agentNow();
@@ -5190,6 +5201,10 @@ let stateTimer = null;
 // or waiting on an answer, so a new prompt shows up promptly.
 // Open agent screens that want state polled fast (a live agent, an open prompt).
 const fastPolls = new Set();
+// How long a chat polls fast after a send. A Gemini 4 Neon turn often takes
+// several seconds before its first step, and its row turns Working only once
+// the agent takes the message.
+const SENT_FAST_POLL_MS = 20_000;
 function pollState() {
   clearTimeout(stateTimer);
   if (document.hidden) return;

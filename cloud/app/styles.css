@@ -619,18 +619,25 @@ a { color: var(--accent); }
 .m-note .m-why { margin: 3px 0 0; }
 .m-note .m-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 10px; }
 .m-note .m-acts .btn.small { min-height: 32px; font-size: 13.5px; }
-/* Edit under a sent message (chat-edit.js) shows on hover or focus. A phone
-   has no hover, so it always shows there, and a long press opens the
-   message's menu instead of selecting text. */
-.msg.user .edit-foot { opacity: 0; transition: opacity 0.12s; justify-content: flex-end; }
+/* Edit under a sent message (chat-edit.js) shows on hover or focus, in the
+   space under the message rather than adding to it, so a message with Edit
+   stands as far from the next as any other. A phone has no hover, so Edit
+   always shows there with room to tap, and a long press opens the message's
+   menu instead of selecting text. */
+.msg.user.editable { margin-bottom: 0; }
+.msg.user .edit-foot { opacity: 0; transition: opacity 0.12s; justify-content: flex-end; height: 16px; margin-top: 2px; }
+.msg.user .edit-foot > button { padding: 0 4px; line-height: 16px; }
 .msg.user:hover .edit-foot, .msg.user:focus-within .edit-foot { opacity: 1; }
 @media (pointer: coarse) {
-  .msg.user .edit-foot { opacity: 1; }
+  .msg.user.editable { margin-bottom: 14px; }
+  .msg.user .edit-foot { opacity: 1; height: auto; margin-top: 4px; }
+  .msg.user .edit-foot > button { padding: 4px; line-height: normal; }
   .msg.user.editable .bubble { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 }
 /* Editing a sent message in place (chat-edit.js): a text box takes the
    bubble's place, and the turns after it fade until it is sent or closed. */
 .msg.user.editing > .bubble, .msg.user.editing > .atts, .msg.user.editing > .edit-foot { display: none; }
+.msg.user.editable.editing { margin-bottom: 14px; }
 .msg.user.editing ~ * { opacity: 0.35; transition: opacity 0.15s; }
 /* An edited message the dashboard has not sent yet (it stops the turn
    first): it says so, and the turns it drops stay faded. */

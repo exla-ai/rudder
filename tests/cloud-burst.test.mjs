@@ -251,6 +251,7 @@ test("the broker forwards with the worker token and passes only lease fields", a
     assert.deepEqual(seen[0].body, { seconds: 600, holder: "x" });
   } finally {
     server.close();
+    fs.rmSync(path.dirname(socketPath), { recursive: true, force: true });
   }
 });
 
@@ -305,5 +306,6 @@ test("rudder-burst end to end: upload, run, pull back, release", { skip: hasRsyn
     builder.close();
     broker.close();
     controlServer.close();
+    fs.rmSync(path.dirname(socketPath), { recursive: true, force: true });
   }
 });

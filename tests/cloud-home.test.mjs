@@ -990,6 +990,8 @@ const model = neon
 process.stdout.write(JSON.stringify({ current: null, harnesses: [{ id: "antigravity", label: "Antigravity", account: "Google", models: [model], default: null }] }) + "\\n");
 `, { mode: 0o755 });
     let log = "";
+    const tmp = path.join(scratch, "tmp");
+    fs.mkdirSync(tmp);
     const child = spawn(process.execPath, [path.join(workerDir, "home.mjs")], {
       cwd: workerDir,
       env: {
@@ -1002,6 +1004,9 @@ process.stdout.write(JSON.stringify({ current: null, harnesses: [{ id: "antigrav
         RUDDER_HOME_TOOLCHAINS: "0",
         RUDDER_HOST_KIND: "external",
         RUDDER_HOST_IMAGE: "registry.fly.io/workers:old",
+        // Its own temp dir: the supervisor binds its sockets there, and the
+        // default /tmp would replace a live Cloud home's own sockets.
+        TMPDIR: tmp,
         // The checkout's build (`npm run build`), as the image's /opt/rudder/dist.
         RUDDER_DIST: path.join(repoRoot, "dist"),
       },

@@ -92,7 +92,7 @@ impl App {
             .unwrap_or(MAIN_ACCOUNT);
         let spec = format!("{model} {} {account}", effort.map(EffortLevel::as_str).unwrap_or("auto"));
         match self.deliver_model_request(&id, &spec) {
-            SteerDelivery::Delivered | SteerDelivery::Sent(_) => {
+            SteerDelivery::Delivered | SteerDelivery::Awaiting(_) => {
                 if let Some(index) = self.agent_index_for_token(&id) {
                     let run = &self.agents[index];
                     self.notice = Some(format!("now on {}", agent_model_label(run.backend, &run.model, run.effort)));
@@ -100,7 +100,7 @@ impl App {
                 }
                 self.focus = FocusPane::Worker;
             }
-            SteerDelivery::Failed(why) => {
+            SteerDelivery::Failed(_, why) => {
                 self.notice = Some(format!("model not changed: {why}"));
                 self.focus = FocusPane::Agents;
             }
@@ -208,7 +208,7 @@ impl App {
     /// harness carries on with it.
     pub(crate) fn deliver_harness_request(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
         let expected = || {
-            SteerDelivery::Failed("expected <harness> <model> <effort|auto> <account>, then the handoff".to_string())
+            SteerDelivery::Failed(FailCode::Refused, "expected <harness> <model> <effort|auto> <account>, then the handoff".to_string())
         };
         let Some((head, handoff)) = instruction.split_once('\n') else {
             return expected();
@@ -220,43 +220,43 @@ impl App {
             return expected();
         };
         let Some(backend) = Backend::parse(harness) else {
-            return SteerDelivery::Failed(format!("unknown harness: {harness}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("unknown harness: {harness}"));
         };
         let effort = parse_effort_arg(effort_arg);
         if effort.is_none() && !effort_arg.eq_ignore_ascii_case("auto") {
-            return SteerDelivery::Failed(format!("unknown effort: {effort_arg}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("unknown effort: {effort_arg}"));
         }
         // An Antigravity model takes no effort of its own (its slug names
         // one), so a chat moved there drops the one it ran at.
         let effort = if backend == Backend::Antigravity { None } else { effort };
         let account = match parse_account_arg(account_arg) {
             Ok(account) => account,
-            Err(refusal) => return SteerDelivery::Failed(refusal),
+            Err(refusal) => return SteerDelivery::Failed(FailCode::Refused, refusal),
         };
         let handoff = sanitize_steer_instruction(handoff);
         if handoff.is_empty() {
-            return SteerDelivery::Failed("the handoff is empty".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "the handoff is empty".to_string());
         }
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         let run = &mut self.agents[index];
         if let Some(refusal) = harness_switch_refusal(run, backend) {
-            return SteerDelivery::Failed(refusal);
+            return SteerDelivery::Failed(FailCode::Refused, refusal);
         }
         if let Some(other) = known_model_backend(model).filter(|other| *other != backend) {
-            return SteerDelivery::Failed(format!("{model} is a {} model, not a {} one", other.as_str(), backend.as_str()));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{model} is a {} model, not a {} one", other.as_str(), backend.as_str()));
         }
         if !effort_options_for(backend, model).contains(&effort) {
-            return SteerDelivery::Failed(format!("{model} has no {effort_arg} effort"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{model} has no {effort_arg} effort"));
         }
         if let Some(refusal) = openrouter_key_refusal(backend, model) {
-            return SteerDelivery::Failed(refusal.to_string());
+            return SteerDelivery::Failed(FailCode::Refused, refusal.to_string());
         }
         // The new harness starts on `account`; refused up front when it
         // cannot, while the old process still runs.
         if let Err(error) = signals::account_env(backend, account.as_deref()) {
-            return SteerDelivery::Failed(error.to_string());
+            return SteerDelivery::Failed(FailCode::Refused, error.to_string());
         }
         let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
         let from = agent_model_label(run.backend, &run.model, run.effort);
@@ -271,7 +271,7 @@ impl App {
         };
         // Refused before the old process is touched: it keeps running.
         if let Err(error) = wired {
-            return SteerDelivery::Failed(format!("could not start {label} on {}: {error}", backend.as_str()));
+            return SteerDelivery::Failed(FailCode::Refused, format!("could not start {label} on {}: {error}", backend.as_str()));
         }
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
@@ -287,7 +287,7 @@ impl App {
                 run.status = AgentStatus::Failed;
                 run.last_error = Some(error.to_string());
                 let _ = save_native_run_record(&self.cwd, run);
-                return SteerDelivery::Failed(format!("could not start {label} on {}: {error}", backend.as_str()));
+                return SteerDelivery::Failed(FailCode::Refused, format!("could not start {label} on {}: {error}", backend.as_str()));
             }
         };
         let _ = terminal.drain_output();
@@ -356,7 +356,7 @@ impl App {
         if unrecorded.is_empty() {
             SteerDelivery::Delivered
         } else {
-            SteerDelivery::Failed(format!("it moved to {to}, but {}", unrecorded.join("; ")))
+            SteerDelivery::Failed(FailCode::Refused, format!("it moved to {to}, but {}", unrecorded.join("; ")))
         }
     }
 }

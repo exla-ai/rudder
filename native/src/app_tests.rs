@@ -1,5 +1,32 @@
 use super::*;
 
+/// The agent's transcript recorded every message waiting for it.
+fn agent_takes_all(app: &mut App) {
+    let ids: Vec<u64> = app.pending_deliveries.iter().map(|pending| pending.id).collect();
+    for id in ids {
+        app.apply_delivery_scan(crate::delivery::ScanResult {
+            id,
+            started: Instant::now(),
+            taken: true,
+            path: None,
+            offset: None,
+        });
+    }
+}
+
+/// For a message whose receipt waits for the agent to take it: whether it
+/// was given to the agent at launch.
+fn awaited_launch(app: &App, delivery: &SteerDelivery) -> Option<bool> {
+    match delivery {
+        SteerDelivery::Awaiting(id) => app
+            .pending_deliveries
+            .iter()
+            .find(|pending| pending.id == *id)
+            .map(|pending| pending.message.launched),
+        _ => None,
+    }
+}
+
 #[test]
 fn base64_encode_matches_known_vectors() {
     // RFC 4648 test vectors — the OSC 52 clipboard payload encoder must be exact or
@@ -732,6 +759,7 @@ fn steer_inbox_submits_each_message_before_pasting_the_next() {
     app.flush_pending_enters();
     app.poll_steer_inbox();
     assert!(!inbox.join("request-1.json").exists());
+    agent_takes_all(&mut app);
     assert_eq!(app.agents[0].current_prompt, "second message");
     let first = wait_for_log(&repo, "live-input", "first message");
     assert!(!first.contains("second message"), "the first Enter submitted only its own paste");
@@ -857,6 +885,11 @@ fn web_steer_running_worker_injects_and_persists_a_user_turn() {
         app.notice.as_deref(),
         Some("steered n-running: \"focus on the failing parser test\"")
     );
+    assert!(
+        app.agents[0].turns.iter().all(|turn| turn.prompt != "focus on the failing parser test"),
+        "a typed message is a turn once the agent takes it"
+    );
+    agent_takes_all(&mut app);
 
     let run = &app.agents[0];
     assert_eq!(run.status, AgentStatus::Running);
@@ -943,6 +976,7 @@ fn web_steer_done_worker_regoals_the_same_row() {
     app.agents.push(run);
 
     let _ = app.deliver_steer_request("n-done", "also cover malformed input", false);
+    agent_takes_all(&mut app);
 
     let status = app.agents[0].status;
     let current_prompt = app.agents[0].current_prompt.clone();
@@ -999,9 +1033,11 @@ fn web_steer_resumes_a_stopped_worker() {
         app.agents.push(run);
 
         let delivery = app.deliver_steer_request("n-stopped", "pick it back up", false);
+        let launched = awaited_launch(&app, &delivery) == Some(true);
+        agent_takes_all(&mut app);
         results.push((
             status,
-            matches!(&delivery, SteerDelivery::Sent(sent) if sent.launched),
+            launched,
             app.agents[0].status,
             app.agents[0].turns.last().map(|turn| turn.prompt.clone()),
         ));
@@ -1060,7 +1096,7 @@ fn a_regoaled_chat_gets_the_message_at_launch_not_typed() {
         let delivery = app.deliver_steer_request("n-done", "- also cover malformed input", false);
 
         assert!(
-            matches!(&delivery, SteerDelivery::Sent(sent) if sent.launched),
+            awaited_launch(&app, &delivery) == Some(true),
             "{backend:?}: the receipt waits for the agent to take it"
         );
         let args = wait_for_log(&dir, "args", "--");
@@ -1138,13 +1174,110 @@ fn a_steer_receipt_waits_for_the_transcript_to_record_the_message() {
     // The next message goes to the live agent, which then exits without
     // recording it.
     let sent = app.deliver_steer_request("n-done", "and the docs", false);
-    assert!(matches!(&sent, SteerDelivery::Sent(message) if !message.launched));
+    assert_eq!(awaited_launch(&app, &sent), Some(false));
     app.settle_steer("request-lost-2", sent);
     app.agents[0].terminal = None;
     let (status, error) = drive(&mut app, "request-lost-2", 5_000);
     assert_eq!(status, "failed");
     assert!(error.contains("not delivered"), "{error}");
     assert!(app.pending_deliveries.is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// hunt-app (5.0.33): a message to a stopped main chat started it and was
+// recorded as its running turn at once. The CLI never took it, and the chat
+// showed working with a turn that never ran. A turn is recorded once the
+// transcript has it; a launch it never took leaves the row at rest.
+#[cfg(not(windows))]
+#[test]
+fn a_message_to_a_stopped_main_chat_is_a_turn_only_once_the_agent_takes_it() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("stopped-main-take");
+    env.set_home(&dir, &dir.join("home"));
+    std::env::set_var("RUDDER_HOME", dir.join("home/.rudder"));
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 30\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    let session = "6b1d3f0a-2e3c-4d4b-8f9a-8b7c6d5e4f30";
+    let projects = dir.join("home/.claude/projects").join(encode_claude_project_dir(&dir));
+    fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{session}.jsonl"));
+    fs::write(&transcript, "").unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("main-run", "talk it through");
+    run.cwd = dir.clone();
+    run.mode = AgentMode::Main;
+    run.status = AgentStatus::Stopped;
+    run.session_id = Some(session.to_string());
+    app.agents.push(run);
+    let turns = app.agents[0].turns.len();
+    let prompt = app.agents[0].current_prompt.clone();
+    let receipt = |id: &str| {
+        fs::read_to_string(dir.join(format!(".rudder/steer-receipts/{id}.json")))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or_default()
+    };
+    let drive = |app: &mut App, id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(receipt(id)["status"].as_str(), Some("delivered" | "failed")) && Instant::now() < deadline {
+            app.drive_deliveries();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        receipt(id)
+    };
+
+    let first = app.deliver_steer_request("main-run", "is it done?", false);
+    assert_eq!(awaited_launch(&app, &first), Some(true));
+    app.settle_steer("request-main-1", first);
+    assert_eq!(app.agents[0].status, AgentStatus::Running, "starting");
+    assert_eq!(app.agents[0].turns.len(), turns, "no turn before the agent takes it");
+    // The CLI started but never began a turn with it.
+    app.pending_deliveries[0].sent = Instant::now().checked_sub(crate::delivery::LAUNCH_WAIT).unwrap();
+    let failed = drive(&mut app, "request-main-1");
+    assert_eq!(failed["status"], "failed", "{failed}");
+    assert_eq!(failed["code"], "not_submitted", "{failed}");
+    assert_eq!(app.agents[0].status, AgentStatus::Paused, "at rest, not working");
+    assert_eq!(app.agents[0].turns.len(), turns);
+    assert_eq!(app.agents[0].current_prompt, prompt);
+
+    // The next message is typed into the live pane, and is a turn once taken.
+    let second = app.deliver_steer_request("main-run", "and the tests?", false);
+    assert_eq!(awaited_launch(&app, &second), Some(false));
+    app.settle_steer("request-main-2", second);
+    assert_eq!(app.agents[0].turns.len(), turns);
+    let turn = serde_json::json!({
+        "type": "user",
+        "timestamp": system_time_to_iso(SystemTime::now()),
+        "message": {"role": "user", "content": "and the tests?"},
+    });
+    fs::write(&transcript, format!("{turn}\n")).unwrap();
+    assert_eq!(drive(&mut app, "request-main-2")["status"], "delivered");
+    let last = app.agents[0].turns.last().unwrap();
+    assert_eq!((last.prompt.as_str(), last.source.as_str()), ("and the tests?", "user"));
+    assert_eq!(app.agents[0].current_prompt, "and the tests?");
+    app.agents[0].terminal = None;
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// The app withdraws a message that waited too long by creating its failed
+// receipt, then deletes the inbox file. Native claims a request the same way,
+// so one of the two wins and a withdrawn message is never typed.
+#[test]
+fn a_withdrawn_request_is_never_claimed() {
+    let dir = unique_test_repo("steer-claim");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let receipts = dir.join(".rudder/steer-receipts");
+    fs::create_dir_all(&receipts).unwrap();
+    let withdrawn = r#"{"requestId":"request-withdrawn","status":"failed","code":"withdrawn"}"#;
+    fs::write(receipts.join("request-withdrawn.json"), withdrawn).unwrap();
+    assert!(!app.claim_steer_request("request-withdrawn").unwrap());
+    assert_eq!(fs::read_to_string(receipts.join("request-withdrawn.json")).unwrap(), withdrawn);
+    assert!(app.claim_steer_request("request-fresh").unwrap());
+    assert!(!app.claim_steer_request("request-fresh").unwrap(), "claimed once");
+    assert_eq!(fs::read_dir(&receipts).unwrap().count(), 2, "no temp file is left");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -8373,7 +8506,7 @@ fn steering_guards_refuse_unsafe_targets() {
     orch.mode = AgentMode::RudderPlan;
     app.agents = vec![orch];
     assert!(
-        !app.regoal_agent_at(0, "new direction"),
+        app.regoal_agent_at(0, "new direction").is_none(),
         "orchestrator is not re-goaled"
     );
 }
@@ -9629,6 +9762,7 @@ fn worker_enter_resumes_a_paused_paneless_row() {
         let mut app = paneless_app(&repo, backend, session, AgentStatus::Paused);
         app.focus = FocusPane::Worker;
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        agent_takes_all(&mut app);
 
         assert!(app.agents[0].terminal.is_some(), "{backend:?}: resumed");
         assert_eq!(app.agents[0].status, AgentStatus::Running, "{backend:?}");
@@ -9940,7 +10074,7 @@ fn historical_readonly_modes_survive_restarts_with_and_without_sessions() {
                 run.status = AgentStatus::Stopped;
                 run.session_id = saved_session.then(|| "saved-session".to_string());
                 app.agents.push(run);
-                assert!(app.restart_agent_at(0, "continue the inspection", None), "{:?}", app.notice);
+                assert!(app.restart_agent_at(0, Some("continue the inspection"), None), "{:?}", app.notice);
                 let end = Instant::now() + Duration::from_secs(3);
                 while !log.exists() && Instant::now() < end {
                     std::thread::sleep(Duration::from_millis(5));
@@ -13609,6 +13743,7 @@ fn orchestrator_can_pause_and_resume_worker_on_another_model() {
     app.agents.push(worker);
 
     app.scan_orchestrator_skill_markers();
+    agent_takes_all(&mut app);
 
     let worker = app
         .agents
@@ -20911,6 +21046,7 @@ fn fleet_nudge_status_and_keep_going_preserve_unavailable_runs_until_explicit_re
     app.handle_orchestrator_skill_marker(
         "RUDDER_RESUME fleet-stopped codex gpt-5.6 high authorized continuation",
     );
+    agent_takes_all(&mut app);
     let resumed = app.agents.iter_mut().find(|run| run.id == "fleet-stopped").unwrap();
     assert_eq!(resumed.status, AgentStatus::Running);
     assert_eq!(resumed.current_prompt, "authorized continuation");
@@ -20992,7 +21128,7 @@ fn fleet_nudge_reports_partial_failure_without_replacing_a_dead_attempt() {
     }
     app.agents = vec![live, dead];
     let result = app.deliver_nudge_all_request("check live work only");
-    assert!(matches!(result, SteerDelivery::Failed(ref error)
+    assert!(matches!(result, SteerDelivery::Failed(_, ref error)
         if error == "sent to 1 live worker; 1 could not be reached"));
     assert_eq!(app.pending_enters.len(), 1, "dead pane must not acquire a submit");
     assert_eq!(app.agents[1].terminal.as_ref().unwrap().instance_id(), dead_instance);
@@ -21026,7 +21162,7 @@ fn fleet_nudge_excludes_finished_orchestrator_and_stopped_rows_even_with_a_termi
         app.agents.push(run);
     }
     let before = fleet_note_state(&app);
-    assert!(matches!(app.deliver_nudge_all_request("keep going"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_nudge_all_request("keep going"), SteerDelivery::Failed(_, _)));
     assert_eq!(fleet_note_state(&app), before);
     assert!(app.pending_enters.is_empty());
     for run in &mut app.agents { run.terminal = None; }
@@ -28794,7 +28930,7 @@ fn phone_keys_and_watched_screen_mirror() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(matches!(unknown, SteerDelivery::Failed(_)), "unknown keys are refused");
+    assert!(matches!(unknown, SteerDelivery::Failed(_, _)), "unknown keys are refused");
     assert!(matches!(delivered, SteerDelivery::Delivered), "enter reached the live pane");
     assert!(!unwatched, "nothing is mirrored while nobody watches");
     assert!(screen.contains("phone-42"), "the watched screen shows the command's output: {screen}");
@@ -28946,8 +29082,8 @@ fn a_phone_message_is_refused_with_a_reason_when_the_pane_has_a_menu_open() {
     let result = app.deliver_steer_request("isabelle", "Hello?", false);
 
     match result {
-        SteerDelivery::Failed(reason) => assert!(reason.contains("menu is open"), "{reason}"),
-        SteerDelivery::Delivered | SteerDelivery::Sent(_) => panic!("the message was typed into the menu"),
+        SteerDelivery::Failed(_, reason) => assert!(reason.contains("menu is open"), "{reason}"),
+        SteerDelivery::Delivered | SteerDelivery::Awaiting(_) => panic!("the message was typed into the menu"),
     }
     assert_eq!(app.agents[0].turns.len(), 1, "no phantom turn was recorded");
     app.agents[0].terminal = None;
@@ -29185,8 +29321,8 @@ fn the_home_machine_adopts_a_staged_agent_once_and_resumes_its_conversation() {
     assert_eq!(args.lines().count(), 1, "one process: {args}");
     assert!(args.contains("--resume 11111111-2222-3333-4444-555555555555"), "{args}");
 
-    assert!(matches!(app.deliver_adopt_request("../etc"), SteerDelivery::Failed(_)));
-    assert!(matches!(app.deliver_adopt_request("not-staged"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_adopt_request("../etc"), SteerDelivery::Failed(_, _)));
+    assert!(matches!(app.deliver_adopt_request("not-staged"), SteerDelivery::Failed(_, _)));
     app.agents[0].terminal = None;
     std::env::remove_var("RUDDER_CLAUDE_BIN");
     let _ = fs::remove_dir_all(&dir);
@@ -29294,7 +29430,7 @@ fn a_deleted_chat_waits_in_closed_and_reopens_on_its_own_session() {
 
     // The app's Reopen (steer `reopen`) brings the worker back in its own
     // workspace without moving the dashboard's focus.
-    assert!(matches!(app.deliver_reopen_request("nope"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_reopen_request("nope"), SteerDelivery::Failed(_, _)));
     assert!(matches!(app.deliver_reopen_request("worker-1"), SteerDelivery::Delivered));
     assert_eq!(app.focus, FocusPane::Worker);
     assert_eq!(app.selected_agent, 0);
@@ -29339,7 +29475,7 @@ fn a_delete_from_the_phone_removes_the_row_and_its_record() {
     assert!(!dir.join(".rudder").join("runs").join("gone").exists(), "the phone lists records, so the record goes");
     assert!(closed_run_dir(&dir, "gone").join("run.json").is_file(), "closed, so it can come back");
     assert!(dir.join(".rudder").join("runs").join("keep").exists());
-    assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Failed(_, _)));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -31170,6 +31306,95 @@ fn an_idle_codex_composer_is_never_refused() {
     .map(|line| line.to_string())
     .collect();
     assert!(terminal_composer_blocked(Backend::Codex, &trust).is_some());
+}
+
+/// Codex 0.170 reopened on a paused goal (captured 11-23 at 120 columns):
+/// Enter picks the highlighted "Resume goal", so a message typed now resumed
+/// the old goal and was gone. Its "Replace goal?" dialog is the goal menu the
+/// app answers.
+#[test]
+fn codex_goal_dialogs_hold_or_refuse_a_typed_message() {
+    let screen = |rows: &[&str]| -> Vec<String> { rows.iter().map(|row| row.to_string()).collect() };
+    let paused = screen(&[
+        "› what is three plus three?",
+        "",
+        "                          Resume paused goal?",
+        "› Ask Codex to do anythi  Goal: write a haiku about rivers into haiku.txt",
+        "  GPT-6-Luna low fast ·",
+        "                        › 1. Resume goal   Mark it active and continue when idle",
+        "                          2. Leave paused  Keep it paused; use /goal resume later",
+        "",
+        "                          enter select · esc back",
+    ]);
+    assert!(codex_paused_goal_dialog(&paused));
+    assert!(!terminal_composer_shown(Backend::Codex, &paused), "a message waits for the composer");
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &paused), Some(InputBlock::MenuOpen));
+    let replace = screen(&[
+        "                          Replace goal?",
+        "› Ask Codex to do anythi  New objective: write a limerick about cats into cats.txt",
+        "  GPT-6-Luna low fast ·",
+        "",
+        "                        › 1. Replace current goal  Set the new objective and start it now",
+        "                          2. Cancel                Keep the current goal",
+        "",
+        "                          enter select · esc back",
+    ]);
+    assert!(!codex_paused_goal_dialog(&replace));
+    assert_eq!(terminal_composer_blocked(Backend::Codex, &replace), Some(InputBlock::GoalMenu));
+    assert_eq!(InputBlock::GoalMenu.code().as_str(), "goal_menu");
+}
+
+/// The pane's cells as `TerminalPane::live_styled_rows` gives them.
+fn styled_screen(bytes: &str) -> Vec<Vec<StyledTerminalCell>> {
+    let mut parser = vt100::Parser::new(8, 60, 0);
+    parser.process(bytes.as_bytes());
+    let screen = parser.screen();
+    (0..8)
+        .map(|row| {
+            (0..60)
+                .filter_map(|col| screen.cell(row, col))
+                .filter(|cell| !cell.is_wide_continuation())
+                .map(|cell| StyledTerminalCell {
+                    contents: if cell.has_contents() { CellContents::new(cell.contents()) } else { CellContents::SPACE },
+                    fg: cell.fgcolor(),
+                    bg: cell.bgcolor(),
+                    bold: cell.bold(),
+                    dim: cell.dim(),
+                    italic: cell.italic(),
+                    underline: cell.underline(),
+                    inverse: cell.inverse(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// 9 glued turns in the hunt (11-23): a message typed onto text already in
+/// the composer went with it as one turn. Claude Code 2.1.330 and Codex 0.170
+/// draw their placeholder, suggestion and queued-message hint dim, and typed
+/// text plain (captured escapes).
+#[test]
+fn a_draft_in_the_composer_blocks_a_typed_message_and_placeholders_do_not() {
+    let rule = "\u{2500}".repeat(30);
+    let claude = |input: &str| styled_screen(&format!("{rule}\r\n{input}\r\n{rule}\r\n  \u{23f5}\u{23f5} bypass permissions on\r\n"));
+    for empty in [
+        "\u{276f}\u{a0}",
+        "\u{276f}\u{a0}\x1b[2mTry \"edit <filepath> to\u{2026}\"\x1b[0m",
+        "\u{276f}\u{a0}\x1b[2mPress up to edit queued messages\x1b[0m",
+    ] {
+        assert!(!composer_has_draft(Backend::Claude, &claude(empty)), "{empty:?}");
+    }
+    assert!(composer_has_draft(Backend::Claude, &claude("\u{276f}\u{a0}a real draft")));
+    assert!(composer_has_draft(Backend::Claude, &claude("\u{276f}\u{a0}[Pasted text #1 +12 lines]")));
+
+    let codex = |input: &str| {
+        styled_screen(&format!(
+            "\x1b[1m\u{203a}\x1b[0m what is four plus four?\r\n\r\n{input}\r\n\r\n  GPT-6-Luna low fast \u{b7} /proj\r\n  \u{2190} for agents \u{b7} ? for shortcuts\r\n"
+        ))
+    };
+    assert!(!composer_has_draft(Backend::Codex, &codex("\x1b[1m\u{203a}\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m")));
+    assert!(composer_has_draft(Backend::Codex, &codex("\x1b[1m\u{203a}\x1b[0m a real draft")));
+    assert_eq!(InputBlock::ComposerNotEmpty.code().as_str(), "composer_not_empty");
 }
 
 /// The send check reads the live screen. A dashboard pane scrolled back shows
@@ -33097,7 +33322,7 @@ fn agent_pin_keeps_a_planned_conversation_awake_and_out_of_automatic_review() {
     assert!(!app.is_auto_integration_candidate(&app.agents[0]));
     app.maybe_start_node_review();
     assert!(app.plan().node_reviewers.is_empty(), "a reply does not start automatic review");
-    assert!(matches!(app.deliver_park_request("pin-conversation", "idle 4h"), SteerDelivery::Failed(reason) if reason.contains("pinned")));
+    assert!(matches!(app.deliver_park_request("pin-conversation", "idle 4h"), SteerDelivery::Failed(_, reason) if reason.contains("pinned")));
     assert!(app.agents[0].terminal.is_some(), "cleanup cannot put a pin to sleep");
     for nested in [false, true] {
         app.nest_view = nested;
@@ -33155,7 +33380,7 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
     // and back to main.
     assert!(matches!(
         app.deliver_model_request("chat-run", "haiku auto work"),
-        SteerDelivery::Failed(reason) if reason == "the Claude Code account work is gone; switch this chat to another account"
+        SteerDelivery::Failed(_, reason) if reason == "the Claude Code account work is gone; switch this chat to another account"
     ));
     assert_eq!(app.agents[0].account, None, "a refusal leaves the chat as it was");
     fs::create_dir_all(home.join(".rudder/accounts/claude/work")).unwrap();
@@ -33166,8 +33391,8 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
 
     // A conversation cannot change providers, and a model without an effort
     // dial takes only auto.
-    assert!(matches!(app.deliver_model_request("chat-run", "gpt-6.1-sol high main"), SteerDelivery::Failed(reason) if reason.contains("codex model")));
-    assert!(matches!(app.deliver_model_request("chat-run", "haiku high main"), SteerDelivery::Failed(reason) if reason.contains("no high effort")));
+    assert!(matches!(app.deliver_model_request("chat-run", "gpt-6.1-sol high main"), SteerDelivery::Failed(_, reason) if reason.contains("codex model")));
+    assert!(matches!(app.deliver_model_request("chat-run", "haiku high main"), SteerDelivery::Failed(_, reason) if reason.contains("no high effort")));
 
     // Mid-turn: relaunching would throw the turn away.
     app.agents[0].status = AgentStatus::Running;
@@ -33175,7 +33400,7 @@ fn chat_model_switch_applies_on_resume_and_refuses_what_it_cannot_honor() {
         Some(TerminalCommand::with_args("/bin/sh", ["-c", "cat"])),
         TerminalPaneOptions::default(),
     ).unwrap());
-    assert!(matches!(app.deliver_model_request("chat-run", "opus high main"), SteerDelivery::Failed(reason) if reason.contains("middle of a turn")));
+    assert!(matches!(app.deliver_model_request("chat-run", "opus high main"), SteerDelivery::Failed(_, reason) if reason.contains("middle of a turn")));
     assert_eq!(app.agents[0].model, "haiku");
     app.agents[0].terminal = None;
 }
@@ -33223,7 +33448,7 @@ fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
         let index = app.agents.len();
         app.agents.push(run);
         let prompt = "continue here";
-        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(why) if why.contains("permission")));
+        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(_, why) if why.contains("permission")));
         assert_eq!(app.agents[index].account, None);
         assert!(app.agents[index].terminal.is_none());
         app.agents[index].needs_permission = false;
@@ -33242,7 +33467,7 @@ fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
             }
             run.terminal = Some(terminal);
             run.last_worker_input_at = Some(Instant::now());
-            assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(_)));
+            assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Failed(_, _)));
             assert_eq!(app.agents[index].account, None);
             assert_eq!(app.agents[index].turns.len(), 1);
             app.agents[index].last_worker_input_at = None;
@@ -33250,7 +33475,10 @@ fn account_rotation_resumes_the_same_chat_with_the_new_prompt() {
 
         // The new account's session starts with the prompt, and its receipt
         // waits for the transcript.
-        assert!(matches!(app.deliver_steer_request(&run_id, prompt, false), SteerDelivery::Sent(sent) if sent.launched));
+        let delivery = app.deliver_steer_request(&run_id, prompt, false);
+        assert_eq!(awaited_launch(&app, &delivery), Some(true));
+        assert_eq!(app.agents[index].turns.len(), 1, "its turn waits for the agent to take it");
+        agent_takes_all(&mut app);
         let run = &mut app.agents[index];
         assert_eq!(run.account.as_deref(), Some("work"));
         assert_eq!(run.session_id.as_deref(), Some(session));
@@ -33317,8 +33545,8 @@ fn chat_harness_switch_moves_the_row_to_the_new_harness_with_the_handoff() {
     // Its own harness switches models through the model control, a model
     // must belong to the harness named, and the handoff is required.
     let refused = |app: &mut App, spec: &str| match app.deliver_harness_request("chat-run", spec) {
-        SteerDelivery::Failed(reason) => reason,
-        SteerDelivery::Delivered | SteerDelivery::Sent(_) => panic!("{spec} moved the chat"),
+        SteerDelivery::Failed(_, reason) => reason,
+        SteerDelivery::Delivered | SteerDelivery::Awaiting(_) => panic!("{spec} moved the chat"),
     };
     assert!(refused(&mut app, &format!("claude sonnet auto main\n{handoff}")).contains("already runs on claude"));
     assert!(refused(&mut app, &format!("codex opus auto main\n{handoff}")).contains("claude model"));
@@ -33566,7 +33794,7 @@ sleep 30"#;
     assert_eq!(fs::read(dir.join("key")).unwrap(), b"\x1b");
     assert_eq!(app.agents[0].turns.len(), prior_turns);
     assert!(app.pending_interrupt_sends.iter().any(|pending| pending.run_id == "interrupt-test"));
-    assert!(matches!(app.deliver_steer_request("interrupt-test", "another message", false), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_steer_request("interrupt-test", "another message", false), SteerDelivery::Failed(_, _)));
 
     fs::write(dir.join("show-composer"), "").unwrap();
     wait_for(&mut app, "message");
@@ -33577,13 +33805,14 @@ sleep 30"#;
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(fs::read(dir.join("message")).unwrap(), expected);
-    assert_eq!(app.agents[0].turns.last().unwrap().prompt, "new message");
+    assert_eq!(app.agents[0].turns.len(), prior_turns);
     // Typed is not delivered: the receipt waits for Claude to record it.
     assert!(!dir.join(".rudder/steer-receipts/interrupt-test-0001.json").exists());
     let turn = serde_json::json!({"type": "user", "timestamp": system_time_to_iso(SystemTime::now()), "message": {"role": "user", "content": "new message"}});
     fs::write(&transcript, format!("{turn}\n")).unwrap();
     let receipt = chat_edit_receipt(&mut app, "interrupt-test-0001");
     assert_eq!(receipt["status"], "delivered", "{receipt}");
+    assert_eq!(app.agents[0].turns.last().unwrap().prompt, "new message");
     app.agents[0].terminal = None;
     fs::remove_dir_all(dir).unwrap();
 }
@@ -33835,7 +34064,7 @@ sleep 5"#;
     let answer = format!("{} replace", menu.opened_at);
     let raw = fs::read_to_string(native_run_dir(&repo, "codex-goal").join("run.json")).unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["codexGoalMenu"]["objective"], menu.objective);
-    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", "0 cancel"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", "0 cancel"), SteerDelivery::Failed(_, _)));
     assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Delivered));
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -33849,7 +34078,7 @@ sleep 5"#;
         screen.iter().any(|row| row.split_whitespace().eq(["1b", "5b", "41", "0d"])),
         "{screen:?}"
     );
-    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_goal_answer("codex-goal", &answer), SteerDelivery::Failed(_, _)));
     app.agents[0].terminal = None;
     fs::remove_dir_all(repo).unwrap();
 }
@@ -33890,7 +34119,7 @@ sleep 5"#;
     let answer = format!("{} keep", menu.opened_at);
     let raw = fs::read_to_string(native_run_dir(&repo, "codex-rate-limit").join("run.json")).unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["codexRateLimitMenu"]["model"], menu.model);
-    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", "0 switch"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", "0 switch"), SteerDelivery::Failed(_, _)));
     assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", &answer), SteerDelivery::Delivered));
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -33904,7 +34133,7 @@ sleep 5"#;
         screen.iter().any(|row| row.split_whitespace().eq(["1b", "5b", "42", "0d"])),
         "{screen:?}"
     );
-    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", &answer), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_codex_rate_limit_answer("codex-rate-limit", &answer), SteerDelivery::Failed(_, _)));
     app.agents[0].terminal = None;
     fs::remove_dir_all(repo).unwrap();
 }

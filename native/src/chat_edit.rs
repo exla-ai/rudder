@@ -847,7 +847,7 @@ impl App {
             Ok(()) => None,
             Err(reason) => {
                 self.push_activity(format!("edit: {reason}"));
-                Some(SteerDelivery::Failed(reason))
+                Some(SteerDelivery::Failed(FailCode::Refused, reason))
             }
         }
     }
@@ -973,7 +973,7 @@ impl App {
             if let Err(reason) = started {
                 self.chat_edits_in_flight.remove(&run_id);
                 self.push_activity(format!("edit: {reason}"));
-                let _ = self.write_steer_receipt(&request_id, Err(&reason));
+                let _ = self.write_steer_receipt(&request_id, Err((FailCode::Refused, &reason)));
             }
         }
     }
@@ -987,7 +987,7 @@ impl App {
             if let Err(reason) = &result {
                 self.push_activity(format!("edit: {reason}"));
             }
-            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(String::as_str));
+            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(|error| (FailCode::Refused, error.as_str())));
         }
     }
 

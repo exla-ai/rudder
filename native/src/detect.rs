@@ -859,21 +859,60 @@ fn is_numbered_option(text: &str) -> bool {
     digits > 0 && matches!(text[digits..].chars().next(), Some('.' | ')'))
 }
 
+/// What keeps text typed into a pane from reaching the agent as a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputBlock {
+    RateLimitPrompt,
+    PermissionPrompt,
+    GoalMenu,
+    MenuOpen,
+    ComposerNotEmpty,
+}
+
+impl InputBlock {
+    pub(crate) fn code(self) -> FailCode {
+        match self {
+            Self::RateLimitPrompt => FailCode::RateLimitPrompt,
+            Self::PermissionPrompt => FailCode::PermissionPrompt,
+            Self::GoalMenu => FailCode::GoalMenu,
+            Self::MenuOpen => FailCode::MenuOpen,
+            Self::ComposerNotEmpty => FailCode::ComposerNotEmpty,
+        }
+    }
+
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::RateLimitPrompt => "answer the Codex rate-limit prompt first",
+            Self::PermissionPrompt => {
+                "the agent is waiting for approval. Open its Terminal to review the prompt, then retry"
+            }
+            Self::GoalMenu => "Codex is asking whether to replace its goal. Answer it first",
+            Self::MenuOpen => "a menu is open in its pane (Esc closes it)",
+            Self::ComposerNotEmpty => {
+                "its input box already has text. Send or clear it in the Terminal, then retry"
+            }
+        }
+    }
+}
+
 /// Why text typed into this pane would NOT reach the agent as a message, if it
 /// would not: a permission prompt or a menu (Claude's `/config`, `/model`, a
-/// picker, Codex's selection lists) owns the keyboard, and typing into it
-/// filters a search box or picks an option instead. Read off the bottom rows,
-/// where every such panel keeps its key hints; the composer's own footer and a
-/// running turn's "esc to interrupt" never match. Used before a remote message
-/// (the phone, the web board) is typed into a pane.
-pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
+/// picker, Codex's selection lists and goal dialogs) owns the keyboard, and
+/// typing into it filters a search box or picks an option instead. Read off
+/// the bottom rows, where every such panel keeps its key hints; the composer's
+/// own footer and a running turn's "esc to interrupt" never match. Used before
+/// a remote message (the phone, the web board) is typed into a pane.
+pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<InputBlock> {
     if backend == Backend::Codex && codex_rate_limit_menu_from_lines(lines).is_some() {
-        return Some("answer the Codex rate-limit prompt first");
+        return Some(InputBlock::RateLimitPrompt);
     }
     if terminal_needs_permission_from_lines(backend, lines) {
-        return Some("the agent is waiting for approval. Open its Terminal to review the prompt, then retry");
+        return Some(InputBlock::PermissionPrompt);
     }
-    const MENU_HINTS: [&str; 10] = [
+    if backend == Backend::Codex && codex_goal_menu_from_lines(lines).is_some() {
+        return Some(InputBlock::GoalMenu);
+    }
+    const MENU_HINTS: [&str; 11] = [
         "esc to close",
         "esc to clear",
         "esc to cancel",
@@ -884,6 +923,10 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
         "enter/space to change",
         "enter to confirm",
         "type to filter",
+        // Codex 0.170's dialogs ("Resume paused goal?", "Replace goal?"):
+        // Enter picks the highlighted option, so a typed message's Enter
+        // resumed the old goal and the message was gone.
+        "enter select · esc back",
     ];
     let rows: Vec<String> = lines
         .iter()
@@ -902,7 +945,55 @@ pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> O
                 // `↑/↓ Navigate · enter Select`, `enter Select  esc Go Back`.
                 || (backend == Backend::Antigravity && line.contains("↑/↓ navigate"))
         });
-    menu_open.then_some("a menu is open in its pane (Esc closes it)")
+    menu_open.then_some(InputBlock::MenuOpen)
+}
+
+/// Codex 0.170 asks `Resume paused goal?` when it reopens a conversation whose
+/// goal is paused, over the composer, with `1. Resume goal` highlighted.
+pub(crate) fn codex_paused_goal_dialog(lines: &[String]) -> bool {
+    let rows: Vec<String> = lines.iter().map(|line| normalize_terminal_line(line)).collect();
+    rows.iter().rposition(|row| row.ends_with("Resume paused goal?")).is_some_and(|title| {
+        let below = &rows[title + 1..];
+        below.iter().any(|row| row.contains("2. Leave paused"))
+            && below.iter().any(|row| row.ends_with("enter select · esc back"))
+    })
+}
+
+/// Whether the composer already holds text: a draft someone is writing, or a
+/// message whose Enter never arrived. A message typed now would be glued onto
+/// it. Claude Code (2.1.330) and Codex (0.170) draw their placeholder and
+/// suggestions dim and typed text plain, so the cells' style tells them apart.
+pub(crate) fn composer_has_draft(backend: Backend, rows: &[Vec<StyledTerminalCell>]) -> bool {
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|cells| normalize_terminal_line(&cells.iter().map(|cell| cell.contents.as_str()).collect::<String>()))
+        .collect();
+    let typed = |cells: &[StyledTerminalCell]| {
+        cells.iter().any(|cell| !cell.dim && !cell.contents.as_str().trim().is_empty())
+    };
+    let after = |cells: &[StyledTerminalCell], glyph: &str| {
+        cells
+            .iter()
+            .position(|cell| cell.contents.as_str() == glyph)
+            .is_some_and(|at| typed(&cells[at + 1..]))
+    };
+    match backend {
+        Backend::Claude => {
+            let Some(top) = claude_composer_top(&plain) else {
+                return false;
+            };
+            let Some(bottom) = plain.iter().rposition(|row| is_claude_rule(row)) else {
+                return false;
+            };
+            let Some(input) = (top + 1..bottom).find(|&row| plain[row].starts_with('\u{276f}')) else {
+                return false;
+            };
+            // The rows under the input row are the draft's own lines.
+            after(&rows[input], "\u{276f}") || rows[input + 1..bottom].iter().any(|cells| typed(cells))
+        }
+        Backend::Codex => codex_composer_row(&plain).is_some_and(|row| after(&rows[row], "\u{203a}")),
+        Backend::Opencode | Backend::Antigravity => false,
+    }
 }
 
 /// Antigravity's status bar during a turn: `esc to cancel` on the row right

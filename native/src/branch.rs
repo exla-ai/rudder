@@ -342,7 +342,7 @@ impl App {
             Ok(_) => None,
             Err(reason) => {
                 self.push_activity(format!("branch: {reason}"));
-                Some(SteerDelivery::Failed(reason))
+                Some(SteerDelivery::Failed(FailCode::Refused, reason))
             }
         }
     }
@@ -364,7 +364,7 @@ impl App {
             self.push_activity(format!("branch: {reason}"));
         }
         if let Some(request_id) = request_id {
-            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(String::as_str));
+            let _ = self.write_steer_receipt(&request_id, result.as_ref().map(|_| ()).map_err(|error| (FailCode::Refused, error.as_str())));
         }
         let _ = self.write_rudder_context_timed(None);
         self.dirty = true;

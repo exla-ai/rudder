@@ -1520,6 +1520,17 @@ impl TerminalPane {
         lines
     }
 
+    /// The live screen's cells (see `live_lines_snapshot`), after draining
+    /// pending output: what the pane shows now, styles included.
+    pub fn live_styled_rows(&mut self) -> Vec<Vec<StyledTerminalCell>> {
+        self.drain_output();
+        let view = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(0);
+        let rows = self.current_styled_screen_rows();
+        self.parser.screen_mut().set_scrollback(view);
+        rows
+    }
+
     pub fn visible_lines_snapshot(&self) -> Vec<String> {
         // Plan-mode front-end: always the live screen, no scrollback (see the field doc).
         if self.live_screen_only {

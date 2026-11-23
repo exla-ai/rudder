@@ -138,6 +138,7 @@ mod subagents;
 mod background;
 mod codex_rollout;
 mod delivery;
+use delivery::FailCode;
 mod chat_edit;
 mod agent_life;
 mod branch;
@@ -1934,6 +1935,9 @@ struct App {
     delivery_rx: Option<mpsc::Receiver<Vec<delivery::ScanResult>>>,
     last_delivery_scan: Instant,
     next_delivery_id: u64,
+    /// When a waiting message last answered a Codex chat's `Resume paused
+    /// goal?` dialog, by run id (`App::answer_paused_goal_dialog`).
+    goal_dialog_answers: HashMap<String, Instant>,
     /// `/sync` messages waiting for their agent's turn to end (agent_sync.rs).
     pending_syncs: Vec<PendingSync>,
     /// Runs a `/sync` was typed into, so the reply turn ends without a review
@@ -3131,12 +3135,22 @@ struct AgentTurn {
     source: String,
 }
 
+/// Where a row relaunched with a message goes back to when the agent does not
+/// take it: a finished chat is finished again; any other is paused with its
+/// process up.
+fn resting_status(status: AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Done => AgentStatus::Done,
+        _ => AgentStatus::Paused,
+    }
+}
+
 enum SteerDelivery {
     Delivered,
-    /// Typed into the agent or given to it at launch. Its receipt waits for
-    /// the agent's transcript to record it (delivery.rs).
-    Sent(delivery::SentMessage),
-    Failed(String),
+    /// Typed into the agent or given to it at launch: the pending delivery
+    /// (delivery.rs) that answers once the agent's transcript records it.
+    Awaiting(u64),
+    Failed(FailCode, String),
 }
 
 #[derive(Clone)]
@@ -3707,6 +3721,7 @@ impl App {
             pending_enters: Vec::new(),
             pending_interrupt_sends: Vec::new(),
             pending_deliveries: Vec::new(),
+            goal_dialog_answers: HashMap::new(),
             delivery_rx: None,
             last_delivery_scan: Instant::now(),
             next_delivery_id: 0,
@@ -12769,14 +12784,18 @@ Address the objection directly. If you disagree, say why inside \
                 run.last_error = None;
                 if !bootstrap.is_empty() {
                     let starting_new_turn = was_done_before_spawn;
-                    let now = now_stamp();
-                    run.current_prompt = bootstrap.clone();
-                    run.turns.push(AgentTurn {
-                        ts: now.clone(),
-                        prompt: bootstrap.clone(),
-                        source: if continue_session { "user" } else { "bootstrap" }.to_string(),
-                    });
-                    run.last_user_input_at = now;
+                    // A reopened session's next turn is recorded once the
+                    // agent takes it (take_or_record, from steer_resume_main).
+                    if !continue_session {
+                        let now = now_stamp();
+                        run.current_prompt = bootstrap.clone();
+                        run.turns.push(AgentTurn {
+                            ts: now.clone(),
+                            prompt: bootstrap.clone(),
+                            source: "bootstrap".to_string(),
+                        });
+                        run.last_user_input_at = now;
+                    }
                     run.needs_user_input = false;
                     run.done_summary = None;
                     let requested_delivery = DeliveryEvidence::for_task(&bootstrap);
@@ -14561,11 +14580,14 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     /// Why a message typed into this row's pane would not reach the agent.
-    fn composer_blocked_at(&mut self, index: usize) -> Option<&'static str> {
+    fn composer_blocked_at(&mut self, index: usize) -> Option<InputBlock> {
         let run = self.agents.get_mut(index)?;
         let backend = run.backend;
-        let lines = run.terminal.as_mut()?.live_screen_lines();
-        terminal_composer_blocked(backend, &lines)
+        let terminal = run.terminal.as_mut()?;
+        let lines = terminal.live_screen_lines();
+        terminal_composer_blocked(backend, &lines).or_else(|| {
+            composer_has_draft(backend, &terminal.live_styled_rows()).then_some(InputBlock::ComposerNotEmpty)
+        })
     }
 
     /// The home machine staged an agent a laptop moved here (`rudder __adopt-moved`
@@ -14578,7 +14600,7 @@ Address the objection directly. If you disagree, say why inside \
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
         {
-            return SteerDelivery::Failed(format!("bad run id: {run_id}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("bad run id: {run_id}"));
         }
         let existing = self.agents.iter().position(|run| run.id == run_id);
         if let Some(index) = existing {
@@ -14595,7 +14617,7 @@ Address the objection directly. If you disagree, say why inside \
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         else {
-            return SteerDelivery::Failed(format!("no staged record for {run_id}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("no staged record for {run_id}"));
         };
         heal_moved_repo_paths(&mut record, &self.cwd);
         let migration = record.get("migration").cloned().unwrap_or_default();
@@ -14610,11 +14632,11 @@ Address the objection directly. If you disagree, say why inside \
             .filter(|prompt| !prompt.trim().is_empty())
             .map(ToOwned::to_owned);
         let Some(agent) = agent_from_run_record(&self.cwd, record) else {
-            return SteerDelivery::Failed(format!("unreadable record for {run_id}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("unreadable record for {run_id}"));
         };
         let summary = agent.task_summary.clone();
         if let Err(error) = self.resume_recorded_agent(agent, session_id, fresh_prompt) {
-            return SteerDelivery::Failed(error);
+            return SteerDelivery::Failed(FailCode::Refused, error);
         }
         self.record_activity(format!("home: picked up \"{summary}\" from a laptop"));
         self.notice = Some(format!("picked up \"{summary}\" from a laptop; it continues here"));
@@ -14666,19 +14688,19 @@ Address the objection directly. If you disagree, say why inside \
     /// running agents along: do exactly what `H` does.
     fn deliver_move_home_request(&mut self) -> SteerDelivery {
         if self.home_move_slug().is_none() {
-            return SteerDelivery::Failed(
+            return SteerDelivery::Failed(FailCode::Refused, 
                 "this checkout cannot move agents to the home machine (signed in, with a GitHub origin?)"
                     .to_string(),
             );
         }
         let ids = self.movable_agent_ids();
         if ids.is_empty() {
-            return SteerDelivery::Failed("no running agents with workspaces of their own".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "no running agents with workspaces of their own".to_string());
         }
         if self.move_agents_to_home(ids) {
             SteerDelivery::Delivered
         } else {
-            SteerDelivery::Failed("the move could not start".to_string())
+            SteerDelivery::Failed(FailCode::Refused, "the move could not start".to_string())
         }
     }
 
@@ -14687,16 +14709,16 @@ Address the objection directly. If you disagree, say why inside \
     /// and a closed one's record is under `.rudder/closed`).
     fn deliver_delete_request(&mut self, task_id: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         if is_cloud_owned_agent(&self.agents[index]) {
-            return SteerDelivery::Failed("that agent runs elsewhere; delete it where it runs".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "that agent runs elsewhere; delete it where it runs".to_string());
         }
         let live_main = self.agents[index].is_main()
             && self.agents[index].terminal.is_some()
             && self.agents[index].status == AgentStatus::Running;
         if live_main && !self.stop_agent_at(index) {
-            return SteerDelivery::Failed("could not stop it, so it was not deleted".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "could not stop it, so it was not deleted".to_string());
         }
         let label = self.agents[index].task_summary.clone();
         if self.delete_pending.as_deref() == Some(self.agents[index].id.as_str()) {
@@ -14704,7 +14726,7 @@ Address the objection directly. If you disagree, say why inside \
         }
         let notice = match self.close_agent_now(index) {
             Ok(notice) => notice,
-            Err(error) => return SteerDelivery::Failed(format!("could not close it: {error}")),
+            Err(error) => return SteerDelivery::Failed(FailCode::Refused, format!("could not close it: {error}")),
         };
         self.record_activity(format!("deleted \"{label}\" (from the phone)"));
         self.notice = Some(notice);
@@ -15663,7 +15685,7 @@ Address the objection directly. If you disagree, say why inside \
             self.notice = Some(format!("RUDDER_REGOAL target not found: {token}"));
             return;
         };
-        if !self.regoal_agent_at(index, goal) {
+        if self.regoal_agent_at(index, goal).is_none() {
             self.notice = Some(format!("could not re-goal {token}"));
         }
     }
@@ -15685,7 +15707,7 @@ Address the objection directly. If you disagree, say why inside \
         } else {
             spec.direction.as_str()
         };
-        if !self.retarget_agent_at(index, spec.backend, &spec.model, spec.effort, direction) {
+        if self.retarget_agent_at(index, spec.backend, &spec.model, spec.effort, direction).is_none() {
             self.notice = Some(format!("could not resume {}", spec.target));
         }
     }
@@ -15739,13 +15761,13 @@ Address the objection directly. If you disagree, say why inside \
         if message.is_empty() {
             let error = "RUDDER_NUDGE_ALL requires a message".to_string();
             self.notice = Some(error.clone());
-            return SteerDelivery::Failed(error);
+            return SteerDelivery::Failed(FailCode::Refused, error);
         }
         let targets = self.nudge_targets();
         if targets.is_empty() {
             let error = "no live workers to nudge".to_string();
             self.notice = Some(error.clone());
-            return SteerDelivery::Failed(error);
+            return SteerDelivery::Failed(FailCode::Refused, error);
         }
         let mut sent = 0usize;
         let mut failed = 0usize;
@@ -15778,7 +15800,7 @@ Address the objection directly. If you disagree, say why inside \
         } else {
             // Some writes may have succeeded. Preserve that exact partial count
             // instead of reporting that the whole fleet accepted this request.
-            SteerDelivery::Failed(summary)
+            SteerDelivery::Failed(FailCode::Refused, summary)
         }
     }
 
@@ -16561,7 +16583,10 @@ Address the objection directly. If you disagree, say why inside \
                     self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
                     continue;
                 }
-                if self.agent_index_for_token(&task_id).is_some_and(|index| self.agent_is_starting(index)) {
+                if self
+                    .agent_index_for_token(&task_id)
+                    .is_some_and(|index| self.typed_input_waits(index, &instruction))
+                {
                     // Typed into a CLI that is still starting, it would sit in
                     // the input box without its Enter. Wait for the composer.
                     let due = Instant::now() + Duration::from_millis(250);
@@ -16569,12 +16594,21 @@ Address the objection directly. If you disagree, say why inside \
                     continue;
                 }
             }
-            if valid_request_id && self.write_steer_processing(&request_id).is_err() {
-                // Do not touch the PTY until the at-most-once tombstone is
-                // durable. No file event will repeat, so retry in a second.
-                let due = Instant::now() + Duration::from_secs(1);
-                self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
-                continue;
+            if valid_request_id {
+                match self.claim_steer_request(&request_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    Err(_) => {
+                        // Do not touch the PTY until the at-most-once tombstone is
+                        // durable. No file event will repeat, so retry in a second.
+                        let due = Instant::now() + Duration::from_secs(1);
+                        self.steer_inbox_due = Some(self.steer_inbox_due.map_or(due, |next| next.min(due)));
+                        continue;
+                    }
+                }
             }
             let result = match kind.as_str() {
                 "cancel" => self.deliver_cancel_request(&task_id),
@@ -16658,7 +16692,7 @@ Address the objection directly. If you disagree, say why inside \
                 ),
                 // A kind from a newer sender must not reach an agent as typed
                 // text ("park"'s reason once would have been a prompt).
-                other => SteerDelivery::Failed(format!("unknown request kind: {other}")),
+                other => SteerDelivery::Failed(FailCode::Refused, format!("unknown request kind: {other}")),
             };
             self.settle_steer(&request_id, result);
             // The request is consumed after the injection attempt; its
@@ -16668,7 +16702,10 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    fn write_steer_processing(&self, request_id: &str) -> io::Result<()> {
+    /// Claim a request with a "processing" receipt, created only when the
+    /// request has none: false when the app withdrew it first (its failed
+    /// receipt, also an exclusive create) or it was answered already.
+    fn claim_steer_request(&self, request_id: &str) -> io::Result<bool> {
         let dir = self.cwd.join(".rudder").join("steer-receipts");
         std::fs::create_dir_all(&dir)?;
         let file = dir.join(format!("{request_id}.json"));
@@ -16678,11 +16715,18 @@ Address the objection directly. If you disagree, say why inside \
             "status": "processing",
         });
         std::fs::write(&temp, serde_json::to_vec(&value)?)?;
-        std::fs::rename(temp, file)
+        // A link appears whole and fails when the name exists.
+        let linked = std::fs::hard_link(&temp, &file);
+        std::fs::remove_file(&temp)?;
+        match linked {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
-    /// The answer to one request: delivered, or failed with why.
-    fn write_steer_receipt(&self, request_id: &str, result: Result<(), &str>) -> io::Result<()> {
+    /// The answer to one request: delivered, or failed with its code and why.
+    fn write_steer_receipt(&self, request_id: &str, result: Result<(), (FailCode, &str)>) -> io::Result<()> {
         if request_id.len() < 8
             || request_id.len() > 128
             || !request_id
@@ -16700,14 +16744,29 @@ Address the objection directly. If you disagree, say why inside \
                 "requestId": request_id,
                 "status": "delivered",
             }),
-            Err(error) => serde_json::json!({
+            Err((code, error)) => serde_json::json!({
                 "requestId": request_id,
                 "status": "failed",
+                "code": code.as_str(),
                 "error": error,
             }),
         };
         std::fs::write(&temp, serde_json::to_vec(&value)?)?;
         std::fs::rename(temp, file)
+    }
+
+    /// The code for a prompt the agent has open (an approval, a Codex goal
+    /// or rate-limit question), when it has one.
+    fn open_prompt_code(&self, run: &AgentRun) -> Option<FailCode> {
+        if run.codex_rate_limit_menu.is_some() {
+            Some(FailCode::RateLimitPrompt)
+        } else if run.codex_goal_menu.is_some() {
+            Some(FailCode::GoalMenu)
+        } else if run.needs_permission || self.codex_waits.contains_key(&run.id) {
+            Some(FailCode::PermissionPrompt)
+        } else {
+            None
+        }
     }
 
     fn start_interrupt_send(
@@ -16718,25 +16777,24 @@ Address the objection directly. If you disagree, say why inside \
         opencode_prompt: bool,
     ) -> Option<SteerDelivery> {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return Some(SteerDelivery::Failed(format!("target not found: {task_id}")));
+            return Some(SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}")));
         };
+        let prompt_code = self.open_prompt_code(&self.agents[index]);
         let run = &mut self.agents[index];
         if self.pending_interrupt_sends.iter().any(|pending| pending.run_id == run.id) {
-            return Some(SteerDelivery::Failed("This chat is already interrupting to send a message.".to_owned()));
+            return Some(SteerDelivery::Failed(FailCode::Refused, "This chat is already interrupting to send a message.".to_owned()));
         }
         let text = sanitize_steer_instruction(text);
         if text.is_empty() {
-            return Some(SteerDelivery::Failed("The message is empty.".to_owned()));
+            return Some(SteerDelivery::Failed(FailCode::Refused, "The message is empty.".to_owned()));
         }
         if run.is_orchestrator() || run.plain_process {
-            return Some(SteerDelivery::Failed("Interrupt and send requires an interactive chat.".to_owned()));
+            return Some(SteerDelivery::Failed(FailCode::Refused, "Interrupt and send requires an interactive chat.".to_owned()));
         }
-        if run.needs_permission || self.codex_waits.contains_key(&run.id)
-            || run.codex_goal_menu.is_some() || run.codex_rate_limit_menu.is_some()
-        {
-            return Some(SteerDelivery::Failed("Answer the agent's open prompt before interrupting.".to_owned()));
+        if let Some(code) = prompt_code {
+            return Some(SteerDelivery::Failed(code, "Answer the agent's open prompt before interrupting.".to_owned()));
         }
-        let unsupported = || Some(SteerDelivery::Failed("Interrupt and send requires a live interactive terminal.".to_owned()));
+        let unsupported = || Some(SteerDelivery::Failed(FailCode::Refused, "Interrupt and send requires a live interactive terminal.".to_owned()));
         let Some(terminal) = run.terminal.as_mut() else { return unsupported() };
         if terminal.execution_profile().is_some_and(|profile| profile != "native")
             || terminal.is_output_only() || !terminal.is_alive()
@@ -16744,8 +16802,11 @@ Address the objection directly. If you disagree, say why inside \
             return unsupported();
         }
         let lines = terminal.live_screen_lines();
-        if let Some(reason) = terminal_composer_blocked(run.backend, &lines) {
-            return Some(SteerDelivery::Failed(format!("Could not interrupt and send: {reason}")));
+        if let Some(block) = terminal_composer_blocked(run.backend, &lines) {
+            return Some(SteerDelivery::Failed(
+                block.code(),
+                format!("Could not interrupt and send: {}", block.reason()),
+            ));
         }
         // The agent may have completed while the user's attachment uploaded.
         if terminal_at_idle_prompt(run.backend, &lines) {
@@ -16772,17 +16833,24 @@ Address the objection directly. If you disagree, say why inside \
         let mut index = 0;
         while index < self.pending_interrupt_sends.len() {
             let pending = &self.pending_interrupt_sends[index];
+            let prompt_code = self
+                .agents
+                .iter()
+                .find(|run| run.id == pending.run_id)
+                .and_then(|run| self.open_prompt_code(run));
             let run = self.agents.iter_mut().find(|run| run.id == pending.run_id);
             let ready = match run.and_then(|run| {
                 let terminal = run.terminal.as_mut()?;
                 (terminal.instance_id() == pending.instance_id && terminal.is_alive()).then_some(run)
             }) {
-                None => Err("The agent's terminal closed before the message could be sent.".to_owned()),
-                Some(run) if run.needs_permission || self.codex_waits.contains_key(&run.id)
-                    || run.codex_goal_menu.is_some() || run.codex_rate_limit_menu.is_some() =>
-                {
-                    Err("The agent opened a prompt. Answer it before retrying the message.".to_owned())
-                }
+                None => Err((
+                    FailCode::AgentExited,
+                    "The agent's terminal closed before the message could be sent.".to_owned(),
+                )),
+                Some(_) if prompt_code.is_some() => Err((
+                    prompt_code.unwrap(),
+                    "The agent opened a prompt. Answer it before retrying the message.".to_owned(),
+                )),
                 Some(run) => {
                     // Use the terminal already read by poll_agents. An Esc write,
                     // a stale status flag or a fixed delay cannot prove readiness.
@@ -16792,7 +16860,10 @@ Address the objection directly. If you disagree, say why inside \
                     {
                         Ok(())
                     } else if Instant::now() >= pending.deadline {
-                        Err("The agent did not return to its composer after interrupting.".to_owned())
+                        Err((
+                            FailCode::TurnDidNotStop,
+                            "The agent did not return to its composer after interrupting.".to_owned(),
+                        ))
                     } else {
                         index += 1;
                         continue;
@@ -16802,7 +16873,7 @@ Address the objection directly. If you disagree, say why inside \
             let pending = self.pending_interrupt_sends.remove(index);
             let result = match ready {
                 Ok(()) => self.deliver_steer_request(&pending.run_id, &pending.text, pending.opencode_prompt),
-                Err(reason) => SteerDelivery::Failed(reason),
+                Err((code, reason)) => SteerDelivery::Failed(code, reason),
             };
             self.settle_steer(&pending.request_id, result);
         }
@@ -16815,47 +16886,186 @@ Address the objection directly. If you disagree, say why inside \
             SteerDelivery::Delivered => {
                 let _ = self.write_steer_receipt(request_id, Ok(()));
             }
-            SteerDelivery::Failed(error) => {
-                let _ = self.write_steer_receipt(request_id, Err(&error));
+            SteerDelivery::Failed(code, error) => {
+                let _ = self.write_steer_receipt(request_id, Err((code, &error)));
             }
-            SteerDelivery::Sent(message) => {
-                let Some(run) = self.agents.iter().find(|run| run.id == message.run_id) else {
-                    let _ = self.write_steer_receipt(request_id, Err("not delivered: the chat was closed"));
-                    return;
-                };
-                self.next_delivery_id += 1;
-                self.pending_deliveries.push(delivery::PendingDelivery {
-                    id: self.next_delivery_id,
-                    request_id: request_id.to_string(),
-                    label: run.node_id.clone().unwrap_or_else(|| run.id.clone()),
-                    backend: run.backend,
-                    cwd: run.cwd.clone(),
-                    message,
-                    sent: Instant::now(),
-                    idle_since: None,
-                    gone_since: None,
-                    path: None,
-                    offset: None,
-                });
+            SteerDelivery::Awaiting(id) => {
+                match self.pending_deliveries.iter_mut().find(|pending| pending.id == id) {
+                    Some(pending) => pending.request_id = Some(request_id.to_string()),
+                    None => {
+                        let _ = self.write_steer_receipt(
+                            request_id,
+                            Err((FailCode::ChatClosed, "not delivered: the chat was closed")),
+                        );
+                    }
+                }
             }
         }
     }
 
-    /// A message sent to the agent at `index`: checked against its transcript
-    /// when the backend records one (delivery.rs), else delivered as written.
-    fn sent_or_delivered(&self, index: usize, text: &str, launched: bool) -> SteerDelivery {
-        match self.agents.get(index) {
-            Some(run) if delivery::checked(run.backend, text) => match run.terminal.as_ref() {
-                Some(terminal) => SteerDelivery::Sent(delivery::SentMessage::new(
-                    &run.id,
-                    terminal.instance_id(),
-                    text,
-                    launched,
-                )),
-                None => SteerDelivery::Failed("not delivered: the agent has no terminal".to_string()),
-            },
-            _ => SteerDelivery::Delivered,
+    /// A message sent to the agent at `index`, typed or given at `launch`.
+    /// When the backend records what it takes (delivery.rs), its turn is
+    /// recorded once the agent took it, and the delivery returned answers
+    /// then: a launch the agent never took left a turn and "working" behind
+    /// it. Otherwise the turn is recorded now. `resting` is where a launched
+    /// row goes back to when the agent does not take it.
+    fn take_or_record(
+        &mut self,
+        index: usize,
+        text: &str,
+        launched: bool,
+        source: &'static str,
+        resting: Option<AgentStatus>,
+    ) -> SteerDelivery {
+        let Some(run) = self.agents.get(index) else {
+            return SteerDelivery::Failed(FailCode::ChatClosed, "not delivered: the chat was closed".to_string());
+        };
+        if !delivery::checked(run.backend, text) {
+            self.record_user_turn(index, text, source);
+            return SteerDelivery::Delivered;
         }
+        let Some(terminal) = run.terminal.as_ref() else {
+            return SteerDelivery::Failed(FailCode::AgentExited, "not delivered: the agent has no terminal".to_string());
+        };
+        let message = delivery::SentMessage {
+            run_id: run.id.clone(),
+            instance_id: terminal.instance_id().to_string(),
+            text: text.to_string(),
+            sent_ms: delivery::unix_ms(),
+            launched,
+            source,
+            resting: resting.filter(|_| launched),
+        };
+        self.next_delivery_id += 1;
+        let id = self.next_delivery_id;
+        self.pending_deliveries.push(delivery::PendingDelivery {
+            id,
+            request_id: None,
+            label: run.node_id.clone().unwrap_or_else(|| run.id.clone()),
+            backend: run.backend,
+            cwd: run.cwd.clone(),
+            message,
+            sent: Instant::now(),
+            idle_since: None,
+            gone_since: None,
+            path: None,
+            offset: None,
+        });
+        SteerDelivery::Awaiting(id)
+    }
+
+    /// A turn the agent took: the run's current prompt and its history.
+    fn record_user_turn(&mut self, index: usize, prompt: &str, source: &str) {
+        let now = now_stamp();
+        let cwd = self.cwd.clone();
+        let Some(run) = self.agents.get_mut(index) else {
+            return;
+        };
+        run.current_prompt = prompt.to_string();
+        run.turns.push(AgentTurn {
+            ts: now.clone(),
+            prompt: prompt.to_string(),
+            source: source.to_string(),
+        });
+        run.last_user_input_at = now;
+        run.needs_user_input = false;
+        let _ = save_native_run_record(&cwd, run);
+        self.dirty = true;
+    }
+
+    /// Whether a typed message for the agent at `index` waits in the inbox
+    /// before it is typed: a Codex command needs its conversation reopened
+    /// first, the CLI is still starting, a Codex goal dialog is being
+    /// answered, or a draft in its composer is still settling.
+    fn typed_input_waits(&mut self, index: usize, instruction: &str) -> bool {
+        self.reopen_for_typed_command(index, instruction)
+            || self.agent_is_starting(index)
+            || self.answer_paused_goal_dialog(index)
+            || self.draft_settling(index)
+    }
+
+    /// Codex runs a slash command only when it is typed: given at launch, it
+    /// is sent to the model as text (0.170), so `/goal <text>` for a stopped
+    /// chat never set a goal. A command for a Codex chat with no process
+    /// reopens its conversation, and the command is typed once the composer
+    /// shows.
+    fn reopen_for_typed_command(&mut self, index: usize, instruction: &str) -> bool {
+        let Some(run) = self.agents.get_mut(index) else {
+            return false;
+        };
+        let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
+        let at_rest = matches!(
+            run.status,
+            AgentStatus::Done | AgentStatus::Paused | AgentStatus::Stopped | AgentStatus::Failed | AgentStatus::Orphaned
+        );
+        if run.backend != Backend::Codex
+            || !instruction.trim_start().starts_with('/')
+            || live
+            || !at_rest
+            || run.is_orchestrator()
+            || run.session_id.as_deref().is_none_or(|session| session.trim().is_empty())
+        {
+            return false;
+        }
+        if run.is_main() {
+            run.terminal = None;
+            let run_id = run.id.clone();
+            self.focus_or_spawn_main_with_prompt("", true);
+            self.agents.iter().any(|run| run.id == run_id && run.terminal.is_some())
+        } else {
+            self.restart_agent_at(index, None, None)
+        }
+    }
+
+    /// Codex reopened on a paused goal asks `Resume paused goal?` over its
+    /// composer, and Enter picks "Resume goal": a message typed then was gone
+    /// and the old goal ran instead. For a waiting message it answers "Leave
+    /// paused", which keeps the goal as it was, and the message waits for
+    /// the composer. A dialog still open after that is left to the refusal
+    /// check.
+    fn answer_paused_goal_dialog(&mut self, index: usize) -> bool {
+        let Some(run) = self.agents.get_mut(index) else {
+            return false;
+        };
+        if run.backend != Backend::Codex {
+            return false;
+        }
+        let Some(terminal) = run.terminal.as_mut() else {
+            return false;
+        };
+        if !terminal.is_alive() || !codex_paused_goal_dialog(&terminal.live_screen_lines()) {
+            return false;
+        }
+        let now = Instant::now();
+        if let Some(answered) = self.goal_dialog_answers.get(&run.id) {
+            let since = now.duration_since(*answered);
+            if since < delivery::SETTLE_WAIT {
+                return true;
+            }
+            if since < delivery::SETTLE_WAIT * 5 {
+                return false;
+            }
+        }
+        if terminal.write_input(b"2").is_err() {
+            return false;
+        }
+        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
+        self.goal_dialog_answers.insert(run.id.clone(), now);
+        self.push_activity(format!("{label}: kept its paused goal paused to deliver a message"));
+        true
+    }
+
+    /// A draft in the composer right after input reached the pane: a
+    /// submitted message the CLI has not cleared yet, or someone typing.
+    fn draft_settling(&mut self, index: usize) -> bool {
+        let Some(run) = self.agents.get_mut(index) else {
+            return false;
+        };
+        let backend = run.backend;
+        run.last_worker_input_at.is_some_and(|at| at.elapsed() < delivery::SETTLE_WAIT)
+            && run.terminal.as_mut().is_some_and(|terminal| {
+                terminal.is_alive() && composer_has_draft(backend, &terminal.live_styled_rows())
+            })
     }
 
     /// Whether the agent's CLI is still starting: it was given a message at
@@ -16962,13 +17172,35 @@ Address the objection directly. If you disagree, say why inside \
             }
         };
         let pending = self.pending_deliveries.remove(at);
+        let index = self.agents.iter().position(|run| run.id == pending.message.run_id);
         match outcome {
             Ok(()) => {
-                let _ = self.write_steer_receipt(&pending.request_id, Ok(()));
+                if let Some(index) = index {
+                    self.record_user_turn(index, &pending.message.text, pending.message.source);
+                }
+                if let Some(request_id) = &pending.request_id {
+                    let _ = self.write_steer_receipt(request_id, Ok(()));
+                }
             }
-            Err(reason) => {
+            Err((code, reason)) => {
                 self.push_activity(format!("steer: {} not delivered, {reason}", pending.label));
-                let _ = self.write_steer_receipt(&pending.request_id, Err(&format!("not delivered: {reason}")));
+                // A launch whose turn never started is at rest, not working.
+                if let (Some(index), Some(resting)) = (index, pending.message.resting) {
+                    let cwd = self.cwd.clone();
+                    let run = &mut self.agents[index];
+                    let same = run
+                        .terminal
+                        .as_ref()
+                        .is_some_and(|terminal| terminal.instance_id() == pending.message.instance_id);
+                    if same && run.status == AgentStatus::Running {
+                        run.status = resting;
+                        let _ = save_native_run_record(&cwd, run);
+                        self.dirty = true;
+                    }
+                }
+                if let Some(request_id) = &pending.request_id {
+                    let _ = self.write_steer_receipt(request_id, Err((code, &format!("not delivered: {reason}"))));
+                }
             }
         }
     }
@@ -16991,7 +17223,7 @@ Address the objection directly. If you disagree, say why inside \
         // those newlines remain one composed message rather than extra submits.
         let instruction = sanitize_steer_instruction(instruction);
         if instruction.is_empty() {
-            return SteerDelivery::Failed(
+            return SteerDelivery::Failed(FailCode::Refused, 
                 "instruction became empty after sanitization".to_string(),
             );
         }
@@ -17000,10 +17232,10 @@ Address the objection directly. If you disagree, say why inside \
             || task_id.eq_ignore_ascii_case("orchestrator");
         if conductor_target {
             if opencode_prompt {
-                return SteerDelivery::Failed("OpenCode commands need an OpenCode agent".to_string());
+                return SteerDelivery::Failed(FailCode::Refused, "OpenCode commands need an OpenCode agent".to_string());
             }
             if let Err(error) = self.submit_task_from_input(&instruction) {
-                return SteerDelivery::Failed(error);
+                return SteerDelivery::Failed(FailCode::Refused, error);
             }
             // Do not replace the notice produced by the task-input path (for
             // example a command result or a planner error); the activity stream is
@@ -17015,13 +17247,13 @@ Address the objection directly. If you disagree, say why inside \
         let index = self.agent_index_for_token(task_id);
         let Some(index) = index else {
             self.push_activity(format!("steer: target not found ({task_id})"));
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         if self.pending_interrupt_sends.iter().any(|pending| pending.run_id == self.agents[index].id) {
-            return SteerDelivery::Failed("This chat is already interrupting to send a message.".to_owned());
+            return SteerDelivery::Failed(FailCode::Refused, "This chat is already interrupting to send a message.".to_owned());
         }
         if opencode_prompt && self.agents[index].backend != Backend::Opencode {
-            return SteerDelivery::Failed("the agent is no longer running OpenCode".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "the agent is no longer running OpenCode".to_string());
         }
         // The supervisor can prove that this account has reached its allowance.
         // Change the account and type the user's next prompt in this one inbox
@@ -17033,17 +17265,17 @@ Address the objection directly. If you disagree, say why inside \
             match config::usage_account_route(run.backend, run.account.as_deref()) {
                 Ok(Some(replacement)) => {
                     if run.needs_permission {
-                        return SteerDelivery::Failed("This chat is waiting for a permission decision. Answer it before switching accounts.".to_string());
+                        return SteerDelivery::Failed(FailCode::Refused, "This chat is waiting for a permission decision. Answer it before switching accounts.".to_string());
                     }
                     if run.session_id.as_deref().is_none_or(|session| session.trim().is_empty()) {
-                        return SteerDelivery::Failed("This chat has no saved session to continue on another account.".to_string());
+                        return SteerDelivery::Failed(FailCode::Refused, "This chat has no saved session to continue on another account.".to_string());
                     }
                     let run = &self.agents[index];
                     let spec = format!("{} {} {replacement}", run.model, run.effort.map_or("auto", EffortLevel::as_str));
                     return self.switch_model_request(task_id, &spec, Some(&instruction));
                 }
                 Ok(None) => {}
-                Err(error) => return SteerDelivery::Failed(error),
+                Err(error) => return SteerDelivery::Failed(FailCode::Refused, error),
             }
         }
         // OpenCode uses the first Enter to complete a bare prompt command.
@@ -17069,37 +17301,25 @@ Address the objection directly. If you disagree, say why inside \
                 // into Claude's /config search box once and the phone was told
                 // "delivered". Refuse with the reason instead; the phone's key
                 // strip (or the pane) closes the menu, then the text goes in.
-                if let Some(reason) = self.composer_blocked_at(index) {
-                    self.push_activity(format!("steer: {label} not typed, {reason}"));
-                    return SteerDelivery::Failed(format!("not sent: {reason}"));
+                // Typed onto a draft (someone's, or a message whose Enter
+                // never arrived), the two would go as one glued turn.
+                if let Some(block) = self.composer_blocked_at(index) {
+                    self.push_activity(format!("steer: {label} not typed, {}", block.reason()));
+                    return SteerDelivery::Failed(block.code(), format!("not sent: {}", block.reason()));
                 }
                 if self.live_inject_at(index, paste) {
-                    // A browser steer is a real user turn, not an ephemeral PTY
-                    // keystroke. Persist the same conversation metadata as direct
-                    // worker/orchestrator input so restart/context views retain it.
-                    let now = now_stamp();
-                    let cwd = self.cwd.clone();
-                    if let Some(run) = self.agents.get_mut(index) {
-                        run.current_prompt = instruction.clone();
-                        run.turns.push(AgentTurn {
-                            ts: now.clone(),
-                            prompt: instruction.clone(),
-                            source: "user".to_string(),
-                        });
-                        run.last_user_input_at = now;
-                        run.needs_user_input = false;
-                        let _ = save_native_run_record(&cwd, run);
-                    }
                     // Quoted, so a cut preview ending in "…" does not read as
                     // work in progress (a spinner pill that never settles).
                     self.push_activity(format!(
                         "steered {label}: \"{}\"",
                         steer_preview(&instruction)
                     ));
-                    self.sent_or_delivered(index, &instruction, false)
+                    // A browser steer is a real user turn, recorded in the run
+                    // like direct input once the agent takes it.
+                    self.take_or_record(index, &instruction, false, "user", None)
                 } else {
                     self.push_activity(format!("steer: {label} has no live terminal"));
-                    SteerDelivery::Failed(format!("{label} has no live terminal"))
+                    SteerDelivery::Failed(FailCode::AgentExited, format!("{label} has no live terminal"))
                 }
             }
             AgentStatus::Done
@@ -17113,15 +17333,16 @@ Address the objection directly. If you disagree, say why inside \
                 // isolated workers); reopen its session with the message as its
                 // next turn. This is the phone case: after the cloud machine
                 // restarts every row is Paused with no process.
+                let resting = resting_status(self.agents[index].status);
                 if self.steer_resume_main(index, paste) {
                     self.push_activity(format!(
                         "resumed {label} with: \"{}\"",
                         steer_preview(&instruction)
                     ));
-                    self.sent_or_delivered(index, &instruction, true)
+                    self.take_or_record(index, &instruction, true, "user", Some(resting))
                 } else {
                     self.record_activity(format!("steer: {label} could not be resumed"));
-                    SteerDelivery::Failed(format!("{label} could not be resumed"))
+                    SteerDelivery::Failed(FailCode::Refused, format!("{label} could not be resumed"))
                 }
             }
             AgentStatus::Done
@@ -17136,11 +17357,12 @@ Address the objection directly. If you disagree, say why inside \
                 // dropped into an idle PTY or spawning unrelated work. A paused,
                 // stopped, failed or orphaned row has no process left, so the
                 // message is the direction it resumes with.
-                if !self.regoal_agent_at(index, &instruction) {
-                    self.record_activity(format!("steer: {label} could not be resumed"));
-                    SteerDelivery::Failed(format!("{label} could not be resumed"))
-                } else {
-                    self.sent_or_delivered(index, &instruction, true)
+                match self.regoal_agent_at(index, &instruction) {
+                    Some(outcome) => outcome,
+                    None => {
+                        self.record_activity(format!("steer: {label} could not be resumed"));
+                        SteerDelivery::Failed(FailCode::Refused, format!("{label} could not be resumed"))
+                    }
                 }
             }
             status => {
@@ -17148,20 +17370,20 @@ Address the objection directly. If you disagree, say why inside \
                     "steer: {label} unavailable (status={})",
                     status.as_str()
                 ));
-                SteerDelivery::Failed(format!("{label} is unavailable ({})", status.as_str()))
+                SteerDelivery::Failed(FailCode::Refused, format!("{label} is unavailable ({})", status.as_str()))
             }
         }
     }
 
     fn deliver_codex_goal_answer(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
         let Some((opened_at, action @ ("replace" | "cancel"))) = instruction.split_once(' ') else {
-            return SteerDelivery::Failed("invalid goal response".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "invalid goal response".to_string());
         };
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         let run = &mut self.agents[index];
-        let no_menu = || SteerDelivery::Failed("The goal confirmation is no longer open.".to_string());
+        let no_menu = || SteerDelivery::Failed(FailCode::Refused, "The goal confirmation is no longer open.".to_string());
         let (Some(menu), Some(terminal)) = (&run.codex_goal_menu, run.terminal.as_mut()) else {
             return no_menu();
         };
@@ -17184,15 +17406,15 @@ Address the objection directly. If you disagree, say why inside \
 
     fn deliver_codex_rate_limit_answer(&mut self, task_id: &str, instruction: &str) -> SteerDelivery {
         let Some((opened_at, action)) = instruction.split_once(' ') else {
-            return SteerDelivery::Failed("Invalid rate-limit response.".to_owned());
+            return SteerDelivery::Failed(FailCode::Refused, "Invalid rate-limit response.".to_owned());
         };
         let target = match action {
             "switch" => 0,
             "keep" => 1,
             "hide" => 2,
-            _ => return SteerDelivery::Failed("Invalid rate-limit response.".to_owned()),
+            _ => return SteerDelivery::Failed(FailCode::Refused, "Invalid rate-limit response.".to_owned()),
         };
-        let closed = || SteerDelivery::Failed("The rate-limit prompt is no longer open.".to_owned());
+        let closed = || SteerDelivery::Failed(FailCode::Refused, "The rate-limit prompt is no longer open.".to_owned());
         let Some(index) = self.agent_index_for_token(task_id) else { return closed() };
         let run = &mut self.agents[index];
         let (Some(menu), Some(terminal)) = (&run.codex_rate_limit_menu, run.terminal.as_mut()) else {
@@ -17217,26 +17439,26 @@ Address the objection directly. If you disagree, say why inside \
 
     fn deliver_keys_request(&mut self, task_id: &str, keys: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         let mut bytes = Vec::new();
         for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
             match remote_input_bytes(key) {
                 Ok(sequence) => bytes.extend_from_slice(&sequence),
-                Err(error) => return SteerDelivery::Failed(error),
+                Err(error) => return SteerDelivery::Failed(FailCode::Refused, error),
             }
         }
         if bytes.is_empty() {
-            return SteerDelivery::Failed("no keys".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "no keys".to_string());
         }
         let Some(terminal) = self.agents[index].terminal.as_mut() else {
-            return SteerDelivery::Failed(format!("{task_id} has no live terminal"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{task_id} has no live terminal"));
         };
         if !terminal.is_alive() {
-            return SteerDelivery::Failed(format!("{task_id} has no live terminal"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{task_id} has no live terminal"));
         }
         if terminal.write_input(&bytes).is_err() {
-            return SteerDelivery::Failed(format!("{task_id}: write failed"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{task_id}: write failed"));
         }
         self.agents[index].last_worker_input_at = Some(Instant::now());
         self.dirty = true;
@@ -17276,17 +17498,17 @@ Address the objection directly. If you disagree, say why inside \
 
     fn deliver_cancel_request(&mut self, task_id: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         if self.agents[index].is_orchestrator() {
-            return SteerDelivery::Failed(
+            return SteerDelivery::Failed(FailCode::Refused, 
                 "the conductor cannot be stopped from a task card".to_string(),
             );
         }
         if self.stop_agent_at(index) {
             SteerDelivery::Delivered
         } else {
-            SteerDelivery::Failed(format!("{task_id} could not be stopped"))
+            SteerDelivery::Failed(FailCode::Refused, format!("{task_id} could not be stopped"))
         }
     }
 
@@ -17297,14 +17519,14 @@ Address the objection directly. If you disagree, say why inside \
     /// where "never one that may be working or that someone has open" holds.
     fn deliver_park_request(&mut self, task_id: &str, reason: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         if self.agents[index].terminal.is_none() {
             // Already asleep (or never had a pane here): nothing to give back.
             return SteerDelivery::Delivered;
         }
         if let Some(refusal) = self.park_refusal(index) {
-            return SteerDelivery::Failed(refusal);
+            return SteerDelivery::Failed(FailCode::Refused, refusal);
         }
         let cwd = self.cwd.clone();
         let reason = reason.trim().chars().take(240).collect::<String>();
@@ -17355,37 +17577,37 @@ Address the objection directly. If you disagree, say why inside \
 
     fn switch_model_request(&mut self, task_id: &str, spec: &str, prompt: Option<&str>) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         let (model, effort, account) = match crate::agent_model::parse_model_spec(spec) {
             Ok(parsed) => parsed,
-            Err(refusal) => return SteerDelivery::Failed(refusal),
+            Err(refusal) => return SteerDelivery::Failed(FailCode::Refused, refusal),
         };
         let run = &mut self.agents[index];
         let backend = run.backend;
         if let Some(refusal) = crate::agent_model::model_switch_refusal(run) {
-            return SteerDelivery::Failed(refusal.to_string());
+            return SteerDelivery::Failed(FailCode::Refused, refusal.to_string());
         }
         if let Some(other) = known_model_backend(model).filter(|other| *other != backend) {
-            return SteerDelivery::Failed(format!(
+            return SteerDelivery::Failed(FailCode::Refused, format!(
                 "{model} is a {} model and this chat runs on {}",
                 other.as_str(),
                 backend.as_str()
             ));
         }
         if !effort_options_for(backend, model).contains(&effort) {
-            return SteerDelivery::Failed(format!(
+            return SteerDelivery::Failed(FailCode::Refused, format!(
                 "{model} has no {} effort",
                 effort.map(EffortLevel::as_str).unwrap_or("auto")
             ));
         }
         if let Some(refusal) = openrouter_key_refusal(backend, model) {
-            return SteerDelivery::Failed(refusal.to_string());
+            return SteerDelivery::Failed(FailCode::Refused, refusal.to_string());
         }
         // Checked before anything changes, for a row with no process too: it
         // would only fail on its next resume.
         if let Err(error) = signals::account_env(backend, account.as_deref()) {
-            return SteerDelivery::Failed(error.to_string());
+            return SteerDelivery::Failed(FailCode::Refused, error.to_string());
         }
         let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
         let mut codex_idle = false;
@@ -17393,14 +17615,14 @@ Address the objection directly. If you disagree, say why inside \
             if self.codex_waits.contains_key(&run.id) || run.codex_plan_menu || run.codex_goal_menu.is_some()
                 || run.codex_rate_limit_menu.is_some() || self.pending_enters.iter().any(|entry| entry.run_id == run.id)
             {
-                return SteerDelivery::Failed("This chat has an open prompt or a message being submitted. Finish it before switching accounts.".to_string());
+                return SteerDelivery::Failed(FailCode::Refused, "This chat has an open prompt or a message being submitted. Finish it before switching accounts.".to_string());
             }
             if !terminal.drain_output().is_empty() {
                 run.last_output_at = Instant::now();
             }
             let lines = terminal.live_lines_snapshot();
-            if let Some(reason) = terminal_composer_blocked(backend, &lines) {
-                return SteerDelivery::Failed(format!("not sent: {reason}"));
+            if let Some(block) = terminal_composer_blocked(backend, &lines) {
+                return SteerDelivery::Failed(block.code(), format!("not sent: {}", block.reason()));
             }
             if backend == Backend::Codex && terminal.execution_profile().is_none_or(|profile| profile == "native") {
                 // Codex can return to its composer after a quota rejection
@@ -17410,27 +17632,28 @@ Address the objection directly. If you disagree, say why inside \
                     && run.last_worker_input_at.is_none_or(|input| run.last_output_at > input)
                     && codex_empty_composer_at_idle(&lines);
                 if !codex_idle {
-                    return SteerDelivery::Failed("Wait for the current turn to finish and clear any draft in the Terminal before switching accounts.".to_string());
+                    return SteerDelivery::Failed(FailCode::Refused, "Wait for the current turn to finish and clear any draft in the Terminal before switching accounts.".to_string());
                 }
             }
         }
         if live && !codex_idle && run.status == AgentStatus::Running
             && !run.needs_user_input && !matches!(run.wait_signal, Some(WaitSignal::Error(_)))
         {
-            return SteerDelivery::Failed(
+            return SteerDelivery::Failed(FailCode::Refused, 
                 "it is in the middle of a turn; switch when it finishes".to_string(),
             );
         }
         if prompt.is_some() && !live && !matches!(run.status,
             AgentStatus::Done | AgentStatus::Paused | AgentStatus::Stopped | AgentStatus::Failed | AgentStatus::Orphaned
         ) {
-            return SteerDelivery::Failed(format!("this chat is unavailable ({})", run.status.as_str()));
+            return SteerDelivery::Failed(FailCode::Refused, format!("this chat is unavailable ({})", run.status.as_str()));
         }
         let session = run.session_id.clone().filter(|id| !id.trim().is_empty());
         if (live || prompt.is_some()) && session.is_none() {
-            return SteerDelivery::Failed("this chat has no saved session to continue".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "this chat has no saved session to continue".to_string());
         }
         let account_changed = run.account != account;
+        let resting = resting_status(run.status);
         let previous = (
             std::mem::replace(&mut run.model, model.to_string()),
             std::mem::replace(&mut run.effort, effort),
@@ -17462,7 +17685,7 @@ Address the objection directly. If you disagree, say why inside \
             // effort and account.
             if let Err(error) = wired {
                 (run.model, run.effort, run.account) = previous;
-                return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
+                return SteerDelivery::Failed(FailCode::Refused, format!("could not reopen {label}: {error}"));
             }
             let options = TerminalPaneOptions {
                 size: run.terminal_size.unwrap_or_default(),
@@ -17479,20 +17702,13 @@ Address the objection directly. If you disagree, say why inside \
                     run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
                     run.last_output_at = Instant::now();
-                    if let Some(prompt) = prompt {
-                        let now = now_stamp();
+                    if prompt.is_some() {
+                        // Its turn is recorded once the agent takes it (take_or_record).
                         run.status = AgentStatus::Running;
                         run.completed_at = None;
                         run.wait_signal = None;
                         run.last_error = None;
                         run.needs_user_input = false;
-                        run.current_prompt = prompt.to_string();
-                        run.turns.push(AgentTurn {
-                            ts: now.clone(),
-                            prompt: prompt.to_string(),
-                            source: "user".to_string(),
-                        });
-                        run.last_user_input_at = now;
                         run.last_worker_input_at = Some(Instant::now());
                     }
                 }
@@ -17502,13 +17718,13 @@ Address the objection directly. If you disagree, say why inside \
                     run.status = AgentStatus::Failed;
                     run.last_error = Some(error.to_string());
                     let _ = save_native_run_record(&self.cwd, run);
-                    return SteerDelivery::Failed(format!("could not reopen {label}: {error}"));
+                    return SteerDelivery::Failed(FailCode::Refused, format!("could not reopen {label}: {error}"));
                 }
             }
         }
         let run = &self.agents[index];
         if let Err(error) = save_native_run_record(&self.cwd, run) {
-            return SteerDelivery::Failed(format!("{label} switched, but its record was not saved: {error}"));
+            return SteerDelivery::Failed(FailCode::Refused, format!("{label} switched, but its record was not saved: {error}"));
         }
         let mut note = format!("{label} now on {}", agent_model_label(backend, &run.model, run.effort));
         if account_changed {
@@ -17522,7 +17738,7 @@ Address the objection directly. If you disagree, say why inside \
         self.dirty = true;
         match prompt {
             // The reopened session's first turn.
-            Some(prompt) => self.sent_or_delivered(index, prompt, true),
+            Some(prompt) => self.take_or_record(index, prompt, true, "user", Some(resting)),
             None => SteerDelivery::Delivered,
         }
     }
@@ -17592,9 +17808,9 @@ Address the objection directly. If you disagree, say why inside \
         let target = if plan_id.is_empty() {
             match waiting.as_slice() {
                 [only] => *only,
-                [] => return SteerDelivery::Failed("no plan is waiting for approval".to_string()),
+                [] => return SteerDelivery::Failed(FailCode::Refused, "no plan is waiting for approval".to_string()),
                 _ => {
-                    return SteerDelivery::Failed(
+                    return SteerDelivery::Failed(FailCode::Refused, 
                         "several plans are waiting; say which one".to_string(),
                     )
                 }
@@ -17602,7 +17818,7 @@ Address the objection directly. If you disagree, say why inside \
         } else {
             match self.plans.iter().position(|plan| plan.id == plan_id) {
                 Some(index) => index,
-                None => return SteerDelivery::Failed(format!("plan not found: {plan_id}")),
+                None => return SteerDelivery::Failed(FailCode::Refused, format!("plan not found: {plan_id}")),
             }
         };
         if !self.plans[target].awaiting_approval {
@@ -17612,7 +17828,7 @@ Address the objection directly. If you disagree, say why inside \
         self.notice = None;
         self.approve_planned_queue_for(target);
         if self.plans[target].awaiting_approval {
-            SteerDelivery::Failed(
+            SteerDelivery::Failed(FailCode::Refused, 
                 self.notice
                     .clone()
                     .unwrap_or_else(|| "the plan could not be approved yet".to_string()),
@@ -17625,7 +17841,7 @@ Address the objection directly. If you disagree, say why inside \
 
     fn deliver_merge_request(&mut self, task_id: &str) -> SteerDelivery {
         if self.agent_index_for_token(task_id).is_none() {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         }
         // The failure branch below reports self.notice as the reason; a notice
         // left over from an unrelated action would masquerade as this merge's
@@ -17636,7 +17852,7 @@ Address the objection directly. If you disagree, say why inside \
             Some(index) if self.agents[index].status == AgentStatus::Merged => {
                 SteerDelivery::Delivered
             }
-            _ => SteerDelivery::Failed(
+            _ => SteerDelivery::Failed(FailCode::Refused, 
                 self.notice
                     .clone()
                     .unwrap_or_else(|| format!("{task_id} could not be merged")),
@@ -21167,8 +21383,10 @@ Address the objection directly. If you disagree, say why inside \
         self.agents.iter().any(|run| run.id == run_id && run.terminal.is_some())
     }
 
-    fn regoal_agent_at(&mut self, index: usize, new_goal: &str) -> bool {
-        self.restart_agent_at(index, new_goal, None)
+    /// Reopen the row's conversation with `new_goal` as its next turn: None
+    /// when it could not be reopened, else how the message is delivered.
+    fn regoal_agent_at(&mut self, index: usize, new_goal: &str) -> Option<SteerDelivery> {
+        self.relaunch_with_goal(index, new_goal, None)
     }
 
     fn retarget_agent_at(
@@ -21178,14 +21396,28 @@ Address the objection directly. If you disagree, say why inside \
         model: &str,
         effort: Option<EffortLevel>,
         new_goal: &str,
-    ) -> bool {
-        self.restart_agent_at(index, new_goal, Some((backend, model.to_string(), effort)))
+    ) -> Option<SteerDelivery> {
+        self.relaunch_with_goal(index, new_goal, Some((backend, model.to_string(), effort)))
     }
 
-    fn restart_agent_at(
+    fn relaunch_with_goal(
         &mut self,
         index: usize,
         new_goal: &str,
+        target: Option<(Backend, String, Option<EffortLevel>)>,
+    ) -> Option<SteerDelivery> {
+        let resting = resting_status(self.agents.get(index)?.status);
+        self.restart_agent_at(index, Some(new_goal), target)
+            .then(|| self.take_or_record(index, new_goal, true, "regoal", Some(resting)))
+    }
+
+    /// Relaunch a worker's process on its conversation, with `new_goal` as
+    /// its next turn (recorded by `take_or_record` once taken), or with none
+    /// (`reopen_for_typed_command`).
+    fn restart_agent_at(
+        &mut self,
+        index: usize,
+        new_goal: Option<&str>,
         target: Option<(Backend, String, Option<EffortLevel>)>,
     ) -> bool {
         let cwd_default = self.cwd.clone();
@@ -21261,13 +21493,20 @@ Address the objection directly. If you disagree, say why inside \
                 // the Enter (2.1.330 and 0.170), so the goal sat unsent until
                 // the next message was glued onto it. agy drops the text too,
                 // and OpenCode's plugin sends it.
-                match backend {
-                    Backend::Claude => (claude_resume_command(run, sid), Some(new_goal), session.clone()),
-                    Backend::Codex => (codex_resume_command(run, sid), Some(new_goal), session.clone()),
-                    Backend::Opencode => (opencode_continue_command(run, sid, new_goal), None, session.clone()),
-                    Backend::Antigravity => (antigravity_continue_command(run, sid, new_goal), None, session.clone()),
+                match (backend, new_goal) {
+                    (Backend::Claude, _) => (claude_resume_command(run, sid), new_goal, session.clone()),
+                    (Backend::Codex, _) => (codex_resume_command(run, sid), new_goal, session.clone()),
+                    (Backend::Opencode, Some(goal)) => (opencode_continue_command(run, sid, goal), None, session.clone()),
+                    (Backend::Opencode, None) => (opencode_resume_command(run, sid), None, session.clone()),
+                    (Backend::Antigravity, Some(goal)) => {
+                        (antigravity_continue_command(run, sid, goal), None, session.clone())
+                    }
+                    (Backend::Antigravity, None) => (antigravity_resume_command(run, sid), None, session.clone()),
                 }
             } else {
+                let Some(new_goal) = new_goal else {
+                    return false;
+                };
                 // No session to resume: fresh spawn carrying a handoff. Files persist
                 // in the jj workspace; only conversation memory is lost.
                 let sid = mint_session_id_for(backend);
@@ -21313,12 +21552,16 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
-                let now = now_stamp();
                 if let Some(run) = self.agents.get_mut(index) {
                     let starting_new_turn = run.status == AgentStatus::Done;
                     run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
-                    run.status = AgentStatus::Running;
+                    // Reopened with no turn, the row is at rest: a message
+                    // for it is typed into the live pane.
+                    run.status = match new_goal {
+                        Some(_) => AgentStatus::Running,
+                        None => resting_status(run.status),
+                    };
                     run.session_id = new_session;
                     run.completed_at = None;
                     run.last_output_at = Instant::now();
@@ -21329,32 +21572,29 @@ Address the objection directly. If you disagree, say why inside \
                     run.merge_requested = false;
                     run.merge_conflict = false;
                     run.merge_conflict_files.clear();
-                    run.done_summary = None;
-                    let requested_delivery = DeliveryEvidence::for_task(new_goal);
-                    if requested_delivery.required || !run.delivery.required || starting_new_turn {
-                        run.delivery = requested_delivery;
+                    if let Some(goal) = new_goal {
+                        run.done_summary = None;
+                        let requested_delivery = DeliveryEvidence::for_task(goal);
+                        if requested_delivery.required || !run.delivery.required || starting_new_turn {
+                            run.delivery = requested_delivery;
+                        }
+                        run.last_worker_input_at = Some(Instant::now());
                     }
-                    run.current_prompt = new_goal.to_string();
-                    run.turns.push(AgentTurn {
-                        ts: now.clone(),
-                        prompt: new_goal.to_string(),
-                        source: "regoal".to_string(),
-                    });
-                    run.last_user_input_at = now;
-                    run.last_worker_input_at = Some(Instant::now());
                     let _ = save_native_run_record(&cwd_default, run);
                 }
-                if retargeted {
-                    let backend_label = self.agents[index].backend.as_str().to_string();
-                    let model_label = self.agents[index].model.clone();
-                    self.push_activity(format!(
-                        "resumed {node_label} on {} {}: {}",
-                        backend_label,
-                        model_label,
-                        short_task(new_goal)
-                    ));
-                } else {
-                    self.push_activity(format!("re-goaled {node_label}: {}", short_task(new_goal)));
+                match new_goal {
+                    Some(goal) if retargeted => {
+                        let backend_label = self.agents[index].backend.as_str().to_string();
+                        let model_label = self.agents[index].model.clone();
+                        self.push_activity(format!(
+                            "resumed {node_label} on {} {}: {}",
+                            backend_label,
+                            model_label,
+                            short_task(goal)
+                        ));
+                    }
+                    Some(goal) => self.push_activity(format!("re-goaled {node_label}: {}", short_task(goal))),
+                    None => self.push_activity(format!("reopened {node_label}")),
                 }
                 self.mirror_graph();
                 true

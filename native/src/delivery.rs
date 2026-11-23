@@ -21,7 +21,53 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::Backend;
+use crate::{AgentStatus, Backend};
+
+/// Why a request failed: the receipt's `code`, which the app reads. The
+/// `error` next to it is copy and may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailCode {
+    /// A menu or picker has the keyboard.
+    MenuOpen,
+    /// The agent waits for a permission decision.
+    PermissionPrompt,
+    /// Codex asks what to do about a usage limit.
+    RateLimitPrompt,
+    /// Codex asks whether to replace its goal (`codexGoalMenu`).
+    GoalMenu,
+    /// The input box already holds text, which the message would be glued onto.
+    ComposerNotEmpty,
+    /// An interrupt did not bring the agent back to its composer.
+    TurnDidNotStop,
+    /// Sent, but the agent never took it.
+    NotSubmitted,
+    /// The process it was sent to ended before it took it, or there is none.
+    AgentExited,
+    /// The chat was closed while the message waited.
+    ChatClosed,
+    /// No chat has that id.
+    NotFound,
+    /// Not acted on: the request is invalid or the chat cannot take it now.
+    Refused,
+}
+
+impl FailCode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MenuOpen => "menu_open",
+            Self::PermissionPrompt => "permission_prompt",
+            Self::RateLimitPrompt => "rate_limit_prompt",
+            Self::GoalMenu => "goal_menu",
+            Self::ComposerNotEmpty => "composer_not_empty",
+            Self::TurnDidNotStop => "turn_did_not_stop",
+            Self::NotSubmitted => "not_submitted",
+            Self::AgentExited => "agent_exited",
+            Self::ChatClosed => "chat_closed",
+            Self::NotFound => "not_found",
+            Self::Refused => "refused",
+        }
+    }
+}
 
 /// How often a waiting message's transcript is read.
 pub(crate) const SCAN_INTERVAL: Duration = Duration::from_millis(250);
@@ -37,6 +83,10 @@ pub(crate) const MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How long a new pane may take to draw its composer before typed input
 /// stops waiting for it (`App::agent_is_starting`).
 pub(crate) const STARTUP_WAIT: Duration = Duration::from_secs(30);
+/// How long input waits for the pane to settle after a key Rudder sent (an
+/// answer to a Codex dialog) or after the last input (a draft still being
+/// cleared or typed), before a block there is a refusal.
+pub(crate) const SETTLE_WAIT: Duration = Duration::from_secs(2);
 /// The first read of a transcript takes this much of its end. Later reads
 /// start where the last one stopped.
 const FIRST_READ_BYTES: u64 = 4 << 20;
@@ -56,18 +106,11 @@ pub(crate) struct SentMessage {
     /// Given to the CLI at launch (a reopened conversation), not typed into
     /// a composer.
     pub(crate) launched: bool,
-}
-
-impl SentMessage {
-    pub(crate) fn new(run_id: &str, instance_id: &str, text: &str, launched: bool) -> Self {
-        Self {
-            run_id: run_id.to_string(),
-            instance_id: instance_id.to_string(),
-            text: text.to_string(),
-            sent_ms: unix_ms(),
-            launched,
-        }
-    }
+    /// The turn's source in the run record once the agent takes it.
+    pub(crate) source: &'static str,
+    /// For a launch: the status the row goes back to when the agent does not
+    /// take it, so a turn that never ran does not show as working.
+    pub(crate) resting: Option<AgentStatus>,
 }
 
 /// Whether a message to `backend` is checked against its transcript.
@@ -78,7 +121,8 @@ pub(crate) fn checked(backend: Backend, text: &str) -> bool {
 /// One message waiting for the agent to take it.
 pub(crate) struct PendingDelivery {
     pub(crate) id: u64,
-    pub(crate) request_id: String,
+    /// The inbox request it answers, when it came from one.
+    pub(crate) request_id: Option<String>,
     pub(crate) label: String,
     pub(crate) backend: Backend,
     pub(crate) cwd: PathBuf,
@@ -96,18 +140,22 @@ pub(crate) struct PendingDelivery {
 impl PendingDelivery {
     /// Why the agent did not take it, judged at `at` (the start of the read
     /// that did not find it), or None while it may still.
-    pub(crate) fn not_taken(&self, at: Instant) -> Option<&'static str> {
+    pub(crate) fn not_taken(&self, at: Instant) -> Option<(FailCode, &'static str)> {
         let since = |mark: Option<Instant>| mark.map_or(Duration::ZERO, |mark| at.saturating_duration_since(mark));
         if self.gone_since.is_some_and(|gone| gone <= at) {
-            return Some("the agent stopped before it took the message");
+            return Some((FailCode::AgentExited, "the agent stopped before it took the message"));
         }
         if self.message.launched && at.saturating_duration_since(self.sent) >= LAUNCH_WAIT {
-            return Some("the agent did not start a turn with it");
+            return Some((FailCode::NotSubmitted, "the agent did not start a turn with it"));
         }
         if self.idle_since.is_some() && since(self.idle_since) >= IDLE_WAIT {
-            return Some("the agent did not take it. The text may still be in its input box");
+            return Some((
+                FailCode::NotSubmitted,
+                "the agent did not take it. The text may still be in its input box",
+            ));
         }
-        (at.saturating_duration_since(self.sent) >= MAX_WAIT).then_some("the agent did not take it")
+        (at.saturating_duration_since(self.sent) >= MAX_WAIT)
+            .then_some((FailCode::NotSubmitted, "the agent did not take it"))
     }
 }
 
@@ -348,11 +396,19 @@ mod tests {
         let now = Instant::now();
         let pending = |launched: bool| PendingDelivery {
             id: 1,
-            request_id: "r".into(),
+            request_id: Some("r".into()),
             label: "n0".into(),
             backend: Backend::Claude,
             cwd: PathBuf::from("/"),
-            message: SentMessage { run_id: "a".into(), instance_id: "i".into(), text: "hi".into(), sent_ms: SENT, launched },
+            message: SentMessage {
+                run_id: "a".into(),
+                instance_id: "i".into(),
+                text: "hi".into(),
+                sent_ms: SENT,
+                launched,
+                source: "user",
+                resting: None,
+            },
             sent: now,
             idle_since: None,
             gone_since: None,
@@ -364,11 +420,13 @@ mod tests {
         let mut resting = pending(false);
         resting.idle_since = Some(now + Duration::from_secs(1));
         assert_eq!(resting.not_taken(now + Duration::from_secs(5)), None);
-        assert!(resting.not_taken(now + Duration::from_secs(21)).is_some_and(|why| why.contains("input box")));
+        assert!(resting
+            .not_taken(now + Duration::from_secs(21))
+            .is_some_and(|(code, why)| code == FailCode::NotSubmitted && why.contains("input box")));
         let mut gone = pending(false);
         gone.gone_since = Some(now + Duration::from_secs(2));
         assert_eq!(gone.not_taken(now + Duration::from_secs(1)), None, "a read from before it went");
-        assert!(gone.not_taken(now + Duration::from_secs(2)).is_some());
+        assert_eq!(gone.not_taken(now + Duration::from_secs(2)).map(|(code, _)| code), Some(FailCode::AgentExited));
         assert!(pending(true).not_taken(now + LAUNCH_WAIT).is_some());
         assert!(pending(false).not_taken(now + MAX_WAIT).is_some());
     }

@@ -565,10 +565,10 @@ impl App {
     /// The app renamed an agent (steer kind `rename`, the name as instruction).
     pub(crate) fn deliver_rename_request(&mut self, task_id: &str, title: &str) -> SteerDelivery {
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         if self.pending_launches.contains_key(&self.agents[index].id) {
-            return SteerDelivery::Failed("it is still starting; rename it in a moment".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "it is still starting; rename it in a moment".to_string());
         }
         match self.rename_agent_at(index, title) {
             Ok(notice) => {
@@ -576,7 +576,7 @@ impl App {
                 let _ = self.write_rudder_context_timed(None);
                 SteerDelivery::Delivered
             }
-            Err(reason) => SteerDelivery::Failed(reason),
+            Err(reason) => SteerDelivery::Failed(FailCode::Refused, reason),
         }
     }
 
@@ -586,20 +586,20 @@ impl App {
         let pinned = match instruction.trim() {
             "pin" => true,
             "unpin" => false,
-            other => return SteerDelivery::Failed(format!("expected pin or unpin, got {other}")),
+            other => return SteerDelivery::Failed(FailCode::Refused, format!("expected pin or unpin, got {other}")),
         };
         let Some(index) = self.agent_index_for_token(task_id) else {
-            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+            return SteerDelivery::Failed(FailCode::NotFound, format!("target not found: {task_id}"));
         };
         let run = &mut self.agents[index];
         if run.is_orchestrator() {
-            return SteerDelivery::Failed("a plan's orchestrator is always at the top".to_string());
+            return SteerDelivery::Failed(FailCode::Refused, "a plan's orchestrator is always at the top".to_string());
         }
         if run.pinned != pinned {
             run.pinned = pinned;
             if let Err(error) = save_native_run_record(&self.cwd, run) {
                 run.pinned = !pinned;
-                return SteerDelivery::Failed(format!("could not save the pin: {error}"));
+                return SteerDelivery::Failed(FailCode::Refused, format!("could not save the pin: {error}"));
             }
         }
         self.dirty = true;
@@ -950,7 +950,7 @@ impl App {
                 let _ = self.write_rudder_context_timed(None);
                 SteerDelivery::Delivered
             }
-            Err(error) => SteerDelivery::Failed(format!("could not reopen it: {error}")),
+            Err(error) => SteerDelivery::Failed(FailCode::Refused, format!("could not reopen it: {error}")),
         }
     }
 

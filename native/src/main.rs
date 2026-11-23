@@ -22868,6 +22868,7 @@ What to do\n\
                                     run.needs_permission = false;
                                     changed = true;
                                     notify_run(run, &format!("\u{2717} turn failed: {label}"));
+                                    crate::helpers::spawn_helper_failure(run, &label);
                                 }
                             }
                             // A manual `/compact` ended. It fires no `Stop`, so a

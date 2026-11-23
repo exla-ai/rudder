@@ -34072,3 +34072,39 @@ fn a_helper_start_never_writes_the_model_config_even_beside_model_and_task_reque
     assert_eq!(app.agents.iter().filter(|run| run.parent_run.is_some()).count(), 4);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_failed_helper_turn_reaches_its_parent_as_an_error_reply() {
+    let repo = unique_test_repo("helper-failed");
+    let mut run = test_agent_run("review-9z8y", "review lib/");
+    run.cwd = repo.clone();
+    run.parent_run = Some("parent-run".into());
+    let record = crate::helpers::HelperRecord {
+        run_id: run.id.clone(),
+        parent_run_id: "parent-run".into(),
+        harness: "antigravity".into(),
+        model: "gemini-4-neon-xhigh".into(),
+        effort: None,
+        replies: Vec::new(),
+    };
+    let path = crate::helpers::helper_record_path(&repo, &run.id);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    // agy waits at its prompt after a usage limit and ends no turn.
+    crate::helpers::spawn_helper_failure(&run, "Individual quota reached. Resets in 3h36m1s.");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let replies = loop {
+        let replies = crate::helpers::read_helper_record(&repo, &run.id).unwrap().replies;
+        if !replies.is_empty() || Instant::now() > deadline {
+            break replies;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].text, None);
+    assert_eq!(
+        replies[0].error.as_deref(),
+        Some("the helper's turn failed: Individual quota reached. Resets in 3h36m1s.")
+    );
+    let _ = fs::remove_dir_all(&repo);
+}

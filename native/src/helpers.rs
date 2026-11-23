@@ -310,6 +310,23 @@ pub(crate) fn spawn_helper_reply(run: &AgentRun) {
         .spawn(move || job.run());
 }
 
+/// A helper's turn failed (a usage limit, an API error; the App loop's
+/// `SignalState::Failed`). Its process waits at its prompt and ends no turn,
+/// so without this its parent would wait for a reply that is not coming.
+pub(crate) fn spawn_helper_failure(run: &AgentRun, detail: &str) {
+    if run.parent_run.is_none() {
+        return;
+    }
+    let repo = dashboard_root(&run.cwd);
+    let run_id = run.id.clone();
+    let reply = HelperReply { at: now_stamp(), text: None, error: Some(format!("the helper's turn failed: {detail}")) };
+    let _ = thread::Builder::new()
+        .name("rudder-helper-reply".to_string())
+        .spawn(move || {
+            let _ = append_helper_reply(&repo, &run_id, reply);
+        });
+}
+
 pub(crate) struct HelperReplyJob {
     pub(crate) repo: PathBuf,
     pub(crate) run_id: String,

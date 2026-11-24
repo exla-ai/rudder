@@ -29,6 +29,7 @@ import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
 import { activeUsageLimit, antigravityError, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
+import { agentProcesses, watchOutsideAgents } from "./outside-agents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
 import { holdsRestart, phoneStatus, pidAlive, statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
@@ -41,7 +42,7 @@ import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
 import { RUN_WATCH_MS, createRunWatch, runSignature } from "./run-watch.mjs";
 import { queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
-import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
+import { cleanupPaths, createCleanupJob, readProcesses } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
@@ -135,6 +136,7 @@ const runWatch = createRunWatch(() => void publishState().catch((error) => log(`
 // boot never reaches it uninitialized (2.16.5 crashed on exactly that).
 let githubCredentials = null;
 const PORT_SCAN_INTERVAL_MS = 5000;
+const OUTSIDE_AGENTS_MS = 3000;
 // All module state lives up here, above the boot sequence below: boot calls
 // into functions that read it, and a `let` declared further down is not
 // initialized yet when they do (a ReferenceError that kills the machine).
@@ -289,6 +291,15 @@ setInterval(() => {
   }
 }, RUN_WATCH_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
+// Reviews and second opinions agents launch from their shells (codex exec,
+// agy -p, claude -p), for the subagent tray.
+setInterval(() => {
+  try {
+    watchOutsideAgents({ home: HOME, agents: agentProcesses(CODE_DIR), processes: readProcesses("/proc") });
+  } catch (error) {
+    log(`outside agents: ${error.message}`);
+  }
+}, OUTSIDE_AGENTS_MS);
 setInterval(reportHeartbeat, 30_000);
 setHomeUpdate({ current: hostInfo(process.env).image, target: null, state: "current", error: null });
 setInterval(checkHomeUpdateRequest, 1000);

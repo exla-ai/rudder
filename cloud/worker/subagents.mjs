@@ -57,6 +57,7 @@ import {
   subagentsLive,
   transcriptFile,
 } from "./transcripts.mjs";
+import { outsideAgentsOf } from "./outside-agents.mjs";
 
 export function listSubagents(repoDir, runId, { home, open = null }) {
   const record = readRunRecord(repoDir, runId);
@@ -79,12 +80,10 @@ export function listSubagents(repoDir, runId, { home, open = null }) {
         ? antigravitySubagents(home, record.session.nativeSessionId, live)
         : [...claudeAgentSubagents(home, file, live), ...claudeTeammates(home, file, live)];
   const lines = found.map((item) => trayLine(store, item)).filter(Boolean);
-  // Agents of another harness those ran from a shell are listed beside them.
-  if (record.backend === "claude") {
-    const outside = claudeOutsideAgents(home, lines, live);
-    found.push(...outside);
-    lines.push(...outside.map((item) => trayLine(store, item)).filter(Boolean));
-  }
+  // Beside them: agents of another harness run from a shell, and helpers.
+  const others = [...outsideItems(home, repoDir, record.id, lines, live), ...helperItems(home, repoDir, record.id)];
+  found.push(...others);
+  lines.push(...others.map((item) => trayLine(store, item)).filter(Boolean));
   const subagents = lines.sort(newestFirst);
   const item = open === null ? null : found.find((entry) => entry.id === open);
   const opened = item ? item.make() : null;
@@ -206,7 +205,7 @@ function line(entry) {
   return {
     id: entry.id,
     backend: entry.backend,
-    model: entry.reader.model ?? null,
+    model: entry.reader.model ?? entry.model ?? null,
     type: entry.type,
     kind: entry.kind,
     name: entry.name,
@@ -216,7 +215,7 @@ function line(entry) {
     endedAt: entry.endedAt,
     toolCalls: entry.reader.toolCalls,
     step: entry.status !== "running" && entry.result ? oneLine(entry.result) : step(last),
-    // Codex threads it ran from its shell (claudeOutsideAgents).
+    // Codex threads it ran from its shell (outsideItems).
     ...(outside.length ? { outside } : {}),
   };
 }
@@ -293,40 +292,145 @@ function claudeAgentSubagents(home, session, live) {
   return list;
 }
 
-// A Codex thread a Claude subagent or teammate ran from its shell, for a
-// review or a second opinion (transcripts.mjs outsideAgents): a line of its
-// own, read from the thread's rollout and titled as the one that ran it.
-function claudeOutsideAgents(home, lines, live) {
-  const list = [];
+// ---------------------------------------------------------------------------
+// Agents of another harness, and helpers
+// ---------------------------------------------------------------------------
+
+// An agent of another harness that this agent, or a subagent of it, ran from a
+// shell for a review or a second opinion: a line of its own, read from that
+// harness's own log. Two things find them: the Codex thread a shell call's
+// output names (transcripts.mjs outsideAgents, `outside` on the line of the
+// subagent that ran it, whose title it takes), and the process tree under the
+// agent (outside-agents.mjs), which also knows whether it still runs.
+function outsideItems(home, repoDir, runId, lines, live) {
+  const found = new Map(); // session id -> { harness, id, file, description, endedAt }
+  for (const entry of outsideAgentsOf(home, repoDir, runId)) {
+    found.set(entry.id, { harness: entry.harness, id: entry.id, file: entry.file, description: null, endedAt: entry.endedAt });
+  }
   for (const parent of lines) {
     for (const id of parent.outside ?? []) {
       const file = codexChildFile(home, id);
-      const stat = file ? statOrNull(file) : null;
-      if (!stat) {
-        continue; // its rollout is not written yet
+      if (file) {
+        found.set(id, { ...found.get(id), harness: "codex", id, file, description: parent.description });
       }
-      list.push({ id, file, key: [stat.size, stat.mtimeMs, live, parent.description].join("|"), make: () => {
-        const reader = followFile(file, () => codexReader({ child: true }));
-        if (!reader) {
-          return null;
-        }
-        const status = outsideCodexStatus(reader, live);
-        return {
-          id,
-          backend: "codex",
-          type: "subagent",
-          kind: "Codex",
-          name: null,
-          description: parent.description,
-          status,
-          startedAt: uuid7Time(id),
-          endedAt: status === "running" ? null : reader.endedAt,
-          result: status === "done" ? reader.result : null,
-          reader,
-          nest: () => attachCodexSubagents(reader, { home, live, shown: null, depth: 1 }),
-        };
-      } });
     }
+  }
+  const list = [];
+  for (const run of found.values()) {
+    const stat = statOrNull(run.file);
+    if (!stat) {
+      continue; // its log is not written yet
+    }
+    list.push({ id: run.id, file: run.file, key: [stat.size, stat.mtimeMs, live, run.description, run.endedAt].join("|"), make: () => outsideEntry(home, run, live) });
+  }
+  return list;
+}
+
+const OUTSIDE_KIND = { codex: "Codex", antigravity: "Antigravity", claude: "Claude" };
+
+function outsideEntry(home, run, live) {
+  const reader = run.harness === "codex" ? followFile(run.file, () => codexReader({ child: true }))
+    : run.harness === "antigravity" ? followFile(run.file, antigravityChildReader)
+    : followFile(run.file, () => claudeReader({ sub: true }));
+  if (!reader) {
+    return null;
+  }
+  // Its process, when the process tree found it, says whether it still runs.
+  const runs = run.endedAt === undefined ? live : run.endedAt === null;
+  const replies = reader.messages.filter((message) => message.role === "assistant");
+  const said = replies[replies.length - 1]?.text ?? null;
+  let status;
+  let result;
+  if (run.harness === "codex") {
+    status = outsideCodexStatus(reader, runs);
+    result = status === "done" ? reader.result : null;
+  } else if (run.harness === "antigravity") {
+    status = reader.finished ? "done" : runs ? "running" : "stopped";
+    result = status === "done" ? reader.report ?? said : null;
+  } else {
+    status = runs ? "running" : claudeInterrupted(reader) || !said ? "stopped" : "done";
+    result = status === "done" ? said : null;
+  }
+  const asked = reader.prompt ?? reader.messages.find((message) => message.role === "user")?.text ?? null;
+  return {
+    id: run.id,
+    backend: run.harness,
+    type: "subagent",
+    kind: OUTSIDE_KIND[run.harness],
+    name: null,
+    description: run.description ?? (asked ? oneLine(asked).slice(0, 80) : null),
+    status,
+    startedAt: reader.firstAt ?? uuid7Time(run.id) ?? reader.messages[0]?.ts ?? null,
+    endedAt: status === "running" ? null : reader.endedAt ?? reader.lastAt ?? run.endedAt ?? null,
+    result,
+    reader,
+    nest: () => {},
+  };
+}
+
+// The helpers this agent started with agents_start (native helpers.rs): runs
+// of their own, on the harness and model it named, whose record names it as
+// parentRunId. A run's parent never changes, so each record is read once for it.
+const helperParents = new Map(); // run.json path -> parentRunId or null
+
+function helperItems(home, repoDir, runId) {
+  const runsDir = path.join(repoDir, ".rudder", "runs");
+  let ids;
+  try {
+    ids = fs.readdirSync(runsDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const list = [];
+  for (const id of ids) {
+    const file = path.join(runsDir, id, "run.json");
+    if (!helperParents.has(file)) {
+      const record = readRunRecord(repoDir, id);
+      if (!record) {
+        continue; // not written yet
+      }
+      helperParents.set(file, typeof record.parentRunId === "string" ? record.parentRunId : null);
+    }
+    if (helperParents.get(file) !== runId) {
+      continue;
+    }
+    const record = readRunRecord(repoDir, id);
+    const log = record && record.backend !== "opencode" ? transcriptFile(record, home) : null;
+    const stat = log ? statOrNull(log) : null;
+    if (!stat) {
+      continue; // it has not started its session yet
+    }
+    const live = subagentsLive(record);
+    list.push({ id, file: log, key: [stat.size, stat.mtimeMs, live, record.status, record.model].join("|"), make: () => {
+      const reader = record.backend === "codex" ? followFile(log, () => codexReader({ child: true }))
+        : record.backend === "antigravity" ? followFile(log, antigravityChildReader)
+        : followFile(log, () => claudeReader({ sub: true }));
+      if (!reader) {
+        return null;
+      }
+      const replies = reader.messages.filter((message) => message.role === "assistant");
+      const working = record.status === "running";
+      const status = working && live ? "running" : record.status === "failed" ? "failed" : record.status === "completed" ? "done" : "stopped";
+      return {
+        id,
+        backend: record.backend ?? "claude",
+        type: "subagent",
+        kind: "Helper",
+        name: null,
+        description: typeof record.taskSummary === "string" && record.taskSummary ? record.taskSummary : null,
+        status,
+        startedAt: Number(record.createdAt) || reader.firstAt || null,
+        endedAt: status === "running" ? null : reader.endedAt ?? reader.lastAt ?? null,
+        result: status === "done" ? replies[replies.length - 1]?.text ?? null : null,
+        // The model it was started on, before its log names one.
+        model: typeof record.model === "string" ? record.model : null,
+        reader,
+        nest: () => {},
+      };
+    } });
   }
   return list;
 }

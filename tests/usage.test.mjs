@@ -401,6 +401,12 @@ test("sidebar bindingWindow picks the primary Gemini pool on Antigravity, not Ar
   const quota = parseAntigravityQuota(ANTIGRAVITY_SUMMARY, { paidTier: { name: "Google AI Pro" } });
   const top = bindingWindow({ provider: "antigravity", ...quota });
   assert.deepEqual(top, { label: "Gemini · Session (5h)", percent: 13, resetsAt: "2026-11-23T13:45:25Z" });
+  // Every pool is reported; a spent one says when it works again.
+  assert.deepEqual(quota.pools, [
+    { name: "Gemini", spent: false, resetsAt: null },
+    { name: "Claude and GPT", spent: false, resetsAt: null },
+    { name: "Gemini 4 Argon", spent: true, resetsAt: "2026-11-30T09:22:06Z" },
+  ]);
   // Both Gemini windows spent: it works again at the later reset.
   const spent = { provider: "antigravity", windows: [
     { label: "Gemini · Weekly", percent: 100, resetsAt: "2026-11-30T20:17:35Z" },

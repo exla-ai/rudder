@@ -27,7 +27,7 @@ import { writeTerminalColors } from "./theme.mjs";
 import { lastAssistantText, userTask, transcriptFile, recentConversation, transcriptDetail, transcriptEtag, transcriptPoll } from "./transcripts.mjs";
 import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
-import { activeUsageLimit, antigravityError, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
+import { activeUsageLimit, antigravityError, antigravityPools, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { agentProcesses, watchOutsideAgents } from "./outside-agents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
@@ -2464,19 +2464,29 @@ async function checkAntigravity(env) {
     return { ok: false, signedIn: false, account: null, plan: null, detail: status.detail };
   }
   const identity = { account: status.account, plan: null };
+  // Each model pool has its own allowance: one spent pool stops its models
+  // only (the app's picker refuses those), not the account.
+  const quota = await import(fromDist("usage.js")).then(({ fetchAntigravityQuota }) => fetchAntigravityQuota(env, { timeoutMs: 2500 }));
+  const modelPools = antigravityPools(quota);
+  const pools = modelPools ? { modelPools } : {};
+  const roomLeft = modelPools?.some((pool) => !pool.spent) === true;
   // A spent quota stays spent until the reset agy gave: no probe before it.
   const known = activeUsageLimit(previous);
-  if (known?.resetsAt != null && status.account === previous.account) {
+  if (known?.resetsAt != null && status.account === previous.account && !roomLeft) {
     return { ...identity, ok: false, signedIn: true, usageLimit: known, detail: quotaDetail(known) };
   }
   const probe = await capture("agy", ["-p", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ...identity, ok: true, detail: null };
+    return { ...identity, ...pools, ok: true, detail: null };
   }
   const text = `${probe.stdout}\n${probe.stderr}`;
   const error = antigravityError(text);
   const usageLimit = antigravityUsageLimit(error);
   if (usageLimit) {
+    // The probe ran on agy's default model. Its pool is spent; another has room.
+    if (roomLeft) {
+      return { ...identity, ...pools, ok: true, detail: null };
+    }
     return { ...identity, ok: false, signedIn: true, usageLimit, detail: quotaDetail(usageLimit) };
   }
   const expired = /please sign in|unauthenticated|\b401\b|(?:token|login|session)(?: has)? expired/i.test(text);

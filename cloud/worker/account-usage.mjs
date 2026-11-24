@@ -73,6 +73,20 @@ export function antigravityUsageLimit(error, now = Date.now()) {
   return { window: null, resetsAt: ms === null ? null : now + ms };
 }
 
+// Antigravity meters its models in pools, each with its own allowance
+// (src/usage.ts parseAntigravityQuota names them as agy does). The pools from
+// its quota report: [{ name, spent, resetsAt }], resetsAt in milliseconds or
+// null; a pool whose reset has passed is no longer spent. Null when the report
+// has no pools to go by.
+export function antigravityPools(quota, now = Date.now()) {
+  if (!quota || quota.error || !quota.pools?.length) return null;
+  return quota.pools.map((pool) => {
+    const resetsAt = pool.spent && pool.resetsAt !== null ? Date.parse(pool.resetsAt) : null;
+    const spent = pool.spent && (resetsAt === null || resetsAt > now);
+    return { name: pool.name, spent, resetsAt: spent ? resetsAt : null };
+  });
+}
+
 export function activeUsageLimit(account, now = Date.now()) {
   const limit = account?.usageLimit;
   return limit && (limit.resetsAt === null || limit.resetsAt > now) ? limit : null;

@@ -6,7 +6,7 @@ import { h, icon, setText } from "/app/render.js";
 import { app, api, coarse, ls, showError, toast, track, accountCanRun, accountUsageLabel } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
 import { UpdateNow } from "/app/home-update.js";
-import { groupAntigravityEfforts, matchesModel, variantEffort, modelRequest } from "./model-effort.js";
+import { antigravityPoolOf, groupAntigravityEfforts, matchesModel, variantEffort, modelRequest } from "./model-effort.js";
 
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 // Effort names. Which ones a model takes comes with the list: each row's
@@ -163,12 +163,28 @@ const accountsOf = (backend) => app.store?.state?.home?.credentials?.[backend] ?
 const accountOf = (backend, id) => accountsOf(backend).find((a) => a.id === id) ?? null;
 /** The account new agents on a harness start on. */
 const defaultAccount = (backend) => accountsOf(backend).find((a) => a.default)?.id ?? MAIN;
-function accountRefusal(backend, id) {
+/** Why the account cannot run an agent, on `model` when one is named; "" when it can. */
+function accountRefusal(backend, id, model = null) {
   const account = accountOf(backend, id);
-  if (!account || accountCanRun(account)) return "";
+  if (!account) return "";
+  if (accountCanRun(account)) return model ? poolRefusal(account, model) : "";
   return accountUsageLabel(account) || (account.signedIn
     ? account.detail || "Could not check usage for this account"
     : "Sign in to this account from Settings");
+}
+
+// Antigravity's models draw on separate pools (the account's `modelPools`,
+// cloud/worker/home.mjs checkAntigravity): a spent pool stops its own models
+// and leaves the rest of the account working.
+function poolRefusal(account, model) {
+  const pool = antigravityPoolOf(model, account.modelPools ?? []);
+  if (!pool?.spent || (pool.resetsAt !== null && pool.resetsAt <= Date.now())) return "";
+  const said = /\d/.test(pool.name) ? `${pool.name} is used up` : `${pool.name} models are used up`;
+  if (pool.resetsAt === null) return said;
+  const when = new Intl.DateTimeFormat(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  }).format(pool.resetsAt);
+  return `${said} · Resets ${when}`;
 }
 
 // Use the preferred account again after its allowance resets.
@@ -184,13 +200,13 @@ const accountName = (backend, id) => {
   return account?.account || (id === MAIN ? "Main account" : `Account ${list.indexOf(account) + 1}`);
 };
 
-function accountLine(harness, id) {
+function accountLine(harness, id, model = null) {
   const cred = accountOf(harness.id, id);
   if (!cred) return `Runs on your own ${harness.account} subscription`;
   if (cred.ok || cred.signedIn) return [
     cred.account,
     cred.plan ? `${PLAN_LABEL[cred.plan] || cred.plan} plan` : null,
-    accountRefusal(harness.id, id),
+    accountRefusal(harness.id, id, model),
   ].filter(Boolean).join(" · ") || "Signed in";
   return cred.account ? `${cred.account} · sign in again on the cloud machine` : `Not signed in on the cloud machine`;
 }
@@ -199,7 +215,7 @@ function accountLine(harness, id) {
  * Under the harness tabs: the account its agents run on. One account is a
  * line; several are a choice, `selected` checked, the signed-out ones off.
  */
-function paintAccounts(el, harness, { selected, onPick }) {
+function paintAccounts(el, harness, { selected, onPick, model = null }) {
   const list = accountsOf(harness.id);
   const addable = ADDABLE.has(harness.id);
   el.hidden = false;
@@ -207,7 +223,7 @@ function paintAccounts(el, harness, { selected, onPick }) {
     el.classList.remove("mp-accounts");
     el.removeAttribute("role");
     el.removeAttribute("aria-label");
-    setText(el, accountLine(harness, selected));
+    setText(el, accountLine(harness, selected, model));
     return;
   }
   el.classList.add("mp-accounts");
@@ -460,7 +476,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     if (harnesses.length) {
       paintTabs(tabsEl, harnesses, { tab, onTab: showTab });
       const harness = harnessOf(data, tab);
-      paintAccounts(accountEl, harness, { selected: accountFor(harness.id), onPick: (id) => { picked[harness.id] = id; render(); } });
+      paintAccounts(accountEl, harness, { selected: accountFor(harness.id), model: pick?.backend === harness.id ? pick.model : null, onPick: (id) => { picked[harness.id] = id; render(); } });
       search.paint(harness, harness.models.length);
       paintModels(modelsEl, { harness, models: harness.models }, { selected: pick && { ...pick, model: pickedRow()?.value }, current, onPick: (backend, model) => {
         if (backend !== pick?.backend || model !== pickedRow()?.value) {
@@ -474,7 +490,7 @@ export function openModelPicker(ws, { onPicked } = {}) {
     const row = pickedRow();
     const eff = effortFor(row, effort, pick?.model);
     const dial = paintEfforts(effortWrap, effortsEl, { row, effort: eff, onPick: (v) => { effort = v; render(); } });
-    useBtn.disabled = !pick || Boolean(accountRefusal(pick.backend, accountFor(pick.backend)));
+    useBtn.disabled = !pick || Boolean(accountRefusal(pick.backend, accountFor(pick.backend), pick.model));
     setText(useBtn, pick ? `Use ${modelText(pick.backend, row.label, dial ? eff : null)}` : "Use this model");
   }
 
@@ -750,7 +766,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     if (section) {
       tab = section.harness.id;
       paintTabs(tabsEl, all.map((x) => x.harness), { tab, onTab: showTab });
-      paintAccounts(accountEl, section.harness, { selected: accountFor(tab), onPick: (id) => { picked[section.harness.id] = id; render(); } });
+      paintAccounts(accountEl, section.harness, { selected: accountFor(tab), model: pick?.backend === section.harness.id ? pick.model : null, onPick: (id) => { picked[section.harness.id] = id; render(); } });
       search.paint(section.harness, section.models.length);
       paintModels(modelsEl, section, {
         selected: { ...pick, model: row?.value }, current: { backend, model: rowOf({ backend, model: a.model })?.value ?? a.model },
@@ -768,7 +784,11 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const to = harnessLabel(pick.backend);
     // An account the machine is not signed in to can't take the chat: its
     // agent would fail at once. The home refuses it too.
-    const blocked = (moving || reaccount) && accountRefusal(pick.backend, account);
+    // A model whose pool is used up fails at once too, on any account.
+    const asked = row ? modelRequest(row, eff).model : null;
+    const acct = accountOf(pick.backend, account);
+    const blocked = ((moving || reaccount) && accountRefusal(pick.backend, account, asked))
+      || (acct && asked ? poolRefusal(acct, asked) : "");
     setText(note, blocked
       ? blocked
       : moving ? `Moves this chat to ${to}, which starts in the same files with a summary of this conversation.`
@@ -780,7 +800,7 @@ function openChatModelPicker({ workspace, run, agent, onSwitched }) {
     const sameModel = request?.model === a.model;
     const same = !moving && !reaccount && sameModel && (!dial || (request.effort ?? "auto") === (a.effort || "auto"));
     const name = row ? [row.label, dial ? effortWord(eff) : null].filter(Boolean).join(" · ") : "";
-    useBtn.disabled = !row || same || (busy && !moving) || blocked;
+    useBtn.disabled = !row || same || (busy && !moving) || Boolean(blocked);
     setText(useBtn, !row || same ? "Current model" : moving ? `Move to ${to} · ${name}` : reaccount && sameModel ? `Switch to ${accountName(pick.backend, account)}` : `Switch to ${name}`);
   }
 

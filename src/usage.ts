@@ -581,10 +581,14 @@ export type AccountQuota = {
   /** Human-readable reason a request would be rejected or throttled right now (rate limit hit, credits depleted), or null when clear. */
   blocked: string | null;
   usageLimit: SubscriptionLimit | null;
+  /** Antigravity: its model pools, each with its own allowance; a spent one says when it resets. */
+  pools?: QuotaPool[];
   /** Human-readable reason the meters are missing, with the fix. */
   error: string | null;
   fetchedAt: string;
 };
+
+export type QuotaPool = { name: string; spent: boolean; resetsAt: string | null };
 
 export type QuotaReport = { accounts: AccountQuota[]; fetchedAt: string; ttlSeconds: number };
 
@@ -986,6 +990,7 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
   const windows: QuotaWindow[] = [];
   const unread: string[] = [];
   const spent = new Set<string>();
+  const pools = new Map<string, QuotaPool>();
   const groups: { name: string | null; buckets: any[] }[] = [
     ...(Array.isArray(summary?.groups) ? summary.groups : []).map((g: any) => ({ name: typeof g?.displayName === "string" ? g.displayName.replace(/\s+models$/i, "") : null, buckets: Array.isArray(g?.buckets) ? g.buckets : [] })),
     { name: null, buckets: Array.isArray(summary?.buckets) ? summary.buckets : [] },
@@ -1003,6 +1008,15 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
       }
       const fraction = Math.max(0, Math.min(1, left));
       if (isPrimary && fraction <= 0) spent.add(group.name ?? "Gemini");
+      // A pool is spent when any of its windows is; it works again at the
+      // latest reset among those.
+      const pool = pools.get(group.name ?? "Gemini") ?? { name: group.name ?? "Gemini", spent: false, resetsAt: null };
+      if (fraction <= 0) {
+        const resetsAt = typeof bucket.resetTime === "string" ? bucket.resetTime : null;
+        pool.resetsAt = pool.spent && pool.resetsAt !== null && (resetsAt === null || Date.parse(pool.resetsAt) >= Date.parse(resetsAt)) ? pool.resetsAt : resetsAt;
+        pool.spent = true;
+      }
+      pools.set(pool.name, pool);
       windows.push({
         label,
         percent: Math.round((1 - fraction) * 100),
@@ -1016,13 +1030,13 @@ export function parseAntigravityQuota(summary: any, codeAssist: any): Omit<Accou
     : windows.length ? null : "Antigravity sent no quota for this account";
   // Which pool ran out: the other pools' models still work.
   const blocked = spent.size ? `${[...spent].join(" and ")} models used up` : null;
-  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked, usageLimit: null, error };
+  return { plan: typeof tier === "string" && tier ? tier : null, windows, blocked, usageLimit: null, pools: [...pools.values()], error };
 }
 
 /**
  * Null when agy is not installed or holds no sign-in: nothing to meter.
  */
-async function fetchAntigravityQuota(env: NodeJS.ProcessEnv, { force = false, timeoutMs = 15_000 } = {}): Promise<AccountQuota | null> {
+export async function fetchAntigravityQuota(env: NodeJS.ProcessEnv, { force = false, timeoutMs = 15_000 } = {}): Promise<AccountQuota | null> {
   const fetchedAt = new Date().toISOString();
   const base = { provider: "antigravity" as const, account: MAIN_ACCOUNT, default: true, email: null, plan: null, windows: [], blocked: null, usageLimit: null, fetchedAt };
   const reason = (error: unknown) => String((error as Error)?.message ?? error);

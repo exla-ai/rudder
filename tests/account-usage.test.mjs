@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  activeUsageLimit, accountReady, antigravityError, antigravityUsageLimit, applyAccountChecks, checkedAccount,
+  activeUsageLimit, accountReady, antigravityError, antigravityPools, antigravityUsageLimit, applyAccountChecks, checkedAccount,
   claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh,
 } from "../cloud/worker/account-usage.mjs";
 import { handoffRefusal } from "../cloud/worker/handoff.mjs";
@@ -105,4 +105,20 @@ test("a spent Antigravity quota becomes a usage limit with its reset, not the ra
   assert.equal(antigravityUsageLimit(capacity, now), null);
   assert.equal(antigravityUsageLimit(antigravityError(agy({ short_error: "RESOURCE_EXHAUSTED (code 429): Too many requests.", status: "RESOURCE_EXHAUSTED", error_code: 429 })), now), null);
   assert.equal(antigravityError("Error: something else"), null);
+});
+
+test("Antigravity's pools come from its quota report, and a pool is spent only until its reset", () => {
+  const now = Date.parse("2026-11-24T00:00:00Z");
+  const quota = { error: null, pools: [
+    { name: "Gemini", spent: true, resetsAt: "2026-11-24T02:00:00Z" },
+    { name: "Claude and GPT", spent: false, resetsAt: null },
+    { name: "Gemini 4 Argon", spent: true, resetsAt: "2026-11-23T09:00:00Z" },
+  ] };
+  assert.deepEqual(antigravityPools(quota, now), [
+    { name: "Gemini", spent: true, resetsAt: Date.parse("2026-11-24T02:00:00Z") },
+    { name: "Claude and GPT", spent: false, resetsAt: null },
+    { name: "Gemini 4 Argon", spent: false, resetsAt: null },
+  ]);
+  assert.equal(antigravityPools({ ...quota, error: "could not reach Google" }, now), null);
+  assert.equal(antigravityPools(null, now), null);
 });

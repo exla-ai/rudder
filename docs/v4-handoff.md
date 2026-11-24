@@ -47,6 +47,44 @@ that tarball and Cloud deploys before the tag, and the tag only verifies
 hashes and publishes npm and the Mac app, at every version. The GHCR worker
 image copy is gone; external hosts pull `rudder-worker-images`.
 
+Shipped 2026-11-24, 5.0.34 to 5.0.39 (npm, Cloud and the Mac app at each):
+
+- 5.0.34: the overnight fixes (message states, delivery, session hijack,
+  reader gaps, status, hygiene, perf) and the Antigravity plan usage meter,
+  which keeps an account at its limit in the popover and names the spent pool.
+- 5.0.35: a subagent's card and tray line show the model its log names.
+- 5.0.36: a Codex review the Codex plugin ran from a Claude agent's shell is a
+  subagent: the shell output names the thread (`transcripts.mjs`
+  `outsideAgents`), a card on that call and a tray line read its rollout.
+- 5.0.37: the home watches the process tree under every agent every 3 s
+  (`cloud/worker/outside-agents.mjs`) and lists each `codex exec`, `agy -p`
+  and `claude -p` in the tray, whichever harness launched it, matched to the
+  session its harness wrote; found runs are kept in
+  `~/.rudder/outside-agents.json`. Helpers (`parentRunId`) are listed under
+  the agent that asked.
+- 5.0.38: the hourly sweep deletes a `/workspace/rudder-scratch/<task>` entry
+  idle for 3 days that no process uses; a jj workspace in it that holds
+  changes keeps it. `/workspace` went from 273 GB to 205 GB used that day.
+- 5.0.39: Antigravity's model pools are on its account (`modelPools`); the
+  picker refuses only the models of a spent pool and the account keeps
+  working on the others.
+
+Open after 5.0.39:
+
+- A command that leaves the agent's process tree (`nohup`, `setsid`) or ends
+  between two looks is not listed; Codex and Antigravity agents get the tray
+  line only, no card in the chat; a subagent that waits on a background shell
+  still reads "done".
+- The home does not refuse a start or a move onto a model of a spent
+  Antigravity pool; only the picker does.
+- The Offstage Mac job often lands on a Mac without Xcode and passes on a
+  rerun of the failed job. `scripts/worker-image.mjs` sometimes fails after a
+  good push when flyctl starts a second build; the registry wait and the tag
+  copy then have to be run again.
+- The warm snapshot pools hold about 34 GB with snapshots no fork seems to
+  use; not looked into. The end to end test videos from the 11-23 overnight
+  plan were never recorded.
+
 How to work: see "Development speed" in `AGENTS.md` (main only, targeted
 checks, CI only at release, no new status docs, no hardening waves).
 

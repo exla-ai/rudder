@@ -30,8 +30,8 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     # Apple Silicon only: no Intel (x86_64) slice in any build.
     ARCHS: arm64
-    MARKETING_VERSION: "5.0.40"
-    CURRENT_PROJECT_VERSION: "5000040"
+    MARKETING_VERSION: "5.0.41"
+    CURRENT_PROJECT_VERSION: "5000041"
 
 targets:
   Rudder:

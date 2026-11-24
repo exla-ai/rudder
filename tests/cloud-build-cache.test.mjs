@@ -17,7 +17,11 @@ async function fixture(t) {
 
 function cacheEnv(dir, overrides = {}) {
   const env = { ...process.env, HOME: dir, TEST_CACHE_SCRIPT: cacheScript };
-  for (const key of ["RUDDER_CACHE_DIR", "RUDDER_HOME", "RUDDER_HOME_VOLUME", "RUDDER_BUILD_CACHE", "npm_config_cache", "NPM_CONFIG_CACHE", "npm_config_store_dir", "NPM_CONFIG_STORE_DIR", "UV_CACHE_DIR"]) delete env[key];
+  for (const key of [
+    "RUDDER_CACHE_DIR", "RUDDER_TOOL_CACHE_DIR", "XDG_CACHE_HOME",
+    "RUDDER_HOME", "RUDDER_HOME_VOLUME", "RUDDER_BUILD_CACHE",
+    "npm_config_cache", "NPM_CONFIG_CACHE", "npm_config_store_dir", "NPM_CONFIG_STORE_DIR", "UV_CACHE_DIR",
+  ]) delete env[key];
   Object.assign(env, overrides);
   const result = spawnSync("sh", ["-eu", "-c", '. "$TEST_CACHE_SCRIPT"; env'], { env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -27,17 +31,33 @@ function cacheEnv(dir, overrides = {}) {
   }));
 }
 
-test("home package caches survive reboot on the account volume and respect explicit tool paths", async (t) => {
+test("package caches unify under the tool-cache root and respect explicit overrides", async (t) => {
   const dir = await fixture(t);
-  const volume = path.join(dir, "volume");
-  const env = cacheEnv(dir, { RUDDER_HOME: "1", RUDDER_HOME_VOLUME: volume });
-  const root = path.join(volume, "cache", "build");
+  const env = cacheEnv(dir, { RUDDER_HOME: "1" });
+  const root = path.join(dir, ".cache", "rudder", "tool-cache");
+  assert.equal(env.RUDDER_CACHE_DIR, root);
   assert.equal(env.npm_config_cache, path.join(root, "npm"));
   assert.equal(env.npm_config_store_dir, path.join(root, "pnpm"));
   assert.equal(env.UV_CACHE_DIR, path.join(root, "uv"));
   assert.equal(env.CARGO_TARGET_DIR, process.env.CARGO_TARGET_DIR, "do not share mutable compiler outputs");
   await fs.writeFile(path.join(root, "retained"), "package blob");
-  const next = cacheEnv(dir, { RUDDER_HOME: "1", RUDDER_HOME_VOLUME: volume, NPM_CONFIG_CACHE: "/custom/npm", NPM_CONFIG_STORE_DIR: "/custom/pnpm", UV_CACHE_DIR: "/custom/uv" });
+
+  const xdg = path.join(dir, "xdg");
+  const withXdg = cacheEnv(dir, { XDG_CACHE_HOME: xdg });
+  assert.equal(withXdg.RUDDER_CACHE_DIR, path.join(xdg, "rudder", "tool-cache"));
+  assert.equal(withXdg.npm_config_cache, path.join(xdg, "rudder", "tool-cache", "npm"));
+
+  const customToolRoot = path.join(dir, "custom-tool-cache");
+  const withToolRoot = cacheEnv(dir, { RUDDER_TOOL_CACHE_DIR: customToolRoot });
+  assert.equal(withToolRoot.RUDDER_CACHE_DIR, customToolRoot);
+  assert.equal(withToolRoot.UV_CACHE_DIR, path.join(customToolRoot, "uv"));
+
+  const explicitRoot = path.join(dir, "explicit-cache");
+  const withExplicitRoot = cacheEnv(dir, { RUDDER_TOOL_CACHE_DIR: customToolRoot, RUDDER_CACHE_DIR: explicitRoot });
+  assert.equal(withExplicitRoot.RUDDER_CACHE_DIR, explicitRoot);
+  assert.equal(withExplicitRoot.npm_config_store_dir, path.join(explicitRoot, "pnpm"));
+
+  const next = cacheEnv(dir, { RUDDER_HOME: "1", NPM_CONFIG_CACHE: "/custom/npm", NPM_CONFIG_STORE_DIR: "/custom/pnpm", UV_CACHE_DIR: "/custom/uv" });
   assert.equal(await fs.readFile(path.join(root, "retained"), "utf8"), "package blob");
   assert.deepEqual([next.npm_config_cache, next.npm_config_store_dir, next.UV_CACHE_DIR], ["/custom/npm", "/custom/pnpm", "/custom/uv"]);
 });

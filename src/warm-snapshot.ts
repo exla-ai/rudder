@@ -769,7 +769,11 @@ async function baseDistance(repoRoot: string, base: string): Promise<number> {
  * Deletes ready snapshots beyond the newest `keep`, unless a fork or a kept
  * snapshot mounts them: a stacked snapshot keeps every layer under it.
  */
-export async function pruneWarmSnapshots(repoRoot: string, keep = KEEP_READY): Promise<void> {
+export async function pruneWarmSnapshots(
+  repoRoot: string,
+  keep = KEEP_READY,
+  options?: { lowerGraceMs?: number },
+): Promise<void> {
   const snaps = readySnapshots(repoRoot);
   const kept = snaps.slice(0, keep);
   for (const snap of snaps.slice(keep)) {
@@ -781,6 +785,7 @@ export async function pruneWarmSnapshots(repoRoot: string, keep = KEEP_READY): P
     await fsp.rm(path.join(warmDir(repoRoot), `${snap.key}.log`), { force: true });
   }
   await pruneUnfinishedBuilds(repoRoot);
+  await pruneUnusedLowers(repoRoot, kept, options?.lowerGraceMs);
   await pruneOldMarkers(repoRoot);
 }
 
@@ -850,6 +855,31 @@ async function removeLowerLinks(root: string, target: string): Promise<void> {
   for (const name of await fsp.readdir(root).catch(() => [] as string[])) {
     const link = path.join(root, name);
     if ((await fsp.readlink(link).catch(() => null)) === target) await fsp.rm(link, { force: true });
+  }
+}
+
+const UNUSED_LOWER_GRACE_MS = 5 * 60_000;
+
+/**
+ * Drops broken symlinks and unreferenced materialized directories created by
+ * `ensure_lower()` in `.warm/lower-links/` and legacy `.warm/lowers/`.
+ */
+async function pruneUnusedLowers(repoRoot: string, kept: WarmSnapshot[], graceMs = UNUSED_LOWER_GRACE_MS): Promise<void> {
+  const used = layersInUse(repoRoot, kept);
+  const cutoff = Date.now() - graceMs;
+  for (const root of [forkLowersRoot(repoRoot), path.join(warmDir(repoRoot), "lowers")]) {
+    for (const name of await fsp.readdir(root).catch(() => [] as string[])) {
+      const entry = path.join(root, name);
+      const lstat = await fsp.lstat(entry).catch(() => null);
+      if (!lstat) continue;
+      if (lstat.isSymbolicLink()) {
+        const exists = await fsp.stat(entry).then(() => true, () => false);
+        if (!exists) await fsp.rm(entry, { force: true });
+      } else if (lstat.isDirectory()) {
+        if (used.has(realPath(entry))) continue;
+        if (lstat.mtimeMs <= cutoff) await removeTree(entry);
+      }
+    }
   }
 }
 

@@ -47,7 +47,7 @@ that tarball and Cloud deploys before the tag, and the tag only verifies
 hashes and publishes npm and the Mac app, at every version. The GHCR worker
 image copy is gone; external hosts pull `rudder-worker-images`.
 
-Shipped 2026-11-24, 5.0.34 to 5.0.39 (npm, Cloud and the Mac app at each):
+Shipped 2026-11-24, 5.0.34 to 5.0.40 (npm, Cloud and the Mac app at each):
 
 - 5.0.34: the overnight fixes (message states, delivery, session hijack,
   reader gaps, status, hygiene, perf) and the Antigravity plan usage meter,
@@ -68,8 +68,15 @@ Shipped 2026-11-24, 5.0.34 to 5.0.39 (npm, Cloud and the Mac app at each):
 - 5.0.39: Antigravity's model pools are on its account (`modelPools`); the
   picker refuses only the models of a spent pool and the account keeps
   working on the others.
+- 5.0.40: S3-backed remote build cache (`cloud/src/remote-build-cache.ts`,
+  sccache WebDAV + Turborepo v8) with per-boot loopback proxy
+  (`cloud/worker/cache-proxy.mjs`), unified tool-cache root and hourly LRU
+  pruning (`cache-env.sh`, `cleanup.mjs`), `.warm/lower-links/` pruning
+  (`src/warm-snapshot.ts`), live home collector (`cloud/worker/cache-stats.mjs`),
+  and `/app/machine` web UI (`cloud/app/machine-panel.js`) with project
+  `WarmChip` and per-agent workspace mode in stats.
 
-Open after 5.0.39:
+Open after 5.0.40:
 
 - A command that leaves the agent's process tree (`nohup`, `setsid`) or ends
   between two looks is not listed; Codex and Antigravity agents get the tray

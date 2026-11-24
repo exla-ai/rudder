@@ -45,6 +45,8 @@ import { queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdra
 import { cleanupPaths, createCleanupJob, readProcesses } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
+import { startCacheProxy } from "./cache-proxy.mjs";
+import { agentWorkspaceMode, createMachineStatsCollector, projectWarmBadge } from "./cache-stats.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
 import { createSlashCommands } from "./slash-commands.mjs";
 import { createVibeprintHosts } from "./vibeprint-host.mjs";
@@ -220,6 +222,32 @@ const tailscale = createTailscale({
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 const accountAvailabilityFile = path.join(PERSIST_HOME, ".rudder", "account-availability.json");
 baseChildEnv.RUDDER_ACCOUNT_AVAILABILITY = accountAvailabilityFile;
+// Local remote-cache proxy (sccache WebDAV + Turborepo v8 -> Cloud S3).
+// Agents receive the per-boot loopback token, never the home worker token.
+let cacheProxy = null;
+if (process.env.RUDDER_REMOTE_CACHE !== "0" && cloudUrl && homeId && workerToken) {
+  cacheProxy = startCacheProxy({
+    cloudUrl,
+    homeId,
+    workerToken,
+    statsFile: path.join(PERSIST_HOME, ".rudder", "remote-cache-stats.json"),
+    log,
+  });
+  try {
+    const info = await cacheProxy.ready;
+    baseChildEnv.RUDDER_REMOTE_CACHE_URL = info.url;
+    baseChildEnv.RUDDER_REMOTE_CACHE_TOKEN = info.token;
+    log(`remote cache proxy listening on ${info.url}`);
+  } catch (error) {
+    log(`remote cache proxy failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    cacheProxy = null;
+  }
+}
+const machineStats = createMachineStatsCollector({
+  home: HOME,
+  env: baseChildEnv,
+  sccacheStatsFile: path.join(PERSIST_HOME, ".rudder", "sccache-stats.json"),
+});
 // Rudder's own skills (rudder-burst and the rest) for every agent on this
 // home, from this image: once per start, where `rudder` did it per dashboard.
 await ensureAgentSkills(baseChildEnv);
@@ -336,6 +364,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     logins.dispose();
     tailscale.dispose();
     vibeprint.stopAll();
+    cacheProxy?.close();
     for (const project of projects.values()) {
       project.stop();
     }
@@ -850,6 +879,28 @@ async function handleRpc(method, params) {
     // machine's Claude and Codex sign-ins (src/usage.ts caches them).
     const { fetchQuota } = await import(fromDist("usage.js"));
     return await fetchQuota({ force: params.refresh === true, env: baseChildEnv });
+  }
+  if (method === "machineStats") {
+    const list = [...projects.values()]
+      .filter((project) => project.status !== "cloning" && !project.coordinator)
+      .map((project) => ({
+        workspaceId: project.workspaceId,
+        name: project.name,
+        repo: project.descriptor.repo,
+        dir: project.dir,
+        agents: project.agents(),
+      }));
+    return await machineStats.collect({
+      projects: list,
+      remoteCache: cacheProxy?.snapshot() ?? null,
+      refresh: params.refresh === true,
+    });
+  }
+  if (method === "pruneCaches") {
+    const list = [...projects.values()]
+      .filter((project) => project.status !== "cloning" && !project.coordinator)
+      .map((project) => ({ workspaceId: project.workspaceId, name: project.name, dir: project.dir }));
+    return await machineStats.prune({ projects: list, env: baseChildEnv, distDir: rudderDist });
   }
   if (method === "createRepo") {
     const created = await createGithubRepo(params);
@@ -1733,6 +1784,7 @@ async function publishState() {
       // Chats closed in the last day, for the app's Show closed and Reopen.
       closed: project.status === "cloning" ? [] : readClosedChats(project.dir).map((chat) => ({ ...chat, modelName: nameModel(chat.backend, chat.model) })),
       plan: project.status === "cloning" ? null : planWithModelNames(readProjectPlan(project.dir)),
+      warm: project.status === "cloning" || project.coordinator ? null : projectWarmBadge(project.dir),
       // The engine-proven role, PID token and attempt travel with every URL.
       // Control-plane authorization binds these to this authenticated Home.
       previews: privatePreviews?.snapshot(project.workspaceId) ?? [],
@@ -1894,6 +1946,7 @@ function agentSummary(record, options, repoDir) {
     planId: record.planId ?? null,
     // The agent that started this one as its helper (native helpers.rs).
     parentRunId: record.parentRunId ?? null,
+    workspaceMode: agentWorkspaceMode(record.workspace?.path),
     remoteUrl,
     asks: agentAsks(record),
     ...(record.backend === "codex" && { answerSubmission: codexAnswerQueue.status(repoDir, record.id) }),

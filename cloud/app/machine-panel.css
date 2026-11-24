@@ -1,0 +1,878 @@
+/* Machine & Cache screen (machine-panel.js) and project header WarmChip.
+   Uses only Rudder design tokens from styles.css so light and dark themes work seamlessly.
+   Class names avoid desktop.css model-picker classes (.mp-model, .mp-name, .mp-badge, etc.). */
+
+/* Desktop layout adjustments ------------------------------------------ */
+body.desktop .dsk-main .mp-screen .back { display: none; }
+body.desktop .dsk-main .mp-screen .scroller > .mp-body { max-width: 960px; }
+
+.mp-body {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 6px 0 24px;
+}
+
+.mp-head-acts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mp-prune-btn {
+  gap: 6px;
+  white-space: nowrap;
+}
+.mp-prune-btn svg { width: 15px; height: 15px; }
+
+@media (max-width: 440px) {
+  .mp-prune-btn { padding: 0 10px; font-size: 13px; }
+}
+
+/* Status pills -------------------------------------------------------- */
+.mp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.mp-pill-ok { background: var(--done-soft); color: var(--done); }
+.mp-pill-warn { background: var(--needs-soft); color: var(--needs); }
+.mp-pill-err { background: var(--failed-soft); color: var(--failed); }
+.mp-pill-accent { background: var(--accent-soft); color: var(--accent); }
+.mp-pill-muted { background: var(--idle-soft); color: var(--muted); }
+
+.mp-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+  position: relative;
+}
+.mp-dot-live::after {
+  content: "";
+  position: absolute;
+  inset: -3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: mp-pulse 1.8s ease-out infinite;
+}
+@keyframes mp-pulse {
+  0% { transform: scale(0.5); opacity: 0.45; }
+  80%, 100% { transform: scale(1.6); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mp-dot-live::after { animation: none; }
+}
+
+/* Skeleton & error states --------------------------------------------- */
+.mp-sk-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.mp-sk-kpi { height: 104px; border-radius: var(--radius); }
+.mp-sk-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.mp-sk-card { height: 156px; border-radius: var(--radius); margin-bottom: 10px; }
+
+.mp-err-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  margin-top: 8px;
+}
+.mp-err-ic {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: var(--failed-soft);
+  color: var(--failed);
+  flex: none;
+}
+.mp-err-ic svg { width: 20px; height: 20px; }
+.mp-err-body { flex: 1; min-width: 0; }
+.mp-err-title { font-weight: 600; font-size: 15px; color: var(--ink); }
+.mp-err-msg { font-size: 13px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
+
+.mp-stale-bar {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--needs-soft);
+  color: var(--needs);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* Offline / asleep banner --------------------------------------------- */
+.mp-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: var(--needs-soft);
+  border-color: color-mix(in srgb, var(--needs) 25%, var(--line));
+}
+.mp-banner-ic {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--needs) 16%, transparent);
+  color: var(--needs);
+  flex: none;
+}
+.mp-banner-ic svg { width: 19px; height: 19px; }
+.mp-banner-text { flex: 1; min-width: 0; }
+.mp-banner-title { font-weight: 650; font-size: 14.5px; color: var(--ink); }
+.mp-banner-sub { font-size: 13px; color: var(--ink-2); margin-top: 2px; line-height: 1.4; }
+
+/* Summary KPI grid ---------------------------------------------------- */
+.mp-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.mp-kpi {
+  padding: 13px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.mp-kpi-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.mp-kpi-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-kpi-val {
+  font-size: clamp(18px, 2.2vw, 22px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-kpi-sub,
+.mp-kpi-sub2 {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.mp-kpi-sub2 { color: var(--faint); }
+.mp-kpi-sub:empty, .mp-kpi-sub2:empty { display: none; }
+
+/* Sections & generic cards -------------------------------------------- */
+.mp-sec-meta {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.mp-card {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.mp-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.mp-card-title {
+  font-weight: 650;
+  font-size: 15px;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-card-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  margin-top: -4px;
+}
+
+.mp-empty-note {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Pipeline grid ------------------------------------------------------- */
+.mp-pipe-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.mp-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px 12px;
+  padding-top: 2px;
+}
+.mp-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.mp-stat-k {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mp-stat-v {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mp-stat-v.mp-v-ok { color: var(--done); }
+.mp-stat-v.mp-v-err { color: var(--failed); }
+.mp-v-mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* sccache multilevel rows --------------------------------------------- */
+.mp-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.mp-level-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mp-level-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mp-level-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.mp-level-nums {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Proof cache bar ----------------------------------------------------- */
+.mp-proof {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.mp-proof-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.mp-proof-val { color: var(--ink-2); font-weight: 500; white-space: nowrap; }
+
+/* Burst builders list ------------------------------------------------- */
+.mp-builders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mp-builder-row {
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mp-builder-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mp-builder-id {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-builder-sub {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.mp-builder-sub:empty { display: none; }
+.mp-builder-err {
+  font-size: 12px;
+  color: var(--failed);
+  overflow-wrap: anywhere;
+}
+
+/* Live Remote Cache Activity Feed ------------------------------------- */
+.mp-feed-card {
+  margin-top: 10px;
+}
+.mp-feed-wrap {
+  overflow-x: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.mp-feed-head,
+.mp-feed-row {
+  display: grid;
+  grid-template-columns: 64px 72px 52px minmax(140px, 1fr) 74px 66px;
+  align-items: center;
+  gap: 10px;
+  min-width: 520px;
+}
+.mp-feed-head {
+  padding: 0 4px 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.mp-feed-rows {
+  display: flex;
+  flex-direction: column;
+}
+.mp-feed-row {
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.mp-feed-row:last-child { border-bottom: 0; padding-bottom: 2px; }
+.mp-feed-time { color: var(--muted); white-space: nowrap; font-size: 12px; }
+.mp-feed-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  justify-self: start;
+}
+.mp-feed-op {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  justify-self: start;
+}
+.mp-op-hit { background: var(--done-soft); color: var(--done); }
+.mp-op-put { background: var(--accent-soft); color: var(--accent); }
+.mp-op-miss { background: var(--idle-soft); color: var(--muted); }
+.mp-op-err { background: var(--failed-soft); color: var(--failed); }
+.mp-feed-key {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-feed-size,
+.mp-feed-ms {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 12px;
+}
+.mp-r { text-align: right; }
+
+/* Warm snapshots per project ------------------------------------------ */
+.mp-proj-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mp-proj-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mp-proj-ident { min-width: 0; flex: 1; }
+.mp-proj-link {
+  display: inline-block;
+  max-width: 100%;
+  font-weight: 650;
+  font-size: 15.5px;
+  color: var(--ink);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-proj-link:hover { color: var(--accent); text-decoration: underline; }
+.mp-proj-repo {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-proj-meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: -4px;
+}
+
+.mp-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mp-layers-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.mp-layers-label { color: var(--ink-2); font-weight: 500; }
+.mp-layers-warn { color: var(--needs); font-weight: 600; }
+.mp-layers-segs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 4px;
+}
+.mp-layers-seg {
+  height: 7px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  transition: background 180ms;
+}
+.mp-layers-seg.filled { background: var(--working); }
+.mp-layers-seg.filled.warn { background: var(--needs); }
+
+/* Collapsible project error ------------------------------------------- */
+.mp-proj-err {
+  border-radius: var(--radius-sm);
+  background: var(--failed-soft);
+  border: 1px solid color-mix(in srgb, var(--failed) 22%, transparent);
+  overflow: hidden;
+}
+.mp-proj-err-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  color: var(--failed);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+}
+.mp-proj-err-toggle svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  transition: transform 140ms;
+}
+.mp-proj-err.open .mp-proj-err-toggle svg { transform: rotate(90deg); }
+.mp-proj-err-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-proj-err-pre {
+  margin: 0;
+  padding: 0 10px 9px 30px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--failed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Workspace chips ----------------------------------------------------- */
+.mp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mp-chips-empty {
+  font-size: 12px;
+  color: var(--faint);
+}
+.mp-ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 2px 9px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.mp-ws-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--idle);
+  flex: none;
+}
+.mp-ws-chip.active .mp-ws-dot { background: var(--working); }
+.mp-ws-name {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.mp-ws-meta {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.mp-ws-meta::before {
+  content: "· ";
+  color: var(--faint);
+}
+.mp-ws-chip-plain {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+
+/* Progress meters (shared levels: ok / warm / hot) -------------------- */
+.mp-meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.mp-meter-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--working);
+  transition: width 260ms ease, background 180ms ease;
+}
+.mp-meter.lv-ok .mp-meter-fill { background: var(--working); }
+.mp-meter.lv-warm .mp-meter-fill { background: var(--needs); }
+.mp-meter.lv-hot .mp-meter-fill { background: var(--failed); }
+
+/* Local Tool Caches --------------------------------------------------- */
+.mp-cache-root {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-cache-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mp-cache-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mp-cache-row + .mp-cache-row {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.mp-cache-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mp-cache-title {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.mp-cache-nums {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mp-cache-sub {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Machine Health ------------------------------------------------------ */
+.mp-health-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mp-health-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+.mp-health-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.mp-health-subhead {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.mp-health-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mp-hbar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mp-hbar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.mp-hbar-label { font-weight: 600; color: var(--ink); }
+.mp-hbar-right {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mp-hbar-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.mp-health-foot {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.mp-health-cpu,
+.mp-health-psi {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mp-psi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+}
+.mp-psi-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.mp-psi-k { color: var(--muted); }
+.mp-psi-v { font-weight: 650; color: var(--ink); }
+.mp-psi-item.lv-ok .mp-psi-v { color: var(--done); }
+.mp-psi-item.lv-warm {
+  background: var(--needs-soft);
+  border-color: color-mix(in srgb, var(--needs) 24%, transparent);
+}
+.mp-psi-item.lv-warm .mp-psi-v { color: var(--needs); }
+.mp-psi-item.lv-hot {
+  background: var(--failed-soft);
+  border-color: color-mix(in srgb, var(--failed) 24%, transparent);
+}
+.mp-psi-item.lv-hot .mp-psi-v { color: var(--failed); }
+
+/* Responsive desktop breakpoints -------------------------------------- */
+@media (min-width: 720px) {
+  .mp-kpis,
+  .mp-sk-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .mp-pipe-grid,
+  .mp-sk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mp-health-grid,
+  .mp-health-foot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Reusable WarmChip for project headers ------------------------------- */
+.warm-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font: 600 12px/1 var(--font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  background: var(--idle-soft);
+  color: var(--muted);
+  transition: filter 120ms, transform 120ms;
+}
+.warm-chip[hidden] { display: none; }
+.warm-chip:active { transform: scale(0.96); }
+.warm-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.warm-chip .wc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+  position: relative;
+}
+.warm-chip.wc-ready {
+  background: var(--done-soft);
+  color: var(--done);
+}
+.warm-chip.wc-stale {
+  background: var(--needs-soft);
+  color: var(--needs);
+}
+.warm-chip.wc-building {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.warm-chip.wc-building .wc-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: mp-pulse 1.8s ease-out infinite;
+}
+.warm-chip.wc-failed {
+  background: var(--failed-soft);
+  color: var(--failed);
+}
+@media (hover: hover) {
+  .warm-chip:hover { filter: brightness(0.95); }
+  :root[data-theme="dark"] .warm-chip:hover { filter: brightness(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .warm-chip.wc-building .wc-dot::after { animation: none; }
+}

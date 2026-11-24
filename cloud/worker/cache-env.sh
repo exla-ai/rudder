@@ -1,12 +1,10 @@
 #!/usr/bin/env sh
 # Source before starting either supervisor. Share package/download caches within
-# this account's machine; build outputs and writable checkouts stay per agent.
+# this account's machine under the same root as src/tool-cache.ts; build outputs
+# and writable checkouts stay per agent.
 if [ "${RUDDER_BUILD_CACHE:-1}" != "0" ]; then
-  if [ "${RUDDER_HOME:-0}" = "1" ]; then
-    rudder_cache_default="${RUDDER_HOME_VOLUME:-/workspace}/cache/build"
-  else
-    rudder_cache_default="${HOME}/.cache/rudder-build"
-  fi
+  rudder_cache_base="${XDG_CACHE_HOME:-$HOME/.cache}"
+  rudder_cache_default="${RUDDER_TOOL_CACHE_DIR:-$rudder_cache_base/rudder/tool-cache}"
   RUDDER_CACHE_DIR="${RUDDER_CACHE_DIR:-$rudder_cache_default}"
   if mkdir -p "$RUDDER_CACHE_DIR" && [ -w "$RUDDER_CACHE_DIR" ]; then
     # All tools retain their own integrity, locking and cache-key semantics.
@@ -18,5 +16,5 @@ if [ "${RUDDER_BUILD_CACHE:-1}" != "0" ]; then
   else
     echo "rudder-worker: build cache directory is unavailable; using tool defaults" >&2
   fi
-  unset rudder_cache_default
+  unset rudder_cache_base rudder_cache_default
 fi

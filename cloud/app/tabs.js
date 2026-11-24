@@ -326,7 +326,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   }
 
   // What a tab says: an agent's name and status dot, or the page's name.
-  const PAGES = { home: ["Projects", "code"], all: ["All agents", "agents"], "all-agent": ["All agents", "agents"], settings: ["Settings", "settings"], digest: ["Digest", "sun"], files: ["Files", "folder"], team: ["Team", "users"] };
+  const PAGES = { home: ["Projects", "code"], all: ["All agents", "agents"], "all-agent": ["All agents", "agents"], settings: ["Settings", "settings"], machine: ["Machine & Cache", "server"], digest: ["Digest", "sun"], files: ["Files", "folder"], team: ["Team", "users"] };
   const agentTitle = (a) => a?.title || a?.task || "Untitled agent";
   function describe({ path, split }) {
     const r = parseRoute(path);

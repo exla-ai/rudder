@@ -701,6 +701,74 @@ export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = D
 }
 
 // ---------------------------------------------------------------------------
+// Shared tool cache: LRU pruning matching TOOL_CACHE_LIMITS in src/tool-cache.ts.
+// ---------------------------------------------------------------------------
+
+const HOME_TOOL_CACHE_LIMITS = {
+  sccache: 20 * 1024 ** 3,
+  pnpm: 10 * 1024 ** 3,
+  npm: 5 * 1024 ** 3,
+  uv: 10 * 1024 ** 3,
+  pip: 5 * 1024 ** 3,
+  cargo: 5 * 1024 ** 3,
+  turbo: 5 * 1024 ** 3,
+  nx: 5 * 1024 ** 3,
+};
+
+function homeToolCacheRoot(env = process.env) {
+  if (env.RUDDER_TOOL_CACHE_DIR) return env.RUDDER_TOOL_CACHE_DIR;
+  const base = env.XDG_CACHE_HOME || path.join(env.HOME || os.homedir(), ".cache");
+  return path.join(base, "rudder", "tool-cache");
+}
+
+function listToolCacheFiles(dir, out = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) listToolCacheFiles(file, out);
+    else if (entry.isFile()) {
+      try {
+        const st = fs.lstatSync(file);
+        if (st.isFile()) out.push({ file, size: st.size, atime: Math.max(st.atimeMs, st.mtimeMs) });
+      } catch {
+        // raced
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Deletes least recently used files in the home tool cache until each tool
+ * directory is within its limit. Symlinks are never followed or removed.
+ * Returns bytes freed.
+ */
+export function pruneHomeToolCache(env = process.env, limits = HOME_TOOL_CACHE_LIMITS) {
+  const root = homeToolCacheRoot(env);
+  let freed = 0;
+  for (const [name, limit] of Object.entries(limits)) {
+    const files = listToolCacheFiles(path.join(root, name)).sort((a, b) => a.atime - b.atime);
+    let total = files.reduce((sum, f) => sum + f.size, 0);
+    for (const f of files) {
+      if (total <= limit) break;
+      try {
+        fs.unlinkSync(f.file);
+        total -= f.size;
+        freed += f.size;
+      } catch {
+        // in use or gone
+      }
+    }
+  }
+  return freed;
+}
+
+// ---------------------------------------------------------------------------
 // The job: a small model, once an hour or when memory is short.
 // ---------------------------------------------------------------------------
 
@@ -761,6 +829,12 @@ export function createCleanupJob({
     if (scratch && (scratch.removed.length || scratch.failed.length)) {
       log(`cleanup: scratch freed ${scratch.freedBytes} bytes (${scratch.removed.length} removed${scratch.failed.length ? `, ${scratch.failed.length} failed` : ""})`);
     }
+    const toolCacheFreedBytes = trigger === "hourly"
+      ? (safe(() => pruneHomeToolCache({ ...env, HOME: paths.home })) ?? 0)
+      : 0;
+    if (toolCacheFreedBytes > 0) {
+      log(`cleanup: tool cache freed ${toolCacheFreedBytes} bytes`);
+    }
     const args = [
       "-p", cleanupPrompt({ trigger }),
       "--model", model,
@@ -800,7 +874,7 @@ export function createCleanupJob({
         trigger,
         outcome: timedOut ? "timeout" : code === 0 ? "ok" : "failed",
         actions: actionsSince(paths, startedAt),
-        scratchFreedBytes: scratch?.freedBytes ?? 0,
+        scratchFreedBytes: (scratch?.freedBytes ?? 0) + toolCacheFreedBytes,
       }));
       const after = safe(() => readMachine(paths.procRoot));
       const report = out.trim() || err.trim() || `claude exited ${code}`;
@@ -812,6 +886,7 @@ export function createCleanupJob({
         trigger, model, startedAt, finishedAt: new Date().toISOString(), exitCode: code,
         memAvailableMbBefore: before?.memAvailableMb ?? null, memAvailableMbAfter: after?.memAvailableMb ?? null,
         scratch: scratch ? { freedBytes: scratch.freedBytes, removed: scratch.removed, kept: scratch.kept, failed: scratch.failed } : null,
+        toolCacheFreedBytes,
         report,
       }, null, 2)));
     };

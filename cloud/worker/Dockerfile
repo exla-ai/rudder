@@ -276,6 +276,8 @@ COPY cloud/worker/terminal-transport.mjs ./terminal-transport.mjs
 COPY cloud/worker/tailscale-previews.mjs ./tailscale-previews.mjs
 COPY cloud/worker/tailscale-login.mjs ./tailscale-login.mjs
 COPY cloud/worker/cache-env.sh ./cache-env.sh
+COPY cloud/worker/cache-proxy.mjs ./cache-proxy.mjs
+COPY cloud/worker/cache-stats.mjs ./cache-stats.mjs
 COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 COPY cloud/worker/steer-inbox.mjs ./steer-inbox.mjs
 COPY cloud/worker/run-watch.mjs ./run-watch.mjs

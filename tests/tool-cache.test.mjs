@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { pruneToolCache, toolCacheEnv, toolCacheRoot } from "../dist/tool-cache.js";
+import { pruneToolCache, toolCacheEnv, toolCacheRoot, toolCacheUsage } from "../dist/tool-cache.js";
 import { codexShellEnvConfigArgs } from "../dist/codex-config.js";
 import { nativeAgentCommand } from "../dist/native-agents.js";
 
@@ -118,4 +118,92 @@ test("a Codex agent launch carries the tool cache into its shell policy", (t) =>
     if (saved === undefined) delete process.env.RUDDER_TOOL_CACHE_DIR;
     else process.env.RUDDER_TOOL_CACHE_DIR = saved;
   }
+});
+
+test("remote cache env configures sccache multilevel webdav and Turborepo when proxy url and token are set", (t) => {
+  const root = tempDir(t);
+  const env = {
+    HOME: path.join(root, "home"),
+    JJ_CONFIG: "/u/jj.toml",
+    RUDDER_REMOTE_CACHE_URL: "  http://127.0.0.1:41234/  ",
+    RUDDER_REMOTE_CACHE_TOKEN: "  rdrc_test_token  ",
+  };
+  for (const role of ["agent", "builder"]) {
+    const out = toolCacheEnv(role, { root, env, hasTool: () => true });
+    assert.equal(out.SCCACHE_MULTILEVEL_CHAIN, "disk,webdav");
+    assert.equal(out.SCCACHE_WEBDAV_ENDPOINT, "http://127.0.0.1:41234/sccache");
+    assert.equal(out.SCCACHE_WEBDAV_TOKEN, "rdrc_test_token");
+    assert.equal(out.SCCACHE_WEBDAV_RW_MODE, "READ_WRITE");
+    assert.equal(out.SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY, "ignore");
+    assert.equal(out.TURBO_API, "http://127.0.0.1:41234/turbo");
+    assert.equal(out.TURBO_TOKEN, "rdrc_test_token");
+    assert.equal(out.TURBO_TEAM, "rudder");
+  }
+
+  // Without sccache installed, only Turborepo remote vars are set.
+  const noSccache = toolCacheEnv("agent", { root, env, hasTool: (name) => name !== "sccache" });
+  assert.equal(noSccache.SCCACHE_MULTILEVEL_CHAIN, undefined);
+  assert.equal(noSccache.SCCACHE_WEBDAV_ENDPOINT, undefined);
+  assert.equal(noSccache.TURBO_API, "http://127.0.0.1:41234/turbo");
+  assert.equal(noSccache.TURBO_TOKEN, "rdrc_test_token");
+  assert.equal(noSccache.TURBO_TEAM, "rudder");
+
+  // Explicitly disabled or missing url/token leaves remote vars unset.
+  for (const disabled of [
+    { ...env, RUDDER_REMOTE_CACHE: "0" },
+    { ...env, RUDDER_REMOTE_CACHE_URL: "   " },
+    { ...env, RUDDER_REMOTE_CACHE_TOKEN: "" },
+  ]) {
+    const out = toolCacheEnv("agent", { root, env: disabled, hasTool: () => true });
+    assert.equal(out.SCCACHE_MULTILEVEL_CHAIN, undefined);
+    assert.equal(out.TURBO_API, undefined);
+    assert.equal(out.TURBO_TOKEN, undefined);
+    assert.equal(out.TURBO_TEAM, undefined);
+  }
+
+  // Codex shell policy picks up every remote cache variable automatically.
+  const codexArgs = codexShellEnvConfigArgs(toolCacheEnv("agent", { root, env, hasTool: () => true }));
+  assert.ok(codexArgs.includes('shell_environment_policy.set.SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:41234/sccache"'));
+  assert.ok(codexArgs.includes('shell_environment_policy.set.TURBO_API="http://127.0.0.1:41234/turbo"'));
+});
+
+test("toolCacheUsage reports per-tool bytes, counts, recent files and lastWriteAt without following symlinks", (t) => {
+  const root = tempDir(t);
+  const outside = path.join(root, "outside.bin");
+  fs.writeFileSync(outside, Buffer.alloc(10_000));
+
+  const npmDir = path.join(root, "npm", "nested");
+  fs.mkdirSync(npmDir, { recursive: true });
+  const recentFile = path.join(npmDir, "recent.tgz");
+  const oldFile = path.join(npmDir, "old.tgz");
+  fs.writeFileSync(recentFile, Buffer.alloc(300));
+  fs.writeFileSync(oldFile, Buffer.alloc(200));
+  const recentAt = new Date(Date.now() - 60_000);
+  const oldAt = new Date(Date.now() - 48 * 3600_000);
+  fs.utimesSync(recentFile, recentAt, recentAt);
+  fs.utimesSync(oldFile, oldAt, oldAt);
+  fs.symlinkSync(outside, path.join(root, "npm", "linked-outside"));
+
+  const usage = toolCacheUsage(root, { npm: 1024, turbo: 2048 });
+  assert.equal(usage.root, root);
+  assert.equal(usage.totalBytes, 500);
+  assert.equal(usage.entries.length, 2);
+
+  const npm = usage.entries.find((e) => e.name === "npm");
+  assert.equal(npm.bytes, 500);
+  assert.equal(npm.limitBytes, 1024);
+  assert.equal(npm.fileCount, 2);
+  assert.equal(npm.recentFiles24h, 1);
+  assert.equal(typeof npm.lastWriteAt, "number");
+  assert.ok(Math.abs(npm.lastWriteAt - recentAt.getTime()) < 2000);
+
+  const turbo = usage.entries.find((e) => e.name === "turbo");
+  assert.deepEqual(turbo, {
+    name: "turbo",
+    bytes: 0,
+    limitBytes: 2048,
+    fileCount: 0,
+    recentFiles24h: 0,
+    lastWriteAt: null,
+  });
 });

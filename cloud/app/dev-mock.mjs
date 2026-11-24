@@ -188,11 +188,12 @@ const projects = [
   {
     workspaceId: "wsp_rudder", name: "rudder", repo: "exla-ai/rudder", ref: "main", status: "running", failureReason: null,
     dashboard: "running", clients: 1, lastActivityAt: iso(T0 - 1 * MIN),
+    warm: { status: "ready", key: "11eec25736c0", commit: "11eec25736c07beeba277325b1be8424e6926d6a", layers: 3, maxLayers: 8, builtAt: iso(T0 - 14 * MIN), forkCount: 5 },
     agents: [
-      agent({ id: "run_a1", title: "Phone app for agent control", task: "Build the phone-first web app under cloud/app", status: "working", backend: "claude", model: "opus", mode: "main", updatedAt: T0 - 1 * MIN, lastMessage: "Wiring the transcript poll to keep scroll pinned only when you are already at the bottom.", remoteUrl: "https://claude.ai/code/session_01Abc" }),
-      agent({ id: "run_a2", title: "Fix flaky Ctrl+W chord test", task: "Stabilize the e2e chord tests", status: "waiting", backend: "codex", model: "gpt-6.1-sol", phase: "permission", updatedAt: T0 - 4 * MIN, lastMessage: "I need permission to run `cargo test --release` with network access. Allow?" }),
-      agent({ id: "run_a3", title: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "review", visibility: "private", backend: "claude", model: "sonnet", nodeId: "n2", planId: "plan_1", updatedAt: T0 - 18 * MIN, lastMessage: "Done. Ports 3000 and 5173 are reachable at https://rudder-home.tail4c2e1.ts.net. Ready to merge." }),
-      agent({ id: "run_a4", title: "Delete cloud workspaces safely", task: "Request + reaper for deletes", status: "done", backend: "claude", model: "opus", updatedAt: T0 - 3 * 60 * MIN, lastMessage: "Added the deletion reaper with a 30s sweep and 410s for dead rows." }),
+      agent({ id: "run_a1", title: "Phone app for agent control", task: "Build the phone-first web app under cloud/app", status: "working", backend: "claude", model: "opus", mode: "main", workspaceMode: { kind: "overlay-fork", snapshotKey: "11eec25736c0", layers: 3 }, updatedAt: T0 - 1 * MIN, lastMessage: "Wiring the transcript poll to keep scroll pinned only when you are already at the bottom.", remoteUrl: "https://claude.ai/code/session_01Abc" }),
+      agent({ id: "run_a2", title: "Fix flaky Ctrl+W chord test", task: "Stabilize the e2e chord tests", status: "waiting", backend: "codex", model: "gpt-6.1-sol", phase: "permission", workspaceMode: { kind: "overlay-fork", snapshotKey: "11eec25736c0", layers: 3 }, updatedAt: T0 - 4 * MIN, lastMessage: "I need permission to run `cargo test --release` with network access. Allow?" }),
+      agent({ id: "run_a3", title: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "review", visibility: "private", backend: "claude", model: "sonnet", nodeId: "n2", planId: "plan_1", workspaceMode: { kind: "overlay-fork", snapshotKey: "de4609ec9c06", layers: 2 }, updatedAt: T0 - 18 * MIN, lastMessage: "Done. Ports 3000 and 5173 are reachable at https://rudder-home.tail4c2e1.ts.net. Ready to merge." }),
+      agent({ id: "run_a4", title: "Delete cloud workspaces safely", task: "Request + reaper for deletes", status: "done", backend: "claude", model: "opus", workspaceMode: { kind: "plain" }, updatedAt: T0 - 3 * 60 * MIN, lastMessage: "Added the deletion reaper with a 30s sweep and 410s for dead rows." }),
       agent({ id: "run_a5", title: "Bump jj to 0.40 flags", task: "jj rebase -o", status: "merged", backend: "codex", model: "gpt-6.1-sol", updatedAt: T0 - 26 * 60 * MIN, lastMessage: "Merged into main." }),
       agent({ id: "run_o1", title: "Plan: preview links everywhere", task: "Make every dev server reachable from the phone", status: "waiting", backend: "claude", model: "opus", mode: "rudder-plan", planId: "plan_1", updatedAt: T0 - 3 * MIN, lastMessage: "Here is the plan: 5 tasks. Approve it to launch, or tell me what to change." }),
       agent({ id: "run_a7", title: "Port scanner for the home", task: "List listening ports per project", status: "working", backend: "codex", model: "gpt-6.1-sol", nodeId: "n1", planId: "plan_1", updatedAt: T0 - 2 * MIN, lastMessage: "Reading /proc/net/tcp6 for owner pids." }),
@@ -224,6 +225,7 @@ const projects = [
   {
     workspaceId: "wsp_wager", name: "wagerpals", repo: "viraatdas/wagerpals", ref: null, status: "running", failureReason: null,
     dashboard: "running", clients: 0, lastActivityAt: iso(T0 - 12 * MIN),
+    warm: { status: "building", key: "5534bd3ca103", commit: "5534bd3ca103fea927302f18943a36734399a0e1", layers: 7, maxLayers: 8, builtAt: iso(T0 - 42 * MIN), forkCount: 3 },
     agents: [
       agent({ id: "run_b1", title: "Settle bets on resolution", task: "Auto-settle when a market resolves", status: "working", backend: "claude", model: "opus", updatedAt: T0 - 2 * MIN, lastMessage: "Running the settlement test suite (42 of 118 passing so far)." }),
       agent({ id: "run_b2", title: "Stripe payout webhook", task: "Handle payout.failed", status: "failed", backend: "codex", model: "gpt-6.1-sol", updatedAt: T0 - 35 * MIN, lastMessage: "Error: STRIPE_WEBHOOK_SECRET is not set in this environment." }),
@@ -241,6 +243,212 @@ const projects = [
 // No project has been moved yet (POST /api/app/project-order).
 for (const p of projects) p.sortOrder = null;
 for (const p of projects) if (p.plan) p.plan.nodes = p.plan.nodes.map(named);
+
+const GB = 1024 ** 3;
+const MB = 1024 ** 2;
+const mockMachineState = {
+  sccacheLocalHits: 1284,
+  sccacheRemoteHits: 312,
+  sccacheMisses: 184,
+  sccacheWrites: 179,
+  sccacheBytesRead: 612 * MB,
+  sccacheBytesWritten: 418 * MB,
+  turboHits: 84,
+  turboMisses: 14,
+  turboWrites: 14,
+  turboBytesRead: 295 * MB,
+  turboBytesWritten: 112 * MB,
+  toolCacheSizes: {
+    sccache: 14.2 * GB,
+    pnpm: 4.1 * GB,
+    npm: 3.6 * GB,
+    uv: 1.1 * GB,
+    pip: 140 * MB,
+    cargo: 1.05 * GB,
+    turbo: 420 * MB,
+    nx: 16 * MB,
+  },
+  recent: [
+    { at: T0 - 4_000, tool: "sccache", op: "hit", key: "a/4/a4f891bc3d209e1f0882", bytes: 4.2 * MB, ms: 38 },
+    { at: T0 - 9_000, tool: "sccache", op: "hit", key: "c/9/c91d02fa7481bc331029", bytes: 1.8 * MB, ms: 29 },
+    { at: T0 - 15_000, tool: "turbo", op: "hit", key: "8f41c09e2a7d104b", bytes: 6.4 * MB, ms: 54 },
+    { at: T0 - 22_000, tool: "sccache", op: "put", key: "7/e/7e3301ab9012f7cc4a18", bytes: 2.9 * MB, ms: 81 },
+    { at: T0 - 31_000, tool: "sccache", op: "miss", key: "7/e/7e3301ab9012f7cc4a18", bytes: 0, ms: 19 },
+  ],
+};
+
+function mockMachineTick() {
+  if (homeMode !== "running") return;
+  const ts = now();
+  mockMachineState.sccacheRemoteHits += 1;
+  mockMachineState.sccacheLocalHits += 2;
+  mockMachineState.sccacheBytesRead += Math.round(1.6 * MB);
+  const key = `${Math.floor(Math.random() * 16).toString(16)}/${Math.floor(Math.random() * 16).toString(16)}/${ts.toString(16)}9a4b`;
+  mockMachineState.recent.unshift({ at: ts, tool: "sccache", op: "hit", key, bytes: Math.round(1.6 * MB), ms: 34 });
+  if (mockMachineState.recent.length > 20) mockMachineState.recent.length = 20;
+}
+
+function mockMachinePrune() {
+  const before = Object.values(mockMachineState.toolCacheSizes).reduce((a, b) => a + b, 0);
+  mockMachineState.toolCacheSizes.npm = Math.min(mockMachineState.toolCacheSizes.npm, 1.8 * GB);
+  mockMachineState.toolCacheSizes.pnpm = Math.min(mockMachineState.toolCacheSizes.pnpm, 2.4 * GB);
+  const after = Object.values(mockMachineState.toolCacheSizes).reduce((a, b) => a + b, 0);
+  const toolCacheFreedBytes = Math.max(0, Math.round(before - after));
+  return { ok: true, toolCacheFreedBytes, warmFreedBytes: 0, freedBytes: toolCacheFreedBytes };
+}
+
+function mockMachinePayload(running) {
+  const ts = now();
+  const s = mockMachineState;
+  const totalHits = s.sccacheLocalHits + s.sccacheRemoteHits;
+  const hitRate = Math.round((totalHits / Math.max(1, totalHits + s.sccacheMisses)) * 1000) / 10;
+  const limits = { sccache: 20 * GB, pnpm: 10 * GB, npm: 5 * GB, uv: 10 * GB, pip: 5 * GB, cargo: 5 * GB, turbo: 5 * GB, nx: 5 * GB };
+  const entries = Object.entries(limits).map(([name, limitBytes]) => ({
+    name,
+    bytes: Math.round(s.toolCacheSizes[name] ?? 0),
+    limitBytes,
+    fileCount: name === "sccache" ? 28410 : name === "pnpm" ? 14200 : 1240,
+    recentFiles24h: name === "sccache" ? 4120 : name === "npm" ? 310 : 42,
+    lastWriteAt: ts - (name === "sccache" ? 5_000 : 18 * MIN),
+  }));
+  const remoteSccache = {
+    hits: s.sccacheRemoteHits,
+    misses: s.sccacheMisses,
+    writes: s.sccacheWrites,
+    errors: 0,
+    bytesRead: s.sccacheBytesRead,
+    bytesWritten: s.sccacheBytesWritten,
+    lastActivityAt: s.recent[0]?.at ?? ts,
+  };
+  const remoteTurbo = {
+    hits: s.turboHits,
+    misses: s.turboMisses,
+    writes: s.turboWrites,
+    errors: 0,
+    bytesRead: s.turboBytesRead,
+    bytesWritten: s.turboBytesWritten,
+    lastActivityAt: ts - 15_000,
+  };
+  return {
+    homeConnected: running,
+    homeStatus: homeMode,
+    hostKind: "external",
+    version: homeVersion,
+    collectedAt: ts,
+    host: running ? {
+      memTotalBytes: 64 * GB,
+      memAvailableBytes: 41.2 * GB,
+      swapTotalBytes: 4 * GB,
+      swapFreeBytes: 3.9 * GB,
+      cpus: 16,
+      load1: 2.14,
+      load5: 1.85,
+      load15: 1.62,
+      disks: [
+        { mount: "/workspace", totalBytes: 492 * GB, freeBytes: 218 * GB },
+        { mount: "/", totalBytes: 77 * GB, freeBytes: 41 * GB },
+      ],
+      pressure: { memorySome: 0.2, memoryFull: 0, ioSome: 1.1, cpuSome: 2.4 },
+    } : null,
+    vfs: running ? {
+      activeMode: "overlayfs",
+      fuseReady: true,
+      fuseMounts: 0,
+      overlayMounts: 8,
+      totalForks: 8,
+      totalPlainWorkspaces: 1,
+      totalWarmBytes: Math.round(14.8 * GB),
+      projects: [
+        {
+          workspaceId: "wsp_rudder", name: "rudder", repo: "exla-ai/rudder",
+          baseCommit: "11eec25736c0", status: "ready", latestKey: "11eec25736c0",
+          latestCommit: "11eec25736c07beeba277325b1be8424e6926d6a",
+          builtAt: iso(ts - 14 * MIN), buildSeconds: 20.4,
+          layers: 3, maxLayers: 8, readyCount: 2, failedCount: 0, lastError: null,
+          warmBytes: Math.round(8.4 * GB),
+          forks: [
+            { runId: "run_a1", snapshotKey: "11eec25736c0", layers: 3, upperFiles: 18, active: true },
+            { runId: "run_a2", snapshotKey: "11eec25736c0", layers: 3, upperFiles: 7, active: true },
+            { runId: "run_a3", snapshotKey: "de4609ec9c06", layers: 2, upperFiles: 31, active: false },
+          ],
+          plainWorkspaces: ["run_a4"],
+        },
+        {
+          workspaceId: "wsp_wager", name: "wagerpals", repo: "viraatdas/wagerpals",
+          baseCommit: "7b2a910c44e1", status: "building", latestKey: "5534bd3ca103",
+          latestCommit: "5534bd3ca103fea927302f18943a36734399a0e1",
+          builtAt: iso(ts - 42 * MIN), buildSeconds: 11.2,
+          layers: 7, maxLayers: 8, readyCount: 3, failedCount: 0, lastError: null,
+          warmBytes: Math.round(6.4 * GB),
+          forks: [
+            { runId: "run_b1", snapshotKey: "5534bd3ca103", layers: 7, upperFiles: 44, active: true },
+            { runId: "run_b2", snapshotKey: "5534bd3ca103", layers: 7, upperFiles: 9, active: false },
+          ],
+          plainWorkspaces: [],
+        },
+      ],
+    } : null,
+    toolCache: running ? {
+      root: "/home/rudder/.cache/rudder/tool-cache",
+      totalBytes: entries.reduce((sum, e) => sum + e.bytes, 0),
+      entries,
+      sccache: {
+        available: true,
+        version: "0.18.0",
+        mode: "multilevel",
+        cacheLocation: "Local disk + Cloud S3 WebDAV",
+        activeDaemons: 3,
+        compileRequests: totalHits + s.sccacheMisses,
+        cacheHits: totalHits,
+        cacheMisses: s.sccacheMisses,
+        hitRate,
+        nonCacheable: 12,
+        errors: 0,
+        avgReadHitMs: 18,
+        avgCompilerMs: 1840,
+        levels: [
+          { name: "Local NVMe (L0)", hits: s.sccacheLocalHits, misses: s.sccacheRemoteHits + s.sccacheMisses, writes: s.sccacheWrites, backfills: s.sccacheRemoteHits },
+          { name: "Cloud S3 WebDAV (L1)", hits: s.sccacheRemoteHits, misses: s.sccacheMisses, writes: s.sccacheWrites, backfills: 0 },
+        ],
+      },
+    } : null,
+    remoteCache: running ? {
+      proxyActive: true,
+      proxyUrl: "http://127.0.0.1:41289",
+      upstreamConnected: true,
+      sccache: remoteSccache,
+      turbo: remoteTurbo,
+      recent: s.recent.slice(0, 15),
+    } : null,
+    cloud: {
+      remoteCache: {
+        enabled: true,
+        bucket: "rudder-fabric-v1-597088032164-us-east-1",
+        sccache: remoteSccache,
+        turbo: remoteTurbo,
+        recent: s.recent.slice(0, 15),
+      },
+      fabricCas: {
+        enabled: true,
+        bucket: "rudder-fabric-v1-597088032164-us-east-1",
+        requests: 0,
+        gets: 0,
+        puts: 0,
+        rootsPublished: 0,
+        bytesRead: 0,
+        bytesWritten: 0,
+        errors: 0,
+        lastActivityAt: null,
+        proofCache: { entries: 0, estimated_bytes: 0, max_bytes: 32 * MB, hits: 0, misses: 0 },
+      },
+      burstPool: {
+        enabled: false,
+        policy: null,
+        builders: [],
+      },
+    },
+  };
+}
 
 
 // Morning digests: run records as the dashboard writes them, through the real
@@ -1304,6 +1512,17 @@ const server = http.createServer(async (req, res) => {
       if (q.length < 2) return json(res, 400, { error: "q needs at least 2 characters" });
       if (searchMode === "slow") await new Promise((r) => setTimeout(r, 1500));
       return json(res, 200, mockSearch(q));
+    }
+    // Machine, warm snapshots, overlay forks, sccache and remote cache (machine-panel.js).
+    if (p === "/api/app/machine" && req.method === "GET") {
+      const running = homeMode === "running";
+      mockMachineTick();
+      return json(res, 200, mockMachinePayload(running));
+    }
+    if (p === "/api/app/machine/prune" && req.method === "POST") {
+      if (homeMode !== "running") return json(res, 503, { error: "The cloud machine is asleep", asleep: true });
+      const freed = mockMachinePrune();
+      return json(res, 200, freed);
     }
     // Plan usage for the sidebar meter (src/usage.ts QuotaReport, from the home).
     if (p === "/api/app/usage" && req.method === "GET") {

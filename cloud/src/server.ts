@@ -34,6 +34,7 @@ import { annotateAgent } from "./agent-status.js";
 import { pollIfNoneMatch, sendAppNotModified, sendAppPoll, sendAppPollJson, sendStaticFile } from "./app-static.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
+import { createRemoteBuildCacheHandler, S3RemoteCacheStorage } from "./remote-build-cache.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
 import { HomeControlSessions, HomeRpcEffectUnknownError } from "./home-control-sessions.js";
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
@@ -201,23 +202,30 @@ const fabricS3 = fabricBucket && fabricRole ? new S3Client({
     webIdentityTokenFile: process.env.AWS_WEB_IDENTITY_TOKEN_FILE || "/.fly/oidc_token",
   }),
 }) : null;
+function authenticateFabricOrCache(req: IncomingMessage): string {
+  const workspaceId = req.headers["x-rudder-workspace-id"];
+  if (workspaceId !== undefined) {
+    if (typeof workspaceId !== "string") throw unauthorized();
+    const row = findWorkspaceById.get(workspaceId) as Record<string, unknown> | undefined;
+    if (!row || row.status === "deleting") throw unauthorized();
+    requireWorkerBearer(req, row);
+    return String(row.account_id);
+  }
+  return requireBearer(req).accountId;
+}
 // This prefix is retained indefinitely. Deployment verifies that bucket
 // lifecycle rules do not expire fabric/v1 before enabling publication.
 const fabricHttp = fabricS3 && fabricSpoolReady && process.env.RUDDER_FABRIC_DURABLE_STORE === "1"
   ? createFabricHttpHandler({
     storage: new S3FabricObjectStorage({ client: fabricS3, bucket: fabricBucket, timeoutMs: 60_000, maxConcurrency: 4 }),
     verificationCache: new FabricVerificationCache(32 * 1024 * 1024),
-    authenticate: (req) => {
-      const workspaceId = req.headers["x-rudder-workspace-id"];
-      if (workspaceId !== undefined) {
-        if (typeof workspaceId !== "string") throw unauthorized();
-        const row = findWorkspaceById.get(workspaceId) as Record<string, unknown> | undefined;
-        if (!row || row.status === "deleting") throw unauthorized();
-        requireWorkerBearer(req, row);
-        return String(row.account_id);
-      }
-      return requireBearer(req).accountId;
-    },
+    authenticate: authenticateFabricOrCache,
+  }) : null;
+const remoteCacheHttp = fabricS3 && fabricBucket
+  ? createRemoteBuildCacheHandler({
+    storage: new S3RemoteCacheStorage({ client: fabricS3, bucket: fabricBucket, timeoutMs: 30_000 }),
+    bucket: fabricBucket,
+    authenticate: authenticateFabricOrCache,
   }) : null;
 const slack = slackConfigFromEnv();
 // Slack message events are delivered at-least-once; dedupe by event_id so a
@@ -758,6 +766,14 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       }
       return;
     }
+    if (url.pathname === "/api/rudder/cache" || url.pathname.startsWith("/api/rudder/cache/")) {
+      if (!remoteCacheHttp) {
+        sendJson(res, 503, { error: "Remote build cache is not enabled" });
+      } else {
+        await remoteCacheHttp(req, res, url);
+      }
+      return;
+    }
     if (url.pathname.startsWith("/api/auth")) {
       refreshAuthHandler();
       authHandler(req, res);
@@ -768,6 +784,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
         ok: true,
         s3: Boolean(snapshotBucket),
         fabric: Boolean(fabricHttp),
+        remoteCache: Boolean(remoteCacheHttp),
         fly: Boolean(flyApiToken && flyAppName && flyWorkerImage),
         workerImage: flyWorkerImage,
         byoVm: Boolean(snapshotBucket && flyWorkerImage),
@@ -5444,6 +5461,7 @@ type HomeProject = {
   closed?: JsonRecord[];
   ports?: JsonRecord[];
   plan?: JsonRecord | null;
+  warm?: JsonRecord | null;
 };
 type HomeState = {
   projects: HomeProject[];
@@ -7153,6 +7171,7 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       newAgentsPrivate: visibility.newAgentsPrivate,
       ports: (stateLive ? project?.ports ?? [] : []) as unknown as Json,
       plan: (project?.plan ?? null) as Json,
+      warm: (project?.warm ?? null) as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,
       sortOrder: row.sortOrder ?? null,
@@ -7879,6 +7898,80 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       return;
     }
     sendJson(res, 200, await homeRpc(home.id, "usage", { refresh: url.searchParams.get("refresh") === "1" }, 40_000));
+    return;
+  }
+  // Machine, warm snapshots, VFS/overlay forks, local & remote cache status
+  // (cloud/app/machine-panel.js). Polled while open, so it never wakes a
+  // sleeping home; cloud-side remote cache / CAS / burst pool stats still return.
+  if (req.method === "GET" && url.pathname === "/api/app/machine") {
+    const fabricStats = fabricHttp?.statsForAccount(account.accountId) ?? null;
+    const cloud = {
+      remoteCache: remoteCacheHttp?.statsForAccount(account.accountId) ?? {
+        enabled: false,
+        bucket: null,
+        sccache: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
+        turbo: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
+        recent: [],
+      },
+      fabricCas: {
+        enabled: Boolean(fabricHttp),
+        bucket: fabricHttp ? fabricBucket : null,
+        requests: fabricStats?.requests ?? 0,
+        gets: fabricStats?.gets ?? 0,
+        puts: fabricStats?.puts ?? 0,
+        rootsPublished: fabricStats?.rootsPublished ?? 0,
+        bytesRead: fabricStats?.bytesRead ?? 0,
+        bytesWritten: fabricStats?.bytesWritten ?? 0,
+        errors: fabricStats?.errors ?? 0,
+        lastActivityAt: fabricStats?.lastActivityAt ?? null,
+        proofCache: fabricStats?.verificationCache ?? null,
+      },
+      burstPool: {
+        enabled: Boolean(builderPool),
+        policy: builderPool ? {
+          maxPerHome: builderPool.policy.maxPerHome,
+          cpus: builderPool.policy.cpus,
+          memoryMb: builderPool.policy.memoryMb,
+          idleSeconds: builderPool.policy.idleSeconds,
+        } : null,
+        builders: builderPool && home ? builderPool.list(home.id) : [],
+      },
+    };
+    const summary = homeSummary(home);
+    let homeStats: JsonRecord | null = null;
+    let homeError: string | null = null;
+    if (home && isOpen(homeControls.get(home.id))) {
+      try {
+        homeStats = await homeRpc(home.id, "machineStats", { refresh: url.searchParams.get("refresh") === "1" }, 25_000) as JsonRecord;
+      } catch (error) {
+        homeError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    sendJson(res, 200, {
+      homeConnected: Boolean(homeStats),
+      homeStatus: home?.status ?? null,
+      hostKind: home?.hostKind ?? null,
+      version: (summary?.version as string | null) ?? null,
+      ...(homeError ? { homeError } : {}),
+      collectedAt: typeof homeStats?.collectedAt === "number" ? homeStats.collectedAt : Date.now(),
+      host: (homeStats?.host ?? null) as Json,
+      vfs: (homeStats?.vfs ?? null) as Json,
+      toolCache: (homeStats?.toolCache ?? null) as Json,
+      remoteCache: (homeStats?.remoteCache ?? null) as Json,
+      cloud: cloud as unknown as Json,
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/machine/prune") {
+    if (!home) {
+      sendJson(res, 404, { error: "no home machine yet" });
+      return;
+    }
+    if (!isOpen(homeControls.get(home.id))) {
+      sendJson(res, 503, { error: "The cloud machine is asleep", asleep: true });
+      return;
+    }
+    sendJson(res, 200, await homeRpc(home.id, "pruneCaches", {}, 60_000));
     return;
   }
   if (!home) {

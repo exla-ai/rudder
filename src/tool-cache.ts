@@ -103,6 +103,20 @@ export function toolCacheEnv(role: ToolCacheRole, options: ToolCacheOptions = {}
   if (has("cargo") && use("CARGO_HOME", "cargo")) prepareCargoHome(out.CARGO_HOME, env);
   use("TURBO_CACHE_DIR", "turbo");
   use("NX_CACHE_DIRECTORY", "nx");
+  const remoteBase = (env.RUDDER_REMOTE_CACHE_URL ?? "").trim().replace(/\/+$/, "");
+  const remoteToken = (env.RUDDER_REMOTE_CACHE_TOKEN ?? "").trim();
+  if (env.RUDDER_REMOTE_CACHE !== "0" && remoteBase && remoteToken) {
+    if (out.SCCACHE_DIR) {
+      out.SCCACHE_MULTILEVEL_CHAIN = "disk,webdav";
+      out.SCCACHE_WEBDAV_ENDPOINT = `${remoteBase}/sccache`;
+      out.SCCACHE_WEBDAV_TOKEN = remoteToken;
+      out.SCCACHE_WEBDAV_RW_MODE = "READ_WRITE";
+      out.SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY = "ignore";
+    }
+    out.TURBO_API = `${remoteBase}/turbo`;
+    out.TURBO_TOKEN = remoteToken;
+    out.TURBO_TEAM = "rudder";
+  }
   if (role === "agent") Object.assign(out, agentPagerEnv(root, env, has("jj")));
   return out;
 }
@@ -130,7 +144,22 @@ function agentPagerEnv(root: string, env: NodeJS.ProcessEnv, hasJj: boolean): Re
   return out;
 }
 
-interface CacheFile { file: string; size: number; atime: number }
+interface CacheFile { file: string; size: number; atime: number; mtime: number }
+
+export interface ToolCacheEntryUsage {
+  name: string;
+  bytes: number;
+  limitBytes: number;
+  fileCount: number;
+  recentFiles24h: number;
+  lastWriteAt: number | null;
+}
+
+export interface ToolCacheUsage {
+  root: string;
+  totalBytes: number;
+  entries: ToolCacheEntryUsage[];
+}
 
 function listFiles(dir: string, out: CacheFile[] = []): CacheFile[] {
   let entries: fs.Dirent[];
@@ -139,10 +168,47 @@ function listFiles(dir: string, out: CacheFile[] = []): CacheFile[] {
     const file = path.join(dir, entry.name);
     if (entry.isDirectory()) listFiles(file, out);
     else if (entry.isFile()) {
-      try { const st = fs.statSync(file); out.push({ file, size: st.size, atime: Math.max(st.atimeMs, st.mtimeMs) }); } catch { /* raced */ }
+      try {
+        const st = fs.lstatSync(file);
+        if (st.isFile()) out.push({ file, size: st.size, atime: Math.max(st.atimeMs, st.mtimeMs), mtime: st.mtimeMs });
+      } catch { /* raced */ }
     }
   }
   return out;
+}
+
+/**
+ * Measures disk usage for every directory in `limits` under `root`.
+ * Symlinks are never followed.
+ */
+export function toolCacheUsage(
+  root: string = toolCacheRoot(),
+  limits: Record<string, number> = TOOL_CACHE_LIMITS,
+): ToolCacheUsage {
+  const cutoff = Date.now() - 24 * 3600_000;
+  let totalBytes = 0;
+  const entries: ToolCacheEntryUsage[] = [];
+  for (const [name, limitBytes] of Object.entries(limits)) {
+    const files = listFiles(path.join(root, name));
+    let bytes = 0;
+    let recentFiles24h = 0;
+    let maxMtime = 0;
+    for (const f of files) {
+      bytes += f.size;
+      if (f.mtime >= cutoff) recentFiles24h += 1;
+      if (f.mtime > maxMtime) maxMtime = f.mtime;
+    }
+    totalBytes += bytes;
+    entries.push({
+      name,
+      bytes,
+      limitBytes,
+      fileCount: files.length,
+      recentFiles24h,
+      lastWriteAt: maxMtime > 0 ? maxMtime : null,
+    });
+  }
+  return { root, totalBytes, entries };
 }
 
 /**

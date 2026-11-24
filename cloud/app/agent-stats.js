@@ -5,6 +5,7 @@
 import { h, setText } from "/app/render.js";
 import { api, coarse, ls, rel, toMs } from "/app/core.js";
 import { UpdateNow } from "/app/home-update.js";
+import { formatWorkspaceMode } from "/app/machine-panel.js";
 
 const SVG = (body) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 const GAUGE = SVG('<path d="M4.5 17.5a8.5 8.5 0 1 1 15 0"/><path d="M12 13.5l3.5-4"/><circle cx="12" cy="14" r="1.2" fill="currentColor"/>');
@@ -131,8 +132,9 @@ export function AgentStats(line) {
   const tpsEl = el.querySelector(".as-tps");
   let stats = null;
   let problem = null;
+  let workspaceMode = null;
 
-  const pop = popover(el, { label: "Agent speed", render: () => renderAgentPop(stats, problem) });
+  const pop = popover(el, { label: "Agent speed", render: () => renderAgentPop(stats, problem, workspaceMode) });
 
   // When the line has no room, the speed gives way whole instead of being
   // cut mid-word. The status stays, and so does "Speed unavailable". The step
@@ -149,7 +151,8 @@ export function AgentStats(line) {
   const resize = new ResizeObserver(fit);
   resize.observe(line);
 
-  function update(next) {
+  function update(next, mode = null) {
+    workspaceMode = mode || null;
     paint(next);
     fit();
   }
@@ -174,7 +177,7 @@ export function AgentStats(line) {
   return { el, update, destroy: () => { resize.disconnect(); pop.destroy(); } };
 }
 
-function renderAgentPop(stats, problem) {
+function renderAgentPop(stats, problem, workspaceMode) {
   const box = h(`<div class="st-body"></div>`);
   if (problem) {
     const sec = h(`<section class="st-sec"><div class="st-h"><span>Output speed</span></div><p class="st-note"></p></section>`);
@@ -206,6 +209,12 @@ function renderAgentPop(stats, problem) {
     }
     setText(sec.querySelector(".st-line"), `Last ${speed.responses.length} ${speed.responses.length === 1 ? "response" : "responses"}: ${total.toLocaleString()} tokens in ${formatSeconds(ms)}`);
     box.appendChild(sec);
+  }
+  const wsLabel = formatWorkspaceMode(workspaceMode);
+  if (wsLabel) {
+    const w = h(`<div class="st-foot"></div>`);
+    setText(w, `Workspace: ${wsLabel}`);
+    box.appendChild(w);
   }
   if (stats.model) {
     const m = h(`<div class="st-foot mono"></div>`);

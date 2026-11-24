@@ -60,6 +60,46 @@ async function jsonBody(req: IncomingMessage, keys: string[]): Promise<Record<st
   return data;
 }
 
+export type FabricHttpCounters = {
+  requests: number;
+  gets: number;
+  puts: number;
+  rootsPublished: number;
+  bytesRead: number;
+  bytesWritten: number;
+  errors: number;
+  lastActivityAt: number | null;
+};
+
+export type FabricVerificationCacheStats = ReturnType<FabricVerificationCache["stats"]>;
+
+export type FabricAccountStats = FabricHttpCounters & {
+  verificationCache: FabricVerificationCacheStats | null;
+};
+
+export type FabricGlobalStats = FabricHttpCounters & {
+  accounts: number;
+  verificationCache: FabricVerificationCacheStats | null;
+};
+
+export type FabricHttpHandler = ((req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void>) & {
+  statsForAccount(accountId: string): FabricAccountStats;
+  stats(): FabricGlobalStats;
+};
+
+function emptyCounters(): FabricHttpCounters {
+  return {
+    requests: 0,
+    gets: 0,
+    puts: 0,
+    rootsPublished: 0,
+    bytesRead: 0,
+    bytesWritten: 0,
+    errors: 0,
+    lastActivityAt: null,
+  };
+}
+
 /** Authentication supplies the namespace. A URL/body can never select it.
  * Keep large object operations bounded across every account on this process.
  * These limits are admission control, not fleet coordination or scheduling.
@@ -69,16 +109,40 @@ export function createFabricHttpHandler(options: {
   /** Enable only for an audited immutable prefix with no GC/external expiry. */
   verificationCache?: FabricVerificationCache;
   authenticate: (req: IncomingMessage) => string | Promise<string>;
-}) {
+}): FabricHttpHandler {
   let heavy = 0;
   let total = 0;
   const accounts = new Map<string, number>();
-  return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
+  const globalStats = emptyCounters();
+  const accountStats = new Map<string, FabricHttpCounters>();
+
+  function getOrCreateAccountStats(accountId: string): FabricHttpCounters {
+    let stats = accountStats.get(accountId);
+    if (!stats) {
+      stats = emptyCounters();
+      accountStats.set(accountId, stats);
+    }
+    return stats;
+  }
+
+  function touchActivity(accountId?: string): number {
+    const at = Date.now();
+    globalStats.lastActivityAt = at;
+    if (accountId) getOrCreateAccountStats(accountId).lastActivityAt = at;
+    return at;
+  }
+
+  const handler = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> => {
     let account: string | undefined;
     let admitted = false;
     let large = false;
+    globalStats.requests++;
+    globalStats.lastActivityAt = Date.now();
     try {
       account = await options.authenticate(req);
+      const acct = getOrCreateAccountStats(account);
+      acct.requests++;
+      acct.lastActivityAt = Date.now();
       const route = url.pathname.slice(PREFIX.length);
       large = route === "/missing" || route.startsWith("/objects/") || (route.startsWith("/roots/") && req.method === "POST");
       if (total >= 12 || (accounts.get(account) ?? 0) >= 8 || (large && heavy >= 2)) fail("busy", "Fabric transfer capacity is busy", 429);
@@ -123,10 +187,20 @@ export function createFabricHttpHandler(options: {
               res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": object.size_bytes, "Cache-Control": "private, max-age=31536000, immutable", "ETag": `"sha256-${object.digest}"` });
               await pipeline(Readable.from(body, { objectMode: false }), res);
             });
+            globalStats.gets++;
+            globalStats.bytesRead += object.size_bytes;
+            acct.gets++;
+            acct.bytesRead += object.size_bytes;
+            touchActivity(account);
           } else {
             const bytes = await cas.getObject(object);
             res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": bytes.length, "Cache-Control": "private, max-age=31536000, immutable", "ETag": `"sha256-${object.digest}"` });
             res.end(bytes);
+            globalStats.gets++;
+            globalStats.bytesRead += bytes.length;
+            acct.gets++;
+            acct.bytesRead += bytes.length;
+            touchActivity(account);
           }
         } else {
           const lease = req.headers["x-rudder-staging-lease"];
@@ -134,10 +208,22 @@ export function createFabricHttpHandler(options: {
           if (object.kind === "blob") {
             const length = req.headers["content-length"];
             if (length !== undefined && (!/^\d+$/.test(length) || Number(length) !== object.size_bytes)) fail("invalid_body", "Blob Content-Length must match the typed reference");
-            send(res, 200, { format_version: 1, ...await cas.putBlobStream(lease, object, req) });
+            const receipt = await cas.putBlobStream(lease, object, req);
+            globalStats.puts++;
+            globalStats.bytesWritten += object.size_bytes;
+            acct.puts++;
+            acct.bytesWritten += object.size_bytes;
+            touchActivity(account);
+            send(res, 200, { format_version: 1, ...receipt });
           } else {
             const bytes = await readBody(req, object.size_bytes, 30_000);
-            send(res, 200, { format_version: 1, ...await cas.putObject(lease, object, bytes) });
+            const receipt = await cas.putObject(lease, object, bytes);
+            globalStats.puts++;
+            globalStats.bytesWritten += bytes.length;
+            acct.puts++;
+            acct.bytesWritten += bytes.length;
+            touchActivity(account);
+            send(res, 200, { format_version: 1, ...receipt });
           }
         }
         return;
@@ -153,12 +239,19 @@ export function createFabricHttpHandler(options: {
         } else {
           const body = await jsonBody(req, ["lease_id", "root"]);
           if (typeof body.lease_id !== "string") fail("invalid_lease", "A staging lease is required");
-          send(res, 200, await cas.publishRoot(id, body.lease_id, body.root));
+          const receipt = await cas.publishRoot(id, body.lease_id, body.root);
+          globalStats.rootsPublished++;
+          acct.rootsPublished++;
+          touchActivity(account);
+          send(res, 200, receipt);
         }
         return;
       }
       fail("not_found", "Unknown Fabric endpoint", 404);
     } catch (failure) {
+      globalStats.errors++;
+      if (account) getOrCreateAccountStats(account).errors++;
+      touchActivity(account);
       const externalStatus = Number((failure as { status?: unknown })?.status);
       const status = failure instanceof FabricCasError ? failure.status : externalStatus === 401 || externalStatus === 403 ? externalStatus : 503;
       if (!res.headersSent && !res.destroyed) {
@@ -187,4 +280,22 @@ export function createFabricHttpHandler(options: {
       }
     }
   };
+
+  function statsForAccount(accountId: string): FabricAccountStats {
+    const stats = accountStats.get(accountId);
+    return {
+      ...(stats ? { ...stats } : emptyCounters()),
+      verificationCache: options.verificationCache ? options.verificationCache.stats() : null,
+    };
+  }
+
+  function stats(): FabricGlobalStats {
+    return {
+      ...globalStats,
+      accounts: accountStats.size,
+      verificationCache: options.verificationCache ? options.verificationCache.stats() : null,
+    };
+  }
+
+  return Object.assign(handler, { statsForAccount, stats });
 }

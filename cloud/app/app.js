@@ -39,6 +39,7 @@ import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
 import { ALL_PATH, AllAgentsScreen, allAgentPath, allAgentsButton, coordinatorTool } from "/app/all-agents.js";
 import { TailscaleRow, tailscaleState } from "/app/tailscale-step.js";
+import { MachineScreen, WarmChip } from "/app/machine-panel.js";
 
 function dayLabel(ms) {
   const d = new Date(ms), now = new Date();
@@ -625,6 +626,8 @@ function openAddProject() {
 // Settings is a screen (/app/settings) so the Slack OAuth round trip can
 // land back on it.
 function openSettings() { navigate("/app/settings"); }
+function openMachine() { navigate("/app/machine"); }
+app.openMachine = openMachine;
 
 // Everything this app keeps in localStorage belongs to the signed-in account
 // (its org scope, last screen, drafts, the tour seen), so a different account
@@ -658,6 +661,7 @@ function parseRoute(path) {
   if (parts[0] !== "app") return { name: "home", path: "/app" };
   if (parts[1] === "digest") return { name: "digest", id: parts[2] ? decodeURIComponent(parts[2]) : null, path };
   if (parts[1] === "settings") return { name: "settings", path: "/app/settings" };
+  if (parts[1] === "machine") return { name: "machine", path: "/app/machine" };
   if (parts[1] === "files") return { name: "files", path: "/app/files" };
   if (parts[1] === "team" && parts[2] && parts[3] && parts[4]) {
     // A teammate's agent, read only. Not `ws`: the sidebar and plan column
@@ -756,6 +760,7 @@ function buildScreen(route, paneOpts = {}) {
   if (route.name === "agent") return AgentScreen(route.ws, route.run, paneOpts);
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
+  if (route.name === "machine") return MachineScreen({ navigate, store, onOpenProject: (ws) => navigate(projectPath(ws)) });
   if (route.name === "files") return FilesHubScreen({ projects: () => store.state?.projects || [] });
   if (route.name === "team") return TeamScreen();
   if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
@@ -823,6 +828,7 @@ function DesktopShell() {
       <div class="ds-foot">
         <a class="ds-link ds-team" href="/app/team" data-link hidden>${icon("users")}<span>Team</span></a>
         <a class="ds-link ds-files" href="/app/files" data-link>${icon("folder")}<span>Files</span></a>
+        <a class="ds-link ds-machine" href="/app/machine" data-link>${icon("server")}<span>Machine & Cache</span></a>
         <a class="ds-link ds-digest" href="/app/digest" data-link>${icon("sun")}<span>Digest</span></a>
         <a class="ds-link ds-settings" href="/app/settings" data-link><span class="avatar"></span><span class="ds-who"><span class="ds-email"></span><span class="ds-org"></span></span>${icon("settings")}</a>
       </div>
@@ -1515,6 +1521,7 @@ function DesktopShell() {
     const org = (s?.orgs || []).find((o) => o.id === orgId);
     setText(el.querySelector(".ds-org"), org ? org.name : "Personal");
     el.querySelector(".ds-settings").classList.toggle("on", route?.name === "settings");
+    el.querySelector(".ds-machine").classList.toggle("on", route?.name === "machine");
     el.querySelector(".ds-digest").classList.toggle("on", route?.name === "digest");
     el.querySelector(".ds-files").classList.toggle("on", route?.name === "files");
     allBtn.paint(s, route?.name === "all" || route?.name === "all-agent");
@@ -3078,8 +3085,10 @@ function HomeScreen() {
       <div class="m-icon">${icon("server")}</div>
       <div class="m-body"><div class="m-title"><span>Cloud machine</span><span class="pill"><span class="dot"></span><span class="pl"></span></span></div>
       <div class="m-sub"></div></div>
+      <button type="button" class="btn small machine-inspect">Cache & Build</button>
       <button type="button" class="btn small accent wake" hidden>${icon("power")}<span>Wake</span></button>
     </div>`);
+  machine.querySelector(".machine-inspect").addEventListener("click", openMachine);
   const wakeBtn = machine.querySelector(".wake");
   // Who Claude Code and Codex sign in as on the machine, and Sign in buttons.
   const accounts = AccountsCard();
@@ -3767,6 +3776,8 @@ function ProjectScreen(ws) {
   const scroller = el.querySelector(".scroller");
   el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
   // The model new agents start on, in the header too (the task box has its chip).
+  const warmChip = WarmChip({ onClick: openMachine });
+  bar.appendChild(warmChip.el);
   const headModel = modelChip(ws, { compact: true });
   headModel.el.classList.add("head-model");
   bar.appendChild(headModel.el);
@@ -3915,6 +3926,7 @@ function ProjectScreen(ws) {
     }
     composer.el.hidden = false;
     paintPriv(p);
+    warmChip.update(p.warm);
     setText(el.querySelector(".title"), p.name || p.repo);
     setText(el.querySelector(".repo"), [p.repo || "Local project", p.ref].filter(Boolean).join(" @ "));
 
@@ -5212,7 +5224,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     setText(sub.querySelector(".st"), phase ? `${st.label} · ${phase}` : st.label);
     // The goal first: the speed's fit measures the line with it.
     goalChip.update(t?.goal);
-    agentStats.update(t?.stats);
+    agentStats.update(t?.stats, a?.workspaceMode);
     // Compact now: your own Claude or Codex agent, idle, not compacting already.
     contextMeter.update(t?.context, {
       compacting: !!t?.compacting,
@@ -5797,6 +5809,7 @@ function paletteCommands() {
     { label: "All agents", detail: "One chat with every agent", icon: icon("agents"), run: go(ALL_PATH) },
     { label: "All projects", icon: icon("code"), keywords: ["home"], run: go("/app") },
     { label: "Files", icon: icon("folder"), run: go("/app/files") },
+    { label: "Machine & Cache", detail: "Warm snapshots, overlay forks, sccache and remote cache", icon: icon("server"), keywords: ["vfs", "cache", "warm", "sccache", "burst", "disk"], run: openMachine },
     { label: "Digest", icon: icon("sun"), run: go(digestPath(null)) },
     ...(hasTeam(store.state) ? [{ label: "Team", icon: icon("users"), run: go(teamPath()) }] : []),
     { label: "Settings", icon: icon("settings"), run: openSettings },

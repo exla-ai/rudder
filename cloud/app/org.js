@@ -216,6 +216,7 @@ export function SettingsScreen() {
     acts.appendChild(b);
     return b;
   };
+  addAct("server", "Machine & Cache", () => app.openMachine?.());
   addAct("terminal", "Sign in a computer", () => app.openComputerSignIn?.());
   const ghBtn = addAct("github", "Connect GitHub", () => app.openGithubConnect?.());
   addAct("spark", "Show the tour", () => openTour({ again: true }));

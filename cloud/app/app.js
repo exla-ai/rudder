@@ -3460,6 +3460,8 @@ function updateProjectCard(el, p) {
 /* ------------------------------------------------------------------ */
 
 const clockTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+// "Worked for 1m 05s · 2:09 PM": a turn's length and when it ended.
+export const turnLine = (durationMs, endedAt) => `Worked for ${duration(durationMs)}${Number.isFinite(endedAt) ? ` · ${clockTime(endedAt)}` : ""}`;
 function digestDayLabel(day) {
   // `day` is the account's local YYYY-MM-DD; noon keeps it on the same date here.
   const ms = Date.parse(`${day}T12:00:00`);
@@ -5409,7 +5411,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     if (m.kind === "compact" || m.kind === "handoff" || m.kind === "scheduled" || m.kind === "goal" || m.kind === "rudder") { node._msg = m; return paintCompact(node, m); }
     if (m.kind === "notice") return paintNotice(node, m);
     if (m.kind === "peer") { node._msg = m; return paintPeer(node, m); }
-    if (m.kind === "turn") return setText(node, `Worked for ${duration(m.durationMs)}`);
+    // How long the turn took and when it ended, on the clock of the device
+    // showing it (the home sends the instant, never a formatted time).
+    if (m.kind === "turn") {
+      node.title = Number.isFinite(m.ts) ? new Date(m.ts).toLocaleString() : "";
+      return setText(node, turnLine(m.durationMs, m.ts));
+    }
     const md = node.querySelector(".md");
     let text = m.text || "";
     if (m.role === "user") {

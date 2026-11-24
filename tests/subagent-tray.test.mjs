@@ -316,3 +316,47 @@ async function waitFor(check, timeout = 5000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+test("Claude: a Codex thread a subagent ran from its shell is listed with its model, and shows inside that subagent", (t) => {
+  const session = "5e551011-0000-4000-8000-0000000000c9";
+  const { home, repo } = setup(t, { id: "run_o", backend: "claude", status: "completed", process: { pid: process.pid }, session: { nativeSessionId: session } });
+  const project = path.join(home, ".claude", "projects", "-x");
+  const subagents = path.join(project, session, "subagents");
+  fs.mkdirSync(subagents, { recursive: true });
+  fs.writeFileSync(path.join(project, `${session}.jsonl`), jsonl([{ type: "user", uuid: "u1", timestamp: at(0), message: { role: "user", content: "review it" } }]));
+  const hex = Date.parse(at(5)).toString(16).padStart(12, "0");
+  const thread = `${hex.slice(0, 8)}-${hex.slice(8)}-7000-8000-0000000000e1`;
+  // The review outlived Claude Code's wait: the call answers with the end of
+  // its output and the file that has the start, where Codex named the thread.
+  const output = path.join(home, "tasks", "b1.output");
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.writeFileSync(output, `[codex] Starting Codex task thread.\n[codex] Thread ready (${thread}).\n[codex] Running command: rg x\n`);
+  const side = (uuid, type, content, ts) => ({ type, uuid, isSidechain: true, timestamp: at(ts), message: { role: type, content } });
+  fs.writeFileSync(path.join(subagents, "agent-arev.meta.json"), JSON.stringify({ agentType: "codex:codex-rescue", description: "Codex review", toolUseId: "toolu_1", finished: true }));
+  fs.writeFileSync(path.join(subagents, "agent-arev.jsonl"), jsonl([
+    side("r1", "user", "Review the branch with Codex.", 1),
+    side("r2", "assistant", [{ type: "tool_use", id: "b1", name: "Bash", input: { command: 'node "/p/scripts/codex-companion.mjs" task --model gpt-9 "review"' } }], 5),
+    side("r3", "user", [{ type: "tool_result", tool_use_id: "b1", content: `[… earlier output omitted; full output: ${output}]\n[codex] Running command: rg x` }], 190),
+    side("r4", "assistant", [{ type: "text", text: "Still running." }], 191),
+  ]));
+  const day = path.join(home, ".codex", "sessions", "2026", "11", "18");
+  fs.mkdirSync(day, { recursive: true });
+  fs.writeFileSync(path.join(day, `rollout-2026-11-18T09-00-05-${thread}.jsonl`), jsonl([
+    { timestamp: at(5), ordinal: 0, type: "session_meta", payload: { id: thread } },
+    { timestamp: at(5), ordinal: 1, type: "turn_context", payload: { model: "gpt-9" } },
+    { timestamp: at(5), ordinal: 2, type: "event_msg", payload: { type: "task_started", turn_id: "t1" } },
+    { timestamp: at(8), ordinal: 3, type: "response_item", payload: { type: "function_call", name: "exec_command", call_id: "c1", arguments: JSON.stringify({ cmd: "rg x" }) } },
+  ]));
+
+  const tray = listSubagents(repo, "run_o", { home, open: "arev" });
+  const codex = tray.subagents.find((s) => s.id === thread);
+  assert.deepEqual(
+    { backend: codex.backend, kind: codex.kind, model: codex.model, description: codex.description, status: codex.status, toolCalls: codex.toolCalls },
+    { backend: "codex", kind: "Codex", model: "gpt-9", description: "Codex review", status: "running", toolCalls: 1 },
+  );
+  assert.equal(tray.subagents[0].id, thread, "the running review is first");
+  const card = tray.open.messages.find((m) => m.tool?.name === "Bash").subagent;
+  assert.deepEqual({ id: card.id, model: card.model, status: card.status }, { id: thread, model: "gpt-9", status: "running" });
+  // Another shell command is no agent.
+  assert.equal(listSubagents(repo, "run_o", { home, open: thread }).open.messages.some((m) => m.subagent), false);
+});

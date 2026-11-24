@@ -44,9 +44,12 @@ import {
   claudeSubagentMetas,
   claudeSubagentsDir,
   clip,
+  codexChildFile,
   codexReader,
   followFile,
   oneLine,
+  outsideAgents,
+  outsideCodexStatus,
   opencodeSubagentActivity,
   opencodeSubagents,
   readRunRecord,
@@ -74,8 +77,15 @@ export function listSubagents(repoDir, runId, { home, open = null }) {
       ? codexSubagents(store, home, record.session.nativeSessionId, live)
       : record.backend === "antigravity"
         ? antigravitySubagents(home, record.session.nativeSessionId, live)
-        : [...claudeAgentSubagents(file, live), ...claudeTeammates(home, file, live)];
-  const subagents = found.map((item) => trayLine(store, item)).filter(Boolean).sort(newestFirst);
+        : [...claudeAgentSubagents(home, file, live), ...claudeTeammates(home, file, live)];
+  const lines = found.map((item) => trayLine(store, item)).filter(Boolean);
+  // Agents of another harness those ran from a shell are listed beside them.
+  if (record.backend === "claude") {
+    const outside = claudeOutsideAgents(home, lines, live);
+    found.push(...outside);
+    lines.push(...outside.map((item) => trayLine(store, item)).filter(Boolean));
+  }
+  const subagents = lines.sort(newestFirst);
   const item = open === null ? null : found.find((entry) => entry.id === open);
   const opened = item ? item.make() : null;
   return { runId: record.id, subagents, open: opened && activity(opened) };
@@ -190,6 +200,7 @@ function newestFirst(a, b) {
 
 function line(entry) {
   const messages = entry.reader.messages;
+  const outside = outsideAgents(entry.reader).map((run) => run.threadId);
   // An interrupted one says what it was doing, not Claude's interrupt note.
   const last = messages[messages.length - (claudeInterrupted(entry.reader) ? 2 : 1)];
   return {
@@ -205,6 +216,8 @@ function line(entry) {
     endedAt: entry.endedAt,
     toolCalls: entry.reader.toolCalls,
     step: entry.status !== "running" && entry.result ? oneLine(entry.result) : step(last),
+    // Codex threads it ran from its shell (claudeOutsideAgents).
+    ...(outside.length ? { outside } : {}),
   };
 }
 
@@ -243,7 +256,7 @@ const text = (value) => (typeof value === "string" && value ? value : null);
 // Claude Code
 // ---------------------------------------------------------------------------
 
-function claudeAgentSubagents(session, live) {
+function claudeAgentSubagents(home, session, live) {
   const dir = claudeSubagentsDir(session);
   const list = [];
   for (const [toolUseId, { agentId, meta }] of claudeSubagentMetas(dir)) {
@@ -273,9 +286,47 @@ function claudeAgentSubagents(session, live) {
         endedAt: status === "running" ? null : reader.lastAt,
         result: claudeResult(reader, status),
         reader,
-        nest: () => attachClaudeSubagents(reader, { dir, projectDir: path.dirname(session), live, shown: null, depth: 1 }),
+        nest: () => attachClaudeSubagents(reader, { home, dir, projectDir: path.dirname(session), live, shown: null, depth: 1 }),
       };
     } });
+  }
+  return list;
+}
+
+// A Codex thread a Claude subagent or teammate ran from its shell, for a
+// review or a second opinion (transcripts.mjs outsideAgents): a line of its
+// own, read from the thread's rollout and titled as the one that ran it.
+function claudeOutsideAgents(home, lines, live) {
+  const list = [];
+  for (const parent of lines) {
+    for (const id of parent.outside ?? []) {
+      const file = codexChildFile(home, id);
+      const stat = file ? statOrNull(file) : null;
+      if (!stat) {
+        continue; // its rollout is not written yet
+      }
+      list.push({ id, file, key: [stat.size, stat.mtimeMs, live, parent.description].join("|"), make: () => {
+        const reader = followFile(file, () => codexReader({ child: true }));
+        if (!reader) {
+          return null;
+        }
+        const status = outsideCodexStatus(reader, live);
+        return {
+          id,
+          backend: "codex",
+          type: "subagent",
+          kind: "Codex",
+          name: null,
+          description: parent.description,
+          status,
+          startedAt: uuid7Time(id),
+          endedAt: status === "running" ? null : reader.endedAt,
+          result: status === "done" ? reader.result : null,
+          reader,
+          nest: () => attachCodexSubagents(reader, { home, live, shown: null, depth: 1 }),
+        };
+      } });
+    }
   }
   return list;
 }
@@ -331,7 +382,7 @@ function claudeTeammates(home, session, live) {
         endedAt: status === "running" ? null : reader.lastAt,
         result: claudeResult(reader, status),
         reader,
-        nest: () => attachClaudeSubagents(reader, { dir: claudeSubagentsDir(file), projectDir, live, shown: null, depth: 1 }),
+        nest: () => attachClaudeSubagents(reader, { home, dir: claudeSubagentsDir(file), projectDir, live, shown: null, depth: 1 }),
       };
     } });
   }

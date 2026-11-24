@@ -155,7 +155,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   if (backend === "codex") {
     attachCodexSubagents(page.reader, { home, live, shown, depth: 0 });
   } else if (backend === "claude") {
-    attachClaudeSubagents(page.reader, { dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
+    attachClaudeSubagents(page.reader, { home, dir: claudeSubagentsDir(file), projectDir: path.dirname(file), live, shown, depth: 0 });
   } else if (backend === "antigravity") {
     attachAntigravitySubagents(page.reader, { home, conversationId: conversation, live, shown, depth: 0 });
   }
@@ -1370,6 +1370,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     shutDown: false,
     // The model that answered last, as its log names it.
     model: null,
+    // Bash tool_use id -> an agent of another harness that call ran
+    // (noteOutsideAgent): { message, threadId, outputFile }
+    outside: new Map(),
     dropped: 0,
     // Told of each tool result with its call's message (null when the call
     // is not in what was read), for where a chat page may start.
@@ -1635,6 +1638,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           target.tool.isError = Boolean(block.is_error);
           setToolFiles(target.tool, claudeResultFiles(target.tool.name, inputs.get(block.tool_use_id), { isError: target.tool.isError, result: entry.toolUseResult, text, limit: outputLimit }));
           answerToolAsk(target.tool, entry.toolUseResult);
+          if (target.tool.name === "Bash") {
+            noteOutsideAgent(reader, block.tool_use_id, target, inputs.get(block.tool_use_id)?.command, text);
+          }
           // A followed subagent's reader lives across polls: a call is let go
           // once its result is in, so a long subagent does not pile them up.
           tools.delete(block.tool_use_id);
@@ -2408,7 +2414,8 @@ function summarizeCodexInput(payload) {
 // call in an agent team) has no metadata: it is a session of its own in the
 // same project folder (`projectDir`), done once a turn of its ends and
 // stopped when its process exits mid-turn.
-function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) {
+function attachClaudeSubagents(reader, { home, dir, projectDir, live, shown, depth }) {
+  attachOutsideAgents(reader, { home, live, shown });
   if (!reader.spawns.size) {
     return;
   }
@@ -2422,7 +2429,7 @@ function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) 
     if (found) {
       const sub = followFile(path.join(dir, `agent-${found.agentId}.jsonl`), () => claudeReader({ sub: true, self: toolUseId }));
       if (sub && depth + 1 < SUBAGENT_DEPTH) {
-        attachClaudeSubagents(sub, { dir, projectDir, live, shown: null, depth: depth + 1 });
+        attachClaudeSubagents(sub, { home, dir, projectDir, live, shown: null, depth: depth + 1 });
       }
       const meta = found.meta;
       const note = reader.notifications.get(toolUseId);
@@ -2444,7 +2451,7 @@ function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) 
       }
       const sub = followFile(session, () => claudeReader({ sub: true }));
       if (sub && depth + 1 < SUBAGENT_DEPTH) {
-        attachClaudeSubagents(sub, { dir: claudeSubagentsDir(session), projectDir, live, shown: null, depth: depth + 1 });
+        attachClaudeSubagents(sub, { home, dir: claudeSubagentsDir(session), projectDir, live, shown: null, depth: depth + 1 });
       }
       card = {
         id: path.basename(session, ".jsonl"),
@@ -2642,6 +2649,95 @@ function claudeSessionHead(file, size) {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Agents of another harness that a Claude agent ran from its shell: a review
+// or second opinion from Codex, through the Codex plugin (codex-companion.mjs)
+// or `codex exec`. The Bash call that ran one becomes a subagent card like any
+// other, read from the Codex thread's own rollout. The call's output names
+// the thread, at its start; a call that outlived Claude Code's wait answers
+// with the file its output goes to instead, and the thread is read from there.
+// ---------------------------------------------------------------------------
+
+const OUTSIDE_CODEX = /codex-companion\.mjs["']?\s+(?:task|review|adversarial-review)\b|(?:^|[\s;&|(])codex\s+(?:exec|review)\b/;
+const OUTSIDE_CODEX_THREAD = /\[codex\] Thread ready \(([0-9a-f-]{36})\)|^session id: ([0-9a-f-]{36})$/m;
+const BASH_OUTPUT_FILE = /full output: (\/[^\]\n]+)\]|Output is being written to: (\/\S+?\.output)/;
+const OUTSIDE_HEAD_BYTES = 8192;
+
+function noteOutsideAgent(reader, toolUseId, message, command, output) {
+  if (typeof command !== "string" || !OUTSIDE_CODEX.test(command)) {
+    return;
+  }
+  const thread = OUTSIDE_CODEX_THREAD.exec(output);
+  const file = BASH_OUTPUT_FILE.exec(output);
+  if (thread || file) {
+    reader.outside.set(toolUseId, { message, threadId: thread ? thread[1] ?? thread[2] : null, outputFile: file ? file[1] ?? file[2] : null });
+  }
+}
+
+// The runs whose thread is known, oldest first: [{ threadId, message }].
+function outsideAgents(reader) {
+  const runs = [];
+  for (const run of reader.outside?.values() ?? []) {
+    if (!run.threadId && run.outputFile) {
+      run.threadId = outsideThreadIn(run.outputFile);
+    }
+    if (run.threadId) {
+      runs.push(run);
+    }
+  }
+  return runs;
+}
+
+function outsideThreadIn(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null; // scratch output, removed since
+    }
+    throw error;
+  }
+  try {
+    const head = Buffer.alloc(OUTSIDE_HEAD_BYTES);
+    const match = OUTSIDE_CODEX_THREAD.exec(head.toString("utf8", 0, fs.readSync(fd, head, 0, head.length, 0)));
+    return match ? match[1] ?? match[2] : null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// What a card and the tray say of a Codex thread run from a shell.
+function outsideCodexStatus(child, live) {
+  return child?.turn === "done" ? "done" : child?.turn === "aborted" ? "stopped" : live ? "running" : "stopped";
+}
+
+function attachOutsideAgents(reader, { home, live, shown }) {
+  for (const run of outsideAgents(reader)) {
+    if (shown && !shown.has(run.message)) {
+      continue;
+    }
+    const file = codexChildFile(home, run.threadId);
+    const child = file ? followFile(file, () => codexReader({ child: true })) : null;
+    const status = outsideCodexStatus(child, live);
+    run.message.subagent = {
+      id: run.threadId,
+      backend: "codex",
+      model: child?.model ?? null,
+      kind: "Codex",
+      name: null,
+      description: null,
+      prompt: null,
+      status,
+      startedAt: run.message.ts ?? null,
+      endedAt: status === "running" ? null : child?.endedAt ?? null,
+      toolCalls: child?.toolCalls ?? 0,
+      result: status === "done" ? child.result : null,
+      ...shownMessages(child),
+    };
+  }
 }
 
 // Codex (multi-agent v2): spawn_agent({task_name, message}) answers with the
@@ -3018,7 +3114,7 @@ function toMillis(value) {
 }
 
 // The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
-export { SUBAGENT_PROMPT_LIMIT, antigravityChildReader, antigravityReader, attachAntigravitySubagents, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
+export { SUBAGENT_PROMPT_LIMIT, codexChildFile, outsideAgents, outsideCodexStatus, antigravityChildReader, antigravityReader, attachAntigravitySubagents, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
 
 // ---------------------------------------------------------------------------
 // The app's poll. The open chat asks for its newest page every few seconds;

@@ -5,7 +5,8 @@
 // forgot (dev servers, watchers, test runners). Without it the machine filled
 // 16 GB with resumed sessions idle for days, thrashed, and every terminal
 // attached to it dropped while the supervisor starved. Each hourly run also
-// deletes finished agents' scratch by fixed rules, no model (sweepScratch).
+// deletes finished agents' scratch and stale task scratch by fixed rules, no
+// model (sweepScratch).
 //
 // The model decides; this file is all it can act through (it runs with Bash
 // limited to `node cleanup.mjs ...`), and the rules that make a wrong call
@@ -22,7 +23,7 @@
 //   node cleanup.mjs park <project> <runId> "<reason>"  put an idle agent to sleep
 //   node cleanup.mjs stop <pid> "<reason>"              stop a leftover process
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -411,18 +412,27 @@ function appendAction(paths, entry) {
 // ---------------------------------------------------------------------------
 // Scratch. Each Cloud agent writes temporary files under its own
 // <volume>/scratch/<run id> (RUDDER_SCRATCH, with TMPDIR inside it; set by
-// native/src/signals.rs and src/home-scratch.ts). Fixed rules, no model, and
-// nothing else on the volume is ever touched:
+// native/src/signals.rs and src/home-scratch.ts). Agents also make task scratch
+// by hand under <volume>/rudder-scratch/<task> (build target dirs, clones, jj
+// workspaces) and rarely delete it: 100 of those held 48 GB on 2026-11-24.
+// Fixed rules, no model, and nothing else on the volume is ever touched:
 //   - a run's scratch, 24 hours after the run merged, completed or was
 //     cancelled, or after its run.json is gone (deleted) and nothing in it
 //     changed for 24 hours
 //   - any scratch entry with nothing in it newer than 7 days
+//   - a rudder-scratch entry with nothing in it newer than 3 days. A jj
+//     workspace inside it is forgotten first; one whose working copy holds
+//     changes keeps the whole entry.
 //   - top-level <volume>/.tmp* directories with nothing newer than 24 hours
 // Never one a live process still uses: the run's agent is alive, or some
-// process has it as RUDDER_SCRATCH or as its working directory.
+// process has it as its working directory or names a path inside it in its
+// environment or command line.
 // ---------------------------------------------------------------------------
 
 const HOUR_MS = 60 * MINUTE;
+const TASK_SCRATCH_IDLE_MS = 3 * 24 * HOUR_MS;
+// Never source: skipped when looking for a workspace or for unsaved edits.
+const NOT_SOURCE = new Set([".jj", ".git", "target", "node_modules", "dist"]);
 const FINISHED_RUN = new Set(["merged", "completed", "cancelled"]);
 const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
 
@@ -468,7 +478,7 @@ export function readRunStates(codeDir, alive = pidAlive) {
   return runs;
 }
 
-/** Top-level entries of `root` some live process uses (its RUDDER_SCRATCH or its cwd). */
+/** Top-level entries of `root` some live process uses: its cwd, or a path in its environment or command line. */
 export function scratchInUse(procRoot, root) {
   const used = new Set();
   let names = [];
@@ -477,12 +487,19 @@ export function scratchInUse(procRoot, root) {
   } catch {
     return used;
   }
+  const inside = `${root}${path.sep}`;
   const note = (file) => {
-    if (file && file.startsWith(`${root}${path.sep}`)) used.add(file.slice(root.length + 1).split(path.sep)[0]);
+    if (file && file.startsWith(inside)) used.add(file.slice(inside.length).split(path.sep)[0]);
   };
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue;
-    note(/(?:^|\0)RUDDER_SCRATCH=([^\0]*)/.exec(readText(path.join(procRoot, name, "environ")))?.[1]);
+    // RUDDER_SCRATCH, TMPDIR, CARGO_TARGET_DIR, a script path, a --manifest-path.
+    for (const file of ["environ", "cmdline"]) {
+      const text = readText(path.join(procRoot, name, file));
+      for (let at = text.indexOf(inside); at >= 0; at = text.indexOf(inside, at + 1)) {
+        used.add(/^[^/\0:]*/.exec(text.slice(at + inside.length))[0]);
+      }
+    }
     try {
       note(fs.readlinkSync(path.join(procRoot, name, "cwd")));
     } catch {
@@ -515,7 +532,10 @@ function touchedSince(root, cutoff) {
   return false;
 }
 
-function treeBytes(root) {
+// The size of a tree about to be deleted. Opens directories its owner cannot
+// list or write on the way (overlay work dirs, read-only stores): rmSync fails
+// on those with EACCES, and 20 such .tmp* dirs failed every hour for weeks.
+function unlockAndMeasure(root) {
   let bytes = 0;
   const stack = [root];
   while (stack.length) {
@@ -529,12 +549,77 @@ function treeBytes(root) {
     bytes += stat.size;
     if (!stat.isDirectory()) continue;
     try {
+      if ((stat.mode & 0o700) !== 0o700) fs.chmodSync(file, 0o700);
       for (const name of fs.readdirSync(file)) stack.push(path.join(file, name));
     } catch {
-      // counted what was readable
+      // not ours to open: rmSync reports it
     }
   }
   return bytes;
+}
+
+function runJj(cwd, args) {
+  return execFileSync("jj", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
+}
+
+/** jj workspaces (`.jj/repo` is a file naming the repo) at `dir` or up to two levels under it. */
+function jjWorkspacesIn(dir, depth = 2) {
+  try {
+    if (fs.lstatSync(path.join(dir, ".jj", "repo")).isFile()) return [dir];
+  } catch {
+    // not a workspace
+  }
+  if (depth === 0) return [];
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => !NOT_SOURCE.has(name) && isRealDir(path.join(dir, name)))
+    .flatMap((name) => jjWorkspacesIn(path.join(dir, name), depth - 1));
+}
+
+// Whether a source file in the tree changed after `cutoff`. Files only: a build
+// creating target/ bumps the directory above it.
+function sourceFileNewerThan(root, cutoff) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (NOT_SOURCE.has(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(file);
+      else if (fs.lstatSync(file).mtimeMs > cutoff) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * "work" when the workspace's working copy holds changes, in its commit or not
+ * yet snapshotted (files newer than jj's last snapshot; nothing is snapshotted
+ * here, the repo may be busy); "empty" when it holds none; "forgotten" when the
+ * repo no longer tracks it. Commits under an empty working copy stay in the repo.
+ */
+function workspaceState(workspace, jj) {
+  let out;
+  try {
+    out = jj(workspace, ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", 'if(empty, "empty", "work")']);
+  } catch (error) {
+    if (/doesn't have a working-copy commit/.test(`${error.stderr ?? ""}`)) return "forgotten";
+    throw error;
+  }
+  if (out.trim() !== "empty") return "work";
+  const snapshotAt = fs.statSync(path.join(workspace, ".jj", "working_copy", "tree_state")).mtimeMs;
+  return sourceFileNewerThan(workspace, snapshotAt) ? "work" : "empty";
 }
 
 function isRealDir(file) {
@@ -545,12 +630,13 @@ function isRealDir(file) {
   }
 }
 
-/** Delete scratch by the rules above. Returns { removed: [{ path, reason, bytes }], failed, freedBytes }. */
-export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = Date.now(), log = appendAction } = {}) {
+/** Delete scratch by the rules above. Returns { removed: [{ path, reason, bytes }], kept: [{ path, reason }], failed, freedBytes }. */
+export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = Date.now(), log = appendAction, jj = runJj } = {}) {
   const volume = paths.volume ?? path.dirname(paths.codeDir);
   const scratchRoot = path.join(volume, "scratch");
   const runs = readRunStates(paths.codeDir, alive);
   const inUse = scratchInUse(paths.procRoot, scratchRoot);
+  const result = { removed: [], kept: [], failed: [], freedBytes: 0 };
   const candidates = [];
   if (isRealDir(scratchRoot)) {
     for (const name of fs.readdirSync(scratchRoot)) {
@@ -566,6 +652,26 @@ export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = D
       }
     }
   }
+  const taskRoot = path.join(volume, "rudder-scratch");
+  if (isRealDir(taskRoot)) {
+    const taskInUse = scratchInUse(paths.procRoot, taskRoot);
+    for (const name of fs.readdirSync(taskRoot)) {
+      const file = path.join(taskRoot, name);
+      if (taskInUse.has(name) || touchedSince(file, now - TASK_SCRATCH_IDLE_MS)) continue;
+      try {
+        const workspaces = isRealDir(file) ? jjWorkspacesIn(file).map((dir) => ({ dir, state: workspaceState(dir, jj) })) : [];
+        const work = workspaces.find((workspace) => workspace.state === "work");
+        if (work) {
+          result.kept.push({ path: file, reason: `jj workspace ${path.relative(taskRoot, work.dir)} holds changes` });
+        } else {
+          const forget = workspaces.filter((workspace) => workspace.state === "empty").map((workspace) => workspace.dir);
+          candidates.push({ file, reason: "task scratch untouched for 3 days", forget });
+        }
+      } catch (error) {
+        result.failed.push({ path: file, error: error.message });
+      }
+    }
+  }
   let topLevel = [];
   try {
     topLevel = fs.readdirSync(volume);
@@ -578,10 +684,10 @@ export function sweepScratch({ paths = cleanupPaths(), alive = pidAlive, now = D
       candidates.push({ file, reason: "temp dir untouched for 24 hours" });
     }
   }
-  const result = { removed: [], failed: [], freedBytes: 0 };
-  for (const { file, reason } of candidates) {
-    const bytes = treeBytes(file);
+  for (const { file, reason, forget = [] } of candidates) {
+    const bytes = unlockAndMeasure(file);
     try {
+      for (const workspace of forget) jj(workspace, ["workspace", "forget", "--ignore-working-copy"]);
       fs.rmSync(file, { recursive: true, force: true, maxRetries: 2 });
     } catch (error) {
       result.failed.push({ path: file, error: error.message });
@@ -705,7 +811,7 @@ export function createCleanupJob({
       safe(() => fs.writeFileSync(path.join(workDir, "last.json"), JSON.stringify({
         trigger, model, startedAt, finishedAt: new Date().toISOString(), exitCode: code,
         memAvailableMbBefore: before?.memAvailableMb ?? null, memAvailableMbAfter: after?.memAvailableMb ?? null,
-        scratch: scratch ? { freedBytes: scratch.freedBytes, removed: scratch.removed, failed: scratch.failed } : null,
+        scratch: scratch ? { freedBytes: scratch.freedBytes, removed: scratch.removed, kept: scratch.kept, failed: scratch.failed } : null,
         report,
       }, null, 2)));
     };

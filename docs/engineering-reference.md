@@ -1293,8 +1293,19 @@ brain lives in the cloud, and the phone is a first-class client.
   it merged/completed/was cancelled or its run.json disappeared (and nothing in
   it changed for 24h), any scratch entry untouched for 7 days, and top-level
   `/workspace/.tmp*` directories untouched for 24h. Never one in use (the run's
-  pid is alive, or a process has it as `RUDDER_SCRATCH` or cwd), never anything
-  else at the top level, and with `~/code` unreadable no run counts as deleted.
+  pid is alive, or a process has it as cwd or names a path inside it in its
+  environment or command line), never anything else at the top level, and with
+  `~/code` unreadable no run counts as deleted. The same sweep also
+  covers the task scratch agents make by hand, `/workspace/rudder-scratch/<task>`
+  (100 entries held 48 GB on 2026-11-24: cargo target dirs, clones, jj
+  workspaces): an entry untouched for 3 days and not in use goes. A jj workspace
+  inside it (up to two levels down) is forgotten first when its working copy is
+  empty (`jj log --ignore-working-copy`, plus no source file newer than
+  `.jj/working_copy/tree_state`; nothing is snapshotted); one that holds changes
+  keeps the whole entry and is listed under `kept` in `last.json`. Before
+  deleting, the sweep opens directories it cannot list or write (overlay work
+  dirs): those made `rmSync` fail with EACCES on the same 20 `.tmp*` dirs every
+  hour.
   Freed bytes go to the log (`cleanup: scratch freed N bytes`), `last.json`,
   `actions.jsonl` (`action: "scratch"`) and `rudder.home.cleanup.scratch_freed`.
 - **Swap at boot (`provision_home_swap`, root-bootstrap.sh).** A home has no

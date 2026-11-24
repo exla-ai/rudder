@@ -379,6 +379,68 @@ test("scratch goes once its run is finished, deleted or stale; live, recent and 
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+// Task scratch agents make by hand under /workspace/rudder-scratch/<task>.
+test("task scratch goes after 3 idle days unless a process names it or a jj workspace in it holds changes", () => {
+  const { root, paths, addProcess } = fakeMachine();
+  const DAY = 24 * 60 * MIN;
+  const tasks = path.join(path.dirname(paths.codeDir), "rudder-scratch");
+  const put = (rel, ageMs, text = "x".repeat(1000)) => {
+    const file = path.join(tasks, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    // Up to the task directory: creating a child bumps its parent.
+    for (let at = file; at !== tasks; at = path.dirname(at)) fs.utimesSync(at, new Date(NOW - ageMs), new Date(NOW - ageMs));
+  };
+  const workspace = (rel, { editedAfterSnapshot = false } = {}) => {
+    put(`${rel}/target/debug/big`, 9 * DAY);
+    put(`${rel}/src/main.rs`, editedAfterSnapshot ? 5 * DAY : 9 * DAY);
+    put(`${rel}/.jj/repo`, 9 * DAY, "/repo/.jj/repo");
+    put(`${rel}/.jj/working_copy/tree_state`, 8 * DAY);
+    // A build after the last snapshot: output, not work.
+    put(`${rel}/target/debug/late`, 5 * DAY);
+  };
+
+  put("old-build/target/debug/big", 4 * DAY);
+  // An overlay work dir: its owner can neither list nor write it.
+  put("old-build/overlay/work/x", 4 * DAY);
+  fs.chmodSync(path.join(tasks, "old-build/overlay/work"), 0o000);
+  put("old.log", 4 * DAY);
+  put("young/target/debug/big", 2 * DAY);
+  put("building/target/debug/big", 9 * DAY);
+  addProcess({ pid: 6100, ppid: 1, comm: "cargo", cmdline: "cargo build", ageMin: 30, rssMb: 50 });
+  fs.writeFileSync(path.join(paths.procRoot, "6100", "environ"), `PATH=/bin\0CARGO_TARGET_DIR=${tasks}/building/target\0`);
+  put("scripted/run.mjs", 9 * DAY);
+  addProcess({ pid: 6200, ppid: 1, comm: "node", cmdline: `node ${tasks}/scripted/run.mjs`, ageMin: 30, rssMb: 50 });
+  workspace("ws-empty/ws");
+  workspace("ws-committed/ws");
+  workspace("ws-edited", { editedAfterSnapshot: true });
+  workspace("ws-forgotten/ws");
+  workspace("ws-broken/ws");
+
+  const calls = [];
+  const jj = (cwd, args) => {
+    const name = path.relative(tasks, cwd);
+    calls.push(`${name}: ${args.slice(0, 2).join(" ")}`);
+    if (args[0] === "workspace") return "";
+    if (name.startsWith("ws-forgotten")) throw Object.assign(new Error("jj failed"), { stderr: "Error: Workspace `x` doesn't have a working-copy commit\n" });
+    if (name.startsWith("ws-broken")) throw Object.assign(new Error("jj failed"), { stderr: "Error: The repo is corrupt\n" });
+    return name.startsWith("ws-committed") ? "work" : "empty";
+  };
+
+  const result = sweepScratch({ paths, alive: () => true, now: NOW, jj });
+  assert.deepEqual(result.removed.map((entry) => path.relative(tasks, entry.path)).sort(), ["old-build", "old.log", "ws-empty", "ws-forgotten"]);
+  assert.ok(result.removed.every((entry) => entry.reason === "task scratch untouched for 3 days"));
+  assert.deepEqual(result.kept.map((entry) => [path.relative(tasks, entry.path), entry.reason]).sort(), [
+    ["ws-committed", "jj workspace ws-committed/ws holds changes"],
+    ["ws-edited", "jj workspace ws-edited holds changes"],
+  ]);
+  assert.deepEqual(result.failed.map((entry) => path.relative(tasks, entry.path)), ["ws-broken"]);
+  assert.deepEqual(fs.readdirSync(tasks).sort(), ["building", "scripted", "ws-broken", "ws-committed", "ws-edited", "young"]);
+  // Only the empty workspace is forgotten, and before its directory goes.
+  assert.deepEqual(calls.filter((call) => call.includes("workspace forget")), ["ws-empty/ws: workspace forget"]);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("a detached worker on a Linux home gets its own scratch and TMPDIR; anywhere else, nothing", async () => {
   const { homeScratchEnv } = await import("../dist/home-scratch.js");
   const volume = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-scratch-env-"));

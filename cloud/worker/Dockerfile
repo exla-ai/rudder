@@ -254,6 +254,7 @@ COPY cloud/worker/transcript-search.mjs ./transcript-search.mjs
 COPY cloud/worker/handoff.mjs ./handoff.mjs
 COPY cloud/worker/account-usage.mjs ./account-usage.mjs
 COPY cloud/worker/subagents.mjs ./subagents.mjs
+COPY cloud/worker/outside-agents.mjs ./outside-agents.mjs
 COPY cloud/worker/session-lineage.mjs ./session-lineage.mjs
 COPY cloud/worker/context-usage.mjs ./context-usage.mjs
 COPY cloud/worker/chat-goal.mjs ./chat-goal.mjs

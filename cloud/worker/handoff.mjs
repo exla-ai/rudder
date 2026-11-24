@@ -12,7 +12,7 @@
 // instructions.
 
 import path from "node:path";
-import { accountReady, activeUsageLimit, quotaDetail } from "./account-usage.mjs";
+import { accountReady, activeUsageLimit, antigravityPoolOf, quotaDetail } from "./account-usage.mjs";
 
 const HEADER = "Rudder handoff: this chat moved to you from ";
 // Its own line: a mode that frames the prompt (plan mode) puts words before it.
@@ -105,7 +105,7 @@ export function handoffShown(text) {
  * nothing is known, and the move goes ahead. The app's model sheet refuses
  * the same way (model-picker.js).
  */
-export function handoffRefusal(credentials, backend, account, label) {
+export function handoffRefusal(credentials, backend, account, label, model = null) {
   const cred = credentials?.[backend]?.find((entry) => entry.id === account);
   if (credentials?.[backend] && !cred) {
     return `That ${label} account is no longer on your cloud machine.`;
@@ -113,7 +113,14 @@ export function handoffRefusal(credentials, backend, account, label) {
   const limit = activeUsageLimit(cred);
   if (limit) return `${quotaDetail(limit)} for this ${label} account. Choose another account or wait for the reset.`;
   if (cred?.signedIn && !accountReady(cred)) return `Rudder could not check whether this ${label} account can run. ${cred.detail ?? ""}`.trim();
-  return cred && !accountReady(cred) ? `${label} isn't signed in on your cloud machine${cred.account ? ` as ${cred.account}` : ""}.` : null;
+  if (cred && !accountReady(cred)) return `${label} isn't signed in on your cloud machine${cred.account ? ` as ${cred.account}` : ""}.`;
+  // Antigravity: the account works, but this model's pool is used up.
+  const pool = model && cred?.modelPools ? antigravityPoolOf(model, cred.modelPools) : null;
+  if (pool?.spent && (pool.resetsAt === null || pool.resetsAt > Date.now())) {
+    const what = /\d/.test(pool.name) ? `${pool.name} is` : `${pool.name} models are`;
+    return `${what} used up on this ${label} account. Choose a model from another pool or wait for the reset.`;
+  }
+  return null;
 }
 
 function stopped(messages, working, cwd) {

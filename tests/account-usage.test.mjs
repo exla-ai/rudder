@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  activeUsageLimit, accountReady, antigravityError, antigravityPools, antigravityUsageLimit, applyAccountChecks, checkedAccount,
+  activeUsageLimit, accountReady, antigravityError, antigravityPoolOf, antigravityPools, antigravityUsageLimit, applyAccountChecks, checkedAccount,
   claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh,
 } from "../cloud/worker/account-usage.mjs";
 import { handoffRefusal } from "../cloud/worker/handoff.mjs";
@@ -121,4 +121,31 @@ test("Antigravity's pools come from its quota report, and a pool is spent only u
   ]);
   assert.equal(antigravityPools({ ...quota, error: "could not reach Google" }, now), null);
   assert.equal(antigravityPools(null, now), null);
+});
+
+test("an Antigravity model draws on its own pool: third-party models, a family's own pool, else the shared Gemini pool", () => {
+  const pools = [{ name: "Gemini" }, { name: "Claude and GPT" }, { name: "Gemini 4 Argon" }];
+  const pool = (model) => antigravityPoolOf(model, pools)?.name ?? null;
+  assert.equal(pool("gemini-4-neon-xhigh"), "Gemini");
+  assert.equal(pool("gemini-3.8-flash-low"), "Gemini");
+  assert.equal(pool("gemini-pro-orchestrator-neon"), "Gemini");
+  assert.equal(pool("gemini-4-argon-medium"), "Gemini 4 Argon");
+  assert.equal(pool("gemini-pro-orchestrator-argon"), "Gemini 4 Argon");
+  assert.equal(pool("claude-opus-5-5-low"), "Claude and GPT");
+  assert.equal(pool("gpt-oss-120b-medium"), "Claude and GPT");
+  assert.equal(antigravityPoolOf("gemini-4-neon-low", [{ name: "Claude and GPT" }]), null);
+  assert.equal(antigravityPoolOf("something-else", pools), null);
+});
+
+test("a move onto an Antigravity model whose pool is used up is refused; the account's other models go ahead", () => {
+  const resetsAt = Date.now() + 3_600_000;
+  const credentials = { antigravity: [{ id: "main", ok: true, account: "a@b.c", modelPools: [
+    { name: "Gemini", spent: true, resetsAt, models: ["gemini-4-neon-low"] },
+    { name: "Claude and GPT", spent: false, resetsAt: null, models: ["claude-opus-5-5-low"] },
+  ] }] };
+  assert.match(handoffRefusal(credentials, "antigravity", "main", "Antigravity", "gemini-4-neon-low"), /^Gemini models are used up on this Antigravity account/);
+  assert.equal(handoffRefusal(credentials, "antigravity", "main", "Antigravity", "claude-opus-5-5-low"), null);
+  assert.equal(handoffRefusal(credentials, "antigravity", "main", "Antigravity"), null);
+  credentials.antigravity[0].modelPools[0].resetsAt = Date.now() - 1;
+  assert.equal(handoffRefusal(credentials, "antigravity", "main", "Antigravity", "gemini-4-neon-low"), null);
 });

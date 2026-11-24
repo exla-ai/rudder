@@ -87,6 +87,22 @@ export function antigravityPools(quota, now = Date.now()) {
   });
 }
 
+// The pools are named as agy names them: "Gemini" (Neon, Hydrogen, Flash), "Claude and GPT", and
+// pools of one model family such as "Gemini 4 Argon". The pool among `pools`
+// ([{ name }]) that `model` (an agy model id) draws on, or null when none of
+// them is it.
+export function antigravityPoolOf(model, pools) {
+  const id = String(model || "").toLowerCase();
+  if (/^(claude|gpt)/.test(id)) return pools.find((pool) => /claude|gpt/i.test(pool.name)) ?? null;
+  // "gemini-4-argon-low" is Argon; the orchestrators are named after theirs,
+  // the plain one being Carbon's.
+  const family = /^gemini-pro-orchestrator(?:-([a-z]+))?$/.exec(id)?.[1]
+    ?? (id === "gemini-pro-orchestrator" ? "carbon" : /^gemini-[\d.]+-([a-z]+)/.exec(id)?.[1]);
+  if (!family) return null;
+  const own = pools.find((pool) => pool.name.toLowerCase().split(/\s+/).includes(family));
+  return own ?? pools.find((pool) => pool.name === "Gemini") ?? null;
+}
+
 export function activeUsageLimit(account, now = Date.now()) {
   const limit = account?.usageLimit;
   return limit && (limit.resetsAt === null || limit.resetsAt > now) ? limit : null;

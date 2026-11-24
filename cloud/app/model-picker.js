@@ -6,7 +6,7 @@ import { h, icon, setText } from "/app/render.js";
 import { app, api, coarse, ls, showError, toast, track, accountCanRun, accountUsageLabel } from "/app/core.js";
 import { harnessLogo } from "/app/harness-logos.js";
 import { UpdateNow } from "/app/home-update.js";
-import { antigravityPoolOf, groupAntigravityEfforts, matchesModel, variantEffort, modelRequest } from "./model-effort.js";
+import { groupAntigravityEfforts, matchesModel, variantEffort, modelRequest } from "./model-effort.js";
 
 const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
 // Effort names. Which ones a model takes comes with the list: each row's
@@ -174,10 +174,10 @@ function accountRefusal(backend, id, model = null) {
 }
 
 // Antigravity's models draw on separate pools (the account's `modelPools`,
-// cloud/worker/home.mjs checkAntigravity): a spent pool stops its own models
-// and leaves the rest of the account working.
+// each with the ids of its models; cloud/worker/home.mjs checkAntigravity): a
+// spent pool stops its own models and leaves the rest of the account working.
 function poolRefusal(account, model) {
-  const pool = antigravityPoolOf(model, account.modelPools ?? []);
+  const pool = (account.modelPools ?? []).find((entry) => entry.models.includes(model));
   if (!pool?.spent || (pool.resetsAt !== null && pool.resetsAt <= Date.now())) return "";
   const said = /\d/.test(pool.name) ? `${pool.name} is used up` : `${pool.name} models are used up`;
   if (pool.resetsAt === null) return said;

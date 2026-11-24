@@ -27,7 +27,7 @@ import { writeTerminalColors } from "./theme.mjs";
 import { lastAssistantText, userTask, transcriptFile, recentConversation, transcriptDetail, transcriptEtag, transcriptPoll } from "./transcripts.mjs";
 import { searchChats } from "./transcript-search.mjs";
 import { handoffPrompt, handoffRefusal } from "./handoff.mjs";
-import { activeUsageLimit, antigravityError, antigravityPools, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
+import { activeUsageLimit, antigravityError, antigravityPoolOf, antigravityPools, antigravityUsageLimit, applyAccountChecks, claudeUsageLimit, claudeUsageLimitText, codexUsageLimit, jsonEvents, quotaDetail, routingQuotaCheckFresh } from "./account-usage.mjs";
 import { listSubagents } from "./subagents.mjs";
 import { agentProcesses, watchOutsideAgents } from "./outside-agents.mjs";
 import { readAsks, askDecision, isAskId, codexAsks, codexAskSteps, codexTypedAnswer, createCodexAnswerQueue } from "./asks.mjs";
@@ -1103,7 +1103,7 @@ async function handleRpc(method, params) {
       throw new Error(`no agent ${runId} in this project`);
     }
     const backend = record.backend ?? "claude";
-    const refusal = handoffRefusal(credentials, backend, account, harnessLabel(backend));
+    const refusal = handoffRefusal(credentials, backend, account, harnessLabel(backend), String(params.model || ""));
     if (refusal) {
       throw new Error(refusal);
     }
@@ -1115,7 +1115,7 @@ async function handleRpc(method, params) {
     // (handoff.mjs). The instruction is `<harness> <model> <effort>`, then it.
     // A harness this machine is not signed in to is refused here as well as
     // in the app, so an old app or a stale screen can't start a broken agent.
-    const refusal = handoffRefusal(credentials, params.backend, String(params.account || ""), harnessLabel(params.backend));
+    const refusal = handoffRefusal(credentials, params.backend, String(params.account || ""), harnessLabel(params.backend), String(params.model || ""));
     if (refusal) {
       throw new Error(refusal);
     }
@@ -2520,7 +2520,10 @@ async function checkAntigravity(env) {
   // Each model pool has its own allowance: one spent pool stops its models
   // only (the app's picker refuses those), not the account.
   const quota = await import(fromDist("usage.js")).then(({ fetchAntigravityQuota }) => fetchAntigravityQuota(env, { timeoutMs: 2500 }));
-  const modelPools = antigravityPools(quota);
+  // Each pool carries the ids of the models that draw on it, for the picker.
+  const listed = (models?.value?.harnesses ?? []).find((harness) => harness.id === "antigravity")?.models.map((row) => row.value) ?? [];
+  const metered = antigravityPools(quota);
+  const modelPools = metered?.map((pool) => ({ ...pool, models: listed.filter((id) => antigravityPoolOf(id, metered) === pool) })) ?? null;
   const pools = modelPools ? { modelPools } : {};
   const roomLeft = modelPools?.some((pool) => !pool.spent) === true;
   // A spent quota stays spent until the reset agy gave: no probe before it.

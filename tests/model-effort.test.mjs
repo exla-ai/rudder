@@ -39,18 +39,3 @@ test("Gemini 4 Neon exposes the CLI's four selectable thinking levels", () => {
     model: "gemini-4-neon-xhigh", effort: null, name: "Gemini 4 Neon (Extra)",
   });
 });
-
-test("an Antigravity model draws on its own pool: third-party models, a family's own pool, else the shared Gemini pool", async () => {
-  const { antigravityPoolOf } = await import("../cloud/app/model-effort.js");
-  const pools = [{ name: "Gemini" }, { name: "Claude and GPT" }, { name: "Gemini 4 Argon" }];
-  const pool = (model) => antigravityPoolOf(model, pools)?.name ?? null;
-  assert.equal(pool("gemini-4-neon-xhigh"), "Gemini");
-  assert.equal(pool("gemini-3.8-flash-low"), "Gemini");
-  assert.equal(pool("gemini-pro-orchestrator-neon"), "Gemini");
-  assert.equal(pool("gemini-4-argon-medium"), "Gemini 4 Argon");
-  assert.equal(pool("gemini-pro-orchestrator-argon"), "Gemini 4 Argon");
-  assert.equal(pool("claude-opus-5-5-low"), "Claude and GPT");
-  assert.equal(pool("gpt-oss-120b-medium"), "Claude and GPT");
-  assert.equal(antigravityPoolOf("gemini-4-neon-low", [{ name: "Claude and GPT" }]), null);
-  assert.equal(antigravityPoolOf("something-else", pools), null);
-});

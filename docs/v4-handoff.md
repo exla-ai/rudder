@@ -82,8 +82,8 @@ Open after 5.0.40:
   between two looks is not listed; Codex and Antigravity agents get the tray
   line only, no card in the chat; a subagent that waits on a background shell
   still reads "done".
-- The home does not refuse a start or a move onto a model of a spent
-  Antigravity pool; only the picker does.
+- A new agent started on a model of a spent Antigravity pool is not refused
+  (a model switch or a move is, from 5.0.41); it fails with the quota error.
 - The Offstage Mac job often lands on a Mac without Xcode and passes on a
   rerun of the failed job. `scripts/worker-image.mjs` sometimes fails after a
   good push when flyctl starts a second build; the registry wait and the tag

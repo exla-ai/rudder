@@ -46,6 +46,9 @@ const MAX_DESCRIPTION = 400;
 
 // In the chat these open its model sheet, the app's control for both.
 const CLAUDE_MODEL_COMMANDS = new Set(["model", "effort"]);
+// The chat shows what these do itself (/goal: the header's goal chip), so
+// they never bring up the terminal view.
+const CLAUDE_CHAT_COMMANDS = new Set(["goal"]);
 
 /**
  * Command objects in a chunk of Claude Code's bundled JavaScript (read as
@@ -507,7 +510,7 @@ export function buildClaudeCommands({ menu, headless, binary }) {
     const tui = variants && (variants.find((v) => v.type === "local-jsx") ?? variants.find((v) => v.type === "local" && !v.headless)
       ?? variants.find((v) => v.type === "prompt") ?? variants.find((v) => v.type === "local"));
     const interactive = !!tui && (tui.type === "local-jsx" || (tui.type === "local" && !tui.headless));
-    const opens = tui && CLAUDE_MODEL_COMMANDS.has(name) ? "model" : interactive ? "terminal" : null;
+    const opens = tui && CLAUDE_MODEL_COMMANDS.has(name) ? "model" : interactive && !CLAUDE_CHAT_COMMANDS.has(name) ? "terminal" : null;
     // A prompt that names its arguments says so last: "(arguments: who, when)".
     const argNames = /\(arguments: ([^)]*)\)$/.exec(description)?.[1].split(", ");
     return {
@@ -569,7 +572,7 @@ const CODEX_BUILTINS = [
   ["recap", "summarize the current conversation now", {}],
   ["plan", "switch to Plan mode", { args: true }],
   ["voice", "start or stop voice; use /voice settings to choose a voice", { args: true, gate: "voice" }],
-  ["goal", "set or view the goal for a long-running task", { args: true, opens: "terminal", gate: "goals" }],
+  ["goal", "set or view the goal for a long-running task", { args: true, gate: "goals" }],
   ["agents", "open the agent command center", { opens: "terminal" }],
   ["side", "start a side conversation", { args: true, opens: "terminal", when: "always" }],
   ["btw", "start a side conversation", { args: true, opens: "terminal", when: "always", alias: true }],

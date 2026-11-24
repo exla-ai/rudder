@@ -138,6 +138,24 @@ test("a file reference resolves in the agent's workspace, then the checkout, the
   await assert.rejects(readFileRef({ version: 1, runId: "../x", path: "a" }, {}, AbortSignal.timeout(1000)), /Invalid file request/);
 });
 
+test("a file in the chat's own workspace under .rudder-workspaces opens; its private files and other chats' workspaces do not", async (t) => {
+  const m = await machine(t);
+  const spaces = path.join(m.root, "code", "app", ".rudder-workspaces", "app-1");
+  const mine = path.join(spaces, "run_1"), theirs = path.join(spaces, "run_2");
+  for (const dir of [path.join(mine, "docs"), path.join(mine, ".rudder"), theirs]) await mkdir(dir, { recursive: true });
+  await writeFile(path.join(mine, "docs", "README.md"), "# Mine\n");
+  await writeFile(path.join(mine, ".env"), "KEY=1\n");
+  await writeFile(path.join(mine, ".rudder", "state.json"), "{}\n");
+  await writeFile(path.join(theirs, "README.md"), "# Theirs\n");
+  const [checkout] = await m.dependencies.grants();
+  m.dependencies.grants = async () => [checkout, { ...checkout, scope: { ...checkout.scope, workspaceId: "run_1" }, root: mine }];
+  assert.equal((await m.open(path.join(mine, "docs", "README.md"))).text, "# Mine\n", "by its full path");
+  assert.equal((await m.open("docs/README.md")).text, "# Mine\n", "by its path in the workspace");
+  for (const file of [path.join(mine, ".env"), ".rudder/state.json", path.join(theirs, "README.md")]) {
+    await assert.rejects(m.open(file), (e) => e.message === PRIVATE_FILE, file);
+  }
+});
+
 test("file references preview screenshots from scratch and PDFs from the checkout", async (t) => {
   const m = await machine(t);
   const screenshot = path.join(m.scratch, "Screenshot.png");

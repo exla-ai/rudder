@@ -70,10 +70,14 @@ export function inside(folder: string, file: string): string | null {
   return file.startsWith(prefix) ? file.slice(prefix.length) : null;
 }
 
-/** Why the viewer does not open this absolute, normalized path, or null. */
-export function privateReason(file: string, homes: readonly string[]): string | null {
+/** Why the viewer does not open this absolute, normalized path, or null.
+ * `own` is the chat's own folders (its agent's workspace and the checkout):
+ * a workspace lives under `.rudder-workspaces`, so for a file in one of them
+ * only the path below that folder is checked for private names. */
+export function privateReason(file: string, homes: readonly string[], own: readonly string[] = []): string | null {
   if (SYSTEM.some((root) => inside(root, file) !== null)) return SYSTEM_FILE;
-  const parts = file.split("/").filter(Boolean);
+  const below = own.map((folder) => inside(folder, file)).filter((rest): rest is string => rest !== null);
+  const parts = (below.length ? below.reduce((a, b) => (a.length <= b.length ? a : b)) : file).split("/").filter(Boolean);
   if (parts.some((part) => PRIVATE_FOLDERS.has(part) || PRIVATE_NAMES.has(part) || PRIVATE_NAME.test(part))) return PRIVATE_FILE;
   for (const home of homes) {
     const rest = inside(home, file);
@@ -139,11 +143,13 @@ async function canonical(policy: FileRefPolicy): Promise<FileRefPolicy> {
 
 async function readAt(file: string, places: FileGrant[], knownRevision: string | undefined, dependencies: FileRefDependencies,
   policy: FileRefPolicy, signal: AbortSignal): Promise<FileDocument> {
-  const reason = privateReason(file, policy.homes);
+  const own = [...new Set([...places.map((place) => place.root), ...await Promise.all(places.map((place) => realpath(place.root).catch(() => place.root)))])];
+  // (A fork's folder that only its agent's mount holds has no other name here.)
+  const reason = privateReason(file, policy.homes, own);
   if (reason) throw new ProjectFileError("denied", reason);
   // A fork's files exist only in its agent's mount: the file service reads them there.
   const fork = places.find((place) => place.access.kind === "namespace" && inside(place.root, file) !== null);
-  if (!fork) return readHost(file, knownRevision, policy, signal);
+  if (!fork) return readHost(file, knownRevision, policy, own, signal);
   const relative = inside(fork.root, file)!;
   if (!relative) throw new ProjectFileError("unsupported", "That is a folder. Only files open in the viewer");
   const kind = classification(file).kind;
@@ -164,9 +170,9 @@ function shown(file: string, revision: string, text: string | undefined, unchang
   return unchanged ? { path: file, revision, mime: format.mime, kind, unchanged: true } : { path: file, revision, mime: format.mime, kind, text };
 }
 
-async function readHost(file: string, knownRevision: string | undefined, policy: FileRefPolicy, signal: AbortSignal): Promise<FileDocument> {
+async function readHost(file: string, knownRevision: string | undefined, policy: FileRefPolicy, own: readonly string[], signal: AbortSignal): Promise<FileDocument> {
   const check = (at: string) => {
-    const reason = outsideReason(at, policy.roots) ?? privateReason(at, policy.homes);
+    const reason = outsideReason(at, policy.roots) ?? privateReason(at, policy.homes, own);
     if (reason) throw new ProjectFileError("denied", reason);
   };
   check(file);

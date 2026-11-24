@@ -25,8 +25,10 @@ const CLIS = [
   { harness: "antigravity", comm: "agy", mode: /\s(?:-p|--print)(?:\s|$)/ },
   { harness: "claude", comm: "claude", mode: /\s(?:-p|--print)(?:\s|$)/ },
 ];
-// A session starts this long before or after its process, at most.
-const EARLY_MS = 3_000;
+// A session starts after its process, within this long. The little before is
+// the clock's slack only: a Claude agent's own session, begun 1.8 s before its
+// first `claude -p`, was once taken for that command's.
+const EARLY_MS = 250;
 const LATE_MS = 120_000;
 // One process is one entry: the same pid seen again with the same start.
 const SAME_START_MS = 5_000;

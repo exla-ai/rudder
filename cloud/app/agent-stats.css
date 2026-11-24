@@ -44,6 +44,8 @@
 /* Popover */
 .st-pop {
   position: fixed; z-index: 40; width: min(300px, calc(100vw - 16px));
+  /* 8px clear of the window on each side, less its own padding and border. */
+  max-height: calc(100dvh - 42px); overflow-y: auto; overscroll-behavior: contain;
   padding: 12px 14px; border-radius: 14px;
   background: var(--surface); color: var(--ink);
   border: 1px solid var(--line-strong); box-shadow: var(--shadow-2);

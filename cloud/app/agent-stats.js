@@ -64,7 +64,13 @@ export function popover(anchor, { label, render, place = "below" }) {
     const vw = document.documentElement.clientWidth, vh = window.innerHeight;
     const left = Math.max(8, Math.min(vw - w - 8, place === "above" ? a.left : a.right - w));
     const below = a.bottom + 6, above = a.top - hgt - 6;
-    const top = place === "above" ? (above >= 8 ? above : below) : (below + hgt <= vh - 8 ? below : Math.max(8, above));
+    // The asked side when it fits there, else the other; when it fits on
+    // neither (three accounts' meters in a short window), it stays inside the
+    // window over the anchor, and scrolls when taller than the window (.st-pop).
+    const fitsAbove = above >= 8, fitsBelow = below + hgt <= vh - 8;
+    const top = (place === "above" ? fitsAbove : !fitsBelow && fitsAbove) ? above
+      : fitsBelow ? below
+      : Math.max(8, vh - hgt - 8);
     el.style.left = `${Math.round(left)}px`;
     el.style.top = `${Math.round(top)}px`;
   };

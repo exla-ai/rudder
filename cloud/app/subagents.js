@@ -96,8 +96,8 @@ function activitySig(s) {
 
 /**
  * What a subagent's card says of it, in the chat and in the tray alike: its
- * status, title, kind and name (`who`), how long it has run or ran, and how
- * many tools it used.
+ * status, title, kind and name (`who`), the model it runs on once its log
+ * names one, how long it has run or ran, and how many tools it used.
  */
 export function subagentFacts(s, now) {
   const st = SUBAGENT_STATUS[s.status] || SUBAGENT_STATUS.stopped;
@@ -107,15 +107,15 @@ export function subagentFacts(s, now) {
   const title = s.description || s.name || s.kind || "Subagent";
   const who = [s.kind, s.name].filter((x, i, all) => x && x !== title && all.indexOf(x) === i).join(" · ");
   const calls = s.toolCalls || s.status === "running" ? `${s.toolCalls} tool ${s.toolCalls === 1 ? "call" : "calls"}` : "";
-  return { st, title, who, time: elapsed == null ? "" : duration(elapsed), calls };
+  return { st, title, who, model: s.model || "", time: elapsed == null ? "" : duration(elapsed), calls };
 }
 
 function paint(box, m, open) {
   const s = m.subagent;
   box._msg = m;
-  const { st, title, who, time, calls } = subagentFacts(s, Date.now());
-  const facts = [who, time, calls].filter(Boolean);
-  const sig = [activitySig(s), time, open, box._links].join("|");
+  const { st, title, who, model, time, calls } = subagentFacts(s, Date.now());
+  const facts = [who, model, time, calls].filter(Boolean);
+  const sig = [activitySig(s), model, time, open, box._links].join("|");
   if (box._saSig === sig) return;
   box._saSig = sig;
 

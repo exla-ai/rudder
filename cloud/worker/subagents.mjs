@@ -21,9 +21,9 @@
 // from (trayLine): a log that has not changed is not read at all.
 //
 // The list has one line per subagent:
-//   { id, backend, type, kind, name, description, status, startedAt, endedAt,
-//     toolCalls, step }
-// type is "subagent" or "teammate"; status is running, done, stopped or failed; step is
+//   { id, backend, model, type, kind, name, description, status, startedAt,
+//     endedAt, toolCalls, step }
+// model is the one its log names last, null before its first reply; type is "subagent" or "teammate"; status is running, done, stopped or failed; step is
 // what a running one does now, or what a finished one came back with. `open`
 // names one subagent whose activity comes back too, in the shape of the chat's
 // cards (cloud/app/subagents.js): the line plus prompt, result, messages and
@@ -195,6 +195,7 @@ function line(entry) {
   return {
     id: entry.id,
     backend: entry.backend,
+    model: entry.reader.model ?? null,
     type: entry.type,
     kind: entry.kind,
     name: entry.name,

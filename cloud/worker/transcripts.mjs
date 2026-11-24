@@ -832,7 +832,7 @@ function agyArg(value) {
 function antigravityChildReader() {
   const reader = antigravityReader();
   const addStep = reader.addLine;
-  Object.assign(reader, { dropped: 0, toolCalls: 0, prompt: null, report: null, firstAt: null, lastAt: null, finished: false });
+  Object.assign(reader, { dropped: 0, toolCalls: 0, prompt: null, report: null, firstAt: null, lastAt: null, finished: false, model: null });
   reader.skip = () => false;
   reader.addLine = (line) => {
     let step;
@@ -857,6 +857,9 @@ function antigravityChildReader() {
       reader.finished = false;
     }
     if (step.type === "PLANNER_RESPONSE") {
+      if (typeof step.model === "string" && step.model) {
+        reader.model = step.model;
+      }
       const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
       reader.toolCalls += calls.length;
       for (const call of calls.filter((entry) => entry?.name === "send_message")) {
@@ -955,6 +958,7 @@ function attachAntigravitySubagents(reader, { home, conversationId, live, shown,
     spawn.message.subagent = {
       id,
       backend: "antigravity",
+      model: sub?.model ?? null,
       kind: spawn.kind || (typeof descriptor?.typeName === "string" && descriptor.typeName ? descriptor.typeName : null),
       name: spawn.name || (typeof descriptor?.role === "string" && descriptor.role ? descriptor.role : null),
       description: null,
@@ -1208,9 +1212,13 @@ export function opencodeSubagents(home, parentId, live) {
       ? turn.error?.name === "MessageAbortedError" ? "stopped" : turn.error ? "failed" : "done"
       : live ? "running" : "stopped";
     const detail = step?.type === "tool" ? `${step.tool} ${summarizeOpencodeInput(step.state?.input)}` : step?.text;
+    // A reply names its model flat, a prompt under `model`.
+    const provider = turn?.providerID ?? turn?.model?.providerID;
+    const model = turn?.modelID ?? turn?.model?.modelID;
     return {
       id,
       backend: "opencode",
+      model: provider && model ? `${provider}/${model}` : null,
       type: "subagent",
       kind: agent ?? null,
       name: null,
@@ -1360,6 +1368,8 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     exited: false,
     // A teammate agreed to shut down: its work is over, its process exits next.
     shutDown: false,
+    // The model that answered last, as its log names it.
+    model: null,
     dropped: 0,
     // Told of each tool result with its call's message (null when the call
     // is not in what was read), for where a chat page may start.
@@ -1375,6 +1385,10 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         entry = JSON.parse(line);
       } catch {
         return;
+      }
+      // "<synthetic>" marks a note Claude Code wrote itself, not a model's reply.
+      if (entry.type === "assistant" && typeof entry.message?.model === "string" && entry.message.model && !entry.message.model.startsWith("<")) {
+        reader.model = entry.message.model;
       }
       add(entry, offset);
       if (sub && reader.messages.length > SUBAGENT_KEEP * 2) {
@@ -1938,6 +1952,8 @@ function codexReader({ stats = null, child = false } = {}) {
     result: null,
     endedAt: null,
     toolCalls: 0,
+    // The model of its newest turn (turn_context).
+    model: null,
     dropped: 0,
     // As claudeReader's.
     onResult: null,
@@ -1987,6 +2003,9 @@ function codexReader({ stats = null, child = false } = {}) {
       if (Number(entry.ordinal) < reader.start) {
         return;
       }
+    }
+    if (entry.type === "turn_context" && typeof entry.payload?.model === "string" && entry.payload.model) {
+      reader.model = entry.payload.model;
     }
     stats?.add(entry);
     const id = `c${offset}`;
@@ -2444,6 +2463,7 @@ function attachClaudeSubagents(reader, { dir, projectDir, live, shown, depth }) 
     spawn.message.subagent = {
       id: card.id,
       backend: "claude",
+      model: sub?.model ?? null,
       kind: card.kind,
       name: card.name,
       description: card.description,
@@ -2645,6 +2665,7 @@ function attachCodexSubagents(reader, { home, live, shown, depth }) {
     spawn.message.subagent = {
       id: spawn.threadId,
       backend: "codex",
+      model: child?.model ?? null,
       kind: typeof meta.agent_role === "string" ? meta.agent_role : null,
       name: typeof meta.agent_nickname === "string" ? meta.agent_nickname : null,
       description: spawn.taskName ? spawn.taskName.replace(/[_-]+/g, " ").trim() : null,

@@ -3,7 +3,7 @@
 // composer, so they stay in reach without scrolling up to their cards
 // (cloud/worker/subagents.mjs, GET
 // /api/app/subagents). Each entry says what the chat's card says, live: status,
-// title, kind and name, how long and tool calls (subagents.js subagentFacts).
+// title, kind and name, model, how long and tool calls (subagents.js subagentFacts).
 // An entry opens that subagent's activity in the tray, painted as the card's is
 // (paintSubagentActivity). Teammates are listed too, whether or not the chat
 // has a card for them. The tray stays closed behind one button left of the
@@ -142,7 +142,7 @@ export function mountSubagentTray({ workspace, run, isWorking = () => false }) {
     setText(openEl.querySelector(".sat-open-title"), f.title);
     openEl.querySelector(".dot").classList.toggle("live", !!f.st.live);
     setText(openEl.querySelector(".sa-label"), f.st.label);
-    setText(openEl.querySelector(".sat-open-facts"), [f.who, f.time, f.calls].filter(Boolean).join(" · "));
+    setText(openEl.querySelector(".sat-open-facts"), [f.who, f.model, f.time, f.calls].filter(Boolean).join(" · "));
     loading.hidden = !!opened;
     if (!opened) return;
     // Only your own agents have a tray, so their files open (file-link.js, mounted on the tray by app.js).
@@ -160,7 +160,7 @@ export function mountSubagentTray({ workspace, run, isWorking = () => false }) {
 
   function paintCard(node, s, now) {
     const f = trayFacts(s, now);
-    const facts = [f.time, f.calls].filter(Boolean).join(" · ");
+    const facts = [f.model, f.time, f.calls].filter(Boolean).join(" · ");
     const sig = [s.status, f.title, f.who, facts].join("|");
     if (node.dataset.sig === sig) return;
     node.dataset.sig = sig;

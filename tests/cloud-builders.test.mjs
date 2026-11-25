@@ -188,6 +188,35 @@ test("a stopped builder is started again on its old volume", async () => {
   assert.ok(fly.calls.includes(`start ${machine.id}`));
 });
 
+test("a destroyed Fly machine is replaced on its retained volume and never deleted twice", async () => {
+  const { pool, fly, advance } = setup();
+  const lease = await pool.lease(home);
+  pool.release(home.id, lease.leaseId);
+  const [old] = fly.machines.values();
+  old.state = "destroyed";
+
+  const next = await pool.lease(home);
+  assert.equal(next.builderId, lease.builderId);
+  assert.equal(next.warm, false);
+  assert.notEqual(next.url, lease.url);
+  assert.deepEqual(fly.calls, ["createVolume rdb_home_a_0", "createMachine vol_1", "createMachine vol_1"]);
+
+  pool.release(home.id, next.leaseId);
+  const replacement = [...fly.machines.values()].at(-1);
+  replacement.state = "destroyed";
+  advance(16 * 60_000);
+  await pool.sweep();
+  assert.equal(pool.list(home.id)[0].machineState, null);
+
+  const last = await pool.lease(home);
+  pool.release(home.id, last.leaseId);
+  [...fly.machines.values()].at(-1).state = "destroyed";
+  await pool.destroyForHome(home.id);
+  assert.equal(pool.list(home.id).length, 0);
+  assert.equal(fly.volumes.size, 0);
+  assert.equal(fly.calls.some((call) => call.startsWith("destroyMachine ")), false);
+});
+
 test("renew extends a live lease; an expired lease frees the builder", async () => {
   const { pool, advance, now } = setup();
   const grant = await pool.lease(home, { seconds: 120 });

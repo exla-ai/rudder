@@ -313,10 +313,16 @@ export function createBuilderPool({
   }
 
   function remember(row: Row, machine: BuilderMachine): void {
+    row.private_ip = machine.private_ip || (row.machine_id === machine.id ? row.private_ip : null);
     row.machine_id = machine.id;
-    row.private_ip = machine.private_ip || row.private_ip;
     row.machine_state = machine.state || null;
     q.machine.run({ id: row.id, machine_id: row.machine_id, private_ip: row.private_ip, machine_state: row.machine_state, now: now() });
+  }
+
+  async function existingMachine(id: string | null): Promise<BuilderMachine | null> {
+    const machine = id ? await fly.getMachine(id) : null;
+    // Fly keeps the deleted machine's record and image metadata for a while.
+    return machine?.state === "destroyed" ? null : machine;
   }
 
   async function createMachine(row: Row): Promise<void> {
@@ -329,6 +335,7 @@ export function createBuilderPool({
   /** Bring a claimed builder to "started". Returns whether it was already running. */
   async function ensureRunning(row: Row): Promise<boolean> {
     const token = builderToken(key, row.id, row.token_salt);
+    const current = await existingMachine(row.machine_id);
     // A machine made by this call is a cold start whatever state Fly reports.
     let wasRunning = true;
     if (row.status === "creating") {
@@ -342,10 +349,10 @@ export function createBuilderPool({
       row.status = "ready";
       q.status.run({ id: row.id, status: "ready", error: null, now: now() });
       persist();
-    } else if (sha256Hex(token) !== row.token_sha256 || !row.machine_id || (await fly.getMachine(row.machine_id))?.workerImage !== fly.image) {
+    } else if (!current || sha256Hex(token) !== row.token_sha256 || current.workerImage !== fly.image) {
       // The image or key changed, or the machine is gone: a fresh machine on the
       // same volume keeps the caches and picks up the current token hash.
-      if (row.machine_id) await fly.destroyMachine(row.machine_id);
+      if (current) await fly.destroyMachine(current.id);
       row.token_sha256 = sha256Hex(token);
       q.token.run({ id: row.id, token_sha256: row.token_sha256, now: now() });
       await createMachine(row);
@@ -355,7 +362,7 @@ export function createBuilderPool({
     const deadline = now() + START_TIMEOUT_MS;
     let requestedStart = false;
     for (;;) {
-      const machine = await fly.getMachine(row.machine_id!);
+      const machine = await existingMachine(row.machine_id);
       if (!machine) throw new BuilderPoolError("builder machine disappeared while starting", 503);
       remember(row, machine);
       if (machine.state === "started") return wasRunning;
@@ -365,7 +372,7 @@ export function createBuilderPool({
       if (!requestedStart && (machine.state === "stopped" || machine.state === "suspended")) {
         await fly.startMachine(machine.id);
         requestedStart = true;
-      } else if (machine.state === "failed" || machine.state === "destroyed" || machine.state === "destroying") {
+      } else if (machine.state === "failed" || machine.state === "destroying") {
         throw new BuilderPoolError(`builder machine is ${machine.state}`, 503);
       }
       if (now() > deadline) throw new BuilderPoolError("builder did not start in time", 503);
@@ -491,7 +498,9 @@ export function createBuilderPool({
   }
 
   async function finishDestroy(row: Row): Promise<void> {
-    if (row.machine_id) await fly.destroyMachine(row.machine_id);
+    const machine = await existingMachine(row.machine_id);
+    if (machine?.state === "destroying") return;
+    if (machine) await fly.destroyMachine(machine.id);
     if (row.volume_id) await fly.destroyVolume(row.volume_id);
     q.remove.run(row.id);
   }
@@ -540,10 +549,12 @@ export function createBuilderPool({
         // whose process wedged. Recheck the lease after every await.
         if (current.status === "ready" && current.machine_id && current.machine_state !== "stopped"
           && at - current.last_used_at > (policy.idleSeconds + 600) * 1000) {
-          const machine = await fly.getMachine(current.machine_id);
+          const machine = await existingMachine(current.machine_id);
+          const refreshed = get(current.id);
+          if (!refreshed || refreshed.lease_id || refreshed.machine_id !== current.machine_id) continue;
           if (!machine) {
             q.machine.run({ id: current.id, machine_id: null, private_ip: null, machine_state: null, now: now() });
-          } else if (machine.state === "started" && !get(current.id)?.lease_id) {
+          } else if (machine.state === "started") {
             log(`[builders] ${current.home_id} ${current.id} still running while idle; stopping it`);
             await fly.stopMachine(machine.id);
             q.machine.run({ id: current.id, machine_id: machine.id, private_ip: machine.private_ip || current.private_ip, machine_state: "stopping", now: now() });

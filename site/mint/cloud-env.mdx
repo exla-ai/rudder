@@ -1,0 +1,96 @@
+---
+title: "Match your cloud machine to your laptop"
+description: "Your agents run on your cloud machine, not your laptop. Give it the same env values and files your code needs. Point your local agent at this page and it can do it for you."
+---
+## Hand this to your agent
+
+Paste this into Claude Code, Codex or any coding agent running on your laptop, in the project you want to run in the cloud:
+
+```text
+Read https://rudder.exla.ai/docs/cloud-env and make my Rudder cloud machine
+match this project's local environment. Follow the "Rules for agents" section.
+```
+
+The rest of this page is what the agent will do, and what you can do by hand.
+
+## Why it matters
+
+A Rudder cloud machine starts with your repository and nothing that is not in git. Your `.env` files, API keys and tokens stay on your laptop, because git ignores them. An agent in the cloud that runs your tests or your dev server without them fails in ways that look like bugs in your code.
+
+Rudder keeps these values in a vault on your account and hands them to your cloud machine. There is no API key to create and nothing to paste into a web page.
+
+## Sign the laptop in
+
+```text
+npm install -g @exla/rudder
+rudder login
+```
+
+`rudder login` prints a code and opens the browser. Approve it with the same account you use in the app. In the app this is Settings, then **Sign in a computer**. You do this once per laptop.
+
+## Env values
+
+One value at a time:
+
+```text
+rudder cloud secrets set STRIPE_SECRET_KEY
+```
+
+It asks for the value without showing it. To set one from a script, pipe it in, so the value never lands in your shell history:
+
+```text
+printf '%s' "$STRIPE_SECRET_KEY" | rudder cloud secrets set STRIPE_SECRET_KEY
+```
+
+Agents on your cloud machine get these as environment variables. An agent that is already running keeps the environment it started with; the next one you start has the new value.
+
+## Env files and other files
+
+Most projects read a `.env` file rather than the process environment. Store the file itself, at the path it should have on the cloud machine:
+
+```text
+rudder cloud secrets set --file ~/code/my-app/.env ./.env
+```
+
+The first path is where the file goes on the cloud machine, the second is the file on your laptop. Projects on the cloud machine live in `~/code/<repo name>`, so `~/code/my-app/.env` is the `.env` at the root of the `my-app` repository. A file in a subfolder works the same way: `~/code/my-app/apps/web/.env.local`.
+
+Any other file under your home directory works too, such as `~/.npmrc` for a private registry. Files are capped at 1 MB each.
+
+To bring over the agent logins and settings your laptop already has (Claude Code, Codex, git and GitHub) in one step:
+
+```text
+rudder cloud secrets sync
+```
+
+## Check it worked
+
+```text
+rudder cloud secrets list
+```
+
+This lists names, kinds and sizes. It never shows a value. Then ask an agent on the cloud machine to confirm what it sees, by name only:
+
+```text
+Check that these env names are set, without printing their values:
+STRIPE_SECRET_KEY, DATABASE_URL. Then run the test suite.
+```
+
+The cloud machine picks up vault changes when it wakes and when you open or add a project. If a new agent does not see a value you just set, open the project in the app and start the agent again.
+
+To remove something: `rudder cloud secrets rm NAME`, or `rudder cloud secrets rm ~/code/my-app/.env` for a file.
+
+<Note>
+Only values and files. Tools your project needs, such as a database, a language version or a CLI, are installed on the cloud machine by asking an agent there to set the project up. The cloud machine is Linux, so a macOS-only tool needs its Linux equivalent.
+</Note>
+
+## Rules for agents
+
+If you are an agent doing this for someone, work through these in order.
+
+1. Run `rudder --version`. If it is missing, install it with `npm install -g @exla/rudder`. Never run a bare `rudder <word>` that is not a listed command; it starts a paid agent.
+2. Run `rudder cloud secrets list`. If it says you are not signed in, ask the person to run `rudder login` and approve it. Do not try to sign in for them.
+3. Find what the project needs: `.env`, `.env.local`, `.env.*` at the repository root and in each package, `.env.example` for names with no local value, and config the code reads from the home directory such as `~/.npmrc`.
+4. Show the person the list of names and files you plan to store, without values, and wait for a yes. Leave out anything that points at their laptop only, such as `localhost` database URLs, unless they say the cloud machine runs that service too.
+5. Store each env file with `rudder cloud secrets set --file ~/code/<repo name>/<path in repo> <local path>`. The repo name is the last part of the git remote, the name the project has in the Rudder app.
+6. Store values that are only in the shell environment by piping them in, as shown under Env values. Never put a value on a command line, in a file you commit, in a chat message or in your final summary.
+7. Run `rudder cloud secrets list` again and report the names stored, the names from `.env.example` that still have no value, and anything you left out and why.

@@ -569,6 +569,9 @@ export type SubscriptionLimit = { window: "session" | "weekly" | null; resetsAt:
 /** Antigravity has quota meters but no token-cost logs, so it is not a `Provider`. */
 export type QuotaProvider = Provider | "antigravity";
 
+/** One model's spent limit on an account; `resetsAt` in epoch milliseconds, null when unknown. */
+export type ModelLimit = { model: string; resetsAt: number | null };
+
 export type AccountQuota = {
   provider: QuotaProvider;
   /** Which of the provider's accounts: "main" or an extra account's id. */
@@ -581,6 +584,8 @@ export type AccountQuota = {
   /** Human-readable reason a request would be rejected or throttled right now (rate limit hit, credits depleted), or null when clear. */
   blocked: string | null;
   usageLimit: SubscriptionLimit | null;
+  /** Claude: models whose own weekly limit is spent while the account still has allowance, each by its display name ("Fable"). */
+  modelLimits?: ModelLimit[];
   /** Antigravity: its model pools, each with its own allowance; a spent one says when it resets. */
   pools?: QuotaPool[];
   /** Human-readable reason the meters are missing, with the fix. */
@@ -685,10 +690,17 @@ export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string 
   push("Weekly · Opus", usage?.seven_day_opus);
   push("Weekly · Sonnet", usage?.seven_day_sonnet);
   const seenScopes = new Set(windows.map((w) => w.label));
+  const modelLimits: ModelLimit[] = [];
   for (const limit of Array.isArray(usage?.limits) ? usage.limits : []) {
     if (!limit?.is_active || typeof limit.percent !== "number") continue;
     const model = limit.scope?.model?.display_name;
     if (typeof model !== "string" || !model) continue;
+    // Spent for this model only: the account still serves its other models,
+    // and another account may still serve this one.
+    if (limit.percent >= 100 && !modelLimits.some((entry) => entry.model === model)) {
+      const resetsAt = Date.parse(limit.resets_at);
+      modelLimits.push({ model, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null });
+    }
     const label = `Weekly · ${model}`;
     if (seenScopes.has(label)) continue;
     seenScopes.add(label);
@@ -709,7 +721,7 @@ export function parseClaudeQuota(usage: any, profile: any, fallbackPlan: string 
     [usage?.five_hour?.utilization, Date.parse(usage?.five_hour?.resets_at), "session"],
     [usage?.seven_day?.utilization, Date.parse(usage?.seven_day?.resets_at), "weekly"],
   ]);
-  return { email, plan, windows, blocked, usageLimit, error: windows.length ? null : "this plan does not expose limits" };
+  return { email, plan, windows, blocked, usageLimit, modelLimits, error: windows.length ? null : "this plan does not expose limits" };
 }
 
 async function fetchClaudeQuota(account: AgentAccount, env: NodeJS.ProcessEnv, timeoutMs = 15_000): Promise<AccountQuota> {

@@ -2053,9 +2053,35 @@ async function scanPorts() {
 // ---------------------------------------------------------------------------
 
 
+// Claude accounts' models whose own weekly limit is spent while the account
+// still has allowance ("Weekly · Fable" at 100%): "claude:<id>" -> [{ model,
+// resetsAt }]. New work on such a model goes to an account that still has it
+// (native config.rs usage_account_route). Read from each account's usage
+// every few minutes while there is a second account to go to.
+const modelLimits = new Map();
+const MODEL_LIMITS_CHECK_MS = 3 * 60 * 1000;
+
+async function refreshModelLimits() {
+  const rows = credentials?.claude ?? [];
+  if (rows.length < 2) return;
+  let changed = false;
+  await Promise.all(rows.filter((row) => row.ok || row.signedIn).map(async ({ id }) => {
+    const quota = await readAccountQuota("claude", id, loginEnv("claude", id));
+    if (quota.error) return;
+    const key = `claude:${id}`;
+    const next = quota.modelLimits ?? [];
+    if (JSON.stringify(modelLimits.get(key) ?? []) === JSON.stringify(next)) return;
+    modelLimits.set(key, next);
+    changed = true;
+    log(`account ${id}: spent model limits: ${next.map((limit) => limit.model).join(", ") || "none"}`);
+  }));
+  if (changed) await publishAccountAvailability();
+}
+setInterval(() => void refreshModelLimits().catch((error) => log(`model limits: ${error.code || error.name}`)), MODEL_LIMITS_CHECK_MS).unref();
+
 async function publishAccountAvailability() {
   const rows = (backend) => (credentials?.[backend] ?? []).map(({ id, ok, signedIn, usageLimit }) => ({
-    id, ok, signedIn, usageLimit,
+    id, ok, signedIn, usageLimit, modelLimits: modelLimits.get(`${backend}:${id}`) ?? [],
   }));
   await writeJson(accountAvailabilityFile, { claude: rows("claude"), codex: rows("codex") }, { mode: 0o600 });
   lastStateJson = "";
@@ -2160,6 +2186,7 @@ async function checkCredentials() {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
     await publishAccountAvailability();
+    void refreshModelLimits().catch((error) => log(`model limits: ${error.code || error.name}`));
     const who = (list) => list.map((check) => (check.ok ? check.account || "yes" : "no")).join(",");
     log(`credentials: github=${github.ok ? github.account : "no"} claude=${who(claude)} codex=${who(codex)} opencode=${who(opencode)} antigravity=${who(antigravity)}`);
   } catch (error) {

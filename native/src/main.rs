@@ -8982,7 +8982,7 @@ impl App {
     fn route_fresh_task(&mut self, input: &str) -> Result<(), String> {
         let preferred = config::load_rudder_config().as_ref()
             .and_then(|config| config::config_account(config, self.backend));
-        if let Err(error) = config::usage_account_route(self.backend, preferred.as_deref()) {
+        if let Err(error) = config::usage_account_route(self.backend, preferred.as_deref(), &self.model) {
             if self.task_input.is_empty() {
                 self.replace_task_input(input.to_string());
             }
@@ -9731,7 +9731,7 @@ impl App {
         };
         let session_id = mint_session_id_for(backend);
         let prompt = rudder_reconcile_prompt(input, &frontier);
-        let account = new_agent_account(backend);
+        let account = new_agent_account(backend, &model);
         let mut command =
             self.reconcile_planner_command(backend, &model, effort, &prompt, session_id.as_deref());
         let wired = signals::apply_account(&mut command, backend, account.as_deref());
@@ -9925,9 +9925,9 @@ impl App {
             }],
             last_user_input_at: created_at,
             backend,
+            account: new_agent_account(backend, &model),
             model,
             effort,
-            account: new_agent_account(backend),
             status: AgentStatus::Running,
             cwd: self.cwd.clone(),
             workspace_path: None,
@@ -10387,8 +10387,8 @@ Until the first packet arrives, reply only: \"standing by\"."
             session_id.as_deref(),
         );
         // Both halves are new rows, each on its backend's default account.
-        let account = new_agent_account(backend);
-        let adversarial_account = new_agent_account(adversarial_backend);
+        let account = new_agent_account(backend, &model);
+        let adversarial_account = new_agent_account(adversarial_backend, &adversarial_model);
         let generator_wired = signals::augment_worker_command(
             &mut generator_command,
             backend,
@@ -11721,7 +11721,7 @@ Address the objection directly. If you disagree, say why inside \
             other => other,
         };
         let session_id = mint_session_id_for(backend);
-        let account = new_agent_account(backend);
+        let account = new_agent_account(backend, &model);
         let mut command = if is_swarm {
             swarm_orchestrator_command(
                 backend,
@@ -17373,7 +17373,7 @@ Address the objection directly. If you disagree, say why inside \
         // CLI startup cannot drop a paste meant for the new process.
         let run = &self.agents[index];
         if !instruction.starts_with('/') && crate::agent_model::model_switch_refusal(run).is_none() {
-            match config::usage_account_route(run.backend, run.account.as_deref()) {
+            match config::usage_account_route(run.backend, run.account.as_deref(), &run.model) {
                 Ok(Some(replacement)) => {
                     if run.needs_permission {
                         return SteerDelivery::Failed(FailCode::Refused, "This chat is waiting for a permission decision. Answer it before switching accounts.".to_string());
@@ -20834,14 +20834,15 @@ Address the objection directly. If you disagree, say why inside \
 
         // The row goes in now, in the dashboard checkout with no workspace and
         // no process; finish_fork_launch fills those in and records the seed.
+        // A conversation from outside the dashboard is no row's: the fork
+        // is a new row, on the backend's default account.
+        let account = new_agent_account(backend, &model);
         let run = fork_row(
             run_id.clone(),
             task,
             truncate_chars(&label, 56),
             (backend, model, effort),
-            // A conversation from outside the dashboard is no row's: the fork
-            // is a new row, on the backend's default account.
-            new_agent_account(backend),
+            account,
             self.cwd.clone(),
         );
 
@@ -21522,7 +21523,7 @@ Address the objection directly. If you disagree, say why inside \
                 // start a context-carrying session on the requested provider, on
                 // that provider's default account.
                 run.session_id = None;
-                run.account = new_agent_account(backend);
+                run.account = new_agent_account(backend, &run.model);
             } else if backend == Backend::Codex
                 && run
                     .session_id

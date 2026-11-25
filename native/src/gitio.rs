@@ -324,7 +324,7 @@ pub(crate) fn create_main_agent(
         model: model.to_string(),
         effort,
         // Every caller makes a new row: it starts on the backend's default account.
-        account: new_agent_account(backend),
+        account: new_agent_account(backend, model),
         status: AgentStatus::Stopped,
         cwd: repo_root.to_path_buf(),
         workspace_path: None,

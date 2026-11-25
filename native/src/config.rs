@@ -95,13 +95,14 @@ pub(crate) fn config_account(config: &serde_json::Value, backend: Backend) -> Op
         .map(str::to_string)
 }
 
-/// The account a NEW agent row on `backend` starts on, read from config.json
-/// at launch. A row that continues a conversation keeps its own instead.
-pub(crate) fn new_agent_account(backend: Backend) -> Option<String> {
+/// The account a NEW agent row on `backend` and `model` starts on, read from
+/// config.json at launch. A row that continues a conversation keeps its own
+/// instead.
+pub(crate) fn new_agent_account(backend: Backend, model: &str) -> Option<String> {
     let preferred = load_rudder_config()
         .as_ref()
         .and_then(|config| config_account(config, backend));
-    match usage_account_route(backend, preferred.as_deref()) {
+    match usage_account_route(backend, preferred.as_deref(), model) {
         Ok(Some(id)) => (id != MAIN_ACCOUNT).then_some(id),
         Ok(None) | Err(_) => preferred,
     }
@@ -115,6 +116,28 @@ struct AccountAvailability {
     #[serde(default)]
     signed_in: bool,
     usage_limit: Option<AccountUsageLimit>,
+    /// Models whose own limit is spent on this account while the account
+    /// still has allowance, by display name ("Fable").
+    #[serde(default)]
+    model_limits: Vec<AccountModelLimit>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountModelLimit {
+    model: String,
+    resets_at: Option<u64>,
+}
+
+impl AccountAvailability {
+    /// Whether `model` (an id like `claude-fable-5-2`) has its own limit spent here.
+    fn model_spent(&self, model: &str, now: u64) -> bool {
+        let model = model.to_ascii_lowercase();
+        self.model_limits.iter().any(|limit| {
+            let name = limit.model.trim().to_ascii_lowercase();
+            !name.is_empty() && model.contains(&name) && limit.resets_at.is_none_or(|reset| reset > now)
+        })
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -129,30 +152,42 @@ impl AccountUsageLimit {
     }
 }
 
+/// The account to use in place of `current`, or `None` to stay. An account
+/// is left when its allowance is spent, or when `model`'s own limit is spent
+/// on it and another account still has that model. With no account to go to,
+/// a spent allowance is an error; a spent model limit stays where it is, as
+/// the account still serves its other models.
 fn select_usage_account<'a>(
     rows: &'a [AccountAvailability],
     current: &str,
+    model: &str,
     now: u64,
 ) -> Result<Option<&'a str>, String> {
     let exhausted = |row: &AccountAvailability| {
         row.usage_limit.as_ref().is_some_and(|limit| limit.active(now))
     };
-    if !rows.iter().any(|row| row.id == current && exhausted(row)) {
+    let Some(here) = rows.iter().find(|row| row.id == current) else {
+        return Ok(None);
+    };
+    if !exhausted(here) && !here.model_spent(model, now) {
         return Ok(None);
     }
-    rows.iter()
-        .find(|row| {
-            (row.ok || row.signed_in && row.usage_limit.is_some())
-                && !exhausted(row)
-                && (row.id == MAIN_ACCOUNT || valid_account_id(&row.id))
-        })
-        .map(|row| Some(row.id.as_str()))
-        .ok_or_else(|| "This account has reached its usage limit. Wait for the reset or add another account in Settings.".to_string())
+    let replacement = rows.iter().find(|row| {
+        (row.ok || row.signed_in && row.usage_limit.is_some())
+            && !exhausted(row)
+            && !row.model_spent(model, now)
+            && (row.id == MAIN_ACCOUNT || valid_account_id(&row.id))
+    });
+    match replacement {
+        Some(row) => Ok(Some(row.id.as_str())),
+        None if exhausted(here) => Err("This account has reached its usage limit. Wait for the reset or add another account in Settings.".to_string()),
+        None => Ok(None),
+    }
 }
 
 /// The cloud supervisor owns the account snapshot. Local dashboards without
 /// that supervisor keep using their configured account.
-pub(crate) fn usage_account_route(backend: Backend, current: Option<&str>) -> Result<Option<String>, String> {
+pub(crate) fn usage_account_route(backend: Backend, current: Option<&str>, model: &str) -> Result<Option<String>, String> {
     if !matches!(backend, Backend::Claude | Backend::Codex) {
         return Ok(None);
     }
@@ -171,7 +206,7 @@ pub(crate) fn usage_account_route(backend: Backend, current: Option<&str>) -> Re
         return Ok(None);
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-    select_usage_account(rows, current.unwrap_or(MAIN_ACCOUNT), now).map(|replacement| replacement.map(str::to_string))
+    select_usage_account(rows, current.unwrap_or(MAIN_ACCOUNT), model, now).map(|replacement| replacement.map(str::to_string))
 }
 
 #[cfg(test)]
@@ -187,13 +222,27 @@ mod account_rotation_tests {
             {"id":"older", "ok":false, "signedIn":true, "usageLimit":{"resetsAt":900}},
             {"id":"newer", "ok":true}
         ])).unwrap();
-        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 800).unwrap(), Some("newer"));
-        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 900).unwrap(), Some("older"));
-        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, 1000).unwrap(), None);
-        assert!(select_usage_account(&rows[..4], MAIN_ACCOUNT, 899).is_err());
-        assert_eq!(select_usage_account(&rows, "outage", 800).unwrap(), None);
-        assert_eq!(select_usage_account(&rows, "expired", 800).unwrap(), None);
-        assert_eq!(select_usage_account(&rows, "newer", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, "claude-opus-5-5", 800).unwrap(), Some("newer"));
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, "claude-opus-5-5", 900).unwrap(), Some("older"));
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, "claude-opus-5-5", 1000).unwrap(), None);
+        assert!(select_usage_account(&rows[..4], MAIN_ACCOUNT, "claude-opus-5-5", 899).is_err());
+        assert_eq!(select_usage_account(&rows, "outage", "claude-opus-5-5", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, "expired", "claude-opus-5-5", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, "newer", "claude-opus-5-5", 800).unwrap(), None);
+    }
+
+    #[test]
+    fn a_models_own_spent_limit_moves_only_that_model_to_another_account() {
+        let rows: Vec<AccountAvailability> = serde_json::from_value(serde_json::json!([
+            {"id":"main", "ok":true, "modelLimits":[]},
+            {"id":"second", "ok":true, "modelLimits":[{"model":"Fable", "resetsAt":1000}]}
+        ])).unwrap();
+        assert_eq!(select_usage_account(&rows, "second", "claude-fable-5-2", 800).unwrap(), Some("main"));
+        assert_eq!(select_usage_account(&rows, "second", "claude-opus-5-5", 800).unwrap(), None);
+        assert_eq!(select_usage_account(&rows, "second", "claude-fable-5-2", 1000).unwrap(), None, "the limit reset");
+        assert_eq!(select_usage_account(&rows, MAIN_ACCOUNT, "claude-fable-5-2", 800).unwrap(), None);
+        // Spent on every account: stay, the account still serves its other models.
+        assert_eq!(select_usage_account(&rows[1..], "second", "claude-fable-5-2", 800).unwrap(), None);
     }
 }
 

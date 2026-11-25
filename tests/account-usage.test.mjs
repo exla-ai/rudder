@@ -36,6 +36,12 @@ test("accurate account-wide meters supply reset times without rounding or model-
   assert.deepEqual(parseClaudeQuota({ five_hour: { utilization: 100 }, seven_day: window }, null, null).usageLimit, { window: "session", resetsAt: null });
   assert.equal(parseClaudeQuota({ seven_day: { ...window, utilization: 99.99 } }, null, null).usageLimit, null);
   assert.equal(parseClaudeQuota({ seven_day_opus: window }, null, null).usageLimit, null);
+  // A model's own spent limit leaves the account available and names the model.
+  const fable = parseClaudeQuota({ seven_day: { utilization: 87 }, limits: [
+    { is_active: true, percent: 100, resets_at: "2026-11-28T22:00:00Z", scope: { model: { display_name: "Fable" } } },
+    { is_active: true, percent: 40, scope: { model: { display_name: "Opus" } } },
+  ] }, null, null);
+  assert.deepEqual([fable.usageLimit, fable.modelLimits], [null, [{ model: "Fable", resetsAt: Date.parse("2026-11-28T22:00:00Z") }]]);
   assert.equal(parseClaudeQuota({ seven_day: window, extra_usage: { is_enabled: true } }, null, null).usageLimit, null);
   const meter = { used_percent: 100, reset_at: resetsAt / 1000, limit_window_seconds: 604800 };
   assert.deepEqual(parseCodexQuota({ rate_limit: { limit_reached: true, primary_window: meter } }).usageLimit, expected);

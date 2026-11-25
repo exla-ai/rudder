@@ -81,6 +81,16 @@
 .mp-radio svg { width: 13px; height: 13px; stroke-width: 3; }
 .mp-model[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .mp-model[aria-checked="true"] .mp-radio { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+/* A phone: four tabs across have no room for a logo beside "Claude Code", so
+   the name goes under it, and a model's line says what it is for, in full,
+   in place of its id. */
+@media (max-width: 560px) {
+  .seg.mp-tabs button { flex-direction: column; gap: 3px; min-height: 52px; padding: 6px 2px; font-size: 12px; }
+  .seg.mp-tabs button span { max-width: 100%; }
+  .mp-detail { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.35; }
+  .mp-id:has(+ .mp-desc:not(:empty)) { display: none; }
+  .mp-id:has(+ .mp-desc:not(:empty)) + .mp-desc::before { content: none; }
+}
 .mp-efforts { display: flex; flex-wrap: wrap; gap: 6px; }
 .mp-effort { height: 34px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink-2); font: 500 14px/1 var(--font); }
 .mp-effort[aria-checked="true"] { background: var(--ink); color: var(--bg); border-color: transparent; }

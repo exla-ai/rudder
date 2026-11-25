@@ -248,3 +248,76 @@ test("A background task shows running across turns until its notification or Tas
   ]);
   assert.deepEqual(calls("gone").map((call) => call[2]), [false, false, false, false, false]);
 });
+
+test("Antigravity: a command carries its toolSummary, and a background task or timer runs until a message from it or a server restart", () => {
+  const response = (index, calls) => ({ step_index: index, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: at(index), content: "", tool_calls: calls });
+  const result = (index, status, content) => ({ step_index: index, source: "MODEL", type: "GENERIC", status, created_at: at(index), content: `Created At: ${at(index)}\n${content}` });
+  const system = (index, content) => ({ step_index: index, source: "SYSTEM", type: "SYSTEM_MESSAGE", status: "DONE", created_at: at(index), content: `<SYSTEM_MESSAGE>\n${content}\n</SYSTEM_MESSAGE>` });
+  const launched = (task) => `Tool is running as a background task with task id: c1/${task}\nTask Description: …`;
+  const run = (command, summary) => ({ name: "run_command", args: { CommandLine: JSON.stringify(command), WaitMsBeforeAsync: 5000, toolSummary: summary } });
+  const tools = read(antigravityReader(), [
+    response(0, [run("npm test", "Run the tests"), run("PORT=4321 node server.mjs", "Start the dev server"), run("cargo build", "Build the engine")]),
+    result(1, "DONE", "Completed At: x\nCommand exited with code 0."),
+    result(2, "RUNNING", launched("task-2")),
+    result(3, "RUNNING", launched("task-3")),
+    response(4, [{ name: "schedule", args: { DurationSeconds: 240, Prompt: "Check whether the deploy finished." } }, { name: "manage_task", args: { Action: "status", TaskId: "c1/task-3" } }]),
+    result(5, "RUNNING", "Tool is running as a background task with task id: c1/task-5\nTask Description: Timer: 4m, Prompt: Check whether the deploy finished."),
+    result(6, "DONE", "Completed At: x\nTask: c1/task-3\nStatus: RUNNING"),
+    system(7, '[Message] timestamp=x sender=c1/task-3 priority=MESSAGE_PRIORITY_HIGH content=Task id "c1/task-3" finished with result:'),
+    system(8, "[Message] timestamp=x sender=c1/task-5 priority=MESSAGE_PRIORITY_HIGH content=Check whether the deploy finished."),
+  ]).filter((m) => m.role === "tool");
+  assert.deepEqual(tools.map((m) => [m.tool.input, m.tool.description ?? null, m.tool.background?.status ?? null, m.tool.poll === true]), [
+    ["npm test", "Run the tests", null, false],
+    ["PORT=4321 node server.mjs", "Start the dev server", null, false],
+    ["cargo build", "Build the engine", "finished", false],
+    ["Timer 4m", "Check whether the deploy finished.", "finished", false],
+    ["Action status, TaskId c1/task-3", null, null, true],
+  ]);
+  assert.deepEqual(tools[1].tool.background, { id: "c1/task-2", status: null });
+  const restarted = antigravityReader();
+  read(restarted, [response(0, [run("sleep 600", "Wait ten minutes")]), result(1, "RUNNING", launched("task-1")), system(2, "[Message] timestamp=x sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.")]);
+  assert.equal(restarted.messages[0].tool.background.status, "stopped");
+});
+
+test("Codex: a command that outlives its call stays open until the output that reads its exit, and polls are marked", () => {
+  const call = (id, type, name, body) => ({ timestamp: at(0), type: "response_item", payload: type === "custom_tool_call" ? { type, name, call_id: id, input: body } : { type, name, call_id: id, arguments: JSON.stringify(body) } });
+  const output = (id, type, value) => ({ timestamp: at(1), type: "response_item", payload: { type: `${type}_output`, call_id: id, output: value } });
+  const parts = (...texts) => texts.map((text) => ({ type: "input_text", text }));
+  const head = (status) => `Script ${status}\nWall time 1.0 seconds\nOutput:\n`;
+  const reader = codexReader();
+  read(reader, [
+    // Code mode: the build yields with its session still going, a poll reads on, the next one reads its exit.
+    call("c1", "custom_tool_call", "exec", 'text(await tools.exec_command({cmd:"cargo build --release",yield_time_ms:10000}))'),
+    output("c1", "custom_tool_call", parts(head("completed"), JSON.stringify({ chunk_id: "a", wall_time_seconds: 10, session_id: 4242, output: "Compiling" }))),
+    call("c2", "custom_tool_call", "exec", 'text(await tools.write_stdin({session_id:4242,chars:"",yield_time_ms:30000}))'),
+    output("c2", "custom_tool_call", parts(head("completed"), JSON.stringify({ chunk_id: "b", wall_time_seconds: 30, session_id: 4242, output: "Compiling more" }))),
+  ]);
+  const [build, poll] = reader.messages;
+  assert.deepEqual([build.tool.input, build.tool.open, poll.tool.poll], ["cargo build --release", true, true]);
+  read(reader, [
+    call("c3", "custom_tool_call", "exec", 'text(await Promise.allSettled([tools.write_stdin({session_id:4242,chars:""}),tools.exec_command({cmd:"ls"})]))'),
+    output("c3", "custom_tool_call", parts(head("completed"), JSON.stringify([{ status: "fulfilled", value: { chunk_id: "c", wall_time_seconds: 2, exit_code: 0, output: "Finished" } }, { status: "fulfilled", value: { chunk_id: "d", wall_time_seconds: 0, exit_code: 0, output: "a" } }]))),
+    // A script that yields runs until `wait` says it ended.
+    call("c4", "custom_tool_call", "exec", 'text(await tools.exec_command({cmd:"npm test"}))'),
+    output("c4", "custom_tool_call", parts(head("running with cell ID g2:7"))),
+    call("c5", "function_call", "wait", { cell_id: "g2:7" }),
+    output("c5", "function_call", parts(head("completed"), JSON.stringify({ chunk_id: "e", wall_time_seconds: 40, exit_code: 0, output: "ok" }))),
+    // Plain exec_command, outside code mode.
+    call("c6", "function_call", "exec_command", { cmd: "npm run dev" }),
+    output("c6", "function_call", "Chunk ID: f\nWall time: 10.0 seconds\nProcess running with session ID 77\nOutput:\nready"),
+  ]);
+  const tools = reader.messages.filter((m) => m.role === "tool");
+  assert.deepEqual(tools.map((m) => [m.tool.name, m.tool.open ?? null, m.tool.poll === true]), [
+    ["exec", false, false],
+    ["exec", null, true],
+    ["exec", null, false],
+    ["exec", false, false],
+    ["wait", null, true],
+    ["exec_command", true, false],
+  ]);
+  read(reader, [
+    call("c7", "function_call", "write_stdin", { session_id: 77, chars: "\u0003" }),
+    output("c7", "function_call", "Chunk ID: g\nWall time: 0.1 seconds\nProcess exited with code 130\nOutput:\n"),
+  ]);
+  assert.equal(tools[5].tool.open, false);
+});

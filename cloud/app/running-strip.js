@@ -1,12 +1,14 @@
-// The chat's Running strip: what the agent has running right now, above the
-// composer (app.js AgentScreen). It reads the newest transcript page, where
-// the worker marks a call `running` (worker/transcripts.mjs markRunning): a
-// call with no result yet in the turn under way, or a background task (Claude
-// Code's run_in_background Bash, a Monitor) that has not ended. Collapsed, it
-// says how many run and the newest one's description and time. Tapped, it
-// lists a row each, newest first: the description, how long, and the command
-// itself in mono, whole once its row is tapped. Finished ones drop out, and
-// the strip hides when nothing runs.
+// The chat's Running strip: what the agent started on purpose and still has
+// running, above the composer (app.js AgentScreen). It reads the newest
+// transcript page, where the worker marks a call `running`
+// (worker/transcripts.mjs markRunning): a call with no result yet in the turn
+// under way, a Codex command that outlived its call, or a background task (a
+// Claude Code background Bash or Monitor, an Antigravity command or timer) that
+// has not ended. Calls that only wait on or read another (`tool.poll`) are
+// left out. Collapsed, it says how many run and the newest one's purpose and
+// time. Tapped, it lists a row each, newest first: the purpose, how long, and
+// the command itself in mono, whole once its row is tapped. Finished ones drop
+// out, and the strip hides when nothing runs.
 
 import { h, icon, reconcile, setText, toolIcon } from "/app/render.js";
 import { duration } from "/app/subagents.js";
@@ -133,7 +135,7 @@ export function mountRunningStrip() {
 // (tool.ask) waits on you, and a subagent has its own tray.
 function runningItems(messages) {
   return messages
-    .filter((m) => m.role === "tool" && m.tool?.running && !m.tool.ask && !m.subagent)
+    .filter((m) => m.role === "tool" && m.tool?.running && !m.tool.poll && !m.tool.ask && !m.subagent)
     .map((m) => {
       const tool = m.tool;
       const command = (tool.input || "").replace(/\s+/g, " ").trim();
@@ -141,6 +143,7 @@ function runningItems(messages) {
         id: String(m.id),
         since: m.ts,
         background: !!tool.background,
+        // Claude Code's `description`, Antigravity's `toolSummary` (worker/transcripts.mjs).
         desc: tool.description || (toolIcon(tool.name) === "terminal" ? shortCommand(command) : tool.name) || command,
         command,
       };
@@ -148,8 +151,8 @@ function runningItems(messages) {
     .sort((a, b) => b.since - a.since);
 }
 
-// A command with no description of its own (Codex, or a Bash call without
-// one), as the strip names it: the first program it runs, past the steps
+// A command with no purpose line of its own (Codex records none, and a
+// Claude Bash call may have no description), as the strip names it: the first program it runs, past the steps
 // that only set up the shell and variable assignments in front ("cd cloud &&
 // FOO=1 npm test | tail" is "npm test"). The row's second line has the whole
 // command.

@@ -486,7 +486,8 @@ function startingMessages(record) {
 
 // A call with no result yet runs while the agent's process lives and nothing
 // after it ended its turn: a turn's end, a Stopped marker, a marker such as a
-// compaction or a check-in, or a later prompt. A background task the page
+// compaction or a check-in, or a later prompt. So does a Codex command that
+// outlived its call (codexReader noteCodexOpen). A background task the page
 // started runs across turns, until its notification (claudeReader
 // noteBackground). The newest page only; copies, so the reader's messages
 // stay as read.
@@ -508,7 +509,7 @@ function markRunning(messages, live) {
     if (message.role === "user" || message.stopped || (message.role === "system" && message.kind && message.kind !== "notice")) {
       break;
     }
-    if (message.role === "tool" && !message.subagent && message.tool?.output === null) {
+    if (message.role === "tool" && !message.subagent && (message.tool?.output === null || message.tool?.open)) {
       run(index);
     }
   }
@@ -739,6 +740,8 @@ function antigravityReader({ stats = null } = {}) {
   // The newest response's calls still waiting for their result steps.
   let pending = [];
   const spawnByMessage = new Map();
+  // Background task id -> the call (run_command, schedule) that started it, while it runs.
+  const background = new Map();
   const reader = {
     messages: [],
     // invoke_subagent calls: [{ message, ts, stepIndex, kind, name, prompt, childId }]
@@ -773,6 +776,19 @@ function antigravityReader({ stats = null } = {}) {
           const kb = (bytes) => `${Math.round(bytes / 1024)} KB`;
           reader.messages.push(noticeMessage(`${id}.cut`, ts, `Antigravity kept only the first ${kb(Buffer.byteLength(cut[1]))} of this message and cut the last ${kb(Number(cut[2]))}. The agent got it cut short too.`, "warning"));
         }
+      } else if (step.type === "SYSTEM_MESSAGE") {
+        // agy tells the model when a background task ends in a message from
+        // the task itself: a command's 'Task id "<id>" finished with result:'
+        // or 'was canceled', a timer's prompt. A restart of its server stops
+        // every one.
+        for (const [, taskId, said] of content.matchAll(/\[Message\][^\n]*?\bsender=(\S+)[^\n]*?\bcontent=([^\n]*)/g)) {
+          endAgyTask(taskId, said.startsWith(`Task id "${taskId}" was canceled`) ? "canceled" : "finished");
+        }
+        if (content.includes("background tasks have been stopped due to server restart")) {
+          for (const taskId of [...background.keys()]) {
+            endAgyTask(taskId, "stopped");
+          }
+        }
       } else if (step.type === "ERROR_MESSAGE") {
         // An error agy hit (a model with no capacity, an API failure). A retry
         // that answers follows it; without one, it is all the chat has.
@@ -786,6 +802,16 @@ function antigravityReader({ stats = null } = {}) {
         pending = (step.tool_calls ?? []).map((call, index) => {
           const args = call.args ?? {};
           const message = { id: `${id}.${index}`, role: "tool", ts, tool: { name: call.name, input: antigravityCallInput(args), output: null, isError: false } };
+          // agy's own line for what the call is for ("Run the tests"). A
+          // timer (schedule) has its prompt for when it fires instead.
+          const summary = agyArg(args.toolSummary) ?? (call.name === "schedule" ? agyArg(args.Prompt) : null);
+          if (summary) {
+            message.tool.description = oneLine(summary);
+          }
+          // Checking on or stopping a background task is not work of its own.
+          if (call.name === "manage_task") {
+            message.tool.poll = true;
+          }
           reader.messages.push(message);
           if (call.name === "invoke_subagent") {
             const spawn = {
@@ -809,6 +835,14 @@ function antigravityReader({ stats = null } = {}) {
           const output = content.replace(/^(?:(?:Created|Completed) At: \S+\n?)+/, "");
           target.tool.output = clip(output);
           target.tool.isError = step.status === "ERROR" || /^Command exited with code [1-9]/.test(output);
+          // A command still going when its wait ran out goes on as a
+          // background task: "Tool is running as a background task with task
+          // id: <id>", in a step still RUNNING.
+          const task = step.status === "RUNNING" ? /^Tool is running as a background task with task id: (\S+)/m.exec(output) : null;
+          if (task) {
+            target.tool.background = { id: task[1], status: null };
+            background.set(task[1], target);
+          }
           const spawn = spawnByMessage.get(target);
           if (spawn && !spawn.childId) {
             const matched = /"conversationId"\s*:\s*"([A-Za-z0-9-]+)"/.exec(output);
@@ -820,6 +854,13 @@ function antigravityReader({ stats = null } = {}) {
       }
     },
   };
+  function endAgyTask(taskId, status) {
+    const message = background.get(taskId);
+    if (message) {
+      message.tool.background.status = status;
+      background.delete(taskId);
+    }
+  }
   return reader;
 }
 
@@ -1003,6 +1044,11 @@ function antigravityCallInput(args) {
       return args[key];
     }
   };
+  // A timer (schedule): how long it waits.
+  if (Number.isFinite(args.DurationSeconds)) {
+    const seconds = args.DurationSeconds;
+    return `Timer ${seconds < 120 ? `${seconds}s` : `${Math.round(seconds / 60)}m`}`;
+  }
   const target = value("CommandLine") || value("Path") || value("TargetFile") || value("AbsolutePath") || value("Query") || value("Url");
   if (target) {
     const lines = value("StartLine") && value("EndLine") ? `:${value("StartLine")}-${value("EndLine")}` : "";
@@ -1356,6 +1402,9 @@ function inAppWords(text) {
 const CLAUDE_SUBAGENT_TOOL = "Agent";
 // Claude Code tools whose call says in `description` what it does.
 const DESCRIBED_TOOLS = new Set(["Bash", "Monitor"]);
+// Claude Code tools that read or wait on a background task's output: not
+// work of their own (the app's Running strip shows the task).
+const CLAUDE_POLL_TOOLS = new Set(["TaskOutput", "BashOutput"]);
 
 // A Claude Code session read entry by entry. The parent's own file skips
 // sidechain entries; a subagent's file is nothing but those, and a teammate's
@@ -1639,6 +1688,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
         const description = DESCRIBED_TOOLS.has(block.name) && typeof block.input?.description === "string" ? oneLine(block.input.description) : "";
         if (description) {
           message.tool.description = description;
+        }
+        if (CLAUDE_POLL_TOOLS.has(block.name)) {
+          message.tool.poll = true;
         }
         setToolFiles(message.tool, { files: claudeCallFiles(block.name, block.input) });
         setToolAsk(message.tool, block.name, block.input);
@@ -2019,6 +2071,12 @@ function answerToolAsk(tool, result) {
 // before `subagent_history_start_ordinal`, which is not its own.
 function codexReader({ stats = null, child = false } = {}) {
   const calls = new Map(); // call_id -> message
+  const callPayloads = new Map(); // call_id -> the call as logged, for its result (noteCodexOpen)
+  // What a call left running after it returned, each to the call that
+  // started it: a process ("session:<id>") or a code-mode script that
+  // yielded ("cell:<id>"). A cell's script, for the results its wait prints.
+  const open = new Map();
+  const cells = new Map(); // cell id -> { message, source }
   const outputLimit = child ? SUBAGENT_OUTPUT_LIMIT : TOOL_OUTPUT_LIMIT;
   const reader = {
     messages: [],
@@ -2196,8 +2254,14 @@ function codexReader({ stats = null, child = false } = {}) {
         text: "",
         tool: { name: payload.name || payload.type, input: summarizeCodexInput(payload), output: null, isError: false },
       };
+      // Waiting on a script or a process, or reading more of its output, is
+      // not work of its own: the call that started it shows.
+      if (codexPoll(payload)) {
+        message.tool.poll = true;
+      }
       if (payload.call_id) {
         calls.set(payload.call_id, message);
+        callPayloads.set(payload.call_id, payload);
         if (payload.name === "spawn_agent") {
           reader.spawns.set(payload.call_id, { message, ts, taskName: codexArguments(payload).task_name ?? null, threadId: null, error: null });
         }
@@ -2211,7 +2275,9 @@ function codexReader({ stats = null, child = false } = {}) {
         const { output, isError } = codexOutput(payload.output);
         target.tool.output = clip(output, outputLimit);
         target.tool.isError = isError;
+        noteCodexOpen(target, callPayloads.get(payload.call_id), codexText(payload.output));
         calls.delete(payload.call_id);
+        callPayloads.delete(payload.call_id);
       }
       const spawn = reader.spawns.get(payload.call_id);
       if (spawn) {
@@ -2235,7 +2301,113 @@ function codexReader({ stats = null, child = false } = {}) {
       }
     }
   }
+  // A Codex command that outlives its call. Codex runs a command until it
+  // yields (yield_time_ms), then returns with the process still going: a
+  // `session_id` and no `exit_code` in code mode, "Process running with
+  // session ID N" otherwise. write_stdin reads on until the result has the
+  // exit code. A code-mode script that yields says "Script running with cell
+  // ID N"; `wait` on the cell says when it ended, with what it printed. Codex
+  // writes nothing when a process ends that nothing reads, so these show as
+  // running only in the turn under way (markRunning).
+  function noteCodexOpen(message, call, text) {
+    if (!call) {
+      return;
+    }
+    if (call.type === "custom_tool_call" && call.name === "exec") {
+      const head = CODE_MODE_HEAD.exec(text);
+      const cell = head ? /^running with cell ID (\S+)$/.exec(head[1]) : null;
+      if (cell) {
+        cells.set(cell[1], { message, source: String(call.input ?? "") });
+        setOpen(`cell:${cell[1]}`, message);
+      }
+      scriptResults(message, String(call.input ?? ""), head ? text.slice(head[0].length) : text);
+    } else if (call.name === "wait") {
+      const cellId = String(codexArguments(call).cell_id ?? "");
+      const cell = cells.get(cellId);
+      const head = CODE_MODE_HEAD.exec(text);
+      if (cell && head) {
+        scriptResults(cell.message, cell.source, text.slice(head[0].length));
+        if (!head[1].startsWith("running")) {
+          closeOpen(`cell:${cellId}`);
+          cells.delete(cellId);
+        }
+      }
+    } else if (call.name === "exec_command") {
+      const running = /Process running with session ID (\d+)/.exec(text);
+      if (running) {
+        setOpen(`session:${running[1]}`, message);
+      }
+    } else if (call.name === "write_stdin" && /Process exited with code/.test(text)) {
+      closeOpen(`session:${codexArguments(call).session_id}`);
+    }
+  }
+  // A code-mode script's printed results, a JSON line each (a result, or
+  // Promise.allSettled's entries). A process still running opens; one that
+  // exited closes the session its write_stdin read. That result does not name
+  // the session, so the script's command results are matched to its
+  // exec_command and write_stdin calls in order, when it printed one for each.
+  function scriptResults(message, source, printed) {
+    const used = [...source.matchAll(/tools\.(exec_command|write_stdin)\(\s*\{([^}]*)/g)].map(([, name, args]) => ({ name, session: /\bsession_id\s*:\s*(\d+)/.exec(args)?.[1] ?? null }));
+    const results = printed.split("\n").flatMap((line) => {
+      if (!line.startsWith("{") && !line.startsWith("[")) return [];
+      let value;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        return []; // not JSON, or cut by Codex
+      }
+      const items = Array.isArray(value) ? value : [value];
+      return items.map((item) => (item?.status === "fulfilled" && "value" in item ? item.value : item));
+    }).filter((result) => result && typeof result === "object" && ("chunk_id" in result || "wall_time_seconds" in result));
+    for (const result of results) {
+      if (!message.tool.poll && Number.isInteger(result.session_id) && !("exit_code" in result)) {
+        setOpen(`session:${result.session_id}`, message);
+      }
+    }
+    if (results.length === used.length) {
+      used.forEach((call, index) => {
+        if (call.name === "write_stdin" && call.session && "exit_code" in results[index] && !("session_id" in results[index])) {
+          closeOpen(`session:${call.session}`);
+        }
+      });
+    }
+  }
+  function setOpen(key, message) {
+    if (!open.has(key)) {
+      open.set(key, message);
+    }
+    open.get(key).tool.open = true;
+  }
+  function closeOpen(key) {
+    const message = open.get(key);
+    if (message) {
+      open.delete(key);
+      message.tool.open = [...open.values()].includes(message);
+    }
+  }
   return reader;
+}
+
+// A call that waits on or reads more of something an earlier call started:
+// `wait` on a code-mode cell or on subagents, write_stdin, or a code-mode
+// script that only calls write_stdin.
+function codexPoll(payload) {
+  if (["wait", "wait_agent", "write_stdin"].includes(payload.name)) {
+    return true;
+  }
+  if (payload.type !== "custom_tool_call" || payload.name !== "exec") {
+    return false;
+  }
+  const used = [...String(payload.input ?? "").matchAll(/tools\.(\w+)\(/g)].map((match) => match[1]);
+  return used.length > 0 && used.every((name) => name === "write_stdin");
+}
+
+// A Codex tool output as text: a string, or its content parts' text.
+function codexText(value) {
+  if (Array.isArray(value)) {
+    return value.map((part) => part?.text ?? "").join("\n");
+  }
+  return String(value ?? "");
 }
 
 const CODEX_GOAL_CONTEXT = /^<codex_internal_context source="(user_goal|goal)">\n?([\s\S]*?)\n?<\/codex_internal_context>$/;
@@ -2346,7 +2518,7 @@ function codexOutput(value) {
 // script's own index or label). The row shows each tool's output in their
 // place, with "Exit code N" over a command that failed, and fails when the
 // script did or any command exited non-zero.
-const CODE_MODE_HEAD = /^Script (completed|failed|running with cell ID \d+)\nWall time [^\n]*\nOutput:\n?/;
+const CODE_MODE_HEAD = /^Script (completed|failed|running with cell ID \S+)\nWall time [^\n]*\nOutput:\n?/;
 
 function codeModeOutput(status, prints) {
   let failed = status === "failed";

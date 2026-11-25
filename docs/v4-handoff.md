@@ -10,16 +10,25 @@ read, write and delete access to `cache/v1/accounts/*`. The 5.0.43 home
 uploaded a Rust build to production and restored it with an empty local
 cache. A Turborepo artifact also round-tripped through the home proxy.
 
-Running strip: the app's chat shows what the agent has running right now
-above the composer (`cloud/app/running-strip.js`), how many, the newest
-one's description and time, and a row each with the command in mono. It
-reads the transcript: a call with no result in the turn under way, and a
-Claude background Bash or Monitor until its `<task-notification>` or
-TaskStop ends it (`transcripts.mjs` `noteBackground`, `markRunning`). Bash
-and Monitor calls carry their `description`; Codex calls show the command.
-It needs a worker image with this `transcripts.mjs`. A background task of a
-process that was killed before Claude wrote its notification shows until it
-leaves the newest page; run.json does not record when the process started.
+Running strip: the app's chat shows what the agent started on purpose and
+still has running, above the composer (`cloud/app/running-strip.js`): how
+many, the newest one's purpose and time, and a row each with the command in
+mono. The worker marks it (`transcripts.mjs` `markRunning`) for all three
+harnesses. Claude Code: a call with no result in the turn under way, and a
+background Bash or Monitor until its `<task-notification>` or TaskStop; the
+purpose is the call's `description`. Antigravity: a `run_command` or
+`schedule` whose result step is RUNNING ("running as a background task")
+until a message from that task or a server restart notice; the purpose is
+`toolSummary` (a timer's prompt). Codex records no purpose line (its
+`justification` is a sandbox approval question), so the row shows the
+command; a command that outlived its call (a `session_id`, or a yielded
+code-mode cell) shows until the write_stdin or wait output with its exit, and
+only in the turn under way. Polls (TaskOutput, manage_task, wait,
+write_stdin) are not rows. Needs a worker image with this `transcripts.mjs`.
+Limits: a Claude or Antigravity background task of a process killed before
+its end was written shows until it leaves the newest page (run.json does not
+record when the process started), and a Codex process nothing reads again
+shows until its turn ends.
 
 Claude Code and Codex limits on Cloud homes keep the account signed in and
 show the reset in Settings. New work and the next prompt in a saved,

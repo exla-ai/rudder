@@ -7,7 +7,7 @@ description: Click through the real Rudder iPhone app on an Offstage Mac's simul
 
 The app runs in an iPhone simulator on an Offstage Mac. A UI test taps
 through `ios/UITests/steps.json`, the simulator's screen is recorded, and the
-output comes back to this machine. One run takes about ten minutes.
+output comes back to this machine. One run takes about twenty minutes.
 
 ## Run it
 
@@ -22,8 +22,11 @@ Cloud is deployed, with no new native build.
 
 The output directory holds:
 
-- `clickthrough.mp4`: the whole pass. Send it with SendUserFile when the user
-  wants to watch it.
+- `clickthrough.mp4`: the whole pass, raw. It runs about 13 minutes and
+  300 MB because the test waits between taps. Before sending it to the user,
+  speed it up and shrink it (about 2 MB), then send that with SendUserFile:
+  `ffmpeg -i clickthrough.mp4 -vf "setpts=PTS/4,scale=-2:1280,fps=30" -an -c:v libx264 -crf 26 -pix_fmt yuv420p -movflags +faststart short.mp4`
+  (no ffmpeg on PATH here: `find ~/.cache -name 'ffmpeg-linux-x86_64*'`).
 - `shots/NN-name.png` and `shots/NN-name.txt`: each "shot" step's screenshot
   and accessibility tree. Read the PNGs yourself and report what looks wrong.
 - `shots/log.txt`: one line per step. `MISS` means no element had that label.

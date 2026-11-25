@@ -57,7 +57,7 @@ pub(crate) const PLANNING_OWNERSHIP_RULE: &str = "PLAN SCOPE: Plan only what the
 pub(crate) fn execution_prompt(task: &str) -> String {
     let task = strip_rudder_prompt_wrappers(task);
     const CONTEXT: &str = concat!(
-        "Rudder: you work in your own jj workspace. Rudder integrates it when the session ends. When the user explicitly asks to ship, follow the project's release workflow.\n",
+        "Rudder: you work in your own jj workspace. Rudder integrates it at session end. When the user explicitly asks to ship, follow the project's release workflow.\n",
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),

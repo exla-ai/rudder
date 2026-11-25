@@ -31,13 +31,18 @@ function fakeFly({ failStart = false } = {}) {
     async getMachine(id) {
       const machine = fly.machines.get(id);
       if (!machine) return null;
-      // A created or starting machine is started on the next look.
-      if (machine.state === "created" || machine.state === "starting") machine.state = failStart ? "failed" : "started";
-      return { id, state: machine.state, private_ip: machine.private_ip, workerImage: machine.config.metadata["rudder-worker-image"] };
+      // Creation launches the machine asynchronously. Fly can still report
+      // "created" while it pulls the image and refuses a second start.
+      const state = machine.state;
+      if (state === "created") machine.state = "starting";
+      if (state === "starting") machine.state = failStart ? "failed" : "started";
+      return { id, state, private_ip: machine.private_ip, workerImage: machine.config.metadata["rudder-worker-image"] };
     },
     async startMachine(id) {
       fly.calls.push(`start ${id}`);
-      fly.machines.get(id).state = "starting";
+      const machine = fly.machines.get(id);
+      assert.ok(["stopped", "suspended"].includes(machine.state), "Fly starts only stopped or suspended machines");
+      machine.state = "starting";
     },
     async stopMachine(id) {
       fly.calls.push(`stop ${id}`);
@@ -98,7 +103,7 @@ test("the first lease creates a volume and machine; the token is never stored", 
   assert.equal(grant.warm, false);
   assert.match(grant.token, /^rdrb_/);
   assert.match(grant.url, /^http:\/\/\[fdaa::1\]:7420$/);
-  assert.deepEqual(fly.calls.slice(0, 2), ["createVolume rdb_home_a_0", "createMachine vol_1"]);
+  assert.deepEqual(fly.calls, ["createVolume rdb_home_a_0", "createMachine vol_1"]);
   const machine = [...fly.machines.values()][0];
   assert.equal(machine.config.env.RUDDER_BUILDER, "1");
   assert.equal(machine.config.env.RUDDER_BUILDER_TOKEN_SHA256, lib.sha256Hex(grant.token));

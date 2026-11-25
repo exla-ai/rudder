@@ -353,14 +353,18 @@ export function createBuilderPool({
       persist();
     }
     const deadline = now() + START_TIMEOUT_MS;
+    let requestedStart = false;
     for (;;) {
       const machine = await fly.getMachine(row.machine_id!);
       if (!machine) throw new BuilderPoolError("builder machine disappeared while starting", 503);
       remember(row, machine);
       if (machine.state === "started") return wasRunning;
       wasRunning = false;
-      if (machine.state === "stopped" || machine.state === "created" || machine.state === "suspended") {
+      // Fly launches on creation. While pulling the image it can report
+      // "created", and a start request in that state is rejected.
+      if (!requestedStart && (machine.state === "stopped" || machine.state === "suspended")) {
         await fly.startMachine(machine.id);
+        requestedStart = true;
       } else if (machine.state === "failed" || machine.state === "destroyed" || machine.state === "destroying") {
         throw new BuilderPoolError(`builder machine is ${machine.state}`, 503);
       }

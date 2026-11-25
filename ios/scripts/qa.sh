@@ -49,7 +49,7 @@ case "$stage" in
     xcrun simctl ui "$udid" appearance dark
     xcrun simctl uninstall "$udid" dev.viraat.rudder 2>/dev/null || true
     rm -f "$out/clickthrough.mp4"
-    nohup xcrun simctl io "$udid" recordVideo --codec h264 --force "$out/clickthrough.mp4" > "$out/record.log" 2>&1 &
+    nohup xcrun simctl io "$udid" recordVideo --codec hevc --force "$out/clickthrough.mp4" > "$out/record.log" 2>&1 &
     recorder=$!
     sleep 2
     code=0
@@ -67,7 +67,11 @@ case "$stage" in
     ;;
   collect)
     cd "$root/.."
-    tar -czf out.tgz qa-out
+    # One read of a large file can drop: hand it over in 8 MiB parts.
+    rm -f out.part.*
+    COPYFILE_DISABLE=1 tar -czf out.tgz qa-out
+    split -b 8m out.tgz out.part.
+    ls out.part.*
     ;;
   *)
     echo "unknown stage $stage"; exit 2

@@ -79,7 +79,9 @@ try {
 
   const pack = await sandbox.commands.run("bash ios/scripts/qa.sh collect", { cwd: "src" })
   if (pack.exitCode !== 0) throw new Error(`offstage: collect exit ${pack.exitCode}: ${pack.stdout.trim()}${pack.stderr.trim()}`)
-  writeFileSync("offstage-out.tgz", await sandbox.files.read("out.tgz", { format: "bytes" }))
+  const parts = []
+  for (const name of pack.stdout.trim().split("\n")) parts.push(await sandbox.files.read(name, { format: "bytes" }))
+  writeFileSync("offstage-out.tgz", Buffer.concat(parts))
   rmSync("offstage-out/ios-qa", { recursive: true, force: true })
   mkdirSync("offstage-out/ios-qa", { recursive: true })
   execFileSync("tar", ["-xzf", "offstage-out.tgz", "-C", "offstage-out/ios-qa", "--strip-components=1"])

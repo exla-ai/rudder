@@ -130,3 +130,17 @@ try {
 } finally {
   rmSync(temp, { recursive: true, force: true })
 }
+
+// The archive is verified and unpacked here. Offstage would keep it 7 days,
+// and a team's stored artifacts may total 512 MiB: about 30 releases a week
+// filled that and every later upload was refused (2026-11-24). Delete it now.
+for (const name of [archiveName, checksumName]) {
+  const response = await fetch(`${process.env.OFFSTAGE_API_URL}/v1/tasks/${task.id}/artifacts/${name}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${process.env.OFFSTAGE_API_KEY}` },
+  })
+  if (response.status !== 204) {
+    throw new Error(`Offstage did not delete ${name} of task ${task.id}: ${response.status} ${await response.text()}`)
+  }
+}
+log(`Deleted the artifacts of Offstage task ${task.id}`)

@@ -12,7 +12,7 @@
 (function () {
   if (navigator.doNotTrack === "1" || window.doNotTrack === "1" || navigator.globalPrivacyControl) return;
 
-  var KEY = "phc_2KfOzM4nSxjAgPDfgEikP7Kp7JVcU5aJ0kAyEQykkmn";
+  var KEY = "phc_mfKRMMfVVkmnVSgijr7bN4ruZ6AagLgT9R3pfK4KfC5L";
   var URL_ = "https://us.i.posthog.com/i/v0/e/";
   var id = "site-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var path = location.pathname.replace(/\/+$/, "") || "/";

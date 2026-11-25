@@ -9,7 +9,7 @@
 const DMG = "https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg";
 const POSTHOG = "https://us.i.posthog.com/i/v0/e/";
 // The same write-only project token as site/analytics.js.
-const KEY = "phc_2KfOzM4nSxjAgPDfgEikP7Kp7JVcU5aJ0kAyEQykkmn";
+const KEY = "phc_mfKRMMfVVkmnVSgijr7bN4ruZ6AagLgT9R3pfK4KfC5L";
 const CAPTURE_TIMEOUT_MS = 1500;
 const BOT = /bot|crawl|spider|preview|slack|discord|telegram|whatsapp|facebookexternalhit|linkedin|embedly|curl|wget|python|go-http|node-fetch|headless/i;
 

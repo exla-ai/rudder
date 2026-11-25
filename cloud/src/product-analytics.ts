@@ -93,7 +93,7 @@ const ANONYMOUS_SET = new Set<string>(ANONYMOUS_EVENTS);
 export const INTERNAL_EMAIL_DOMAIN = "exla.ai";
 // Same project as the CLI (src/analytics.ts): a write-only project token.
 const POSTHOG_HOST = "https://us.i.posthog.com";
-const POSTHOG_PROJECT_KEY = "phc_2KfOzM4nSxjAgPDfgEikP7Kp7JVcU5aJ0kAyEQykkmn";
+const POSTHOG_PROJECT_KEY = "phc_mfKRMMfVVkmnVSgijr7bN4ruZ6AagLgT9R3pfK4KfC5L";
 const CAPTURE_TIMEOUT_MS = 3000;
 const MAX_PROPS = 20;
 const MAX_STRING = 200;

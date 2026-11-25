@@ -31,7 +31,7 @@ import { rudderHome } from "./util.js";
 
 const POSTHOG_HOST = "https://us.i.posthog.com";
 /** Project write key. Public by design; overridable so forks can point elsewhere. */
-const POSTHOG_PROJECT_KEY = "phc_2KfOzM4nSxjAgPDfgEikP7Kp7JVcU5aJ0kAyEQykkmn";
+const POSTHOG_PROJECT_KEY = "phc_mfKRMMfVVkmnVSgijr7bN4ruZ6AagLgT9R3pfK4KfC5L";
 /** A hung network must never hold up a CLI command or the dashboard's shutdown. */
 const CAPTURE_TIMEOUT_MS = 2_000;
 

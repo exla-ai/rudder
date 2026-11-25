@@ -177,7 +177,7 @@ test("every contract event name is whitelisted", () => {
     "org_invite_accepted", "org_member_role_changed", "org_member_removed", "integration_connect_clicked",
     "integration_connected", "integration_disconnected", "model_picked", "agent_panel_opened", "plan_panel_opened",
     "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened", "chat_model_switched",
-    "all_agents_started", "feature_used",
+    "all_agents_started", "feature_used", "screen_viewed",
   ];
   const serverOnly = [
     "app_active", "app_error", "message_sent", "message_edited", "prompt_answered", "agent_action", "agent_branched",

@@ -45,6 +45,9 @@ export const PRODUCT_EVENTS = [
   // { feature }: a panel or tool opened (subagent tray, terminal, files...).
   // The server sends it too, for Tailscale.
   "feature_used",
+  // { screen }: a screen opened (home, project, agent, settings...), once per
+  // screen for each load of the app.
+  "screen_viewed",
   // Captured by the server itself (server.ts), whichever client acted:
   "app_active",
   "app_error",

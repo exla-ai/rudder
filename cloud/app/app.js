@@ -771,11 +771,20 @@ function buildScreen(route, paneOpts = {}) {
   return HomeScreen();
 }
 
+// Which screens people open, once per screen for each load of the app. With
+// the platform every event carries, this says how the phone, the browser and
+// the Mac app are each used.
+const screensViewed = new Set();
+
 function mountScreen(dir = "forward", { revealSidebar = false } = {}) {
   let route = null;
   if (!store.signedOut) {
     route = parseRoute(location.pathname);
     if (!route.needsAccount) ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
+    if (!screensViewed.has(route.name)) {
+      screensViewed.add(route.name);
+      track("screen_viewed", { screen: route.name });
+    }
   }
   const wantDesktop = DESKTOP_MQ.matches && !!route && !FULL_PAGE.has(route.name);
   document.body.classList.toggle("desktop", wantDesktop);

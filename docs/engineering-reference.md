@@ -1698,7 +1698,9 @@ on the user's own Claude Code / Codex subscription.
   voice overview lists only teammates' non-private live agents, read only.
 - **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
   whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
-  anonymous (sha256 of the account id), props sanitized. Server-side events
+  anonymous (sha256 of the account id), props sanitized. `screen_viewed`
+  {screen} is each screen a client opens, once per screen and app load, so
+  the three clients can be compared screen by screen. Server-side events
   (org_*, integration_*) are captured
   by the modules themselves; the client must not resend them. The server also
   counts what every client does at the route, so web, Mac, phone and voice are

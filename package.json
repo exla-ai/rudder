@@ -1,6 +1,6 @@
 {
   "name": "@exla/rudder",
-  "version": "5.0.46",
+  "version": "5.0.47",
   "description": "Run Claude Code and Codex locally or in Rudder Cloud, with one dashboard for tasks and agent communication.",
   "keywords": [
     "tui",

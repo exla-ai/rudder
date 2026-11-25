@@ -33827,7 +33827,12 @@ fn chat_edit_env(env: &mut EnvGuard, dir: &Path) -> (PathBuf, PathBuf) {
     std::env::set_var("RUDDER_HOME", dir.join("rudder-home"));
     let args = dir.join("claude-args");
     let fake = dir.join("fake-claude.sh");
-    write_fake_bin(&fake, &format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nsleep 30\n", args.display()));
+    // A concurrent CLI probe is not the relaunched PTY. Publish its complete
+    // argument list atomically so a NUL between arguments cannot end the read.
+    write_fake_bin(&fake, &format!(
+        "#!/bin/sh\n[ . -ef '{}/workspace' ] || exit 0\nout='{}'\nprintf '%s\\0' \"$@\" > \"$out.$$\" && mv \"$out.$$\" \"$out\"\nsleep 30\n",
+        dir.display(), args.display()
+    ));
     std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
     (home, args)
 }

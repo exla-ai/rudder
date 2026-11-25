@@ -486,20 +486,30 @@ function startingMessages(record) {
 
 // A call with no result yet runs while the agent's process lives and nothing
 // after it ended its turn: a turn's end, a Stopped marker, a marker such as a
-// compaction or a check-in, or a later prompt. The newest page only; copies,
-// so the reader's messages stay as read.
+// compaction or a check-in, or a later prompt. A background task the page
+// started runs across turns, until its notification (claudeReader
+// noteBackground). The newest page only; copies, so the reader's messages
+// stay as read.
 function markRunning(messages, live) {
   if (!live) {
     return messages;
   }
   const shown = messages.slice();
+  const run = (index) => {
+    shown[index] = { ...shown[index], tool: { ...shown[index].tool, running: true } };
+  };
+  shown.forEach((message, index) => {
+    if (message.role === "tool" && message.tool?.background && message.tool.background.status === null) {
+      run(index);
+    }
+  });
   for (let index = shown.length - 1; index >= 0; index -= 1) {
     const message = shown[index];
     if (message.role === "user" || message.stopped || (message.role === "system" && message.kind && message.kind !== "notice")) {
       break;
     }
     if (message.role === "tool" && !message.subagent && message.tool?.output === null) {
-      shown[index] = { ...message, tool: { ...message.tool, running: true } };
+      run(index);
     }
   }
   return shown;
@@ -1344,6 +1354,8 @@ function inAppWords(text) {
 
 // The tool Claude Code starts a subagent with.
 const CLAUDE_SUBAGENT_TOOL = "Agent";
+// Claude Code tools whose call says in `description` what it does.
+const DESCRIBED_TOOLS = new Set(["Bash", "Monitor"]);
 
 // A Claude Code session read entry by entry. The parent's own file skips
 // sidechain entries; a subagent's file is nothing but those, and a teammate's
@@ -1361,6 +1373,9 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     spawns: new Map(),
     // Agent tool_use id -> the status of its newest <task-notification>
     notifications: new Map(),
+    // Background task id -> the Bash or Monitor call that started it, while
+    // it runs (noteBackground).
+    background: new Map(),
     toolCalls: 0,
     // A subagent's or teammate's task (its first user turn) and when it came.
     prompt: null,
@@ -1530,6 +1545,12 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
       push(goal);
       return;
     }
+    // Claude Code queues a task's notification the moment the task ends; the
+    // agent reads it later, as a prompt or a queued_command.
+    if (entry.type === "queue-operation" && entry.operation === "enqueue") {
+      endBackground(entry.content);
+      return;
+    }
     // Claude Code's own (isMeta) turns stay out of the chat, but for what
     // other agents send (peerMessages).
     if ((entry.type !== "user" && entry.type !== "assistant") || !own || (entry.isMeta && !PEER_ORIGINS.has(entry.origin?.kind))) {
@@ -1613,6 +1634,12 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           text: "",
           tool: { name: block.name || "tool", input: summarizeClaudeInput(block.name, block.input), output: null, isError: false },
         };
+        // What the agent says a command does ("Deploy Cloud"), for the app's
+        // Running strip (cloud/app/running-strip.js).
+        const description = DESCRIBED_TOOLS.has(block.name) && typeof block.input?.description === "string" ? oneLine(block.input.description) : "";
+        if (description) {
+          message.tool.description = description;
+        }
         setToolFiles(message.tool, { files: claudeCallFiles(block.name, block.input) });
         setToolAsk(message.tool, block.name, block.input);
         tools.set(block.id, message);
@@ -1645,10 +1672,16 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
           if (target.tool.name === "Bash") {
             noteOutsideAgent(reader, block.tool_use_id, target, inputs.get(block.tool_use_id)?.command, text);
           }
+          noteBackground(target, entry.toolUseResult);
           // A followed subagent's reader lives across polls: a call is let go
           // once its result is in, so a long subagent does not pile them up.
           tools.delete(block.tool_use_id);
           inputs.delete(block.tool_use_id);
+        }
+        // TaskStop's result names the task it stopped.
+        const stopped = entry.toolUseResult;
+        if (typeof stopped?.task_id === "string" && typeof stopped.task_type === "string") {
+          closeBackground(stopped.task_id, "stopped");
         }
         const spawn = reader.spawns.get(block.tool_use_id);
         if (spawn) {
@@ -1674,6 +1707,42 @@ function claudeReader({ stats = null, sub = false, self = null } = {}) {
     const status = xmlTag(value, "status");
     if (id && status) {
       reader.notifications.set(id, status);
+    }
+    endBackground(value);
+  }
+  // A call whose result started a background task (the same launches as the
+  // dashboard's background.rs): a Bash run with run_in_background or moved
+  // there when it timed out, or a Monitor that is not persistent (a
+  // persistent one watches the whole session). It runs until a
+  // notification or TaskStop ends it (closeBackground).
+  function noteBackground(message, result) {
+    const id = typeof result?.backgroundTaskId === "string" ? result.backgroundTaskId
+      : typeof result?.taskId === "string" && result.persistent === false ? result.taskId
+        : "";
+    if (!id) {
+      return;
+    }
+    message.tool.background = { id, status: null };
+    reader.background.set(id, message);
+  }
+  // Every <task-id> of a <task-notification> that carries a <status>; a
+  // Monitor's event notifications carry none and end nothing.
+  function endBackground(text) {
+    for (const [, block] of String(text || "").matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+      const status = xmlTag(block, "status");
+      if (!status) {
+        continue;
+      }
+      for (const [, id] of block.matchAll(/<task-id>([\s\S]*?)<\/task-id>/g)) {
+        closeBackground(id.trim(), status);
+      }
+    }
+  }
+  function closeBackground(id, status) {
+    const message = reader.background.get(id);
+    if (message) {
+      message.tool.background.status = status;
+      reader.background.delete(id);
     }
   }
   // What other agents sent (peerMessages): a card each in the chat, never the user's bubble.

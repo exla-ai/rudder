@@ -523,8 +523,13 @@ function baseTranscript(a) {
     { id: id(), role: "tool", ts: t + 33 * MIN, text: "", tool: { name: "WebFetch", input: "https://rudder-home.tail4c2e1.ts.net:3000/health", output: null, isError: false } },
     { id: id(), role: "assistant", ts: t + 34 * MIN, text: "Wrote it up. [Open the full Offstage snapshot plan](/home/rudder/.claude/plans/dreamy-launching-firefly.md), or the [Full Opus/Fable design](file:///home/rudder/.claude/plans/dreamy-launching-firefly.md#L9) section.\n\nThe viewer change is in `cloud/app/file-view.js:120`, the plan sits at `/home/rudder/.claude/plans/dreamy-launching-firefly.md`, and `src/missing.ts:5` is gone." },
   ];
+  // A working agent's Running strip (running-strip.js): a background deploy
+  // its call described, then a command with no description, still going.
+  const working = a.status === "working";
+  if (working) msgs.push({ id: id(), role: "tool", ts: now() - 134_000, text: "", tool: { name: "Bash", input: "cd cloud && fly deploy --app rudder-cloud-control --image registry.fly.io/rudder-cloud-control:5.0.49 --strategy rolling", description: "Deploying Cloud", output: "Command running in background with ID: b4e66erp9.", isError: false, background: { id: "b4e66erp9", status: null }, running: true } });
   if (a.status === "waiting") msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
   else if (a.lastMessage) msgs.push({ id: id(), role: "assistant", ts: a.updatedAt, text: a.lastMessage });
+  if (working) msgs.push({ id: id(), role: "tool", ts: now() - 9_000, text: "", tool: { name: "Bash", input: "unset $(env | grep -o '^RUDDER_[A-Z_]*') && npm test -- --test-name-pattern transcript", output: null, isError: false, running: true } });
   return msgs;
 }
 

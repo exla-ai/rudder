@@ -31,6 +31,7 @@ import { duration, paintSubagent } from "/app/subagents.js";
 import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.js";
 import { COMPACTING_HTML, compactHasDetail, compactHtml, paintCompacting, paintCompaction } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
+import { mountRunningStrip } from "/app/running-strip.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
 import { isCommand, leavesRecord, sendAttempts, sentAfter, settlePending, unanswered, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
@@ -4467,6 +4468,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     askSlot.hidden = closed;
     el.querySelector(".more").hidden = closed;
     tray?.pause(closed);
+    runningStrip.pause(closed);
     if (was && !closed) void loadTranscript({ replace: true });
     if (!closed) return;
     find?.close({ restore: false });
@@ -4537,8 +4539,11 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       return st === "running" || !!statusOf(st).live;
     },
   });
+  // Between them: the commands and background tasks running now (running-strip.js).
+  const runningStrip = mountRunningStrip();
+  askSlot.before(runningStrip.el);
   if (tray) {
-    askSlot.before(tray.el);
+    runningStrip.el.before(tray.el);
     mountFileRefs(tray.el, { ws, run });
     const form = composer.el.querySelector("form");
     const row = h(`<div class="c-row"></div>`);
@@ -5314,6 +5319,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     composer.el.classList.toggle("can-interrupt-send", !interruptSendBtn.hidden);
     suggestion?.update({ suggestion: store.transcripts.get(key)?.suggestion, idle: !isRunning(status) && !pendingAsks(agentNow()).length });
     const t = store.transcripts.get(key);
+    runningStrip.update(t?.messages);
     if (!t) {
       if (!msgsEl.firstElementChild) {
         msgsEl.innerHTML = `<div class="sk-wrap" data-key="sk">
@@ -5797,6 +5803,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       contextMeter.destroy();
       goalChip.destroy();
       tray?.destroy();
+      runningStrip.destroy();
       quoteReply?.destroy();
       find?.destroy();
       if (screen?.el === el) document.title = "Rudder";

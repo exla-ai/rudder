@@ -1,0 +1,60 @@
+/* Running strip (running-strip.js): what the agent has running right now,
+   above the composer. One line (how many, the newest one's description and
+   time) that opens a row each, the command in mono under its description. */
+
+.run-strip {
+  flex: none; position: relative; z-index: 4;
+  padding: 0 calc(var(--sar) + 10px) 0 calc(var(--sal) + 10px);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  -webkit-backdrop-filter: saturate(1.6) blur(18px);
+  backdrop-filter: saturate(1.6) blur(18px);
+}
+@media (min-width: 760px) { .run-strip { background: color-mix(in srgb, var(--bg-elev) 88%, transparent); } }
+.run-strip[hidden], .run-strip [hidden] { display: none; }
+/* The composer's own top border would double the strip's. */
+.run-strip:not([hidden]) ~ .composer { border-top-color: transparent; }
+body.desktop .dsk-main .run-strip > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+
+.rs-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 6px 2px;
+  border: 0; background: none; color: var(--ink-2); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.rs-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.rs-spin { width: 14px; height: 14px; border-width: 2px; border-top-color: var(--working); }
+.rs-count {
+  flex: none; padding: 2px 7px; border-radius: 999px;
+  background: var(--working-soft); color: var(--working); font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.rs-desc { flex: 1; min-width: 0; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rs-time, .rs-r-time { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rs-caret { flex: none; width: 14px; height: 14px; color: var(--faint); transform: rotate(-90deg); transition: transform 140ms; }
+.run-strip.open .rs-caret { transform: rotate(90deg); }
+
+.rs-list {
+  display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px; padding: 4px;
+  max-height: min(40vh, calc(var(--vvh) * 0.4)); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-1);
+}
+.rs-row {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px; width: 100%; min-height: 36px; padding: 6px 8px;
+  border: 0; border-radius: 8px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.rs-row:hover { background: var(--surface-2); }
+.rs-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rs-r-top { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
+.rs-r-desc { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rs-r-bg {
+  flex: none; padding: 1px 6px; border-radius: 6px; background: var(--idle-soft); color: var(--muted);
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.rs-r-cmd {
+  display: block; width: 100%; font-family: var(--mono); font-size: 12px; line-height: 1.4; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* A tapped row shows its whole command. */
+.rs-row.whole .rs-r-cmd { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (pointer: coarse) {
+  .rs-head, .rs-row { min-height: 44px; }
+}

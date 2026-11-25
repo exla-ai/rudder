@@ -212,3 +212,39 @@ test("A call with no result yet shows running while the agent lives, until its t
   assert.deepEqual(calls("live"), [["ls", false], ["npm test", false], ["sleep 20", true]]);
   assert.deepEqual(calls("gone"), [["ls", false], ["npm test", false], ["sleep 20", false]]);
 });
+
+test("A background task shows running across turns until its notification or TaskStop ends it, with the description its call gave", (t) => {
+  const { agent, shown } = scratch(t);
+  const use = (uuid, id, name, input) => ({ type: "assistant", uuid, message: { content: [{ type: "tool_use", id, name, input }] } });
+  const result = (uuid, id, toolUseResult) => ({ type: "user", uuid, toolUseResult, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "started" }] } });
+  const notification = (id, status) => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>done</summary>\n</task-notification>`;
+  const lines = [
+    { type: "user", uuid: "u1", message: { role: "user", content: "deploy and test" } },
+    use("a1", "t1", "Bash", { command: "fly deploy --app rudder-cloud", description: "Deploy Cloud", run_in_background: true }),
+    result("r1", "t1", { stdout: "", backgroundTaskId: "b1" }),
+    use("a2", "t2", "Bash", { command: "npm test", description: "Run the tests", run_in_background: true }),
+    result("r2", "t2", { stdout: "", backgroundTaskId: "b2" }),
+    use("a3", "t3", "Monitor", { command: "tail -f build.log", description: "Watch the build" }),
+    result("r3", "t3", { taskId: "m1", persistent: false }),
+    use("a4", "t4", "Monitor", { command: "tail -f app.log", description: "Watch the app" }),
+    result("r4", "t4", { taskId: "m2", persistent: true }),
+    { type: "system", subtype: "turn_duration", uuid: "d1", durationMs: 4000 },
+    // Queued the moment the tests end, before the agent reads it; a Monitor
+    // event ends nothing.
+    { type: "queue-operation", operation: "enqueue", content: notification("b2", "completed") },
+    { type: "queue-operation", operation: "enqueue", content: "<task-notification>\n<task-id>m1</task-id>\n<event>line 1</event>\n</task-notification>" },
+    { ...use("a5", "t5", "TaskStop", { task_id: "m1" }), parentUuid: "d1" },
+    result("r5", "t5", { message: "Stopped", task_id: "m1", task_type: "local_bash" }),
+  ];
+  agent("live", { process: { pid: process.pid } }, lines);
+  agent("gone", {}, lines);
+  const calls = (id) => shown(id).filter((m) => m.role === "tool").map((m) => [m.tool.description ?? null, m.tool.background?.status ?? null, m.tool.running === true]);
+  assert.deepEqual(calls("live"), [
+    ["Deploy Cloud", null, true],
+    ["Run the tests", "completed", false],
+    ["Watch the build", "stopped", false],
+    ["Watch the app", null, false],
+    [null, null, false],
+  ]);
+  assert.deepEqual(calls("gone").map((call) => call[2]), [false, false, false, false, false]);
+});

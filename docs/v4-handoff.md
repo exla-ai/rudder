@@ -10,6 +10,17 @@ read, write and delete access to `cache/v1/accounts/*`. The 5.0.43 home
 uploaded a Rust build to production and restored it with an empty local
 cache. A Turborepo artifact also round-tripped through the home proxy.
 
+Running strip: the app's chat shows what the agent has running right now
+above the composer (`cloud/app/running-strip.js`), how many, the newest
+one's description and time, and a row each with the command in mono. It
+reads the transcript: a call with no result in the turn under way, and a
+Claude background Bash or Monitor until its `<task-notification>` or
+TaskStop ends it (`transcripts.mjs` `noteBackground`, `markRunning`). Bash
+and Monitor calls carry their `description`; Codex calls show the command.
+It needs a worker image with this `transcripts.mjs`. A background task of a
+process that was killed before Claude wrote its notification shows until it
+leaves the newest page; run.json does not record when the process started.
+
 Claude Code and Codex limits on Cloud homes keep the account signed in and
 show the reset in Settings. New work and the next prompt in a saved,
 idle conversation use the first available configured account when the

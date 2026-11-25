@@ -1038,32 +1038,6 @@
   margin-top: 30px;
 }
 
-/* The two places Rudder is best: a ruled box around the browser and the Mac
-   app, its label sitting on the top rule. The iPhone badge stays outside. */
-.get-pick {
-  position: relative;
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px 10px 10px;
-  margin: -12px 0 -10px -10px;
-  border: 1.5px solid var(--work);
-  border-radius: 18px;
-}
-
-.get-pick-label {
-  position: absolute;
-  top: -0.62rem;
-  left: 14px;
-  padding: 0 7px;
-  background: var(--stock);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.02em;
-  color: var(--work);
-  white-space: nowrap;
-}
-
 .way-pick {
   margin-left: 6px;
   padding: 1px 6px;
@@ -1123,11 +1097,6 @@
 @media (max-width: 420px) {
   .get-badge {
     flex: 1 1 100%;
-  }
-  .get-pick {
-    display: flex;
-    flex: 1 1 100%;
-    margin: -12px -10px 0;
   }
 }
 

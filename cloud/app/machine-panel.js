@@ -353,7 +353,7 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
         <div class="subtitle mp-sub-line"></div>
       </div>
       <div class="mp-head-acts">
-        <button type="button" class="btn small mp-prune-btn" title="Prune local tool caches">
+        <button type="button" class="btn small mp-prune-btn" title="Prune local tool caches" aria-label="Prune local tool caches">
           ${icon("trash")}<span>Prune caches</span>
         </button>
         <button type="button" class="icon-btn mp-refresh-btn" aria-label="Refresh" title="Refresh">

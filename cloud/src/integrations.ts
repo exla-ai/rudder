@@ -142,7 +142,8 @@ export function openJson<T = Record<string, unknown>>(key: Buffer, sealed: strin
   return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8")) as T;
 }
 
-type StatePayload = { a: string; o: string | null; p: Provider; e: number; n: string };
+// f: the client that started it (ios, browser, mac), for the product event.
+type StatePayload = { a: string; o: string | null; p: Provider; e: number; n: string; f?: string };
 
 export function signState(key: Buffer, payload: StatePayload): string {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -178,6 +179,12 @@ function sha256(value: string): string {
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+// The client an app request came from (core.js sends it), for event props.
+function platformName(value: unknown): string {
+  const raw = String(value ?? "").toLowerCase();
+  return /^[a-z]{1,12}$/.test(raw) ? raw : "unknown";
 }
 
 function redirect(res: ServerResponse, location: string): void {
@@ -481,7 +488,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
     };
   }
 
-  function startOAuth(account: Account, orgId: string, provider: Provider): string {
+  function startOAuth(account: Account, orgId: string, provider: Provider, platform: string): string {
     if (!configured[provider]) {
       throw new HttpError(503, "Slack is not set up on this server");
     }
@@ -493,6 +500,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
       p: provider,
       e: now() + STATE_TTL_MS,
       n: randomBytes(8).toString("base64url"),
+      f: platform,
     });
     return slackAuthorizeUrl({ clientId: slackConfig.clientId, redirectUri: redirectUri(provider), state });
   }
@@ -540,11 +548,11 @@ export function createIntegrations(deps: IntegrationsDeps) {
       log(`integrations: ${provider} oauth exchange failed: ${error instanceof Error ? error.message : String(error)}`);
       return failed("exchange_failed");
     }
-    capture(state.a, "integration_connected", { provider, scope: owner.kind });
+    capture(state.a, "integration_connected", { provider, scope: owner.kind, platform: platformName(state.f) });
     return settings(owner.kind === "org" ? { connected: provider, org: owner.id } : { connected: provider });
   }
 
-  async function disconnect(account: Account, orgId: string, provider: Provider): Promise<void> {
+  async function disconnect(account: Account, orgId: string, provider: Provider, platform: string): Promise<void> {
     const owner = resolveOwner(account, orgId, "manage");
     const install = getInstall(owner, provider);
     deleteInstall.run(owner.kind, owner.id, provider);
@@ -556,7 +564,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
         log(`integrations: slack token revoke failed for ${owner.kind}:${owner.id}: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
-    capture(account.accountId, "integration_disconnected", { provider, scope: owner.kind });
+    capture(account.accountId, "integration_disconnected", { provider, scope: owner.kind, platform });
   }
 
   async function routeApp(req: IncomingMessage, res: ServerResponse, url: URL, account: Account): Promise<boolean> {
@@ -571,12 +579,12 @@ export function createIntegrations(deps: IntegrationsDeps) {
     const startMatch = /^\/api\/app\/integrations\/(slack)\/start$/.exec(path);
     if (startMatch && method === "POST") {
       const body = await readJson(req);
-      sendJson(res, 200, { url: startOAuth(account, str(body.org) || orgParam, startMatch[1] as Provider) });
+      sendJson(res, 200, { url: startOAuth(account, str(body.org) || orgParam, startMatch[1] as Provider, platformName(req.headers["x-rudder-platform"])) });
       return true;
     }
     const providerMatch = /^\/api\/app\/integrations\/(slack)$/.exec(path);
     if (providerMatch && method === "DELETE") {
-      await disconnect(account, orgParam, providerMatch[1] as Provider);
+      await disconnect(account, orgParam, providerMatch[1] as Provider, platformName(req.headers["x-rudder-platform"]));
       sendJson(res, 200, { ok: true });
       return true;
     }
@@ -625,6 +633,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
       }
       deleteLinkCode.run(codeHash);
       upsertLink.run(team.id, String(row.user_id), account.accountId, new Date(now()).toISOString());
+      capture(account.accountId, "integration_connected", { provider: "slack-user", scope: "user", platform: platformName(req.headers["x-rudder-platform"]) });
       sendJson(res, 200, { ok: true, team });
       return true;
     }
@@ -756,7 +765,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
     track(
       deps.deliverTask(accountId, project.workspaceId, task).then(
         () => {
-          capture(accountId, "task_started", { source: "slack" });
+          capture(accountId, "task_started", { via: "slack" });
           return respondLater(responseUrl, `Started an agent on *${slackEscape(project.name)}*.`);
         },
         (error: unknown) =>

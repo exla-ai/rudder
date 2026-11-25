@@ -45,13 +45,22 @@ export const PRODUCT_EVENTS = [
   // { feature }: a panel or tool opened (subagent tray, terminal, files...).
   // The server sends it too, for Tailscale.
   "feature_used",
-  // { screen }: a screen opened (home, project, agent, settings...), once per
-  // screen for each load of the app.
+  // { screen }: a screen opened (home, project, agent, settings...), once for
+  // each time the app moves to it.
   "screen_viewed",
+  // One visit to the app: it starts when the app comes to the front and ends
+  // when it is hidden ({ duration_s, screens }). Every app event carries the
+  // visit's session_id.
+  "session_started",
+  "session_ended",
+  // { kind, route, status }: a request the app could not finish (offline, a
+  // server error) or a script error. Never the error's text.
+  "client_error",
   // Captured by the server itself (server.ts), whichever client acted:
   "app_active",
   "app_error",
   "message_sent",
+  "message_failed",
   "message_edited",
   "prompt_answered",
   "agent_action",
@@ -79,14 +88,17 @@ const EVENT_SET = new Set<string>(PRODUCT_EVENTS);
 // Counted by the server where the thing happens. A client posting one would
 // only double-count it (or fake it), so /api/app/event refuses these.
 export const SERVER_ONLY_EVENTS: ReadonlySet<string> = new Set([
-  "app_active", "app_error", "message_sent", "message_edited", "prompt_answered", "agent_action", "agent_branched",
+  "app_active", "app_error", "message_sent", "message_failed", "message_edited", "prompt_answered", "agent_action", "agent_branched",
   "chat_harness_switched", "plan_approved", "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
   "signed_in", "home_created", "home_ready", "agent_login_started", "agent_signed_in", "agent_started",
+  "task_started", "integration_connected", "integration_disconnected",
+  "org_created", "org_invite_created", "org_invite_accepted", "org_member_role_changed", "org_member_removed",
 ]);
 // Before sign-in, posted by the app to /api/app/anon-event with its device id.
-export const DEVICE_EVENTS = ["app_first_opened", "signin_viewed", "signin_clicked", "signin_completed"] as const;
+export const DEVICE_EVENTS = ["app_first_opened", "signin_viewed", "signin_clicked", "signin_completed", "signin_failed"] as const;
 // Anonymous events: the device ones, plus signin_started, which the server
-// sends when a Mac or CLI device login starts (keyed by that login).
+// sends when a Mac or CLI device login starts (keyed by that login). The
+// server sends signin_failed too, for a sign-in it refused.
 export const ANONYMOUS_EVENTS = [...DEVICE_EVENTS, "signin_started"] as const;
 const DEVICE_SET = new Set<string>(DEVICE_EVENTS);
 const ANONYMOUS_SET = new Set<string>(ANONYMOUS_EVENTS);
@@ -111,6 +123,20 @@ export function isProductEvent(name: unknown): name is ProductEventName {
 export function isInternalEmail(email: string | null | undefined, adminEmails: ReadonlySet<string>): boolean {
   const lower = (email ?? "").trim().toLowerCase();
   return lower !== "" && (adminEmails.has(lower) || lower.endsWith(`@${INTERNAL_EMAIL_DOMAIN}`));
+}
+
+/** The shape of an app API path, for error events: "send", "pair/finish".
+ * Two segments at most, and a segment that is not a plain word (an id, a
+ * code) becomes ":id", so nothing a person typed or owns goes out. */
+export function routeTemplate(pathname: string): string {
+  const parts = pathname.replace(/^\/+api\/app\/?/, "").split("/").filter(Boolean).slice(0, 2);
+  return parts.map((part) => (/^[a-z][a-z-]{1,23}$/.test(part) ? part : ":id")).join("/") || "app";
+}
+
+/** A sign-in refusal's code as an event prop: a short lowercase word. */
+export function reasonCode(value: unknown): string {
+  const code = String(value ?? "").toLowerCase();
+  return /^[a-z][a-z_]{0,39}$/.test(code) ? code : "other";
 }
 
 /** Keep primitives only, at most 20 keys; drop strings that look like a path,
@@ -138,7 +164,9 @@ export function sanitizeProductProps(props: unknown): ProductProps {
         /\.\.?\//.test(text) ||
         /[^\s@]+@[^\s@]+\.[^\s@]+/.test(text) ||
         /(sk-|ghp_|gho_|github_pat_|phc_|rdr_|rdrw_|xox[abprs]-|lin_api_|whsec_|AKIA[0-9A-Z]{8})/.test(text) ||
-        /^[A-Za-z0-9_\-+/=.]{32,}$/.test(text) ||
+        // A long unbroken run reads as a token. Model ids (a provider path,
+        // a dated name) and route shapes are long by nature and kept.
+        (key !== "model" && key !== "route" && /^[A-Za-z0-9_\-+/=.]{32,}$/.test(text)) ||
         /:\/\/[^/\s]*@/.test(text)
       ) {
         continue;

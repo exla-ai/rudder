@@ -1699,10 +1699,19 @@ on the user's own Claude Code / Codex subscription.
 - **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
   whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
   anonymous (sha256 of the account id), props sanitized. `screen_viewed`
-  {screen} is each screen a client opens, once per screen and app load, so
-  the three clients can be compared screen by screen. Server-side events
-  (org_*, integration_*) are captured
-  by the modules themselves; the client must not resend them. The server also
+  {screen} is each screen a client moves to, counted once the account's state
+  has loaded and never for a redraw, so the three clients can be compared
+  screen by screen. Every app event carries `platform`, `app_version` and the
+  visit's `session_id`; `session_started` {trigger} and `session_ended`
+  {duration_s, screens} bracket each time the app is in front, and
+  `client_error` {kind: network_offline|api_5xx|js_error, route, status} is a
+  request or script that failed, with the route's shape (`routeTemplate`) and
+  never the error's text. Server-side events (org_*, integration_*,
+  `task_started` {via app|slack}, `message_failed` {code}) are captured by the
+  modules themselves with the request's platform; the client must not resend
+  them. A refused sign-in is an anonymous `signin_failed` {provider, platform,
+  reason}; the iPhone app sends its own first open and sign-in steps, since
+  its web view loads only after sign-in. The server also
   counts what every client does at the route, so web, Mac, phone and voice are
   covered at once (`SERVER_ONLY_EVENTS`, which `/api/app/event` refuses):
   `app_active` (once per account, UTC day and platform, never from a passive

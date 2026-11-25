@@ -13394,7 +13394,9 @@ Address the objection directly. If you disagree, say why inside \
             .unwrap_or_default()
             .to_string();
         if name.starts_with('/') && name.len() > 1 {
-            telemetry::emit_event(&self.cwd, "command_used", serde_json::json!({ "name": name }));
+            // Without the slash: a property that starts with one reads as a
+            // path and is dropped (src/analytics.ts sanitizeProperties).
+            telemetry::emit_event(&self.cwd, "command_used", serde_json::json!({ "name": &name[1..] }));
         }
     }
 

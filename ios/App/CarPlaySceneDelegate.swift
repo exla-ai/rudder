@@ -219,6 +219,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         var request = URLRequest(url: Session.resolvedServer().appendingPathComponent("api/app/state"), timeoutInterval: 20)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("carplay", forHTTPHeaderField: "X-Rudder-Platform")
         guard let result = try? await URLSession.shared.data(for: request) else {
             return .failed("Can't reach Rudder")
         }

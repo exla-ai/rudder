@@ -134,7 +134,7 @@ export function SettingsScreen() {
     if (forOrg) setScope(forOrg);
     integrationsCache.clear();
     const name = PROVIDER_NAME[connected] || "";
-    if (name) { toast(`${name} connected`); track("integration_connected", { provider: connected }); }
+    if (name) toast(`${name} connected`);
     else if (connectError) toast(oauthErrorText(connectError, params.get("provider")), { error: true });
   }
 
@@ -538,7 +538,6 @@ export function SettingsScreen() {
       if (!ok) return;
       try {
         await api(`/api/app/integrations/${provider}${scopeQuery(org)}`, { method: "DELETE" });
-        track("integration_disconnected", { provider });
         toast(`${label} disconnected`);
         paintIntegrations(true);
       } catch (err) { showError(err); }
@@ -746,7 +745,6 @@ export function SlackLinkScreen(code) {
       go.disabled = true;
       try {
         await api(`/api/app/link/slack/${encodeURIComponent(code)}`, { method: "POST", body: {} });
-        track("integration_connected", { provider: "slack-user" });
         box.replaceChildren(h(`<div class="cc-icon ok">${icon("check")}</div>`), h(`<h1>Slack is linked</h1>`),
           h(`<p>Try <code>/rudder status</code> in Slack, or <code>/rudder &lt;project&gt; &lt;task&gt;</code> to start an agent.</p>`),
           h(`<div class="actions"><a class="btn primary block" href="/app" data-link>Go to Rudder</a></div>`));

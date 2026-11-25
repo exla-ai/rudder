@@ -44,6 +44,45 @@ final class Session {
             Task { await self.pair(code: code) }
         }
         #endif
+        noteOpened()
+    }
+
+    // MARK: Sign-in steps
+
+    private static let deviceKey = "analyticsDevice"
+    /// The sign-in under way (google, github or pair), for its outcome.
+    private var signInProvider = "google"
+
+    /// The steps before there is an account (first open, the sign-in screen,
+    /// a sign-in button, signed in or not), keyed by a random id this phone
+    /// keeps in UserDefaults. The control plane hashes it, and nothing else
+    /// about the phone goes with it. The web app cannot count these: it loads
+    /// only after sign-in.
+    private func deviceEvent(_ name: String, _ props: [String: String] = [:]) {
+        guard let device = UserDefaults.standard.string(forKey: Self.deviceKey) else { return }
+        var request = URLRequest(url: server.appendingPathComponent("api/app/anon-event"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var all = props
+        all["platform"] = "ios"
+        let body: [String: Any] = ["name": name, "device": device, "props": all]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let ping = request
+        Task { _ = try? await URLSession.shared.data(for: ping) }
+    }
+
+    /// Gives this phone its id on its first launch and counts that launch. A
+    /// phone that is already signed in (an update) only gets its id.
+    private func noteOpened() {
+        let first = UserDefaults.standard.string(forKey: Self.deviceKey) == nil
+        if first {
+            UserDefaults.standard.set(UUID().uuidString.lowercased(), forKey: Self.deviceKey)
+        }
+        guard token == nil else { return }
+        if first {
+            deviceEvent("app_first_opened")
+        }
+        deviceEvent("signin_viewed")
     }
 
     /// The control plane: the default, or a `RudderServerURL` override. A
@@ -62,6 +101,8 @@ final class Session {
         guard !signingIn else { return }
         errorMessage = nil
         signingIn = true
+        signInProvider = provider
+        deviceEvent("signin_clicked", ["provider": provider])
         var components = URLComponents(url: server.appendingPathComponent("app/login"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "native", value: "1"),
@@ -79,6 +120,7 @@ final class Session {
         if !session.start() {
             signingIn = false
             errorMessage = "Could not open the sign-in window."
+            deviceEvent("signin_failed", ["provider": provider, "reason": "no_window"])
         }
     }
 
@@ -86,17 +128,21 @@ final class Session {
         signingIn = false
         authSession = nil
         if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+            deviceEvent("signin_failed", ["provider": signInProvider, "reason": "cancelled"])
             return
         }
         if let error {
             errorMessage = error.localizedDescription
+            deviceEvent("signin_failed", ["provider": signInProvider, "reason": "error"])
             return
         }
         let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
         if let token = items.first(where: { $0.name == "token" })?.value, token.hasPrefix("rdr_") {
             Keychain.write(token)
             self.token = token
+            deviceEvent("signin_completed", ["provider": signInProvider])
         } else {
+            // The control plane counted this refusal itself (signin_failed).
             // The server says why (an email already signed up another way, a
             // cancelled or expired sign-in).
             errorMessage = items.first(where: { $0.name == "message" })?.value ?? "Sign-in did not finish. Try again."
@@ -111,9 +157,11 @@ final class Session {
         errorMessage = nil
         signingIn = true
         defer { signingIn = false }
+        deviceEvent("signin_clicked", ["provider": "pair"])
         var request = URLRequest(url: server.appendingPathComponent("api/app/pair/finish"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("ios", forHTTPHeaderField: "X-Rudder-Platform")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["code": trimmed])
         do {
             let (data, _) = try await URLSession.shared.data(for: request)
@@ -121,11 +169,14 @@ final class Session {
             if let token = body["token"] as? String, token.hasPrefix("rdr_") {
                 Keychain.write(token)
                 self.token = token
+                deviceEvent("signin_completed", ["provider": "pair"])
             } else {
+                // The control plane counted a refused code itself (signin_failed).
                 errorMessage = (body["error"] as? String) ?? "That code didn't work."
             }
         } catch {
             errorMessage = error.localizedDescription
+            deviceEvent("signin_failed", ["provider": "pair", "reason": "error"])
         }
     }
 

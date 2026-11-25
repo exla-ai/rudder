@@ -203,6 +203,7 @@ final class VoiceAssistant {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("ios", forHTTPHeaderField: "X-Rudder-Platform")
         var body = ["surface": surface.rawValue]
         if let focus, !focus.isEmpty {
             body["focus"] = focus
@@ -471,10 +472,12 @@ final class VoiceAssistant {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("ios", forHTTPHeaderField: "X-Rudder-Platform")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "name": call.name,
             "arguments": call.arguments,
             "call_id": call.callID,
+            "surface": surface?.rawValue ?? "phone",
         ])
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -530,6 +533,7 @@ final class VoiceAssistant {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("ios", forHTTPHeaderField: "X-Rudder-Platform")
         let seen: Any = updatesSeen.map { $0 as Any } ?? NSNull()
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["seen": seen])
         // Errors are silent: the next tick tries again with the same cursor.

@@ -120,6 +120,7 @@ final class Session {
         var request = URLRequest(url: RudderLinks.pairURL(server))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("mac", forHTTPHeaderField: "X-Rudder-Platform")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["code": trimmed])
         do {
             let (data, _) = try await URLSession.shared.data(for: request)

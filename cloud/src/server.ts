@@ -28,7 +28,7 @@ import {
 } from "./slack.js";
 import { createOrgStore, handleOrgApi } from "./orgs.js";
 import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } from "./team.js";
-import { createHomeWatch, createProductAnalytics, isInternalEmail } from "./product-analytics.js";
+import { createHomeWatch, createProductAnalytics, isInternalEmail, reasonCode, routeTemplate } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
 import { pollIfNoneMatch, sendAppNotModified, sendAppPoll, sendAppPollJson, sendStaticFile } from "./app-static.js";
@@ -439,6 +439,27 @@ const requestPlatform = (req: IncomingMessage): string => {
   const raw = String(req.headers["x-rudder-platform"] ?? "").toLowerCase();
   return /^[a-z]{1,12}$/.test(raw) ? raw : "unknown";
 };
+// The account behind an app request once it is known, so a request that fails
+// later is counted against that account (app_error), and the client an
+// account last used, for what happens after the request (its machine coming
+// up). In memory.
+const requestAccounts = new WeakMap<IncomingMessage, string>();
+const lastPlatform = new Map<string, string>();
+function noteRequestAccount(req: IncomingMessage, accountId: string): void {
+  requestAccounts.set(req, accountId);
+  const platform = requestPlatform(req);
+  if (platform !== "unknown") {
+    if (lastPlatform.size > 50_000) {
+      lastPlatform.clear();
+    }
+    lastPlatform.set(accountId, platform);
+  }
+}
+// A sign-in the server refused. There is no account and no device to key it
+// by, so each one stands alone.
+function noteSignInFailed(props: { provider: string; platform: string; reason: string }): void {
+  void productAnalytics.captureAnonymous(randomUUID(), "signin_failed", props);
+}
 // app_active once per account per UTC day per platform: a daily-active count
 // without an event for every 3s poll. In memory, so a restart may count twice.
 // It carries how much the account runs: projects, agents and their harnesses.
@@ -492,7 +513,7 @@ function noteHomeReady(homeId: string): void {
     return;
   }
   homeReadySeen.add(homeId);
-  captureProductEvent(accountId, "home_ready", { ready_s: Math.round(age / 1000), host: homeHostKind(row.host_kind) });
+  captureProductEvent(accountId, "home_ready", { ready_s: Math.round(age / 1000), host: homeHostKind(row.host_kind), platform: lastPlatform.get(accountId) ?? "unknown" });
 }
 // Slack, per org or per person. Its dependencies are functions
 // declared further down (hoisted), so the module never imports server.ts.
@@ -955,8 +976,8 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     console.error(`request error ${req.method} ${req.url} -> ${status}`, error);
     if (status >= 500 && req.url?.startsWith("/api/app/")) {
       // Only the route's shape goes out: ids and query strings stay here.
-      const route = new URL(req.url, "http://x").pathname.replace(/\/[^/]*[0-9][^/]*/g, "/:id");
-      captureProductEvent("server", "app_error", { route, status, platform: requestPlatform(req) });
+      const route = routeTemplate(new URL(req.url, "http://x").pathname);
+      captureProductEvent(requestAccounts.get(req) ?? "server", "app_error", { route, status, platform: requestPlatform(req) });
     }
     // needsUpdate: the cloud machine runs a Rudder too old for this, and the
     // app offers "Update now" next to the message (homeNeedsUpdate).
@@ -5691,7 +5712,7 @@ async function createHome(accountId: string, region: string | null): Promise<Wor
     recordStartFailure("workspace", id, error);
     throw error;
   }
-  captureProductEvent(accountId, "home_created", { region: regionToUse });
+  captureProductEvent(accountId, "home_created", { region: regionToUse, platform: lastPlatform.get(accountId) ?? "unknown" });
   return rowToWorkspace(findWorkspaceById.get(id));
 }
 
@@ -7374,7 +7395,8 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
       sendJson(res, 502, { error: "the cloud machine did not upload the agent's work" });
       return;
     }
-    captureProductEvent(authContext.accountId, "agent_pulled", { platform: requestPlatform(req) });
+    // Only the CLI pulls (the Mac app runs it for "Open a copy on this Mac").
+    captureProductEvent(authContext.accountId, "agent_pulled", { platform: "cli" });
     sendJson(res, 200, { ...report, repo: repoSlugFromUrl(repo.repoUrl), download: `/api/rudder/home/syncs/${outId}` });
     return;
   }
@@ -7678,10 +7700,13 @@ const canonicalTerminalRelay = new CanonicalTerminalRelay({
 
 async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const account = await requireAccount(req);
+  noteRequestAccount(req, account.accountId);
   if (await projectFileRoutes.handle(req, res, url, account.accountId)) return;
   if (await privatePreviewRoutes.handle(req,res,url,account.accountId)) return;
   if (await vibeprintRoutes.handle(req, res, url, account.accountId)) return;
-  if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
+  const captureOrgEvent = (accountId: string, name: string, props?: Record<string, unknown>) =>
+    captureProductEvent(accountId, name, { ...props, platform: requestPlatform(req) });
+  if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureOrgEvent })) {
     return;
   }
   if (await productAnalytics.handleEventApi(req, res, url, account, { sendJson, readJsonBody })) {
@@ -7890,7 +7915,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   // a sleeping home: the session mints at once and wakes it, and a tool call
   // waits for it like any other write.
   if (req.method === "POST" && url.pathname === "/api/app/voice/session") {
-    await handleVoiceSession(res, account, home, await readJsonBody(req));
+    await handleVoiceSession(res, account, home, await readJsonBody(req), requestPlatform(req));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/voice/tool") {
@@ -7901,7 +7926,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       touchHome(home.id);
     }
     const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
-    sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId, surface), name, args ?? null));
+    sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId, surface, requestPlatform(req)), name, args ?? null));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/voice/updates") {
@@ -8111,7 +8136,14 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       interrupt: typeof body === "object" && body !== null && !Array.isArray(body) && body.interrupt === true,
       ...retryId(body),
     });
-    captureProductEvent(account.accountId, "message_sent", { platform: requestPlatform(req) });
+    // A message the machine refused (the agent is gone, its inbox is full) was
+    // not sent.
+    const refused = (sent as { status?: unknown } | null)?.status === "refused";
+    if (refused) {
+      captureProductEvent(account.accountId, "message_failed", { platform: requestPlatform(req), code: reasonCode((sent as { code?: unknown }).code) });
+    } else {
+      captureProductEvent(account.accountId, "message_sent", { platform: requestPlatform(req) });
+    }
     sendJson(res, 200, sent);
     return;
   }
@@ -8135,7 +8167,13 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (!text) {
       throw badRequest("text is required");
     }
-    sendJson(res, 200, await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000), ...retryId(body) }));
+    const started = await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000), ...retryId(body) });
+    // A slash command goes to the dashboard; anything else starts an agent.
+    if (!text.startsWith("/")) {
+      const files = typeof body === "object" && body !== null && !Array.isArray(body) && typeof body.files === "number" ? body.files : 0;
+      captureProductEvent(account.accountId, "task_started", { platform: requestPlatform(req), via: "app", files });
+    }
+    sendJson(res, 200, started);
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/app/screen") {
@@ -8373,6 +8411,7 @@ function signinErrorText(code: string | null): string {
 function handleAppSigninError(url: URL, res: ServerResponse): void {
   const message = signinErrorText(url.searchParams.get("error"));
   console.log(`sign-in refused: ${String(url.searchParams.get("error")).slice(0, 80)}`);
+  noteSignInFailed({ provider: "web", platform: "browser", reason: reasonCode(url.searchParams.get("error")) });
   sendHtml(res, renderShell({
     title: "Sign in · Rudder",
     brand: "Rudder",
@@ -8386,6 +8425,8 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
   const session = failed ? null : await getBetterAuthSession(req);
   if (!session?.user?.id) {
     console.log(`sign-in refused (app): ${String(failed || "no session").slice(0, 80)}`);
+    // Only the iOS app signs in this way.
+    noteSignInFailed({ provider: "web", platform: "ios", reason: failed ? reasonCode(failed) : "no_session" });
     // The iOS and Mac shells show this text on their sign-in screen.
     res.statusCode = 302;
     res.setHeader("Location", `rudder://auth?error=${encodeURIComponent(failed || "signin")}&message=${encodeURIComponent(signinErrorText(failed))}`);
@@ -8505,6 +8546,7 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
     const next = failures && failures.resetAt > now ? failures : { count: 0, resetAt: now + 60_000 };
     next.count += 1;
     pairFailures.set(address, next);
+    noteSignInFailed({ provider: "pair", platform: requestPlatform(req), reason: "bad_code" });
     sendJson(res, 400, { error: "that code is wrong or expired; run `rudder cloud app` for a new one" });
     return;
   }
@@ -8848,7 +8890,7 @@ const voiceMemories = new Map<string, VoiceMemory>();
 
 // `surface` is where the conversation happens (phone app, CarPlay or a phone
 // call); every tool the assistant uses is counted under it.
-function voiceContext(accountId: string, surface: "phone" | "carplay" | "call" = "phone"): VoiceContext {
+function voiceContext(accountId: string, surface: "phone" | "carplay" | "call", platform: string): VoiceContext {
   let memory = voiceMemories.get(accountId);
   if (!memory) {
     memory = {};
@@ -8872,15 +8914,15 @@ function voiceContext(accountId: string, surface: "phone" | "carplay" | "call" =
     },
     openRepo: (repo) => openRepoOnHome(accountId, { repo }),
     onTool: (tool, ok) => {
-      captureProductEvent(accountId, "voice_tool_used", { tool, ok, surface });
+      captureProductEvent(accountId, "voice_tool_used", { tool, ok, surface, platform });
       if (ok && tool === "launch_plan") {
-        captureProductEvent(accountId, "plan_approved", { via: "voice", surface });
+        captureProductEvent(accountId, "plan_approved", { via: "voice", surface, platform });
       }
     },
   };
 }
 
-async function handleVoiceSession(res: ServerResponse, account: { accountId: string }, home: Workspace | null, body: Json): Promise<void> {
+async function handleVoiceSession(res: ServerResponse, account: { accountId: string }, home: Workspace | null, body: Json, platform: string): Promise<void> {
   const apiKey = openAiApiKey();
   if (!apiKey) {
     sendJson(res, 503, { error: "voice is not set up on this server (OPENAI_API_KEY is missing)" });
@@ -8899,7 +8941,7 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
   recent.push(Date.now());
   voiceMints.set(account.accountId, recent);
   const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
-  captureProductEvent(account.accountId, "voice_session_started", { surface });
+  captureProductEvent(account.accountId, "voice_session_started", { surface, platform });
   const focus = (stringField(body, "focus") ?? "").trim().slice(0, 300) || undefined;
   touchHome(home.id);
   if (!isOpen(homeControls.get(home.id))) {
@@ -9083,7 +9125,7 @@ async function driveVoiceCall(
       resume: how.resume,
       onControl: (control) => liveVoiceCalls.set(callId, control),
       maxMs: Math.max(60_000, VOICE_CALL_MAX_MS - (Date.now() - startedAt)),
-      ctx: voiceContext(accountId, "call"),
+      ctx: voiceContext(accountId, "call", "call"),
       safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
       log: (message) => {
         if (message === "ended") {

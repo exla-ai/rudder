@@ -109,12 +109,40 @@ export async function pollApi(path, { etag = null, signal } = {}) {
   return { data: await answer(res), etag: tag };
 }
 
+// The shape of an API path for error events: "send", "pair/finish". Ids and
+// anything typed never go out (product-analytics.ts routeTemplate).
+function routeTemplate(path) {
+  const parts = String(path).split("?")[0].replace(/^\/+api\/app\/?/, "").split("/").filter(Boolean).slice(0, 2);
+  return parts.map((part) => (/^[a-z][a-z-]{1,23}$/.test(part) ? part : ":id")).join("/") || "app";
+}
+
+// One client_error for each stretch offline, sent once a request gets through
+// again (it could not be sent before).
+let offlineRoute = null;
+// A poll that keeps failing is one error a minute for its route, not one a poll.
+const serverErrorAt = new Map();
 async function request(path, { method, headers, signal, body }) {
+  let res;
   try {
-    return await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", signal, body });
-  } catch {
+    res = await fetch(path, { method, headers, credentials: "same-origin", cache: "no-store", signal, body });
+  } catch (error) {
+    if (error?.name !== "AbortError") offlineRoute ??= routeTemplate(path);
     throw new ApiError("Can't reach Rudder. Check your connection.", 0);
   }
+  if (offlineRoute) {
+    const route = offlineRoute;
+    offlineRoute = null;
+    track("client_error", { kind: "network_offline", route, status: 0 });
+  }
+  // 503 is a machine waking up, which every caller waits out.
+  if (res.status >= 500 && res.status !== 503) {
+    const route = routeTemplate(path);
+    if (Date.now() - (serverErrorAt.get(route) || 0) > 60_000) {
+      serverErrorAt.set(route, Date.now());
+      track("client_error", { kind: "api_5xx", route, status: res.status });
+    }
+  }
+  return res;
 }
 
 async function answer(res) {
@@ -144,9 +172,61 @@ export function track(name, props) {
     headers["Content-Type"] = "application/json";
     fetch("/api/app/event", {
       method: "POST", headers, credentials: "same-origin", cache: "no-store", keepalive: true,
-      body: JSON.stringify({ name, props: { platform: PLATFORM || "browser", ...(props || {}) } }),
+      body: JSON.stringify({ name, props: { platform: PLATFORM || "browser", app_version: APP_VERSION, session_id: visit.id, ...(props || {}) } }),
     }).catch(() => {});
   } catch { /* never throws */ }
+}
+
+/*
+ * Visits. One runs from the app coming to the front until it is hidden, and
+ * every event carries its id. Coming back within half an hour continues the
+ * same id, so a glance at another app does not split a visit's events; each
+ * time in front is still its own session_started and session_ended.
+ */
+const APP_VERSION = typeof NATIVE?.version === "string" ? NATIVE.version : "web";
+const VISIT_IDLE_MS = 30 * 60 * 1000;
+const visit = { id: crypto.randomUUID(), startedAt: 0, hiddenAt: 0, screens: 0 };
+
+/** A screen was shown in this visit (session_ended carries the count). */
+export function noteScreenInVisit() { visit.screens += 1; }
+
+function startVisit(trigger) {
+  if (visit.startedAt) return;
+  if (visit.hiddenAt && Date.now() - visit.hiddenAt > VISIT_IDLE_MS) visit.id = crypto.randomUUID();
+  visit.startedAt = Date.now();
+  visit.screens = 0;
+  track("session_started", { trigger });
+}
+
+function endVisit() {
+  if (!visit.startedAt) return;
+  const duration_s = Math.round((Date.now() - visit.startedAt) / 1000);
+  visit.startedAt = 0;
+  visit.hiddenAt = Date.now();
+  track("session_ended", { duration_s, screens: visit.screens });
+}
+
+/** Starts counting visits, once the app knows it is signed in. */
+let visitsWatched = false;
+export function watchVisits() {
+  if (visitsWatched) return;
+  visitsWatched = true;
+  if (document.visibilityState === "visible") startVisit("launch");
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") startVisit("foreground");
+    else endVisit();
+  });
+  window.addEventListener("pagehide", endVisit);
+  // A script error says only that one happened and where the app was: never
+  // its text, which can hold what someone typed.
+  let scriptErrors = 0;
+  const scriptError = () => {
+    if (scriptErrors >= 5) return;
+    scriptErrors += 1;
+    track("client_error", { kind: "js_error", route: routeTemplate(location.pathname.replace(/^\/app/, "/api/app")), status: 0 });
+  };
+  window.addEventListener("error", scriptError);
+  window.addEventListener("unhandledrejection", scriptError);
 }
 
 /*
@@ -170,14 +250,14 @@ function trackDevice(name, props) {
 
 /** Gives this device its id on its first open, and counts that open. A device
  * that used the app before (a rudder.* key in storage) gets its id quietly, so
- * a release is not a wave of first opens. The Mac app counts its own first
- * open in the native shell, where it signs in. */
+ * a release is not a wave of first opens. The Mac and iPhone apps count
+ * their own first open in the native shell, where they sign in. */
 export function noteAppOpened() {
   if (typeof ls.get(DEVICE_KEY) === "string") return;
   let used;
   try { used = Object.keys(localStorage).some((k) => k.startsWith("rudder.")); } catch { return; }
   ls.set(DEVICE_KEY, crypto.randomUUID());
-  if (!used && PLATFORM !== "mac") trackDevice("app_first_opened");
+  if (!used && PLATFORM !== "mac" && PLATFORM !== "ios") trackDevice("app_first_opened");
 }
 
 let signInViewed = false;

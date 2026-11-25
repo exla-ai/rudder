@@ -173,19 +173,38 @@ test("handleEventApi answers 204 for known events and 400 for unknown ones", asy
 
 test("every contract event name is whitelisted", () => {
   const names = [
-    "tutorial_viewed", "tutorial_step", "tutorial_completed", "tutorial_skipped", "org_created", "org_invite_created",
-    "org_invite_accepted", "org_member_role_changed", "org_member_removed", "integration_connect_clicked",
-    "integration_connected", "integration_disconnected", "model_picked", "agent_panel_opened", "plan_panel_opened",
-    "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened", "chat_model_switched",
-    "all_agents_started", "feature_used", "screen_viewed",
+    "tutorial_viewed", "tutorial_step", "tutorial_completed", "tutorial_skipped", "integration_connect_clicked",
+    "model_picked", "agent_panel_opened", "plan_panel_opened",
+    "download_mac_clicked", "install_cli_copied", "phone_link_opened", "chat_model_switched",
+    "all_agents_started", "feature_used", "screen_viewed", "session_started", "session_ended", "client_error",
   ];
   const serverOnly = [
     "app_active", "app_error", "message_sent", "message_edited", "prompt_answered", "agent_action", "agent_branched",
     "chat_harness_switched", "plan_approved", "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
     "signed_in", "home_created", "home_ready", "agent_login_started", "agent_signed_in", "agent_started",
+    "message_failed", "task_started", "integration_connected", "integration_disconnected",
+    "org_created", "org_invite_created", "org_invite_accepted", "org_member_role_changed", "org_member_removed",
   ];
   assert.deepEqual([...analytics.PRODUCT_EVENTS].sort(), [...names, ...serverOnly].sort());
   assert.deepEqual([...analytics.SERVER_ONLY_EVENTS].sort(), [...serverOnly].sort());
+});
+
+test("error routes keep their shape and lose ids; long model ids are kept", () => {
+  assert.equal(analytics.routeTemplate("/api/app/send"), "send");
+  assert.equal(analytics.routeTemplate("/api/app/pair/finish"), "pair/finish");
+  assert.equal(analytics.routeTemplate("/api/app/link/slack/AbC123xyz_9"), "link/slack");
+  assert.equal(analytics.routeTemplate("/api/app/orgs/org_8f2a/members"), "orgs/:id");
+  assert.equal(analytics.routeTemplate("/api/app/"), "app");
+  const kept = analytics.sanitizeProductProps({
+    route: analytics.routeTemplate("/api/app/integrations/slack/channels"),
+    model: "openrouter/anthropic/claude-sonnet-4.5",
+    other: "openrouter/anthropic/claude-sonnet-4.5",
+    via: "slack",
+  });
+  assert.deepEqual(kept, { route: "integrations/slack", model: "openrouter/anthropic/claude-sonnet-4.5", via: "slack" });
+  assert.equal(analytics.sanitizeProductProps({ model: "sk-ant-0123456789abcdef0123456789abcdef" }).model, undefined);
+  assert.equal(analytics.reasonCode("access_denied"), "access_denied");
+  assert.equal(analytics.reasonCode("Someone typed this"), "other");
 });
 
 test("handleAnonEventApi takes device events with a uuid, hashed, within a budget", async () => {

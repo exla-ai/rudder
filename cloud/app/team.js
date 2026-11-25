@@ -5,7 +5,7 @@
 //   (app.js AgentScreen with a member): no composer, no prompts, no actions.
 // - Private agents show only as a muted "Private agent" row with a status.
 import { h, icon, setText, reconcile } from "/app/render.js";
-import { app, api, rel, track } from "/app/core.js";
+import { app, api, rel } from "/app/core.js";
 import { screenShell, initials, note } from "/app/org.js";
 
 const enc = encodeURIComponent;
@@ -125,7 +125,6 @@ const MACHINE = {
 export function TeamScreen() {
   const { el, body } = screenShell("Team", { back: "/app/settings" });
   el.classList.add("team-screen");
-  track("feature_used", { feature: "team" });
   const refresh = h(`<button type="button" class="icon-btn" aria-label="Refresh">${icon("refresh")}</button>`);
   refresh.addEventListener("click", async () => {
     refresh.classList.add("spinning");

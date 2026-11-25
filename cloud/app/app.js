@@ -6,7 +6,7 @@ import {
 
 import {
   app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, fitTextarea, toMs, rel, ApiError, api, pollApi, toast, confirmDialog, track, showError, openSheet,
-  noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn, accountUsageLabel,
+  noteAppOpened, noteSignInViewed, noteSignInClicked, noteSignedIn, noteScreenInVisit, watchVisits, accountUsageLabel,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
@@ -771,20 +771,32 @@ function buildScreen(route, paneOpts = {}) {
   return HomeScreen();
 }
 
-// Which screens people open, once per screen for each load of the app. With
-// the platform every event carries, this says how the phone, the browser and
-// the Mac app are each used.
-const screensViewed = new Set();
+// Which screens people open, once for each time the app moves to one (not for
+// a redraw of the same screen, which a window resize causes). With the
+// platform every event carries, this says how the phone, the browser and the
+// Mac app are each used. Nothing is counted until the account's state has
+// loaded: before that the app does not know it is signed in.
+let screenViewed = null;
+// The chat counted by agent_panel_opened, so a redraw does not count it again.
+let agentPanelCounted = null;
+function noteScreenViewed(route) {
+  if (!store.state) return false;
+  watchVisits();
+  const key = `${route.name}|${route.path}`;
+  if (screenViewed === key) return false;
+  screenViewed = key;
+  agentPanelCounted = null;
+  noteScreenInVisit();
+  track("screen_viewed", { screen: route.name });
+  return true;
+}
 
 function mountScreen(dir = "forward", { revealSidebar = false } = {}) {
   let route = null;
   if (!store.signedOut) {
     route = parseRoute(location.pathname);
     if (!route.needsAccount) ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
-    if (!screensViewed.has(route.name)) {
-      screensViewed.add(route.name);
-      track("screen_viewed", { screen: route.name });
-    }
+    noteScreenViewed(route);
   }
   const wantDesktop = DESKTOP_MQ.matches && !!route && !FULL_PAGE.has(route.name);
   document.body.classList.toggle("desktop", wantDesktop);
@@ -819,6 +831,7 @@ function mountScreen(dir = "forward", { revealSidebar = false } = {}) {
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
   if (!store.signedOut && screen?.isSignIn) return mountScreen();
+  if (!store.signedOut) noteScreenViewed(parseRoute(location.pathname));
   screen?.update?.();
   desktop?.update(parseRoute(location.pathname));
 }
@@ -3009,7 +3022,7 @@ async function redeemPairCode(code, errorEl) {
   try {
     const res = await fetch("/api/app/pair/finish", {
       method: "POST", credentials: "same-origin", cache: "no-store",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+      headers: { "Content-Type": "application/json", "X-Rudder-Platform": PLATFORM || "browser" }, body: JSON.stringify({ code }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.token) throw new Error(data.error || "That code didn't work.");
@@ -3820,11 +3833,10 @@ function ProjectScreen(ws) {
           if (files.length) toast(files.length > 1 ? `Uploading ${i + 1} of ${files.length}` : "Uploading");
           paths.push(await uploadAttachment(ws, f.file));
         }
-        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths), requestId } });
+        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths), requestId, files: files.length } });
         starts.settle();
         toast(text.startsWith("/") ? "Sent to the dashboard" : "Task started");
-        if (!text.startsWith("/")) track("task_started", { source: "app", files: files.length });
-        else if (/^\/model\s/i.test(text)) syncModel();
+        if (/^\/model\s/i.test(text)) syncModel();
         await refreshState();
         const run = res?.run || res?.runId;
         if (run) navigate(agentPath(ws, run));
@@ -4287,7 +4299,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const ro = !!member;
   const key = ro ? `team|${member}|${ws}|${run}` : `${ws}|${run}`;
   const agentNow = () => (ro ? teamAgent(member, ws, run)?.agent : findAgent(ws, run)) || null;
-  track("agent_panel_opened", { layout: isDesktop() ? "desktop" : "phone" });
+  if (agentPanelCounted !== key) {
+    agentPanelCounted = key;
+    track("agent_panel_opened", { layout: isDesktop() ? "desktop" : "phone" });
+  }
   const el = h(`<section class="screen">
     <header class="topbar agent-bar">
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>

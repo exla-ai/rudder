@@ -1214,6 +1214,13 @@ dialog.plan-sheet .dialog { height: 92vh; max-height: 92vh; }
   font-size: 12px; font-weight: 600; white-space: nowrap;
 }
 .interrupt-send svg { width: 12px; height: 12px; fill: currentColor; color: var(--failed); }
+/* On a phone the three buttons leave the text a few characters a line, so a
+   message that can interrupt gets the full width and the buttons a row below. */
+@media (max-width: 560px) {
+  .composer.can-interrupt-send[data-send-ready] form { flex-wrap: wrap; justify-content: flex-end; padding-left: 4px; }
+  .composer.can-interrupt-send[data-send-ready] textarea { order: -1; flex: 1 1 100%; margin-inline: 10px; }
+  .composer.can-interrupt-send[data-send-ready] .attach { margin-right: auto; }
+}
 .interrupt-send:active { transform: scale(0.98); }
 
 /* Morning digest */

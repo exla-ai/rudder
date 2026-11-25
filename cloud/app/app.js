@@ -2519,7 +2519,9 @@ function openAgentSignIn(provider, account) {
         return await api("/api/app/login/start", { method: "POST", body: { provider, account, device } });
       } catch (err) {
         if (closed || err.status === 401) throw err;
-        if (err.status !== 503 || Date.now() > deadline) throw err;
+        // A machine still starting answers 503, or holds the request until
+        // the phone gives up on it (status 0). Both mean: ask again.
+        if ((err.status !== 503 && err.status !== 0) || Date.now() > deadline) throw err;
         await refreshState();
         await sleep(3000);
         if (closed) throw new Error("closed");

@@ -8358,6 +8358,7 @@ function signinErrorText(code: string | null): string {
 
 function handleAppSigninError(url: URL, res: ServerResponse): void {
   const message = signinErrorText(url.searchParams.get("error"));
+  console.log(`sign-in refused: ${String(url.searchParams.get("error")).slice(0, 80)}`);
   sendHtml(res, renderShell({
     title: "Sign in · Rudder",
     brand: "Rudder",
@@ -8370,6 +8371,7 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
   const failed = new URL(req.url ?? "/", "http://x").searchParams.get("error");
   const session = failed ? null : await getBetterAuthSession(req);
   if (!session?.user?.id) {
+    console.log(`sign-in refused (app): ${String(failed || "no session").slice(0, 80)}`);
     // The iOS and Mac shells show this text on their sign-in screen.
     res.statusCode = 302;
     res.setHeader("Location", `rudder://auth?error=${encodeURIComponent(failed || "signin")}&message=${encodeURIComponent(signinErrorText(failed))}`);

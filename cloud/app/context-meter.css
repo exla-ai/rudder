@@ -30,7 +30,8 @@
    the model's chip its usual room. */
 .c-tools:has(> .ps-chip:not([hidden])) > .cm :is(.cm-w, .cm-at) { display: none; }
 @container (max-width: 449px) {
-  .c-tools:has(> .ps-chip:not([hidden])) > .cm { display: none; }
+  .c-tools:has(> .ps-chip:not([hidden])) > .cm:not(.lv-warm, .lv-hot) { display: none; }
+  .c-tools:has(> .ps-chip:not([hidden])) > .cm .cm-l { display: none; }
   .c-tools:has(> .ps-chip:not([hidden])) > .model-chip:not(.effort-chip) { flex-shrink: 1; max-width: min(100%, 260px); }
 }
 

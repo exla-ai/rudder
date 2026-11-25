@@ -52,9 +52,9 @@ body.desktop .dsk-main .fh-screen .back { display: none; }
 .fh-card-h { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14.5px; margin-bottom: 8px; }
 .fh-card-h svg { color: var(--accent); }
 .fh-paths { display: grid; gap: 5px; margin-bottom: 6px; }
-.fh-path-line { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; }
-.fh-path-line code { font-family: var(--mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fh-state { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fh-path-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; font-size: 12.5px; }
+.fh-path-line code { font-family: var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+.fh-state { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
 .fh-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 
 .fh-chips { display: inline-flex; gap: 4px; flex: none; }
@@ -122,3 +122,9 @@ body.desktop .dsk-main .fh-screen .back { display: none; }
 .fh-pre { flex: 1 1 auto; margin: 0; max-height: 60vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--ink-2); }
 
 .fh-form .hint { font-size: 12.5px; color: var(--muted); margin: 10px 2px 14px; line-height: 1.45; }
+
+/* A phone has no room for the indent under a skill's icon. */
+@media (max-width: 520px) {
+  .fh-desc { margin-left: 12px; }
+  .fh-item > .fh-note, .fh-item > .fh-actions { margin-left: 12px; }
+}

@@ -2160,7 +2160,7 @@ function codexReader({ stats = null, child = false } = {}) {
       }
     } else if (payload.type === "reasoning") {
       // Summaries only; raw reasoning is encrypted.
-      const summary = (payload.summary || []).map((part) => part?.text || "").join("\n").trim();
+      const summary = (payload.summary || []).map((part) => part?.text || "").join("\n\n").trim();
       if (summary) {
         messages.push({ id, role: "system", ts, text: summary });
       }

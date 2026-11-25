@@ -160,7 +160,7 @@ export function FilesHubScreen({ projects }) {
       line.querySelector(".fh-state").textContent = s.state === "missing" ? "does not exist" : s.state === "link" ? `links to ${s.linksTo}` : "";
       paths.appendChild(line);
     }
-    const button = (label, run, primary = false) => { const b = h(`<button type="button" class="btn${primary ? " primary" : ""}"></button>`); b.textContent = label; b.addEventListener("click", run); actions.appendChild(b); };
+    const button = (label, run, primary = false) => { const b = h(`<button type="button" class="btn${primary ? " accent" : ""}"></button>`); b.textContent = label; b.addEventListener("click", run); actions.appendChild(b); };
     const has = (s) => s.state !== "missing" && !!s.root;
     if (shared) {
       noteEl.textContent = "Both agents read this one file, so a change here reaches Claude Code and Codex alike.";

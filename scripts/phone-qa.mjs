@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Phone-width screenshots of the signed-in web app, for a visual check before
 // a release. Read-only: it opens screens, types a draft and opens the model
-// picker, and never sends or changes anything.
+// picker and plan usage, and never sends or changes anything.
 //
 //   RUDDER_QA_TOKEN_FILE=~/.rudder-qa-token node scripts/phone-qa.mjs <out-dir> [base-url]
 //
@@ -25,10 +25,21 @@ fs.mkdirSync(outDir, { recursive: true });
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined, args: ["--no-sandbox"] });
 const context = await browser.newContext({
-  viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, colorScheme: "dark",
+  viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, colorScheme: "dark", serviceWorkers: "block",
   userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
 });
 await context.addInitScript((value) => localStorage.setItem("rudder.token", JSON.stringify(value)), token);
+// RUDDER_QA_APP_DIR=cloud/dist/app (after `node cloud/scripts/build-app.mjs`)
+// shows this checkout's built app over the deployed one, to look at a change
+// before it ships. The API is still the deployed one.
+const appDir = process.env.RUDDER_QA_APP_DIR;
+if (appDir) await context.route((url) => url.pathname === "/app" || url.pathname.startsWith("/app/"), (route) => {
+  const name = new URL(route.request().url()).pathname.slice("/app/".length);
+  const file = path.join(appDir, name);
+  const types = { ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png", ".webmanifest": "application/manifest+json" };
+  if (name && fs.existsSync(file) && fs.statSync(file).isFile()) return route.fulfill({ body: fs.readFileSync(file), contentType: types[path.extname(file)] });
+  return route.fulfill({ body: fs.readFileSync(path.join(appDir, "index.html")), contentType: "text/html" });
+});
 const page = await context.newPage();
 const failures = [];
 async function screen(name, route, act) {
@@ -41,11 +52,24 @@ async function screen(name, route, act) {
   await page.screenshot({ path: path.join(outDir, `${name}.png`) });
 }
 
+await screen("01-tour", "/app");
+// The first run tour covers Home: close it, and it stays closed on later screens.
+await page.locator(".tr-skip").click({ timeout: 4000 }).catch(() => {});
 await screen("01-home", "/app");
 const chat = await page.$$eval("a[href*='/a/']", (links) => links[0]?.getAttribute("href"));
 const project = await page.$$eval("a[href^='/app/p/']", (links) => links.map((a) => a.getAttribute("href")).find((href) => !href.includes("/a/")));
+await screen("02-plan-usage", "/app", async () => {
+  await page.locator(".pu:visible").first().click({ timeout: 4000 });
+  await page.waitForTimeout(1500);
+});
 await screen("02-all-agents", "/app/all");
-if (project) await screen("03-project", project);
+if (project) {
+  await screen("03-project", project);
+  await screen("03-project-menu", project, async () => {
+    await page.locator(".pb-more").click({ timeout: 4000 });
+    await page.waitForTimeout(400);
+  });
+}
 await screen("04-team", "/app/team");
 await screen("05-files", "/app/files");
 if (chat) {
@@ -55,13 +79,12 @@ if (chat) {
     await page.waitForTimeout(400);
   });
   await screen("08-model-picker", chat, async () => {
-    await page.locator(".composer-meta button, .model-chip, [aria-label*='odel']").first().click({ timeout: 4000 });
+    await page.locator(".composer .model-chip:not(.effort-chip)").first().click({ timeout: 4000 });
     await page.waitForTimeout(2500);
   });
 }
 await screen("09-settings", "/app/settings");
 await screen("10-machine", "/app/machine");
-await screen("11-usage", "/app/usage");
 await browser.close();
 for (const failure of failures) console.error(failure);
 console.log(`${fs.readdirSync(outDir).length} screenshots in ${outDir}`);

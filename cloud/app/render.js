@@ -241,6 +241,7 @@ const P = {
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
   reply: '<path d="M9.5 14.5L4.5 9.5l5-5"/><path d="M4.5 9.5H14a5.5 5.5 0 0 1 0 11h-2.5"/>',
   pin: '<path d="M9 3h6"/><path d="M10 3v5.5L7 13h10l-3-4.5V3z"/><path d="M12 13v8"/>',
+  canvas: '<rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M6.5 10v3.5a2 2 0 0 0 2 2H14"/><path d="M17 4.5c1.6 1.2 2.6 2.9 2.5 5"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/>',
   split: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>',

@@ -489,3 +489,5 @@ body.desktop.mac .ds-top { padding-top: 28px; }
 .ds-apin svg { width: 13px; height: 13px; }
 .ds-agent.renaming { background: var(--surface-3); }
 .ds-agent.renaming .ds-apin { display: none; }
+.set-acts .btn .chev { display: flex; margin-left: auto; color: var(--faint); }
+.set-acts .btn .chev svg { width: 16px; height: 16px; }

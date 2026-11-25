@@ -3784,6 +3784,7 @@ function ProjectScreen(ws) {
     </header>
     <div class="scroller has-composer">
       <div class="ptr">${icon("down")}</div>
+      <div class="warm-slot"></div>
       <div class="status-slot"></div>
       <div class="plan-slot"></div>
       <div class="section ports-sec" hidden><div class="section-head"><h2>Previews</h2></div><div class="ports"></div></div>
@@ -3803,13 +3804,30 @@ function ProjectScreen(ws) {
   el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
   // The model new agents start on, in the header too (the task box has its chip).
   const warmChip = WarmChip({ onClick: openMachine });
-  bar.appendChild(warmChip.el);
+  // A phone's bar has room for the name and one button: the warm chip sits
+  // under the bar there, and Refresh, Canvas and Files are in the More menu.
+  const phoneBar = matchMedia("(max-width: 560px)");
+  const warmSlot = el.querySelector(".warm-slot");
+  const placeWarm = () => { if (phoneBar.matches) warmSlot.appendChild(warmChip.el); else bar.insertBefore(warmChip.el, headModel.el); };
   const headModel = modelChip(ws, { compact: true });
   headModel.el.classList.add("head-model");
   bar.appendChild(headModel.el);
-  bar.appendChild(refreshButton(refreshState));
-  bar.appendChild(canvasButton({ ws, findAgent }));
-  bar.appendChild(filesButton({ ws, findAgent }));
+  placeWarm();
+  phoneBar.addEventListener("change", placeWarm);
+  const refreshBtn = refreshButton(refreshState);
+  const canvasBtn = canvasButton({ ws, findAgent });
+  const filesBtn = filesButton({ ws, findAgent });
+  refreshBtn.classList.add("pb-refresh");
+  const moreBtn = h(`<button type="button" class="icon-btn pb-more" aria-label="Project actions" aria-haspopup="menu">${icon("more")}</button>`);
+  moreBtn.addEventListener("click", () => showAgentMenu({
+    anchor: moreBtn, label: "Project actions", returnFocus: moreBtn,
+    items: [
+      { icon: "folder", label: "Files", run: () => filesBtn.click() },
+      { icon: "canvas", label: "Canvas", run: () => canvasBtn.click() },
+      { icon: "refresh", label: "Refresh", run: () => refreshBtn.click() },
+    ],
+  }));
+  bar.append(refreshBtn, canvasBtn, filesBtn, moreBtn);
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
 

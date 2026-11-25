@@ -459,10 +459,10 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
     };
   }
 
-  const kpiWorkspaces = makeKpiCard("Workspaces (VFS / CoW)");
-  const kpiSccache = makeKpiCard("sccache Hit Rate");
-  const kpiRemote = makeKpiCard("Remote Cache (S3)", { withPill: true });
-  const kpiHost = makeKpiCard("Machine Storage & RAM");
+  const kpiWorkspaces = makeKpiCard("Workspaces");
+  const kpiSccache = makeKpiCard("sccache hits");
+  const kpiRemote = makeKpiCard("Remote cache", { withPill: true });
+  const kpiHost = makeKpiCard("Storage & RAM");
   kpisEl.append(kpiWorkspaces.el, kpiSccache.el, kpiRemote.el, kpiHost.el);
 
   /* Build stable sections --------------------------------------------- */
@@ -866,7 +866,7 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
       else setPill(pill, "Idle", "muted");
 
       const metaParts = [];
-      if (cloudRc?.bucket) metaParts.push(`Bucket: ${cloudRc.bucket}`);
+      // The section head above names the bucket.
       if (lastAct) metaParts.push(`Last activity ${ago(lastAct)}`);
       else if (enabled) metaParts.push("Waiting for Turbo builds");
       setText(meta, metaParts.join(" · "));
@@ -882,7 +882,7 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
           { k: "Hits", v: formatCount(hits), ok: hits > 0 },
           { k: "Misses", v: formatCount(misses) },
           { k: "Hit rate", v: rate },
-          { k: "Uploads", v: formatCount(writes) },
+          { k: "Writes", v: formatCount(writes) },
           { k: "Downloaded", v: formatBytes(rcTurbo?.bytesRead ?? 0) },
           { k: "Uploaded", v: formatBytes(rcTurbo?.bytesWritten ?? 0) },
         ];

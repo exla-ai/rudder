@@ -171,6 +171,7 @@ export function TeamScreen() {
       return;
     }
     paintOrgs(data.orgs || []);
+    intro.hidden = !(data.orgs || []).length;
     if (!(data.orgs || []).length) {
       list.replaceChildren(emptyBox("users", "No team yet", "Create an organization in Settings and invite people. Then you can see what each person's agents are doing here.",
         h(`<a class="btn accent" href="/app/settings" data-link>Open Settings</a>`)));

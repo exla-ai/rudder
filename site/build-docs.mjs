@@ -385,7 +385,8 @@ the project you want to run in the cloud:</p>
 <pre><code>Read https://rudder.exla.ai/docs/cloud-env. Take every env
 file this project uses and every one in my home directory
 (~/.codex, ~/.claude and the rest) and put them on my Rudder
-cloud machine. Follow the "Rules for agents" section.</code></pre>
+cloud machine. Show me the list and wait for my yes before
+storing anything. Follow the "Rules for agents" section.</code></pre>
 <p>The rest of this page is what the agent will do, and what you can do by hand.</p>
 
 <div class="note">
@@ -395,7 +396,7 @@ cloud machine. Follow the "Rules for agents" section.</code></pre>
   (<code>~/.codex</code>, <code>~/.claude</code>, <code>~/.config/opencode</code>),
   any env file you have read or loaded in this session, and any variable set in the
   shell you are running in that the code reads. When you are not sure whether
-  something is used, include it and say so in the list you show the person.</p>
+  something is used, include it and say so. Before you store anything, make the list with the person: every file and every name, with no values, and what you are unsure of. Store it all only after they say yes.</p>
 </div>
 
 <h2 id="all">Take every env file</h2>

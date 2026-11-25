@@ -163,6 +163,12 @@ a { color: var(--accent); }
    selection drag, Find or scrollIntoView can scroll sideways, leaving only the
    end of the title in view. */
 .topbar .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; overflow: clip; text-overflow: ellipsis; }
+/* "Fix the tray · rudder": the chat's name, then its project, quieter. The
+   name gives way first when the two do not fit. */
+.topbar .title-row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.topbar .title-row .title { flex: 0 1 auto; min-width: 4ch; }
+.topbar .title-project { flex: 0 0 auto; max-width: 34%; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: clip; text-overflow: ellipsis; }
+.topbar .title-project[hidden] { display: none; }
 .topbar .subtitle { font-size: 12.5px; color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: 1px; }
 .topbar .subtitle > span:not(.dot) { overflow: clip; text-overflow: ellipsis; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 10px; padding-left: 8px; flex: 1; min-width: 0; }

@@ -4276,7 +4276,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   const el = h(`<section class="screen">
     <header class="topbar agent-bar">
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>
-      <div class="titles"><div class="title"></div>
+      <div class="titles"><div class="title-row"><div class="title"></div><span class="title-project" hidden></span></div>
         <div class="subtitle"><span class="dot"></span><span class="st"></span></div></div>
       <button type="button" class="icon-btn lock-toggle" hidden aria-pressed="false"></button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
@@ -5215,6 +5215,12 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     const title = allAgents ? "All agents" : a?.title || t?.title || "Agent";
     if (!isRenaming(titleEl)) setText(titleEl, title);
     if (!ro && !allAgents) titleEl.setAttribute("aria-label", `${title}. Rename`);
+    // Which project the chat belongs to, beside its name.
+    const p = allAgents ? null : findProject(ws);
+    const project = p?.name || p?.repo || "";
+    const projectEl = el.querySelector(".title-project");
+    setText(projectEl, project);
+    projectEl.hidden = !project;
     // Of two agents side by side, the focused one names the window.
     if (screen?.el === el) document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
     const status = closedNow ? "closed" : a?.status || t?.status;

@@ -366,13 +366,14 @@ whatever order they finish.</p>
 
   "cloud-env": {
     title: "Match your cloud machine to your laptop",
-    lede: "Your agents run on your cloud machine, not your laptop. Point your local agent at this page: it goes through the project and the laptop, lists every env file and value the code uses, and puts them on the cloud machine.",
+    lede: "Your agents run on your cloud machine, not your laptop. Take every env file on your laptop, in the project and in your home directory, and put it on the cloud machine. Point your local agent at this page and it does it for you.",
     toc: [
       ["agent", "Hand this to your agent"],
+      ["all", "Take every env file"],
       ["why", "Why it matters"],
       ["inventory", "Everything a project can read"],
       ["sign-in", "Sign the laptop in"],
-      ["env", "Env values"],
+      ["env", "Single values"],
       ["files", "Env files and other files"],
       ["check", "Check it worked"],
       ["rules", "Rules for agents"],
@@ -381,11 +382,32 @@ whatever order they finish.</p>
 <h2 id="agent">Hand this to your agent</h2>
 <p>Paste this into Claude Code, Codex or any coding agent running on your laptop, in
 the project you want to run in the cloud:</p>
-<pre><code>Read https://rudder.exla.ai/docs/cloud-env. Go through this
-project and this machine, list every env file and every env
-value the code uses, and get them onto my Rudder cloud machine.
-Follow the "Rules for agents" section.</code></pre>
+<pre><code>Read https://rudder.exla.ai/docs/cloud-env. Take every env
+file this project uses and every one in my home directory
+(~/.codex, ~/.claude and the rest) and put them on my Rudder
+cloud machine. Follow the "Rules for agents" section.</code></pre>
 <p>The rest of this page is what the agent will do, and what you can do by hand.</p>
+
+<h2 id="all">Take every env file</h2>
+<p>Sign in once with <code>rudder login</code>, then run this in the project. It
+stores every env file git ignores, at the same path on the cloud machine:</p>
+<pre><code>repo=$(basename "$(git rev-parse --show-toplevel)")
+cd "$(git rev-parse --show-toplevel)"
+git ls-files --others --ignored --exclude-standard \
+  | grep -E '(^|/)(\.env[^/]*|\.dev\.vars|\.envrc)$' \
+  | grep -v node_modules \
+  | while read -r f; do
+      rudder cloud secrets set --file ~/code/"$repo/$f" "$f" &lt; /dev/null
+    done</code></pre>
+<p>Then the env files that live in your home directory, where Codex, Claude Code and
+other tools keep theirs:</p>
+<pre><code>for f in ~/.env ~/.codex/.env ~/.claude/.env ~/.config/opencode/.env ~/.npmrc ~/.netrc; do
+  [ -f "$f" ] &amp;&amp; rudder cloud secrets set --file "$f" "$f"
+done
+rudder cloud secrets sync</code></pre>
+<p>The last line brings over the agent logins and settings (Claude Code, Codex, git
+and GitHub). Run both again whenever an env file changes; a file stored twice is
+replaced. <code>rudder cloud secrets list</code> shows what is there, by name only.</p>
 
 <h2 id="why">Why it matters</h2>
 <p>A Rudder cloud machine starts with your repository and nothing that is not in git.
@@ -434,8 +456,8 @@ rudder login</code></pre>
 same account you use in the app. In the app this is Settings, then
 <strong>Sign in a computer</strong>. You do this once per laptop.</p>
 
-<h2 id="env">Env values</h2>
-<p>One value at a time:</p>
+<h2 id="env">Single values</h2>
+<p>For a value that is in no file, only in your shell:</p>
 <pre><code>rudder cloud secrets set STRIPE_SECRET_KEY</code></pre>
 <p>It asks for the value without showing it. To set one from a script, pipe it in, so
 the value never lands in your shell history:</p>
@@ -508,11 +530,12 @@ Names and paths only.</p>
   value anywhere. Mark what points at the laptop only, such as a
   <code>localhost</code> database URL or a macOS path, and ask whether the cloud
   machine runs that service too. Wait for a yes.</li>
-  <li>Store each env file with <code>rudder cloud secrets set --file
-  ~/code/&lt;repo name&gt;/&lt;path in repo&gt; &lt;local path&gt;</code>. The repo name is
-  the last part of the git remote, the name the project has in the Rudder app. Store
-  home files at the same path under <code>~</code>.</li>
-  <li>Store values that are only in the shell by piping them in, as shown under Env
+  <li>Store every file in one pass with the two loops under Take every env file:
+  each repository env file at <code>~/code/&lt;repo name&gt;/&lt;path in repo&gt;</code>
+  (the repo name is the last part of the git remote, the name the project has in the
+  Rudder app), each home file at the same path under <code>~</code>, then
+  <code>rudder cloud secrets sync</code>.</li>
+  <li>Store values that are only in the shell by piping them in, as shown under Single
   values. For values a tool pulls, pull them into an env file on the laptop and store
   that file.</li>
   <li>Run <code>rudder cloud secrets list</code> again and compare it with the table.

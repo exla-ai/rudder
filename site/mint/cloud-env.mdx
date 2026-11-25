@@ -1,19 +1,46 @@
 ---
 title: "Match your cloud machine to your laptop"
-description: "Your agents run on your cloud machine, not your laptop. Point your local agent at this page: it goes through the project and the laptop, lists every env file and value the code uses, and puts them on the cloud machine."
+description: "Your agents run on your cloud machine, not your laptop. Take every env file on your laptop, in the project and in your home directory, and put it on the cloud machine. Point your local agent at this page and it does it for you."
 ---
 ## Hand this to your agent
 
 Paste this into Claude Code, Codex or any coding agent running on your laptop, in the project you want to run in the cloud:
 
 ```text
-Read https://rudder.exla.ai/docs/cloud-env. Go through this
-project and this machine, list every env file and every env
-value the code uses, and get them onto my Rudder cloud machine.
+Read https://rudder.exla.ai/docs/cloud-env. Take every env
+file this project uses and every one in my home directory
+(~/.codex, ~/.claude and the rest) and put them on my Rudder
+cloud machine.
 Follow the "Rules for agents" section.
 ```
 
 The rest of this page is what the agent will do, and what you can do by hand.
+
+## Take every env file
+
+Sign in once with `rudder login`, then run this in the project. It stores every env file git ignores, at the same path on the cloud machine:
+
+```bash
+repo=$(basename "$(git rev-parse --show-toplevel)")
+cd "$(git rev-parse --show-toplevel)"
+git ls-files --others --ignored --exclude-standard \
+  | grep -E '(^|/)(\.env[^/]*|\.dev\.vars|\.envrc)$' \
+  | grep -v node_modules \
+  | while read -r f; do
+      rudder cloud secrets set --file ~/code/"$repo/$f" "$f" < /dev/null
+    done
+```
+
+Then the env files that live in your home directory, where Codex, Claude Code and other tools keep theirs:
+
+```bash
+for f in ~/.env ~/.codex/.env ~/.claude/.env ~/.config/opencode/.env ~/.npmrc ~/.netrc; do
+  [ -f "$f" ] && rudder cloud secrets set --file "$f" "$f"
+done
+rudder cloud secrets sync
+```
+
+Run both again whenever an env file changes; a file stored twice is replaced.
 
 ## Why it matters
 

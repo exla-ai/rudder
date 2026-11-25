@@ -119,7 +119,7 @@ export function renderContract(spec: SpecContract): string {
   const body = [
     spec.runtimeRole === "main-owner"
       ? "Rudder: you own this request in the user's checkout. Preserve unrelated edits. Never force-push."
-      : "Rudder: you work in your own jj workspace. Stay in it. Do not commit, push or deploy; Rudder integrates your changes when your session ends.",
+      : "Rudder: you work in your own jj workspace. Rudder integrates it when the session ends. When the user explicitly asks to ship, follow the project's release workflow.",
     spec.suggestedTests.length > 0
       ? `Checks available: ${spec.suggestedTests.join(", ")}.`
       : "",

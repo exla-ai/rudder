@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fabricStoreTemplate, validateFabricCacheMissUpdate } from "../infra/fabric-store.mjs";
+import { fabricStoreTemplate, validateRemoteBuildCacheUpdate } from "../infra/fabric-store.mjs";
 
 test("Fabric storage keeps writer access bounded and uses exact Fly workload trust", () => {
   const template = fabricStoreTemplate({ accountId: "123456789012" });
@@ -14,8 +14,17 @@ test("Fabric storage keeps writer access bounded and uses exact Fly workload tru
   assert.equal(trust.Condition.StringLike["oidc.fly.io/exla:sub"], "exla:rudder-cloud-control:*");
   assert.ok(!JSON.stringify(template).includes("AWS::IAM::AccessKey"), "no long-lived writer key is provisioned");
   const deletion = WriterBoundary.Properties.PolicyDocument.Statement.filter((rule) => [].concat(rule.Action).some((action) => action.includes("Delete")));
-  assert.equal(deletion.length, 1);
-  assert.match(deletion[0].Resource["Fn::Sub"], /\/staging\/\*$/);
+  assert.deepEqual(deletion.map((rule) => rule.Resource["Fn::Sub"]).sort(), [
+    "${ContentBucket.Arn}/cache/v1/accounts/*",
+    "${ContentBucket.Arn}/fabric/v1/accounts/*/staging/*",
+  ]);
+  const cacheGrant = {
+    Sid: "RemoteBuildCacheObjects", Effect: "Allow",
+    Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+    Resource: { "Fn::Sub": "${ContentBucket.Arn}/cache/v1/accounts/*" },
+  };
+  assert.deepEqual(WriterBoundary.Properties.PolicyDocument.Statement.find((rule) => rule.Sid === cacheGrant.Sid), cacheGrant);
+  assert.deepEqual(FabricRole.Properties.Policies.find((policy) => policy.PolicyName === "RudderRemoteBuildCache").PolicyDocument.Statement, [cacheGrant]);
   assert.ok(ContentPolicy.Properties.PolicyDocument.Statement.some((rule) => rule.Sid === "RequireImmutableConditionalPut" && rule.Condition.Null["s3:if-none-match"] === "true"));
   assert.deepEqual(FabricRole.Properties.PermissionsBoundary, { Ref: "WriterBoundary" });
   for (const policy of [WriterBoundary.Properties.PolicyDocument, FabricRole.Properties.Policies[0].PolicyDocument]) {
@@ -26,18 +35,21 @@ test("Fabric storage keeps writer access bounded and uses exact Fly workload tru
   }
 });
 
-test("the cache-miss IAM migration cannot change trust, retention or other permission scope", () => {
+test("the remote build cache IAM update cannot change trust, retention or other permission scope", () => {
   const next = JSON.parse(JSON.stringify(fabricStoreTemplate({ accountId: "123456789012" })));
   const previous = JSON.parse(JSON.stringify(next));
-  for (const policy of [previous.Resources.WriterBoundary.Properties.PolicyDocument, previous.Resources.FabricRole.Properties.Policies[0].PolicyDocument]) policy.Statement = policy.Statement.filter((rule) => rule.Sid !== "DistinguishCacheMisses");
-  assert.doesNotThrow(() => validateFabricCacheMissUpdate(previous, next));
+  const boundary = previous.Resources.WriterBoundary.Properties.PolicyDocument;
+  boundary.Statement = boundary.Statement.filter((rule) => rule.Sid !== "RemoteBuildCacheObjects");
+  const role = previous.Resources.FabricRole.Properties;
+  role.Policies = role.Policies.filter((policy) => policy.PolicyName !== "RudderRemoteBuildCache");
+  assert.doesNotThrow(() => validateRemoteBuildCacheUpdate(previous, next));
   for (const change of [
     (template) => { template.Resources.ContentBucket.Properties.VersioningConfiguration.Status = "Suspended"; },
     (template) => { template.Resources.FabricRole.Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringLike["oidc.fly.io/exla:sub"] = "*"; },
-    (template) => { template.Resources.WriterBoundary.Properties.PolicyDocument.Statement.find((rule) => rule.Sid === "DistinguishCacheMisses").Resource = "*"; },
+    (template) => { template.Resources.WriterBoundary.Properties.PolicyDocument.Statement.find((rule) => rule.Sid === "RemoteBuildCacheObjects").Resource = "*"; },
   ]) {
     const altered = JSON.parse(JSON.stringify(next)); change(altered);
-    assert.throws(() => validateFabricCacheMissUpdate(previous, altered));
+    assert.throws(() => validateRemoteBuildCacheUpdate(previous, altered));
   }
 });
 

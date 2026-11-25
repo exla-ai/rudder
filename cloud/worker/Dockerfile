@@ -66,6 +66,22 @@ RUN set -eu; \
     make -C /git-src prefix=/usr/local NO_TCLTK=YesPlease DESTDIR=/git-runtime install; \
     /git-runtime/usr/local/bin/git --version
 
+# Both the client and the REAPI cache use the same release pins as the
+# project's native Buck2 fixture. Only verified executables enter PATH.
+FROM ${WORKER_NODE_IMAGE} AS buck2-tools
+COPY examples/build-profile/tools.lock.json /tmp/rudder-build-tools.json
+RUN set -eu; \
+    apt-get update; apt-get install -y --no-install-recommends ca-certificates curl jq zstd; \
+    lock=/tmp/rudder-build-tools.json; \
+    curl -fsSL "$(jq -er .buck2.url "$lock")" -o /tmp/buck2.zst; \
+    echo "$(jq -er .buck2.archive_sha256 "$lock")  /tmp/buck2.zst" | sha256sum -c -; \
+    zstd -dq /tmp/buck2.zst -o /usr/local/bin/buck2; \
+    echo "$(jq -er .buck2.executable_sha256 "$lock")  /usr/local/bin/buck2" | sha256sum -c -; \
+    curl -fsSL "$(jq -er .bazel_remote.url "$lock")" -o /usr/local/bin/bazel-remote; \
+    echo "$(jq -er .bazel_remote.executable_sha256 "$lock")  /usr/local/bin/bazel-remote" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/buck2 /usr/local/bin/bazel-remote; \
+    rm /tmp/buck2.zst "$lock"
+
 FROM ${WORKER_NODE_IMAGE} AS worker-tools
 
 ENV RUDDER_CLOUD_WORKER=1 \
@@ -316,6 +332,9 @@ RUN set -eu; \
     done
 
 WORKDIR /opt/rudder-worker
+COPY --from=buck2-tools /usr/local/bin/bazel-remote /usr/local/bin/bazel-remote
+COPY --from=buck2-tools /usr/local/bin/buck2 /usr/local/bin/buck2
+COPY cloud/worker/buck2-cache.mjs ./buck2-cache.mjs
 
 # Last target stays the legacy/default worker, with unchanged backend updater
 # paths/install behavior. Current deploys that omit --target still use this.

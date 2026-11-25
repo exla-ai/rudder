@@ -1,5 +1,15 @@
 # Rudder v4 handoff (2026-11-04)
 
+Cloud homes and burst builders configure Buck2's native action and content caches
+through their account's S3 namespace. On a configured Linux x64 worker,
+`npm run build-board` builds the shipped stylesheet with `//:board_css`.
+Projects supply their own targets and cache-enabled execution platform.
+
+The Fabric stack grants the control role and its IAM permissions boundary
+read, write and delete access to `cache/v1/accounts/*`. The 5.0.43 home
+uploaded a Rust build to production and restored it with an empty local
+cache. A Turborepo artifact also round-tripped through the home proxy.
+
 Claude Code and Codex limits on Cloud homes keep the account signed in and
 show the reset in Settings. New work and the next prompt in a saved,
 idle conversation use the first available configured account when the

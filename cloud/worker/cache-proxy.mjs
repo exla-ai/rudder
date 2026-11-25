@@ -1,7 +1,7 @@
 // Loopback remote-cache proxy started by home.mjs (modeled on burst-broker.mjs).
 // Agents never see the home's workerToken; instead this proxy listens on
 // 127.0.0.1 with a random per-boot bearer token (rdrc_...) and forwards
-// sccache WebDAV and Turborepo remote cache requests to the control plane
+// sccache, Turborepo and Buck2 cache requests to the control plane
 // authenticated with workerToken and x-rudder-workspace-id.
 
 import crypto from "node:crypto";
@@ -10,6 +10,7 @@ import http from "node:http";
 import path from "node:path";
 
 const SCCACHE_METHODS = new Set(["OPTIONS", "GET", "HEAD", "PROPFIND", "MKCOL", "PUT", "DELETE"]);
+const BUCK2_METHODS = new Set(["GET", "HEAD", "PUT"]);
 const TURBO_METHODS = new Set(["GET", "HEAD", "PUT", "POST"]);
 const BODY_METHODS = new Set(["PUT", "POST", "PROPFIND", "MKCOL", "DELETE"]);
 const RESPONSE_HEADERS = [
@@ -24,6 +25,7 @@ const RESPONSE_HEADERS = [
   "location",
 ];
 const MAX_RECENT = 30;
+const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
 const PERSIST_DEBOUNCE_MS = 2_000;
 
 function emptyToolStats() {
@@ -55,7 +57,7 @@ function sanitizeToolStats(raw) {
 function sanitizeRecent(raw) {
   if (!Array.isArray(raw)) return [];
   const validOps = new Set(["hit", "miss", "put", "error"]);
-  const validTools = new Set(["sccache", "turbo"]);
+  const validTools = new Set(["sccache", "turbo", "buck2"]);
   const out = [];
   for (const entry of raw) {
     if (!entry || typeof entry !== "object") continue;
@@ -75,7 +77,7 @@ function sanitizeRecent(raw) {
 
 function loadStats(statsFile, log) {
   if (!statsFile) {
-    return { sccache: emptyToolStats(), turbo: emptyToolStats(), recent: [] };
+    return { sccache: emptyToolStats(), turbo: emptyToolStats(), buck2: emptyToolStats(), recent: [] };
   }
   try {
     const text = fs.readFileSync(statsFile, "utf8");
@@ -83,13 +85,14 @@ function loadStats(statsFile, log) {
     return {
       sccache: sanitizeToolStats(parsed?.sccache),
       turbo: sanitizeToolStats(parsed?.turbo),
+      buck2: sanitizeToolStats(parsed?.buck2),
       recent: sanitizeRecent(parsed?.recent),
     };
   } catch (error) {
     if (error && error.code !== "ENOENT") {
       log(`cache-proxy: could not read stats from ${statsFile}: ${error.message}`);
     }
-    return { sccache: emptyToolStats(), turbo: emptyToolStats(), recent: [] };
+    return { sccache: emptyToolStats(), turbo: emptyToolStats(), buck2: emptyToolStats(), recent: [] };
   }
 }
 
@@ -102,6 +105,7 @@ function writeStatsAtomic(statsFile, stats, log) {
     const payload = JSON.stringify({
       sccache: stats.sccache,
       turbo: stats.turbo,
+      buck2: stats.buck2,
       recent: stats.recent,
     }, null, 2);
     fs.writeFileSync(tmp, payload);
@@ -113,8 +117,11 @@ function writeStatsAtomic(statsFile, stats, log) {
 
 async function readBody(req) {
   const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  let size = 0;
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    size += Buffer.byteLength(chunk);
+    if (size > MAX_OBJECT_BYTES) throw new RangeError("cache object exceeds size limit");
+    chunks.push(chunk);
   }
   return chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
 }
@@ -130,6 +137,7 @@ function isTurboProbe(pathname) {
 export function startCacheProxy({
   cloudUrl,
   homeId,
+  builderId,
   workerToken,
   statsFile,
   host = "127.0.0.1",
@@ -143,7 +151,7 @@ export function startCacheProxy({
   const cleanHomeId = typeof homeId === "string" ? homeId.trim() : "";
   const cleanWorkerToken = typeof workerToken === "string" ? workerToken.trim() : "";
   if (!cleanCloudUrl) throw new Error("cache-proxy: cloudUrl is required");
-  if (!cleanHomeId) throw new Error("cache-proxy: homeId is required");
+  if (Boolean(cleanHomeId) === Boolean(builderId)) throw new Error("cache-proxy: exactly one of homeId or builderId is required");
   if (!cleanWorkerToken) throw new Error("cache-proxy: workerToken is required");
 
   let proxyToken;
@@ -187,13 +195,17 @@ export function startCacheProxy({
     writeStatsAtomic(statsFile, stats, log);
   }
 
-  function authorized(req) {
+  const basicCredential = Buffer.from(`rudder:${proxyToken}`).toString("base64");
+  const expectedBasicHash = crypto.createHash("sha256").update(basicCredential).digest();
+
+  function authorized(req, buck2) {
     const header = req.headers.authorization;
     if (typeof header !== "string") return false;
-    const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
+    const scheme = buck2 ? /^Basic\s+(\S+)$/i : /^Bearer\s+(\S+)$/i;
+    const match = scheme.exec(header.trim());
     if (!match) return false;
     const suppliedHash = crypto.createHash("sha256").update(match[1]).digest();
-    return crypto.timingSafeEqual(suppliedHash, expectedTokenHash);
+    return crypto.timingSafeEqual(suppliedHash, buck2 ? expectedBasicHash : expectedTokenHash);
   }
 
   function recordEvent(tool, op, key, bytes, ms) {
@@ -229,13 +241,18 @@ export function startCacheProxy({
   }
 
   const server = http.createServer(async (req, res) => {
-    if (!authorized(req)) {
+    if (!URL.canParse(req.url, "http://127.0.0.1")) {
+      replyJson(res, 400, { error: "invalid cache path" });
+      return;
+    }
+    const parsed = new URL(req.url || "/", "http://127.0.0.1");
+    const { pathname, search } = parsed;
+    const buck2 = pathname.startsWith("/buck2/");
+    if (!authorized(req, buck2)) {
       replyJson(res, 401, { error: "unauthorized" });
       return;
     }
 
-    const parsed = new URL(req.url || "/", "http://127.0.0.1");
-    const { pathname, search } = parsed;
     const method = (req.method || "GET").toUpperCase();
 
     let tool = null;
@@ -243,6 +260,12 @@ export function startCacheProxy({
       tool = "sccache";
       if (!SCCACHE_METHODS.has(method)) {
         replyJson(res, 405, { error: "method not allowed" }, { allow: [...SCCACHE_METHODS].join(", ") });
+        return;
+      }
+    } else if (buck2) {
+      tool = "buck2";
+      if (!BUCK2_METHODS.has(method)) {
+        replyJson(res, 405, { error: "method not allowed" }, { allow: [...BUCK2_METHODS].join(", ") });
         return;
       }
     } else if (pathname.startsWith("/turbo/")) {
@@ -258,12 +281,12 @@ export function startCacheProxy({
 
     const key = tool === "turbo"
       ? pathname.replace(/^\/turbo\/v\d+\/artifacts\//, "").replace(/^\/turbo\/?/, "")
-      : pathname.replace(/^\/sccache\/?/, "");
+      : pathname.slice(tool.length + 1).replace(/^\//, "");
     const skipCounts = tool === "sccache" ? isSccacheCheck(pathname) : isTurboProbe(pathname);
     const upstreamUrl = `${cleanCloudUrl}/api/rudder/cache${pathname}${search}`;
     const headers = {
       authorization: `Bearer ${cleanWorkerToken}`,
-      "x-rudder-workspace-id": cleanHomeId,
+      ...(builderId ? { "x-rudder-builder-id": builderId } : { "x-rudder-workspace-id": cleanHomeId }),
     };
     if (req.headers["content-type"]) {
       headers["content-type"] = String(req.headers["content-type"]);
@@ -283,11 +306,21 @@ export function startCacheProxy({
     let bodyBuf;
     try {
       if (BODY_METHODS.has(method)) {
+        if (Number(req.headers["content-length"]) > MAX_OBJECT_BYTES) {
+          replyJson(res, 413, { error: "cache object exceeds size limit" });
+          req.resume();
+          return;
+        }
         bodyBuf = await readBody(req);
       }
     } catch (error) {
       log(`cache-proxy: request body read failed: ${error instanceof Error ? error.message : String(error)}`);
-      replyJson(res, 400, { error: "failed to read request body" });
+      if (error instanceof RangeError) {
+        replyJson(res, 413, { error: error.message });
+        req.resume();
+      } else {
+        replyJson(res, 400, { error: "failed to read request body" });
+      }
       return;
     }
 
@@ -368,6 +401,7 @@ export function startCacheProxy({
       upstreamConnected,
       sccache: { ...stats.sccache },
       turbo: { ...stats.turbo },
+      buck2: { ...stats.buck2 },
       recent: stats.recent.map((entry) => ({ ...entry })),
     };
   }

@@ -1334,14 +1334,16 @@ brain lives in the cloud, and the phone is a first-class client.
   never touching a table the user wrote.
 - **Burst build pool (`cloud/src/builders.ts`, `cloud/worker/builder.mjs`,
   `burst.mjs`).** Per-home builder machines that scale from zero, off unless the
-  control plane has `RUDDER_BUILDERS=1`. `rudder-burst <command>` on a home asks
+  control plane has `RUDDER_BUILDERS=1`, as set in production. `rudder-burst <command>` on a home asks
   the supervisor's broker (`RUDDER_BURST_SOCKET`, `burst-broker.mjs`; agents
   never see the worker token) for a lease. The control plane reuses a free
   builder (started first, then most recently used), creates one while the home
   is under `RUDDER_BUILDERS_MAX_PER_HOME` (default 2), or answers 429 busy. A
   builder serves one lease at a time, so its warm `target/` is a serialized
   build service, never shared by concurrent agents. Defaults: 16 performance CPU,
-  32 GB, 100 GB volume, private network only (no Fly services). The client
+  32 GB, 100 GB volume, private network only (no Fly services). External
+  homes reach the builder through an HTTPS relay bound to the active lease.
+  The client
   uploads with rsync over an authenticated HTTP upgrade (`--filter=:- .gitignore`
   plus `--delete`: ignored paths are neither sent nor deleted, which needs GNU
   rsync on the receiver, as in the image), runs the command over a framed
@@ -1352,8 +1354,7 @@ brain lives in the cloud, and the phone is a first-class client.
   home is gone. Builder tokens are HMACs of a per-builder salt
   (`RUDDER_BUILDER_KEY`, else `BETTER_AUTH_SECRET`); the machine gets only the
   SHA-256, and a changed key recreates the machine on the same volume. The
-  `rudder-burst` skill tells agents when to use it. With no pool (off, an
-  external host, the supervisor not answering) or every builder busy past
+  `rudder-burst` skill tells agents when to use it. With the pool off, the supervisor unavailable, or every builder busy past
   `--wait`, `rudder-burst` runs the command on the home and says so on stderr,
   so following the skill never fails a build.
 - **Build caches on a Cloud machine.** Agents and the warm snapshot builder

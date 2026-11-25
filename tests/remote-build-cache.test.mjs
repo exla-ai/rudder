@@ -88,6 +88,66 @@ async function startCacheServer(t, options = {}) {
   return { server, port, url: `http://127.0.0.1:${port}`, storage, handler };
 }
 
+test("Buck2 bazel-remote HTTP backend keeps verified blobs and action results account-scoped", async (t) => {
+  const { port, storage, handler } = await startCacheServer(t, { maxObjectBytes: 16 });
+  const blob = Buffer.from([0, 128, 255, 1]);
+  const digest = sha256(blob);
+  const actionResult = Buffer.from([0x20, 1]); // REAPI ActionResult with exit_code 1
+  const cas = `cas/${digest}`;
+  const ac = `ac/${digest}`;
+  function request(method, key, token, body) {
+    return rawRequest(port, {
+      method, path: `/api/rudder/cache/buck2/${key}`,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+  }
+
+  assert.equal((await request("PUT", cas, null, blob)).status, 401);
+  assert.equal((await request("GET", ac, "token-a")).status, 404);
+  assert.equal((await request("HEAD", cas, "token-a")).status, 404);
+  assert.equal((await request("PUT", cas, "token-a", blob)).status, 200);
+  assert.equal((await request("PUT", ac, "token-a", actionResult)).status, 200);
+  const head = await request("HEAD", cas, "token-a");
+  assert.equal(head.status, 200);
+  assert.equal(head.headers["content-length"], String(blob.length));
+  assert.equal(head.body.length, 0);
+
+  assert.equal((await request("PUT", cas, "token-a", actionResult)).status, 400);
+  assert.equal((await request("PUT", ac, "token-a", Buffer.alloc(17))).status, 413);
+  assert.equal((await request("DELETE", ac, "token-a")).status, 405);
+  for (const key of [`cas/${digest.toUpperCase()}`, "cas/abcd", `cas.v2/${digest}`, `ac/../cas/${digest}`]) {
+    assert.equal((await request("GET", key, "token-a")).status, 400);
+  }
+  for (const [key, expected] of [[cas, blob], [ac, actionResult]]) {
+    assert.equal((await request("GET", key, "token-b")).status, 404);
+    const read = await request("GET", key, "token-a");
+    assert.equal(read.status, 200);
+    assert.equal(read.headers["content-length"], String(expected.length));
+    assert.deepEqual(read.body, expected);
+  }
+  const prefix = `cache/v1/accounts/${sha256("account-a")}/buck2/`;
+  assert.deepEqual(storage.keys().sort(), [prefix + ac, prefix + cas]);
+  const stats = handler.statsForAccount("account-a");
+  assert.equal(stats.buck2.hits, 2);
+  assert.equal(stats.buck2.misses, 1);
+  assert.equal(stats.buck2.writes, 2);
+  assert.equal(stats.buck2.bytesRead, blob.length + actionResult.length);
+  assert.equal(stats.buck2.bytesWritten, blob.length + actionResult.length);
+  assert.equal(stats.sccache.writes + stats.turbo.writes, 0);
+  assert.ok(stats.recent.every((event) => event.tool === "buck2"));
+  assert.equal(handler.stats().buck2.misses, 3);
+  assert.equal(handler.statsForAccount("account-b").buck2.writes, 0);
+
+  await storage.put(prefix + cas, actionResult);
+  assert.equal((await request("GET", cas, "token-a")).status, 503);
+  const empty = `cas/${sha256(Buffer.alloc(0))}`;
+  assert.equal((await request("PUT", empty, "token-a", Buffer.alloc(0))).status, 200);
+  const emptyRead = await request("GET", empty, "token-a");
+  assert.equal(emptyRead.status, 200);
+  assert.equal(emptyRead.headers["content-length"], "0");
+});
+
 test("sccache WebDAV protocol, account isolation, path validation, size limits and auth", async (t) => {
   const { port, url, storage } = await startCacheServer(t, { maxObjectBytes: 128 });
   const authA = { Authorization: "Bearer token-a" };

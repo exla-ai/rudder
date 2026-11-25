@@ -11,8 +11,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { WebSocket, createWebSocketStream } from "ws";
 
 import { FRAME, RSYNC_UPGRADE, frameDecoder, safeKey, sha256Hex, shellJoin } from "./burst-protocol.mjs";
 
@@ -35,8 +37,8 @@ options:
   --minutes <n>      lease length, renewed while the command runs (default 10)
   --wait <minutes>   how long to wait when every builder is busy (default 10)
 
-When this home has no build pool (it is off, or the home runs on a host
-outside Fly), or every builder stays busy, the command runs here instead.`;
+When this home has no build pool or every builder stays busy, the command runs
+here instead.`;
 
 class BurstError extends Error {
   constructor(message, code = EXIT.failed) {
@@ -168,10 +170,18 @@ function brokerRequest(socketPath, method, pathname, body) {
   });
 }
 
+function builderUrl(base, pathname) {
+  return new URL(base.replace(/\/$/, "") + pathname);
+}
+
+function builderRequest(url, ...args) {
+  return (url.protocol === "https:" ? https : http).request(url, ...args);
+}
+
 function builderJson(lease, method, pathname, body) {
   return new Promise((resolve, reject) => {
     const text = body === undefined ? "" : JSON.stringify(body);
-    const req = http.request(new URL(pathname, lease.url), {
+    const req = builderRequest(builderUrl(lease.url, pathname), {
       method,
       headers: { authorization: `Bearer ${lease.token}`, ...(text ? { "content-type": "application/json", "content-length": Buffer.byteLength(text) } : {}) },
       timeout: 10_000,
@@ -202,7 +212,7 @@ async function waitForBuilder(lease, timeoutMs = 120_000) {
     try {
       const reply = await builderJson(lease, "GET", "/v1/health");
       if (reply.status === 200) return reply.body;
-      if (reply.status === 401) throw new BurstError("the builder rejected its token");
+      if (reply.status === 401 || reply.status === 403) throw new BurstError("the builder rejected the lease credential");
       last = `HTTP ${reply.status}`;
     } catch (error) {
       if (error instanceof BurstError) throw error;
@@ -239,7 +249,7 @@ function rsync(args, env) {
 export function execRemote(lease, body, { stdout = process.stdout, stderr = process.stderr, signal } = {}) {
   return new Promise((resolve, reject) => {
     const text = JSON.stringify(body);
-    const req = http.request(new URL("/v1/exec", lease.url), {
+    const req = builderRequest(builderUrl(lease.url, "/v1/exec"), {
       method: "POST",
       headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json", "content-length": Buffer.byteLength(text) },
       signal,
@@ -388,12 +398,41 @@ function rsh(args, env = process.env) {
   let rest = args;
   if (rest[0] === "-l") rest = rest.slice(2);
   const remote = rest.slice(1);
-  const req = http.request(new URL("/v1/rsync", env.RUDDER_BURST_URL), {
+  const url = builderUrl(env.RUDDER_BURST_URL, "/v1/rsync");
+  const headers = {
+    authorization: `Bearer ${env.RUDDER_BURST_TOKEN || ""}`,
+    "x-rudder-rsync-argv": Buffer.from(JSON.stringify(remote)).toString("base64url"),
+  };
+  if (url.pathname.startsWith("/api/rudder/builder-relay/")) {
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(url, { headers, perMessageDeflate: false, handshakeTimeout: 15_000, maxPayload: 256 * 1024 });
+    const wire = createWebSocketStream(ws);
+    wire.pipe(process.stdout, { end: false });
+    wire.on("error", (error) => {
+      process.stderr.write(`rudder-burst: rsync relay: ${error.message}\n`);
+      process.exitCode = 1;
+    });
+    ws.on("close", (code) => {
+      process.stdin.destroy();
+      if (code !== 1000 && code !== 1005) process.exitCode = 1;
+    });
+    ws.once("open", async () => {
+      try {
+        for await (const data of process.stdin) {
+          await new Promise((resolve, reject) => ws.send(data, (error) => error ? reject(error) : resolve()));
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.send("eof");
+      } catch {
+        if (ws.readyState === WebSocket.OPEN) ws.terminate();
+      }
+    });
+    return;
+  }
+  const req = http.request(url, {
     headers: {
       connection: "Upgrade",
       upgrade: RSYNC_UPGRADE,
-      authorization: `Bearer ${env.RUDDER_BURST_TOKEN || ""}`,
-      "x-rudder-rsync-argv": Buffer.from(JSON.stringify(remote)).toString("base64url"),
+      ...headers,
     },
   });
   req.on("upgrade", (_res, socket, head) => {

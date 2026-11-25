@@ -52,7 +52,7 @@ export function builderPolicy(env: NodeJS.ProcessEnv = process.env): BuilderPoli
   };
 }
 
-export type BuilderMachine = { id: string; state?: string; private_ip?: string };
+export type BuilderMachine = { id: string; state?: string; private_ip?: string; workerImage?: string };
 
 /** The few Fly Machines calls the pool needs; server.ts implements them. */
 export interface BuilderFly {
@@ -174,6 +174,10 @@ export function builderToken(key: string, builderId: string, salt: string): stri
   return `rdrb_${createHmac("sha256", key).update(`rudder-builder-v1\0${builderId}\0${salt}`).digest("base64url")}`;
 }
 
+function cacheToken(key: string, row: Row): string {
+  return "rdbc_" + createHmac("sha256", key).update(`rudder-builder-cache-v1\0${row.id}\0${row.token_salt}`).digest("base64url");
+}
+
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -190,12 +194,14 @@ export function builderVolumeName(homeId: string, slot: number): string {
   return `rdb_${homeId.replace(/[^a-zA-Z0-9]/g, "_")}`.slice(0, 30 - tail.length) + tail;
 }
 
-export function builderMachineConfig(policy: BuilderPolicy, image: string, row: { id: string; home_id: string; volume_id: string; token_sha256: string }): Record<string, unknown> {
+export function builderMachineConfig(policy: BuilderPolicy, image: string, row: { id: string; home_id: string; volume_id: string; token_sha256: string }, cloudUrl: string, cacheCredential: string): Record<string, unknown> {
   return {
     image,
     env: {
       RUDDER_BUILDER: "1",
       RUDDER_BUILDER_ID: row.id,
+      RUDDER_BUILDER_CACHE_TOKEN: cacheCredential,
+      RUDDER_CLOUD_URL: cloudUrl,
       RUDDER_BUILDER_HOME_ID: row.home_id,
       RUDDER_BUILDER_TOKEN_SHA256: row.token_sha256,
       RUDDER_BUILDER_PORT: String(policy.port),
@@ -208,7 +214,7 @@ export function builderMachineConfig(policy: BuilderPolicy, image: string, row: 
     restart: { policy: "no" },
     auto_destroy: false,
     mounts: [{ volume: row.volume_id, path: "/workspace" }],
-    metadata: { "rudder-builder": row.id, "rudder-home": row.home_id },
+    metadata: { "rudder-worker-image": image, "rudder-builder": row.id, "rudder-home": row.home_id },
   };
 }
 
@@ -221,6 +227,8 @@ export function createBuilderPool({
   fly,
   policy,
   key,
+  cloudUrl,
+  isExternalHome,
   homeExists = () => true,
   persist = () => {},
   now = () => Date.now(),
@@ -232,6 +240,8 @@ export function createBuilderPool({
   policy: BuilderPolicy;
   /** HMAC key for builder tokens. */
   key: string;
+  cloudUrl: string;
+  isExternalHome: (homeId: string) => boolean;
   homeExists?: (homeId: string) => boolean;
   persist?: () => void;
   now?: () => number;
@@ -280,6 +290,24 @@ export function createBuilderPool({
     return `http://${host}:${policy.port}`;
   };
 
+  // External homes receive a bearer bound to this lease. Only the relay
+  // exchanges it for the private builder service credential.
+  function relayToken(row: Row, leaseId: string): string {
+    return "rdbx_" + createHmac("sha256", key).update(`rudder-builder-relay-v1\0${row.id}\0${row.token_salt}\0${leaseId}`).digest("base64url");
+  }
+
+  function activeBuilder(id: string): Row | undefined {
+    const row = get(id);
+    if (row?.status === "ready" && row.lease_id && (row.lease_expires_at ?? 0) > now() && homeExists(row.home_id)) return row;
+  }
+
+  function resolveRelay(id: string, leaseId: string, presented: string): { url: string; token: string } | null {
+    const row = activeBuilder(id);
+    if (!row || row.lease_id !== leaseId || !isExternalHome(row.home_id) ||
+        !builderTokenMatches(presented, sha256Hex(relayToken(row, leaseId)))) return null;
+    return { url: urlFor(row), token: builderToken(key, id, row.token_salt) };
+  }
+
   function expireLeases(): void {
     q.expire.run({ now: now() });
   }
@@ -292,7 +320,7 @@ export function createBuilderPool({
   }
 
   async function createMachine(row: Row): Promise<void> {
-    const config = builderMachineConfig(policy, fly.image, { id: row.id, home_id: row.home_id, volume_id: row.volume_id!, token_sha256: row.token_sha256 });
+    const config = builderMachineConfig(policy, fly.image, { id: row.id, home_id: row.home_id, volume_id: row.volume_id!, token_sha256: row.token_sha256 }, cloudUrl, cacheToken(key, row));
     const suffix = randomBytes(3).toString("hex");
     const name = `rudder-build-${row.home_id}-${row.slot}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 55) + `-${suffix}`;
     remember(row, await fly.createMachine({ name, region: row.region, config }));
@@ -314,8 +342,8 @@ export function createBuilderPool({
       row.status = "ready";
       q.status.run({ id: row.id, status: "ready", error: null, now: now() });
       persist();
-    } else if (sha256Hex(token) !== row.token_sha256 || !row.machine_id || !(await fly.getMachine(row.machine_id))) {
-      // The token key changed or the machine is gone: a fresh machine on the
+    } else if (sha256Hex(token) !== row.token_sha256 || !row.machine_id || (await fly.getMachine(row.machine_id))?.workerImage !== fly.image) {
+      // The image or key changed, or the machine is gone: a fresh machine on the
       // same volume keeps the caches and picks up the current token hash.
       if (row.machine_id) await fly.destroyMachine(row.machine_id);
       row.token_sha256 = sha256Hex(token);
@@ -390,12 +418,13 @@ export function createBuilderPool({
       const wasRunning = await ensureRunning(row);
       const fresh = get(row.id)!;
       if (fresh.lease_id !== leaseId) throw new BuilderPoolError("the lease expired while the builder started", 409);
+      const external = isExternalHome(home.id);
       return {
         kind: "granted",
         leaseId,
         builderId: row.id,
-        url: urlFor(fresh),
-        token: builderToken(key, row.id, row.token_salt),
+        url: external ? new URL(`/api/rudder/builder-relay/${row.id}/${leaseId}`, cloudUrl).href : urlFor(fresh),
+        token: external ? relayToken(fresh, leaseId) : builderToken(key, row.id, row.token_salt),
         expiresAt: iso(fresh.lease_expires_at!),
         warm: wasRunning,
         cpus: policy.cpus,
@@ -524,7 +553,13 @@ export function createBuilderPool({
     }
   }
 
-  return { policy, lease, renew, release, list, snapshot, sweep, destroyForHome };
+  function cacheAccount(id: string, token: string): string | null {
+    const row = activeBuilder(id);
+    if (!row) return null;
+    return builderTokenMatches(token, sha256Hex(cacheToken(key, row))) ? row.account_id : null;
+  }
+
+  return { policy, resolveRelay, cacheAccount, lease, renew, release, list, snapshot, sweep, destroyForHome };
 }
 
 export type BuilderPool = ReturnType<typeof createBuilderPool>;

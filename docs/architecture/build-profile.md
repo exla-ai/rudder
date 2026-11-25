@@ -181,12 +181,13 @@ additional qualification target. Buck2's upstream
 and [remote-execution configuration](https://buck2.build/docs/users/remote_execution/)
 describe the supported REAPI interface.
 
-The managed executor sets `local_enabled=true`, `remote_enabled=false`,
-`remote_cache_enabled=true` when configured, and permits successful local
-uploads. It qualifies remote **cache** reuse; it does not claim remote
-execution. See the upstream
-[executor options](https://buck2.build/docs/api/build/CommandExecutorConfig/).
-Rudder's separate authenticated REST CAS is not renamed REAPI.
+Cloud workers run a loopback bazel-remote daemon. Its authenticated home or
+builder proxy stores action results and content blobs under the account's
+`buck2/` cache prefix in S3. On Linux x64 the Rudder board build uses
+`//:board_css`. Other projects can use the same service with their own
+cache-enabled Buck2 execution platform. Build commands execute on the home
+or leased burst builder. The separate managed compiler-action path still
+requires a source and SDK isolation guarantee before it can publish results.
 
 Remote action caches publish trusted execution results. Content hashes verify
 bytes, not that a compiler produced them. Production backends need authorized

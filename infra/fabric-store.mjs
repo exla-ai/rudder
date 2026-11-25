@@ -1,3 +1,16 @@
+import { isDeepStrictEqual } from "node:util";
+
+const cacheObjects = {
+  Sid: "RemoteBuildCacheObjects",
+  Effect: "Allow",
+  Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+  Resource: { "Fn::Sub": "${ContentBucket.Arn}/cache/v1/accounts/*" },
+};
+const cachePolicy = {
+  PolicyName: "RudderRemoteBuildCache",
+  PolicyDocument: { Version: "2012-10-17", Statement: [cacheObjects] },
+};
+
 // The data plane uses Fly workload identity. Admin credentials are used only
 // to provision this stack, never copied into the application or worker image.
 export function fabricStoreTemplate({ accountId, flyOrg = "exla", controlApp = "rudder-cloud-control", existingProviderArn } = {}) {
@@ -35,7 +48,7 @@ export function fabricStoreTemplate({ accountId, flyOrg = "exla", controlApp = "
     },
     WriterBoundary: {
       Type: "AWS::IAM::ManagedPolicy",
-      Properties: { Description: "Maximum permissions for the Rudder Fabric object-store writer", PolicyDocument: permission },
+      Properties: { Description: "Maximum permissions for the Rudder Fabric object-store writer", PolicyDocument: { ...permission, Statement: [...permission.Statement, cacheObjects] } },
     },
     FabricRole: {
       Type: "AWS::IAM::Role",
@@ -47,7 +60,7 @@ export function fabricStoreTemplate({ accountId, flyOrg = "exla", controlApp = "
           Statement: [{ Effect: "Allow", Principal: { Federated: existingProviderArn ?? { Ref: "FlyIdentityProvider" } }, Action: "sts:AssumeRoleWithWebIdentity",
             Condition: { StringEquals: { [`${issuer}:aud`]: "sts.amazonaws.com" }, StringLike: { [`${issuer}:sub`]: `${flyOrg}:${controlApp}:*` } } }],
         },
-        Policies: [{ PolicyName: "RudderFabricObjects", PolicyDocument: permission }],
+        Policies: [{ PolicyName: "RudderFabricObjects", PolicyDocument: permission }, cachePolicy],
         Tags: tags,
       },
     },
@@ -79,22 +92,16 @@ export function fabricStoreTemplate({ accountId, flyOrg = "exla", controlApp = "
   };
 }
 
-/** Restrict the first IAM update to the missing-object permission fix. Any
- * change to retention, trust, resources or other permissions needs its own
- * explicitly reviewed infrastructure migration. */
-export function validateFabricCacheMissUpdate(previous, next) {
-  const copy = (value) => JSON.parse(JSON.stringify(value));
-  const before = copy(previous), after = copy(next);
-  const documents = (template) => [template.Resources.WriterBoundary.Properties.PolicyDocument, template.Resources.FabricRole.Properties.Policies[0].PolicyDocument];
-  const expected = { Sid: "DistinguishCacheMisses", Effect: "Allow", Action: "s3:ListBucket", Resource: { "Fn::GetAtt": ["ContentBucket", "Arn"] } };
-  const canonical = (value) => JSON.stringify((function sorted(item) {
-    return Array.isArray(item) ? item.map(sorted) : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, sorted(item[key])])) : item;
-  })(value));
-  for (const document of documents(before)) if (document.Statement.some((rule) => rule.Sid === expected.Sid)) throw new Error("Cache-miss permission was already present; inspect template drift explicitly");
-  for (const document of documents(after)) {
-    const additions = document.Statement.filter((rule) => rule.Sid === expected.Sid);
-    if (additions.length !== 1 || canonical(additions[0]) !== canonical(expected)) throw new Error("Unexpected cache-miss permission scope");
-    document.Statement = document.Statement.filter((rule) => rule.Sid !== expected.Sid);
+/** Allow only the account cache grant in the boundary and the role. */
+export function validateRemoteBuildCacheUpdate(previous, next) {
+  const expected = JSON.parse(JSON.stringify(previous));
+  const boundary = expected.Resources.WriterBoundary.Properties.PolicyDocument;
+  const policies = expected.Resources.FabricRole.Properties.Policies;
+  if (boundary.Statement.some((rule) => rule.Sid === cacheObjects.Sid)
+      || policies.some((policy) => policy.PolicyName === cachePolicy.PolicyName)) {
+    throw new Error("Remote build cache policy already present in the stack template");
   }
-  if (canonical(before) !== canonical(after)) throw new Error("Infrastructure update includes changes beyond cache-miss permission");
+  boundary.Statement.push(cacheObjects);
+  policies.push(cachePolicy);
+  if (!isDeepStrictEqual(expected, next)) throw new Error("Unexpected infrastructure change outside the remote build cache grant");
 }

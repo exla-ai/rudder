@@ -1,0 +1,8 @@
+[cells]
+root = .
+
+[build]
+execution_platforms = root//:board_platform
+
+[project]
+ignore = .git, .jj, .rudder-workspaces, .rudder-worktrees, target, dist, cloud/node_modules

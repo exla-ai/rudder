@@ -46,6 +46,7 @@ import { cleanupPaths, createCleanupJob, readProcesses } from "./cleanup.mjs";
 import { startHomeTelemetry } from "./telemetry.mjs";
 import { startBurstBroker } from "./burst-broker.mjs";
 import { startCacheProxy } from "./cache-proxy.mjs";
+import { BUCK2_CACHE_HOST, removeBuck2CacheConfig, startBuck2Cache } from "./buck2-cache.mjs";
 import { agentWorkspaceMode, createMachineStatsCollector, projectWarmBadge } from "./cache-stats.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
 import { createSlashCommands } from "./slash-commands.mjs";
@@ -99,6 +100,7 @@ async function agentSetupService() {
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
 const workerToken = (process.env.RUDDER_WORKER_TOKEN || "").trim();
+delete process.env.RUDDER_WORKER_TOKEN;
 const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
 
 // Overridable so the boot can be tested off a real machine.
@@ -181,7 +183,8 @@ async function privatePreviewService() {
         signal.throwIfAborted();
         return runTailnetCommand(args, { socket: TS_SOCKET, timeoutMs: 1500 });
       },
-      processMatches: (item) => privatePreviews?.processMatches(item) ?? Promise.resolve(false),
+      processMatches: async (item) => new URL(item.origin).hostname !== BUCK2_CACHE_HOST
+        && await privatePreviews.processMatches(item),
       ownedPorts: readPreviewPorts(),
       onOwnedPorts: writePreviewPorts,
     }));
@@ -222,10 +225,11 @@ const tailscale = createTailscale({
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 const accountAvailabilityFile = path.join(PERSIST_HOME, ".rudder", "account-availability.json");
 baseChildEnv.RUDDER_ACCOUNT_AVAILABILITY = accountAvailabilityFile;
-// Local remote-cache proxy (sccache WebDAV + Turborepo v8 -> Cloud S3).
-// Agents receive the per-boot loopback token, never the home worker token.
+// Keep the Cloud credential in the local proxy. Buck2 uses an account-local
+// REAPI endpoint and the proxy's authenticated S3 backend.
 let cacheProxy = null;
-if (process.env.RUDDER_REMOTE_CACHE !== "0" && cloudUrl && homeId && workerToken) {
+let buck2Cache = null;
+if (process.env.RUDDER_REMOTE_CACHE !== "0") {
   cacheProxy = startCacheProxy({
     cloudUrl,
     homeId,
@@ -233,15 +237,17 @@ if (process.env.RUDDER_REMOTE_CACHE !== "0" && cloudUrl && homeId && workerToken
     statsFile: path.join(PERSIST_HOME, ".rudder", "remote-cache-stats.json"),
     log,
   });
-  try {
-    const info = await cacheProxy.ready;
-    baseChildEnv.RUDDER_REMOTE_CACHE_URL = info.url;
-    baseChildEnv.RUDDER_REMOTE_CACHE_TOKEN = info.token;
-    log(`remote cache proxy listening on ${info.url}`);
-  } catch (error) {
-    log(`remote cache proxy failed to start: ${error instanceof Error ? error.message : String(error)}`);
-    cacheProxy = null;
-  }
+  const info = await cacheProxy.ready;
+  buck2Cache = await startBuck2Cache({
+    home: HOME, cacheDir: path.join(PERSIST_HOME, ".cache", "rudder", "buck2"),
+    proxy: info, log,
+  });
+  baseChildEnv.RUDDER_REMOTE_CACHE_URL = info.url;
+  baseChildEnv.RUDDER_REMOTE_CACHE_TOKEN = info.token;
+  baseChildEnv.RUDDER_BUCK2_CACHE_ADDRESS = buck2Cache.address;
+  log(`remote cache proxy listening on ${info.url}, Buck2 gRPC on ${buck2Cache.address}`);
+} else {
+  await removeBuck2CacheConfig(HOME);
 }
 const machineStats = createMachineStatsCollector({
   home: HOME,
@@ -364,7 +370,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     logins.dispose();
     tailscale.dispose();
     vibeprint.stopAll();
-    cacheProxy?.close();
+    void (buck2Cache?.close() ?? Promise.resolve()).finally(() => cacheProxy?.close());
     for (const project of projects.values()) {
       project.stop();
     }
@@ -2949,6 +2955,10 @@ function buildChildEnv(vaultEnv) {
   for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN", "TS_AUTHKEY", "TS_API_KEY", "RUDDER_HOME", "RUDDER_OTEL_TOKEN", "RUDDER_OTEL_ENDPOINT"]) {
     delete env[secret];
   }
+  // Only the supervisor that owns the listeners can publish their addresses.
+  delete env.RUDDER_REMOTE_CACHE_URL;
+  delete env.RUDDER_REMOTE_CACHE_TOKEN;
+  delete env.RUDDER_BUCK2_CACHE_ADDRESS;
   return env;
 }
 

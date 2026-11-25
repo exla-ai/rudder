@@ -1,4 +1,5 @@
 node_modules/
+buck-out/
 cloud/dist/
 dist/
 target/

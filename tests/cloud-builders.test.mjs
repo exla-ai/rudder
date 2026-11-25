@@ -33,7 +33,7 @@ function fakeFly({ failStart = false } = {}) {
       if (!machine) return null;
       // A created or starting machine is started on the next look.
       if (machine.state === "created" || machine.state === "starting") machine.state = failStart ? "failed" : "started";
-      return { id, state: machine.state, private_ip: machine.private_ip };
+      return { id, state: machine.state, private_ip: machine.private_ip, workerImage: machine.config.metadata["rudder-worker-image"] };
     },
     async startMachine(id) {
       fly.calls.push(`start ${id}`);
@@ -55,7 +55,7 @@ function fakeFly({ failStart = false } = {}) {
   return fly;
 }
 
-function setup({ env = {}, fly = fakeFly(), key = "builder-key-0123456789", homes = new Set(["home-a"]) } = {}) {
+function setup({ env = {}, fly = fakeFly(), key = "builder-key-0123456789", external = false, homes = new Set(["home-a"]) } = {}) {
   const db = new DatabaseSync(":memory:");
   let clock = Date.parse("2026-11-03T12:00:00Z");
   const policy = lib.builderPolicy({ RUDDER_BUILDERS: "1", ...env });
@@ -64,6 +64,8 @@ function setup({ env = {}, fly = fakeFly(), key = "builder-key-0123456789", home
     fly,
     policy,
     key: k,
+    cloudUrl: "https://control.test",
+    isExternalHome: () => external,
     homeExists: (id) => homes.has(id),
     now: () => clock,
     sleep: async () => {},
@@ -85,7 +87,7 @@ test("policy defaults to a 2 x 16 CPU pool and is off unless asked for", () => {
 
 test("a disabled pool refuses leases with 404", async () => {
   const { db, fly } = setup();
-  const pool = lib.createBuilderPool({ db, fly, policy: lib.builderPolicy({}), key: "k" });
+  const pool = lib.createBuilderPool({ db, fly, policy: lib.builderPolicy({}), key: "k", cloudUrl: "https://control.test", isExternalHome: () => false });
   await assert.rejects(pool.lease(home), (error) => error.status === 404);
 });
 
@@ -112,6 +114,39 @@ test("the first lease creates a volume and machine; the token is never stored", 
   assert.equal(view.leased, true);
   assert.equal(view.leaseHolder, "rudder: cargo build");
   assert.equal(view.token, undefined);
+});
+
+test("cache authority follows the builder account and active lease", async () => {
+  const { pool, fly, advance } = setup();
+  const grant = await pool.lease(home, { seconds: 60 });
+  const machine = [...fly.machines.values()][0];
+  const token = machine.config.env.RUDDER_BUILDER_CACHE_TOKEN;
+  assert.equal(pool.cacheAccount(grant.builderId, grant.token), null);
+  assert.equal(pool.cacheAccount("another-builder", token), null);
+  assert.equal(pool.cacheAccount(grant.builderId, token), home.accountId);
+  advance(60001);
+  assert.equal(pool.cacheAccount(grant.builderId, token), null);
+  fly.image = "registry.fly.io/rudder-workers-test:new";
+  const renewed = await pool.lease(home);
+  assert.equal(renewed.warm, false);
+  assert.equal(fly.volumes.size, 1);
+  pool.release(home.id, renewed.leaseId);
+  assert.equal(pool.cacheAccount(grant.builderId, token), null);
+});
+
+test("the external home receives a relay grant scoped to its current lease", async () => {
+  const { pool, fly } = setup({ external: true });
+  const first = await pool.lease(home);
+  assert.equal(first.url, `https://control.test/api/rudder/builder-relay/${first.builderId}/${first.leaseId}`);
+  const upstream = pool.resolveRelay(first.builderId, first.leaseId, first.token);
+  assert.match(upstream.url, /^http:/);
+  assert.equal(lib.sha256Hex(upstream.token), [...fly.machines.values()][0].config.env.RUDDER_BUILDER_TOKEN_SHA256);
+  assert.equal(pool.resolveRelay(first.builderId, first.leaseId, upstream.token), null);
+  pool.release(home.id, first.leaseId);
+  const second = await pool.lease(home);
+  assert.equal(second.builderId, first.builderId);
+  assert.equal(pool.resolveRelay(first.builderId, first.leaseId, first.token), null);
+  assert.equal(pool.resolveRelay(second.builderId, second.leaseId, first.token), null);
 });
 
 test("scales out while busy, answers busy at the maximum, then reuses warm builders", async () => {

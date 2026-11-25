@@ -534,7 +534,7 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
       </div>
       <div class="mp-feed-rows"></div>
     </div>
-    <div class="mp-empty-note mp-feed-empty">No remote cache traffic yet. Next Rust or Turbo build will stream activity here.</div>
+    <div class="mp-empty-note mp-feed-empty">No remote cache traffic yet. Activity appears when a build uses the remote cache.</div>
   </div>`);
 
   pipeSec.body.append(pipeGrid, feedCard);
@@ -692,15 +692,14 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
     }
 
     // 3. Remote Cache (S3)
-    const rcSccache = pickRemoteToolStats(homeRc?.sccache, cloudRc?.sccache);
-    const rcTurbo = pickRemoteToolStats(homeRc?.turbo, cloudRc?.turbo);
-    const totalHits = (num(rcSccache?.hits) ?? 0) + (num(rcTurbo?.hits) ?? 0);
-    const totalWrites = (num(rcSccache?.writes) ?? 0) + (num(rcTurbo?.writes) ?? 0);
-    const totalRead = (num(rcSccache?.bytesRead) ?? 0) + (num(rcTurbo?.bytesRead) ?? 0);
-    const totalWritten = (num(rcSccache?.bytesWritten) ?? 0) + (num(rcTurbo?.bytesWritten) ?? 0);
+    const remoteTools = ["sccache", "turbo", "buck2"].map((tool) => pickRemoteToolStats(homeRc?.[tool], cloudRc?.[tool]));
+    const total = (field) => remoteTools.reduce((sum, stats) => sum + (num(stats?.[field]) ?? 0), 0);
+    const totalHits = total("hits");
+    const totalWrites = total("writes");
+    const totalRead = total("bytesRead");
+    const totalWritten = total("bytesWritten");
     const lastAct = Math.max(
-      toMs(rcSccache?.lastActivityAt) || 0,
-      toMs(rcTurbo?.lastActivityAt) || 0,
+      ...remoteTools.map((stats) => toMs(stats?.lastActivityAt) || 0),
       toMs(homeRc?.recent?.[0]?.at) || 0,
       toMs(cloudRc?.recent?.[0]?.at) || 0
     );
@@ -718,7 +717,7 @@ export function MachineScreen({ navigate, store, onOpenProject } = {}) {
     setText(kpiRemote.val, remoteEnabled || totalHits + totalWrites > 0
       ? `${formatCount(totalHits)} / ${formatCount(totalWrites)}`
       : "--");
-    setText(kpiRemote.sub, "hits / writes (sccache + turbo)");
+    setText(kpiRemote.sub, "hits / writes across build caches");
     setText(kpiRemote.sub2, remoteEnabled || totalRead + totalWritten > 0
       ? `${formatBytes(totalRead)} saved · ${formatBytes(totalWritten)} uploaded`
       : "Remote cache disabled");

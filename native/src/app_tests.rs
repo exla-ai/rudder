@@ -1543,7 +1543,7 @@ fn execution_prompt_tells_the_worker_it_is_a_jj_runtime() {
     let prompt = execution_prompt("add a feature");
     assert!(prompt.starts_with("add a feature"), "goal comes first: {prompt}");
     assert!(prompt.contains("jj workspace"), "names the VCS: {prompt}");
-    assert!(prompt.contains("Do not commit, push or deploy"));
+    assert!(prompt.contains("When the user explicitly asks to ship"));
     assert!(prompt.contains("Never write secrets"));
     for removed in ["rudder done", "followup", "evidence", "DECISIONS.md", "hunk"] {
         assert!(!prompt.to_lowercase().contains(&removed.to_lowercase()), "no {removed}: {prompt}");

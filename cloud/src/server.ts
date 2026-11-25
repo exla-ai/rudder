@@ -42,6 +42,7 @@ import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
 import { VibeprintRoutes } from "./vibeprint-routes.js";
 import { startControlTelemetry, type ControlSnapshot, type ControlTelemetry } from "./telemetry.js";
+import { createBuilderRelay } from "./builder-relay.js";
 import { BuilderPoolError, builderPolicy, createBuilderPool, type BuilderFly, type BuilderPool } from "./builders.js";
 import { externalHomeImage, externalHomeNeedsUpdate, externalHomeRefusal, HOME_HOST_OFFLINE, homeHostEnv, homeHostKind, parseHomeHostKind, type HomeHostKind } from "./home-host.js";
 
@@ -225,7 +226,15 @@ const remoteCacheHttp = fabricS3 && fabricBucket
   ? createRemoteBuildCacheHandler({
     storage: new S3RemoteCacheStorage({ client: fabricS3, bucket: fabricBucket, timeoutMs: 30_000 }),
     bucket: fabricBucket,
-    authenticate: authenticateFabricOrCache,
+    authenticate(req) {
+      const id = req.headers["x-rudder-builder-id"];
+      if (id === undefined) return authenticateFabricOrCache(req);
+      const auth = req.headers.authorization;
+      if (typeof id !== "string" || req.headers["x-rudder-workspace-id"] || !auth?.startsWith("Bearer rdbc_")) throw unauthorized();
+      const account = builderPool?.cacheAccount(id, auth.slice(7));
+      if (!account) throw unauthorized();
+      return account;
+    },
   }) : null;
 const slack = slackConfigFromEnv();
 // Slack message events are delivered at-least-once; dedupe by event_id so a
@@ -741,6 +750,7 @@ const upsertSetting = database.prepare(`
 let telemetry: ControlTelemetry = { enabled: false, recordRequest() {}, recordHomeDisconnect() {}, recordBuilderLease() {}, async flush() {}, async shutdown() {} };
 // The burst build pool (cloud/src/builders.ts). Null unless RUDDER_BUILDERS=1.
 let builderPool: BuilderPool | null = null;
+const builderRelay = createBuilderRelay((id, lease, token) => builderPool?.resolveRelay(id, lease, token) ?? null);
 
 let authProviderFingerprint = providerFingerprint();
 let auth: ReturnType<typeof createBetterAuth> = createBetterAuth();
@@ -758,6 +768,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
   });
   try {
     const url = new URL(req.url || "/", baseURL);
+    if (builderRelay.http(req, res)) return;
     if (url.pathname === "/api/rudder/fabric" || url.pathname.startsWith("/api/rudder/fabric/")) {
       if (!fabricHttp) {
         sendJson(res, 503, { format_version: 1, error: { code: "unavailable", message: "Fabric durable storage is not enabled" } });
@@ -999,6 +1010,7 @@ server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   }
   try {
     const url = new URL(req.url || "/", baseURL);
+    if (builderRelay.upgrade(req, socket, head)) return;
     if (url.pathname === "/api/app/terminal-screen") {
       void (async () => {
         try {
@@ -6188,7 +6200,7 @@ const builderFly: BuilderFly = {
   async getMachine(id) {
     try {
       const machine = await flyRequest<FlyMachine & { private_ip?: string }>(`/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(id)}`, { method: "GET" });
-      return machine.id ? { id: machine.id, state: machine.state, private_ip: machine.private_ip } : null;
+      return machine.id ? { id: machine.id, state: machine.state, private_ip: machine.private_ip, workerImage: optionalString(objectField(machine.config, "metadata")?.["rudder-worker-image"]) } : null;
     } catch (error) {
       if (/not found|404/i.test(error instanceof Error ? error.message : String(error))) return null;
       throw error;
@@ -6211,6 +6223,11 @@ const builderFly: BuilderFly = {
       db: database,
       fly: builderFly,
       policy,
+      cloudUrl: baseURL,
+      isExternalHome: (id) => {
+        const row = findWorkspaceById.get(id) as Record<string, unknown> | undefined;
+        return homeHostKind(row?.host_kind) === "external";
+      },
       key: process.env.RUDDER_BUILDER_KEY || requiredEnv("BETTER_AUTH_SECRET"),
       homeExists: (homeId) => {
         const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
@@ -7910,6 +7927,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
         enabled: false,
         bucket: null,
         sccache: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
+        buck2: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
         turbo: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
         recent: [],
       },

@@ -16,11 +16,19 @@ if [ "${RUDDER_WORKER_MANAGED_EXECUTION:-0}" = "1" ]; then
   export RUDDER_WORKER_FUSE_READY
 fi
 
+# Only the supervisor receives its Cloud credential. Keep it out of bootstrap
+# helpers, background CLI updates and their descendants.
+unset rudder_boot_worker_token rudder_boot_builder_cache_token rudder_boot_builder_token_hash
+rudder_boot_worker_token=${RUDDER_WORKER_TOKEN-}
+rudder_boot_builder_cache_token=${RUDDER_BUILDER_CACHE_TOKEN-}
+rudder_boot_builder_token_hash=${RUDDER_BUILDER_TOKEN_SHA256-}
+unset RUDDER_WORKER_TOKEN RUDDER_BUILDER_CACHE_TOKEN RUDDER_BUILDER_TOKEN_SHA256
 . /opt/rudder-worker/cache-env.sh
 
 # A builder in a home's burst build pool runs builds and nothing else: no
 # agent CLIs to update, no supervisor.
 if [ "${RUDDER_BUILDER:-0}" = "1" ]; then
+  export RUDDER_BUILDER_CACHE_TOKEN="$rudder_boot_builder_cache_token" RUDDER_BUILDER_TOKEN_SHA256="$rudder_boot_builder_token_hash"
   exec node /opt/rudder-worker/builder.mjs "$@"
 fi
 
@@ -71,6 +79,7 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ]; then
 fi
 
 # A home machine (one per account, every repo on it) runs its own supervisor.
+[ -z "$rudder_boot_worker_token" ] || export RUDDER_WORKER_TOKEN="$rudder_boot_worker_token"
 if [ "${RUDDER_HOME:-0}" = "1" ]; then
   exec node /opt/rudder-worker/home.mjs "$@"
 fi

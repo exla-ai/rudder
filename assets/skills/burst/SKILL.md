@@ -54,8 +54,8 @@ A trailing slash copies a directory's contents into the same directory at home.
 
 ## When there is no builder
 
-If the home has no build pool (it is off, or the home runs on its own host
-outside Fly) or every builder stays busy past `--wait` (default 10 minutes),
+External homes connect through the authenticated Rudder Cloud relay.
+If the build pool is off or every builder stays busy past `--wait` (default 10 minutes),
 `rudder-burst` says so on stderr ("running here instead") and runs the command
 on the home with the same output and exit code. There is no need to retry or
 to run it again yourself.

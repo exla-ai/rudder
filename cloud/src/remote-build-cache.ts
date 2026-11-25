@@ -60,9 +60,11 @@ export type RemoteCacheToolStats = {
   lastActivityAt: number | null;
 };
 
+type RemoteCacheTool = "sccache" | "turbo" | "buck2";
+
 export type RemoteCacheEvent = {
   at: number;
-  tool: "sccache" | "turbo";
+  tool: RemoteCacheTool;
   op: "hit" | "miss" | "put" | "error";
   key: string;
   bytes: number;
@@ -74,6 +76,7 @@ export type RemoteCacheAccountStats = {
   bucket: string | null;
   sccache: RemoteCacheToolStats;
   turbo: RemoteCacheToolStats;
+  buck2: RemoteCacheToolStats;
   recent: RemoteCacheEvent[];
 };
 
@@ -89,6 +92,7 @@ export type RemoteBuildCacheHandler = ((
     accounts: number;
     sccache: RemoteCacheToolStats;
     turbo: RemoteCacheToolStats;
+    buck2: RemoteCacheToolStats;
     recent: RemoteCacheEvent[];
   };
 };
@@ -589,6 +593,7 @@ function buildFilePropfindXml(href: string, head: RemoteCacheHead, fallbackDate:
 interface AccountStatsState {
   sccache: RemoteCacheToolStats;
   turbo: RemoteCacheToolStats;
+  buck2: RemoteCacheToolStats;
   recent: RemoteCacheEvent[];
 }
 
@@ -609,8 +614,7 @@ export function createRemoteBuildCacheHandler(options: {
   let inflightTotal = 0;
   const inflightAccounts = new Map<string, number>();
 
-  const globalSccache = emptyToolStats();
-  const globalTurbo = emptyToolStats();
+  const globalTools = { sccache: emptyToolStats(), turbo: emptyToolStats(), buck2: emptyToolStats() };
   const globalRecent: RemoteCacheEvent[] = [];
   const accountStats = new Map<string, AccountStatsState>();
 
@@ -620,6 +624,7 @@ export function createRemoteBuildCacheHandler(options: {
       state = {
         sccache: emptyToolStats(),
         turbo: emptyToolStats(),
+        buck2: emptyToolStats(),
         recent: [],
       };
       accountStats.set(accountId, state);
@@ -629,7 +634,7 @@ export function createRemoteBuildCacheHandler(options: {
 
   function recordEvent(
     accountId: string | undefined,
-    tool: "sccache" | "turbo",
+    tool: RemoteCacheTool,
     op: "hit" | "miss" | "put" | "error",
     key: string,
     bytes: number,
@@ -638,14 +643,12 @@ export function createRemoteBuildCacheHandler(options: {
     const at = now();
     const ms = Math.max(0, at - startedAt);
     const event: RemoteCacheEvent = { at, tool, op, key, bytes, ms };
-    const globalTool = tool === "sccache" ? globalSccache : globalTurbo;
-    applyEventToStats(globalTool, op, bytes, at);
+    applyEventToStats(globalTools[tool], op, bytes, at);
     pushBounded(globalRecent, event, GLOBAL_RECENT_LIMIT);
 
     if (accountId) {
       const acct = getOrCreateAccountState(accountId);
-      const acctTool = tool === "sccache" ? acct.sccache : acct.turbo;
-      applyEventToStats(acctTool, op, bytes, at);
+      applyEventToStats(acct[tool], op, bytes, at);
       pushBounded(acct.recent, event, ACCOUNT_RECENT_LIMIT);
     }
   }
@@ -674,7 +677,7 @@ export function createRemoteBuildCacheHandler(options: {
     const startedAt = now();
     let accountId: string | undefined;
     let admitted = false;
-    let currentTool: "sccache" | "turbo" | undefined;
+    let currentTool: RemoteCacheTool | undefined;
     let currentKey = "";
     let skipStats = false;
 
@@ -697,6 +700,8 @@ export function createRemoteBuildCacheHandler(options: {
         currentTool = "sccache";
       } else if (subPath === "/turbo" || subPath.startsWith("/turbo/")) {
         currentTool = "turbo";
+      } else if (subPath === "/buck2" || subPath.startsWith("/buck2/")) {
+        currentTool = "buck2";
       }
 
       if (
@@ -714,6 +719,55 @@ export function createRemoteBuildCacheHandler(options: {
 
       const accountPrefix = `cache/v1/accounts/${sha256Hex(accountId)}`;
       const method = (req.method ?? "GET").toUpperCase();
+
+      if (currentTool === "buck2") {
+        // bazel-remote's uncompressed HTTP backend uses the action or blob SHA-256.
+        const match = /^\/buck2\/(ac|cas)\/([a-f0-9]{64})$/.exec(subPath);
+        if (!match) fail("invalid_key", "Expected a Buck2 ac or cas SHA-256 cache key");
+        const [, kind, digest] = match;
+        currentKey = `${kind}/${digest}`;
+        const storageKey = `${accountPrefix}/buck2/${currentKey}`;
+
+        if (method === "HEAD") {
+          const head = await options.storage.head(storageKey);
+          res.writeHead(head ? 200 : 404, { "Content-Length": String(head?.size ?? 0) });
+          res.end();
+          return;
+        }
+        if (method === "GET") {
+          const object = await options.storage.get(storageKey, maxObjectBytes);
+          if (!object) {
+            recordEvent(accountId, "buck2", "miss", currentKey, 0, startedAt);
+            res.writeHead(404, { "Content-Length": "0" });
+            res.end();
+            return;
+          }
+          if (kind === "cas" && sha256Hex(object.body) !== digest) {
+            fail("corrupt_object", "Stored Buck2 CAS object failed SHA-256 verification", 503);
+          }
+          recordEvent(accountId, "buck2", "hit", currentKey, object.body.length, startedAt);
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(object.body.length),
+            "Cache-Control": kind === "cas" ? "private, immutable" : "private, no-cache",
+          });
+          res.end(object.body);
+          return;
+        }
+        if (method === "PUT") {
+          const body = await readBody(req, maxObjectBytes, UPLOAD_TIMEOUT_MS);
+          if (kind === "cas" && sha256Hex(body) !== digest) {
+            fail("digest_mismatch", "Buck2 CAS upload failed SHA-256 verification");
+          }
+          await options.storage.put(storageKey, body, { contentType: "application/octet-stream" });
+          recordEvent(accountId, "buck2", "put", currentKey, body.length, startedAt);
+          res.writeHead(200, { "Content-Length": "0" });
+          res.end();
+          return;
+        }
+        res.setHeader("Allow", "HEAD, GET, PUT");
+        fail("method_not_allowed", `Unsupported Buck2 cache method ${method}`, 405);
+      }
 
       if (currentTool === "sccache") {
         const rawRel = subPath.slice("/sccache".length);
@@ -988,6 +1042,7 @@ export function createRemoteBuildCacheHandler(options: {
         bucket,
         sccache: emptyToolStats(),
         turbo: emptyToolStats(),
+        buck2: emptyToolStats(),
         recent: [],
       };
     }
@@ -996,6 +1051,7 @@ export function createRemoteBuildCacheHandler(options: {
       bucket,
       sccache: cloneToolStats(state.sccache),
       turbo: cloneToolStats(state.turbo),
+      buck2: cloneToolStats(state.buck2),
       recent: state.recent.map((event) => ({ ...event })),
     };
   }
@@ -1005,8 +1061,9 @@ export function createRemoteBuildCacheHandler(options: {
       enabled: true,
       bucket,
       accounts: accountStats.size,
-      sccache: cloneToolStats(globalSccache),
-      turbo: cloneToolStats(globalTurbo),
+      sccache: cloneToolStats(globalTools.sccache),
+      turbo: cloneToolStats(globalTools.turbo),
+      buck2: cloneToolStats(globalTools.buck2),
       recent: globalRecent.map((event) => ({ ...event })),
     };
   }

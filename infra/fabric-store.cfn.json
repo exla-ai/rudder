@@ -104,6 +104,18 @@
                   "Arn"
                 ]
               }
+            },
+            {
+              "Sid": "RemoteBuildCacheObjects",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": {
+                "Fn::Sub": "${ContentBucket.Arn}/cache/v1/accounts/*"
+              }
             }
           ]
         }
@@ -188,6 +200,26 @@
                       "ContentBucket",
                       "Arn"
                     ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "RudderRemoteBuildCache",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "RemoteBuildCacheObjects",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${ContentBucket.Arn}/cache/v1/accounts/*"
                   }
                 }
               ]

@@ -1,6 +1,6 @@
 {
   "name": "@exla/rudder",
-  "version": "5.0.47",
+  "version": "5.0.48",
   "description": "Run Claude Code and Codex locally or in Rudder Cloud, with one dashboard for tasks and agent communication.",
   "keywords": [
     "tui",
@@ -26,7 +26,7 @@
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json && npm run build-board && npm run build-native && npm run copy-native && npm run chmod-cli",
-    "build-board": "esbuild src/board/ui/index.tsx --bundle --minify --format=esm --jsx=automatic --jsx-import-source=preact --outfile=dist/board/board.js && esbuild src/board/ui/board.css --bundle --minify --outfile=dist/board/board.css",
+    "build-board": "esbuild src/board/ui/index.tsx --bundle --minify --format=esm --jsx=automatic --jsx-import-source=preact --outfile=dist/board/board.js && node scripts/build-board-css.mjs",
     "build-native": "node scripts/build-native.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json && npm run chmod-cli && node --test tests/*.test.mjs",

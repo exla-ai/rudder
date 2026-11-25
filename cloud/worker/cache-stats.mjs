@@ -933,6 +933,7 @@ function defaultRemoteCache() {
     upstreamConnected: null,
     sccache: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
     turbo: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
+    buck2: { hits: 0, misses: 0, writes: 0, errors: 0, bytesRead: 0, bytesWritten: 0, lastActivityAt: null },
     recent: [],
   };
 }

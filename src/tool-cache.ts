@@ -103,6 +103,7 @@ export function toolCacheEnv(role: ToolCacheRole, options: ToolCacheOptions = {}
   if (has("cargo") && use("CARGO_HOME", "cargo")) prepareCargoHome(out.CARGO_HOME, env);
   use("TURBO_CACHE_DIR", "turbo");
   use("NX_CACHE_DIRECTORY", "nx");
+  if (env.RUDDER_BUCK2_CACHE_ADDRESS) out.RUDDER_BUCK2_CACHE_ADDRESS = env.RUDDER_BUCK2_CACHE_ADDRESS;
   const remoteBase = (env.RUDDER_REMOTE_CACHE_URL ?? "").trim().replace(/\/+$/, "");
   const remoteToken = (env.RUDDER_REMOTE_CACHE_TOKEN ?? "").trim();
   if (env.RUDDER_REMOTE_CACHE !== "0" && remoteBase && remoteToken) {

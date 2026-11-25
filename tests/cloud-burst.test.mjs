@@ -3,6 +3,7 @@
 // locally with the machine's own rsync.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -11,6 +12,7 @@ import test from "node:test";
 
 import { createBuilderServer } from "../cloud/worker/builder.mjs";
 import { startBurstBroker } from "../cloud/worker/burst-broker.mjs";
+import { createBuilderRelay } from "../cloud/dist/builder-relay.js";
 import { FRAME, buildDir, encodeFrame, frameDecoder, safeKey, sha256Hex, shellJoin, tokenMatches } from "../cloud/worker/burst-protocol.mjs";
 import { EXIT, commandLine, execRemote, parseArgs, pullArgs, repoInfo, uploadArgs } from "../cloud/worker/burst.mjs";
 
@@ -153,6 +155,32 @@ test("exec streams stdout and stderr separately and returns the exit code", asyn
   }
 });
 
+test("releasing an external builder lease disconnects a command already running through the relay", { timeout: 15_000 }, async () => {
+  const { builder, root, url } = await startBuilder();
+  let active = true;
+  const relay = createBuilderRelay((_id, _lease, token) => active && token === "grant" ? { url, token: TOKEN } : null);
+  const control = http.createServer((req, res) => relay.http(req, res));
+  await new Promise((resolve) => control.listen(0, "127.0.0.1", resolve));
+  const controller = new AbortController();
+  try {
+    fs.mkdirSync(path.join(root, "k"));
+    const lease = { url: `http://127.0.0.1:${control.address().port}/api/rudder/builder-relay/bld-t/l1`, token: "grant" };
+    const started = Promise.withResolvers();
+    const result = execRemote(lease, { key: "k", command: "echo running; exec sleep 30" }, {
+      stdout: { write: () => started.resolve() }, stderr: sink(), signal: controller.signal,
+    });
+    const disconnected = assert.rejects(result, /aborted|reset|dropped|closed/i);
+    await Promise.race([started.promise, result.then(() => { throw new Error("command ended before starting"); })]);
+    active = false;
+    await disconnected;
+  } finally {
+    controller.abort();
+    control.close();
+    builder.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("exec waits for first-boot toolchains and says so", async () => {
   let finish;
   const toolchains = new Promise((resolve) => { finish = resolve; });
@@ -255,27 +283,39 @@ test("the broker forwards with the worker token and passes only lease fields", a
   }
 });
 
-test("rudder-burst end to end: upload, run, pull back, release", { skip: hasRsync ? false : "no rsync" }, async () => {
+for (const transport of ["private network", "Cloud relay"]) test(`rudder-burst over ${transport}: upload, run, pull back, release`, { skip: hasRsync ? false : "no rsync" }, async () => {
   const { builder, root, url } = await startBuilder();
   const repo = tmp("rudder-burst-repo-");
   fs.mkdirSync(path.join(repo, "src"));
   fs.mkdirSync(path.join(repo, "target"));
   fs.writeFileSync(path.join(repo, ".gitignore"), "target/\n");
   fs.writeFileSync(path.join(repo, "src", "input.txt"), "source\n");
+  const payload = randomBytes(750_000);
+  fs.writeFileSync(path.join(repo, "src", "input.bin"), payload);
   fs.writeFileSync(path.join(repo, "target", "stale"), "never uploaded\n");
   spawnSync("git", ["init", "-q"], { cwd: repo });
   const control = [];
+  const grantToken = transport === "Cloud relay" ? "external-test-grant" : TOKEN;
+  const relay = createBuilderRelay((builderId, leaseId, token) =>
+    builderId === "bld-t" && leaseId === "lease-1" && token === "external-test-grant" ? { url, token: TOKEN } : null);
+  let grantUrl = url;
   const controlServer = http.createServer((req, res) => {
+    if (relay.http(req, res)) return;
     control.push(`${req.method} ${req.url}`);
     req.resume();
     req.on("end", () => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(req.url.endsWith("/lease") ? { kind: "granted", leaseId: "lease-1", builderId: "bld-t", url, token: TOKEN, warm: true, cpus: 16, memoryMb: 32768 } : { ok: true }));
+      res.end(JSON.stringify(req.url.endsWith("/lease") ? { kind: "granted", leaseId: "lease-1", builderId: "bld-t", url: grantUrl, token: grantToken, warm: true, cpus: 16, memoryMb: 32768 } : { ok: true }));
     });
   });
+  controlServer.on("upgrade", (req, socket, head) => {
+    if (!relay.upgrade(req, socket, head)) socket.destroy();
+  });
   await new Promise((resolve) => controlServer.listen(0, "127.0.0.1", resolve));
+  const cloudUrl = `http://127.0.0.1:${controlServer.address().port}`;
+  if (transport === "Cloud relay") grantUrl = cloudUrl + "/api/rudder/builder-relay/bld-t/lease-1";
   const socketPath = path.join(fs.mkdtempSync("/tmp/rb-"), "b.sock");
-  const broker = startBurstBroker({ socketPath, cloudUrl: `http://127.0.0.1:${controlServer.address().port}`, homeId: "home-t", workerToken: "rdrw_x" });
+  const broker = startBurstBroker({ socketPath, cloudUrl, homeId: "home-t", workerToken: "rdrw_x" });
   await new Promise((resolve) => broker.once("listening", resolve));
   try {
     const run = (args) => new Promise((resolve) => {
@@ -286,13 +326,18 @@ test("rudder-burst end to end: upload, run, pull back, release", { skip: hasRsyn
       child.stderr.on("data", (chunk) => (stderr += chunk));
       child.on("close", (code) => resolve({ code, stdout, stderr }));
     });
-    const first = await run(["--pull", "target/out.txt", "--", "sh", "-c", "cat input.txt; ls ..; mkdir -p ../target && echo built > ../target/out.txt; exit 4"]);
+    if (transport === "Cloud relay") {
+      assert.equal((await fetch(grantUrl + "/v1/health", { headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+      assert.equal((await fetch(grantUrl.replace("lease-1", "expired") + "/v1/health", { headers: { authorization: "Bearer " + grantToken } })).status, 403);
+    }
+    const first = await run(["--pull", "target/out.txt", "--pull", "target/out.bin", "--", "sh", "-c", "cat input.txt; ls ..; mkdir -p ../target && cp input.bin ../target/out.bin && echo built > ../target/out.txt; exit 4"]);
     assert.equal(first.code, 4, first.stderr);
     assert.match(first.stdout, /^source\n/);
     assert.ok(!first.stdout.includes("stale"));
     const key = fs.readdirSync(root)[0];
     assert.ok(!fs.existsSync(path.join(root, key, "target", "stale")), ".gitignored paths stay home");
     assert.equal(fs.readFileSync(path.join(repo, "target", "out.txt"), "utf8"), "built\n");
+    assert.deepEqual(fs.readFileSync(path.join(repo, "target", "out.bin")), payload);
     assert.deepEqual(control, ["POST /api/rudder/workspace/home-t/builders/lease", "POST /api/rudder/workspace/home-t/builders/lease-1/release"]);
 
     // A second run deletes sources removed at home and (GNU rsync) keeps the
@@ -306,6 +351,8 @@ test("rudder-burst end to end: upload, run, pull back, release", { skip: hasRsyn
     builder.close();
     broker.close();
     controlServer.close();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(path.dirname(socketPath), { recursive: true, force: true });
   }
 });

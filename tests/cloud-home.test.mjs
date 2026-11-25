@@ -1026,6 +1026,7 @@ process.stdout.write(JSON.stringify({ current: null, harnesses: [{ id: "antigrav
         RUDDER_WORKER_TOKEN: workerToken,
         RUDDER_HOME_VOLUME: path.join(scratch, "volume"),
         RUDDER_HOME_TOOLCHAINS: "0",
+        RUDDER_REMOTE_CACHE: "0", // this supervisor fixture runs outside the worker image
         RUDDER_HOST_KIND: "external",
         RUDDER_HOST_IMAGE: "registry.fly.io/workers:old",
         // Its own temp dir: the supervisor binds its sockets there, and the

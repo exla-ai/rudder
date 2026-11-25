@@ -19,6 +19,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { FRAME, RSYNC_UPGRADE, buildDir, encodeFrame, tokenMatches } from "./burst-protocol.mjs";
+import { startCacheProxy } from "./cache-proxy.mjs";
+import { startBuck2Cache } from "./buck2-cache.mjs";
 
 const MAX_EXEC_BODY = 256 * 1024;
 
@@ -102,15 +104,25 @@ export function createBuilderServer({
     const extra = {};
     if (input.env && typeof input.env === "object") {
       for (const [name, value] of Object.entries(input.env)) {
-        // The home's PATH and HOME mean nothing here.
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && typeof value === "string" && name !== "PATH" && name !== "HOME") extra[name] = value;
+        // Paths and loopback services belong to the machine running the build.
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && typeof value === "string"
+          && !["PATH", "HOME", "RUDDER_BUCK2_CACHE_ADDRESS", "RUDDER_REMOTE_CACHE_URL", "RUDDER_REMOTE_CACHE_TOKEN"].includes(name)) extra[name] = value;
       }
     }
     res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store" });
+    res.flushHeaders();
+    // Keep quiet builds connected through the external home's HTTP proxy.
+    // Emit complete frames here, where stdout and stderr are also framed.
+    const heartbeat = setInterval(() => {
+      if (!res.writableNeedDrain) res.write(encodeFrame(FRAME.stdout, ""));
+    }, 15_000);
+    heartbeat.unref();
+    res.once("close", () => clearInterval(heartbeat));
     if (!toolchainsReady) {
       res.write(encodeFrame(FRAME.stderr, "rudder builder: installing toolchains (first boot)...\n"));
       await toolchains.catch(() => undefined);
     }
+    if (res.destroyed) return;
     const started = now();
     // Not a login shell: Debian's /etc/profile resets PATH and would drop the
     // volume's cargo and go.
@@ -315,6 +327,9 @@ export async function useToolCache(env, root, modulePath = "/opt/rudder/dist/too
 
 async function main() {
   const tokenSha256 = (process.env.RUDDER_BUILDER_TOKEN_SHA256 || "").trim();
+  const cacheToken = process.env.RUDDER_BUILDER_CACHE_TOKEN;
+  delete process.env.RUDDER_BUILDER_TOKEN_SHA256;
+  delete process.env.RUDDER_BUILDER_CACHE_TOKEN;
   if (!/^[0-9a-f]{64}$/.test(tokenSha256)) {
     console.error("rudder builder: RUDDER_BUILDER_TOKEN_SHA256 is required");
     process.exit(64);
@@ -329,20 +344,37 @@ async function main() {
     PATH: `${path.join(toolsDir, "bin")}:${path.join(home, ".cargo", "bin")}:${path.join(home, "go", "bin")}:${path.join(home, ".local", "bin")}:${process.env.PATH || ""}`,
     CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL || "1",
   };
-  for (const secret of ["RUDDER_BUILDER_TOKEN_SHA256"]) delete env[secret];
+  const builderId = process.env.RUDDER_BUILDER_ID;
+  const cacheProxy = startCacheProxy({
+    cloudUrl: process.env.RUDDER_CLOUD_URL, builderId,
+    workerToken: cacheToken,
+  });
+  const proxy = await cacheProxy.ready;
+  const buck2 = await startBuck2Cache({
+    home, cacheDir: path.join(volume, "cache", "buck2"), proxy,
+    log: (line) => console.error("rudder builder:", line),
+  });
+  env.RUDDER_REMOTE_CACHE_URL = proxy.url;
+  env.RUDDER_REMOTE_CACHE_TOKEN = proxy.token;
+  env.RUDDER_BUCK2_CACHE_ADDRESS = buck2.address;
+  const stop = async () => {
+    await buck2.close();
+    await cacheProxy.close();
+    process.exit(0);
+  };
   const port = Number(process.env.RUDDER_BUILDER_PORT || 7420);
   const builder = createBuilderServer({
     root: path.join(volume, "build"),
     tokenSha256,
     idleSeconds: Number(process.env.RUDDER_BUILDER_IDLE_SECONDS || 300),
     env,
-    builderId: process.env.RUDDER_BUILDER_ID || "",
+    builderId, onIdle: stop,
     toolchains: (process.env.RUDDER_BUILDER_TOOLCHAINS === "0" ? Promise.resolve() : ensureToolchains(home, toolsDir, env))
       .then(() => useToolCache(env, path.join(volume, "tool-cache"))),
   });
   // Fly's private network is IPv6; nothing listens on a public address.
   builder.server.listen(port, "::", () => console.error(`rudder builder: ${process.env.RUDDER_BUILDER_ID || ""} listening on [::]:${port}`));
-  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => process.exit(0));
+  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { builder.close(); void stop(); });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { fabricStoreTemplate, validateFabricCacheMissUpdate } from "../infra/fabric-store.mjs";
+import { fabricStoreTemplate, validateRemoteBuildCacheUpdate } from "../infra/fabric-store.mjs";
 
 const { values } = parseArgs({ options: { apply: { type: "boolean" }, "update-policy": { type: "boolean" }, "module-root": { type: "string" }, account: { type: "string", default: "597088032164" }, region: { type: "string", default: "us-east-1" } } });
 const require = createRequire(path.resolve(values["module-root"] ?? "cloud", "package.json"));
@@ -50,20 +50,20 @@ if (!existingStack) {
   const previous = typeof saved.TemplateBody === "string" ? JSON.parse(saved.TemplateBody) : saved.TemplateBody;
   if (JSON.stringify(previous) !== JSON.stringify(template)) {
     if (!values["update-policy"]) throw new Error("Existing stack differs; create and review an explicit change set before changing retained infrastructure");
-    validateFabricCacheMissUpdate(previous, template);
-    const ChangeSetName = `rudder-fabric-cache-misses-${Date.now()}`;
-    const created = await cfn.send(new CreateChangeSetCommand({ StackName, ChangeSetName, ChangeSetType: "UPDATE", TemplateBody, Capabilities: ["CAPABILITY_NAMED_IAM"], Description: "Allow the dedicated cache control role to distinguish missing S3 keys from access denial" }));
+    validateRemoteBuildCacheUpdate(previous, template);
+    const ChangeSetName = `rudder-remote-build-cache-${Date.now()}`;
+    const created = await cfn.send(new CreateChangeSetCommand({ StackName, ChangeSetName, ChangeSetType: "UPDATE", TemplateBody, Capabilities: ["CAPABILITY_NAMED_IAM"], Description: "Grant the control role and its boundary access to account build-cache objects" }));
     const deadline = Date.now() + 120_000;
     for (;;) {
       const proposed = await cfn.send(new DescribeChangeSetCommand({ StackName, ChangeSetName }));
       if (proposed.Status === "CREATE_COMPLETE") {
         const changes = (proposed.Changes ?? []).map(({ ResourceChange }) => ({ resource: ResourceChange.LogicalResourceId, action: ResourceChange.Action, replacement: ResourceChange.Replacement }));
-        if (!changes.length || changes.some((change) => !["WriterBoundary", "FabricRole", "ContentPolicy"].includes(change.resource) || change.action !== "Modify" || change.replacement !== "False")) throw new Error("Cache-miss change set contains unexpected resource actions or replacement");
+        if (!changes.length || changes.some((change) => !["WriterBoundary", "FabricRole", "ContentPolicy"].includes(change.resource) || change.action !== "Modify" || change.replacement !== "False")) throw new Error("Remote build cache change set contains unexpected resource actions or replacement");
         console.log(JSON.stringify({ changeSetId: created.Id, status: "REVIEWED", changes }));
         await cfn.send(new ExecuteChangeSetCommand({ StackName, ChangeSetName }));
         break;
       }
-      if (proposed.Status === "FAILED" || Date.now() > deadline) throw new Error("Cache-miss change set did not become executable");
+      if (proposed.Status === "FAILED" || Date.now() > deadline) throw new Error("Remote build cache change set did not become executable");
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }

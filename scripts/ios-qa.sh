@@ -21,7 +21,7 @@ done
 echo "run $run"
 code=0
 gh run watch "$run" --exit-status --interval 20 > /dev/null || code=$?
-gh run view "$run" --log 2>/dev/null | grep -E "offstage:|screenshots|failed:|error:" | sed 's/^.*Z //' | tail -20 || true
+gh run view "$run" --log 2>/dev/null | grep "on an Offstage Mac" | grep -v "##\[group\]\|\[36;1m" | sed 's/^.*Z //' | tail -20 || true
 mkdir -p "$out"
 gh run download "$run" --name ios-qa-sealed --dir "$key/sealed"
 openssl pkeyutl -decrypt -inkey "$key/private.pem" -in "$key/sealed/pass.enc" -out "$key/pass"

@@ -46,7 +46,6 @@ case "$stage" in
     : "${QA_PAIR_CODE:?QA_PAIR_CODE is not set}" "${QA_SERVER:?QA_SERVER is not set}"
     udid=$(cat "$out/udid")
     xcrun simctl bootstatus "$udid" -b > /dev/null
-    open "$DEVELOPER_DIR/Applications/Simulator.app" --args -CurrentDeviceUDID "$udid"
     xcrun simctl ui "$udid" appearance dark
     xcrun simctl uninstall "$udid" dev.viraat.rudder 2>/dev/null || true
     rm -f "$out/clickthrough.mp4"

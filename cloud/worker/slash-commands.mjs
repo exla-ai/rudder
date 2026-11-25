@@ -49,6 +49,12 @@ const CLAUDE_MODEL_COMMANDS = new Set(["model", "effort"]);
 // The chat shows what these do itself (/goal: the header's goal chip), so
 // they never bring up the terminal view.
 const CLAUDE_CHAT_COMMANDS = new Set(["goal"]);
+// These open UI in the TUI whatever follows them: a picker, a form, a wizard
+// or an answer drawn over the prompt that the session never records. Every
+// other command that opens UI does so only bare: given its argument
+// (/rename name, /fast on, /add-dir path, /color red) it applies it and
+// prints one line, which the chat shows, so the terminal stays closed.
+const CLAUDE_TUI_WITH_ARGS = new Set(["auto-mode-setup", "btw", "bug", "cd", "context", "copy", "feedback", "help", "ide", "import", "mcp", "resume"]);
 
 /**
  * Command objects in a chunk of Claude Code's bundled JavaScript (read as
@@ -523,7 +529,7 @@ export function buildClaudeCommands({ menu, headless, binary }) {
       // that names its arguments: that one waits for them.
       args: argNames ? "required" : null,
       opens,
-      ...(opens === "terminal" ? { when: "always" } : {}),
+      ...(opens === "terminal" && CLAUDE_TUI_WITH_ARGS.has(name) ? { when: "always" } : {}),
       aliases: [...new Set([...(twin?.aliases ?? []), ...(variants ?? []).flatMap((v) => v.aliases)])],
     };
   });

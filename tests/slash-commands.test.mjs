@@ -226,6 +226,8 @@ test("Claude rows get the inserted name, argument rule and what they open", () =
   const binary = new Map([
     ["resume", [{ type: "local-jsx", argumentHint: "[session ID]", aliases: ["continue"] }]],
     ["model", [{ type: "local-jsx", argumentHint: "[model]", aliases: [] }]],
+    ["rename", [{ type: "local-jsx", argumentHint: "[name]", aliases: [] }]],
+    ["goal", [{ type: "local-jsx", argumentHint: "[<condition> | clear]", aliases: [] }]],
     ["compact", [{ type: "local", headless: true, argumentHint: "<instructions>", aliases: [] }]],
     ["context", [{ type: "local-jsx", aliases: [] }, { type: "local", headless: true, aliases: [] }]],
   ]);
@@ -237,6 +239,8 @@ test("Claude rows get the inserted name, argument rule and what they open", () =
   const menu = [
     { display: "resume", description: "Resume a previous session" },
     { display: "model", description: "Switch model (currently Opus)" },
+    { display: "rename", description: "Rename the current conversation" },
+    { display: "goal", description: "Set a goal Claude checks before stopping" },
     { display: "compact", description: "Free up context" },
     { display: "context", description: "My own context command (project)" },
     { display: "greet", description: "Greet (project) (arguments: who, when)" },
@@ -245,6 +249,10 @@ test("Claude rows get the inserted name, argument rule and what they open", () =
   const byName = new Map(buildClaudeCommands({ menu, headless, binary }).map((c) => [c.name, c]));
   assert.deepEqual(byName.get("resume"), { name: "resume", description: "Resume a previous session", hint: "[session ID]", args: null, opens: "terminal", when: "always", aliases: ["continue"] });
   assert.equal(byName.get("model").opens, "model");
+  // Given its argument a command applies it and prints a line; only bare does it open UI.
+  assert.deepEqual([byName.get("rename").opens, byName.get("rename").when], ["terminal", undefined]);
+  // The chat's goal chip shows the goal: never the terminal.
+  assert.equal(byName.get("goal").opens, null);
   assert.equal(byName.get("compact").opens, null);
   assert.equal(byName.get("context").opens, null, "a project command that shares a built-in's name is the project's");
   assert.deepEqual([byName.get("greet").args, byName.get("greet").hint], ["required", "<who>"]);

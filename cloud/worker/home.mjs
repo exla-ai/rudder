@@ -1086,7 +1086,7 @@ async function handleRpc(method, params) {
     // A message the dashboard refused is an answer about the message, not a
     // failed call: the app keeps it on its bubble, with the receipt's `code`
     // (menu_open, permission_prompt, ...) saying what it waited on.
-    const sent = await deliver(project, { kind, taskId: runId, instruction: text });
+    const sent = await deliver(project, { kind, taskId: runId, instruction: text, requestId: params.requestId });
     return sent.status === "failed" ? { ok: false, status: "refused", error: sent.error, code: sent.code } : sent;
   }
   if (method === "withdraw") {
@@ -1094,7 +1094,7 @@ async function handleRpc(method, params) {
     return await withdrawSteer(project.dir, String(params.requestId || ""));
   }
   if (method === "task") {
-    return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });
+    return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || ""), requestId: params.requestId });
   }
   if (method === "keys") {
     return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
@@ -1715,8 +1715,10 @@ async function steer(project, request) {
 }
 
 // One request and the dashboard's answer: delivered, failed with its reason,
-// or queued with the id its receipt will carry.
-async function deliver(project, { kind, taskId, instruction }) {
+// or queued with the id its receipt will carry. `requestId` is the app's id
+// for a message or new task it may send again: the same id is queued once
+// (steer-inbox.mjs queueSteer) and every send of it gets the one answer.
+async function deliver(project, { kind, taskId, instruction, requestId: asked }) {
   if (!instruction.trim()) {
     throw new Error("message is empty");
   }
@@ -1731,7 +1733,7 @@ async function deliver(project, { kind, taskId, instruction }) {
   const startsTurn = (kind === "steer" && !instruction.trim().startsWith("/")) || kind === "opencode-prompt";
   const record = startsTurn && typeof taskId === "string" && /^[A-Za-z0-9._-]+$/.test(taskId) ? readRunJson(path.join(project.dir, ".rudder", "runs", taskId, "run.json")) : null;
   const idle = !!record && record.status !== "running";
-  const requestId = queueSteer(project.dir, { kind, taskId, instruction });
+  const requestId = queueSteer(project.dir, { kind, taskId, instruction, requestId: asked });
   const receipt = await waitSteerReceipt(project.dir, requestId, 12_000);
   if (receipt?.status === "delivered") {
     if (idle) {

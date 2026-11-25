@@ -10,6 +10,7 @@ import { h, icon, setText } from "/app/render.js";
 import { api, coarse, track } from "/app/core.js";
 import { modelChip } from "/app/model-picker.js";
 import { UpdateNow } from "/app/home-update.js";
+import { sendAttempts } from "/app/pending.js";
 
 export const ALL_PATH = "/app/all";
 export const allAgentPath = (ws, run) => `${ALL_PATH}/${encodeURIComponent(ws)}/${encodeURIComponent(run)}`;
@@ -240,9 +241,13 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
     return project?.dashboard === "running";
   };
 
+  // A first message that got no answer may have gone in: sent again, it is
+  // the same request, so it cannot start a second chat.
+  const starts = sendAttempts();
   async function start(text) {
     if (!text) return false;
     let sent = false;
+    const requestId = starts.id(text);
     try {
       say("Starting the chat…");
       const ws = await within(ensure(), OPEN_MS, "The cloud machine did not open the All agents chat.");
@@ -250,13 +255,15 @@ export function AllAgentsScreen({ fresh, store, createComposer, navigate, goBack
       await until(projectReady, READY_MS, "The cloud machine did not finish setting up the All agents chat.");
       waitingFor = new Set(coordinatorAgents(store.state).map((a) => a.id));
       // `/main`: one agent in the hidden project's own checkout, on its model.
-      await within(api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/main ${text}` } }), OPEN_MS, "The cloud machine did not take the message.");
+      await within(api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/main ${text}`, requestId } }), OPEN_MS, "The cloud machine did not take the message.");
       sent = true;
       track("all_agents_started", { examples: EXAMPLES.includes(text) });
       // update() opens the new chat (and marks the page gone) once the state shows it.
       await until(() => gone, CHAT_MS, "The chat did not open on the cloud machine.");
+      starts.settle();
       return true;
     } catch (err) {
+      starts.settle(err);
       waitingFor = null;
       // Left the page: the draft stays unless the message went in.
       if (gone) return sent;

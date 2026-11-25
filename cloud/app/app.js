@@ -32,7 +32,7 @@ import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.j
 import { COMPACTING_HTML, compactHasDetail, compactHtml, paintCompacting, paintCompaction } from "/app/compaction.js";
 import { mountSubagentTray } from "/app/subagent-tray.js";
 import { applyAgentEdits, branchAgent, closeAgent, editInPlace, isMenuKey, isRenaming, pinAgent, renameAgent, rowMenu, showAgentMenu } from "/app/agent-menu.js";
-import { isCommand, leavesRecord, sentAfter, settlePending, withAttachments } from "/app/pending.js";
+import { isCommand, leavesRecord, sendAttempts, sentAfter, settlePending, unanswered, withAttachments } from "/app/pending.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { openTour, tourDue } from "/app/tutorial.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
@@ -3791,6 +3791,8 @@ function ProjectScreen(ws) {
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
 
+  // A start that got no answer may have gone in: sent again, it is the same request.
+  const starts = sendAttempts();
   const composer = createComposer({
     placeholder: "Start a new task",
     draftKey: `task:${ws}`,
@@ -3802,13 +3804,15 @@ function ProjectScreen(ws) {
         return true;
       }
       if (!text) { toast("Say what the agent should do with the files"); return false; }
+      const requestId = starts.id([text, ...files.map((f) => `${f.file.name}:${f.file.size}`)].join("\n"));
       try {
         const paths = [];
         for (const [i, f] of files.entries()) {
           if (files.length) toast(files.length > 1 ? `Uploading ${i + 1} of ${files.length}` : "Uploading");
           paths.push(await uploadAttachment(ws, f.file));
         }
-        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths) } });
+        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths), requestId } });
+        starts.settle();
         toast(text.startsWith("/") ? "Sent to the dashboard" : "Task started");
         if (!text.startsWith("/")) track("task_started", { source: "app", files: files.length });
         else if (/^\/model\s/i.test(text)) syncModel();
@@ -3816,7 +3820,7 @@ function ProjectScreen(ws) {
         const run = res?.run || res?.runId;
         if (run) navigate(agentPath(ws, run));
         return true;
-      } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); return false; }
+      } catch (err) { starts.settle(err); if (err.status !== 401) toast(err.message, { error: true }); return false; }
     },
   });
   el.appendChild(composer.el);
@@ -4981,7 +4985,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     suggestion?.sent();
     const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })), interrupt };
     item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
-    Object.assign(item, { ts: Date.now(), error: null, code: null, requestId: null, busyAt: null });
+    // A send that got no answer may have gone in: its retry is the same
+    // request, which the cloud machine takes once (pending.js unanswered).
+    const requestId = item.unanswered ? item.requestId : crypto.randomUUID();
+    Object.assign(item, { ts: Date.now(), error: null, code: null, requestId, unanswered: false, busyAt: null });
     // Only a user message the transcript adds after this point can be this one (pending.js).
     item.after = sentAfter(store.transcripts.get(key)?.messages);
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
@@ -4996,14 +5003,15 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       item.state = "sending";
       paint();
       const wasWorking = isRunning(agentNow()?.status || store.transcripts.get(key)?.status);
-      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt } });
+      const res = await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: withAttachments(item.text, (item.files || []).map((f) => f.path)), interrupt: !!item.interrupt, requestId } });
       if (res.status === "refused") Object.assign(item, { state: "failed", error: res.error, code: res.code });
       else if (res.status === "delivered" && ranCommand(item)) pollState();
       else {
         item.state = res.status === "queued" ? "queued" : wasWorking && !item.interrupt ? "waiting" : "sent";
         pollSoon();
       }
-      item.requestId = res.requestId ?? null;
+      // The id the cloud machine queued it under, which its receipt carries.
+      if (res.requestId) item.requestId = res.requestId;
       // The question card tracks a typed answer through the same receipts.
       if (res?.answered) {
         localAnswerSubmission = res;
@@ -5012,7 +5020,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
       }
       setTimeout(() => loadTranscript({ replace: true }), 1200);
     } catch (err) {
-      Object.assign(item, { state: "failed", error: err.message, code: null });
+      Object.assign(item, { state: "failed", error: err.message, code: null, unanswered: unanswered(err) });
     }
     paint();
   }

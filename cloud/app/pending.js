@@ -110,6 +110,33 @@ export function settlePending(list, messages, now, busy) {
   });
 }
 
+/**
+ * Whether a failed send got no answer from the cloud machine: the connection
+ * dropped, the phone gave up waiting, or the server said 503 or 504. The
+ * message or new task may have gone in all the same. Any 4xx is an answer.
+ */
+export const unanswered = (err) => !(err?.status >= 400 && err.status < 500);
+
+/**
+ * The request id of what the user sends from one box. A send that got no
+ * answer keeps its id, so sending the same thing again is the same request
+ * and the cloud machine takes it once (worker/steer-inbox.mjs queueSteer).
+ * `sig` says what is being sent; `settle` takes the error, or nothing once
+ * it went in.
+ */
+export function sendAttempts() {
+  let attempt = null;
+  return {
+    id(sig) {
+      if (attempt?.sig !== sig) attempt = { sig, id: crypto.randomUUID() };
+      return attempt.id;
+    },
+    settle(err) {
+      if (!err || !unanswered(err)) attempt = null;
+    },
+  };
+}
+
 /** Whether a message is a slash command, which the transcript may not record. */
 export const isCommand = (text) => commandOf(text) !== null;
 

@@ -6712,6 +6712,19 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
   ws.on("error", () => undefined);
 }
 
+// The app's id for one message or new task, the same every time it sends it
+// again after no answer (a dropped connection, a 503 or 504): the home queues
+// that id once (worker/steer-inbox.mjs queueSteer), so the retry cannot start
+// a second agent or type the message twice.
+function retryId(body: Json | undefined): { requestId?: string } {
+  const requestId = stringField(body, "requestId");
+  if (requestId === undefined) return {};
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId)) {
+    throw badRequest("requestId must be a UUID");
+  }
+  return { requestId };
+}
+
 async function homeRpc(homeId: string, method: string, params: JsonRecord, timeoutMs = HOME_RPC_TIMEOUT_MS, signal?: AbortSignal): Promise<Json> {
   const control = homeControls.get(homeId);
   if (!isOpen(control)) {
@@ -8096,6 +8109,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
       interrupt: typeof body === "object" && body !== null && !Array.isArray(body) && body.interrupt === true,
+      ...retryId(body),
     });
     captureProductEvent(account.accountId, "message_sent", { platform: requestPlatform(req) });
     sendJson(res, 200, sent);
@@ -8121,7 +8135,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (!text) {
       throw badRequest("text is required");
     }
-    sendJson(res, 200, await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000) }));
+    sendJson(res, 200, await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000), ...retryId(body) }));
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/app/screen") {

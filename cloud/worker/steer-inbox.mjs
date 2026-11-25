@@ -9,11 +9,23 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-/** Drop one request into the inbox; returns its request id. */
-export function queueSteer(repoDir, { kind, taskId, instruction }) {
-  const requestId = randomUUID();
+const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+/**
+ * Drop one request into the inbox; returns its request id. A sender that may
+ * ask again (the app, when its send got no answer) names the id and repeats
+ * it: a request the inbox still holds, or one the dashboard has claimed or
+ * answered (its receipt), is not queued a second time, so one message or new
+ * task reaches the dashboard once however often it is sent.
+ */
+export function queueSteer(repoDir, { kind, taskId, instruction, requestId = randomUUID() }) {
+  if (typeof requestId !== "string" || !REQUEST_ID.test(requestId)) throw new Error("bad request id");
   const inbox = path.join(repoDir, ".rudder", "steer");
   fs.mkdirSync(inbox, { recursive: true });
+  if (fs.existsSync(path.join(repoDir, ".rudder", "steer-receipts", `${requestId}.json`))
+    || fs.readdirSync(inbox).some((name) => name.endsWith(`-${requestId}.json`))) {
+    return requestId;
+  }
   const safeId = (taskId || "conductor").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 64) || "conductor";
   const name = `${String(Date.now()).padStart(13, "0")}-${String(process.hrtime.bigint()).padStart(20, "0")}-${safeId}-${requestId}.json`;
   const file = path.join(inbox, name);
@@ -55,8 +67,6 @@ export function waitSteerReceipt(repoDir, requestId, timeoutMs) {
     check();
   });
 }
-
-const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 /**
  * Resolves true once the agent's run.json says "running", or false after

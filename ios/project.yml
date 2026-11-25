@@ -21,7 +21,9 @@ targets:
   Rudder:
     type: application
     platform: iOS
-    scheme: {}
+    scheme:
+      testTargets:
+        - RudderUITests
     sources:
       - path: App
     settings:
@@ -32,3 +34,17 @@ targets:
         # Info.plist lists all four for iPad and keeps the iPhone in portrait.
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: App/Info.plist
+
+  # The simulator click-through (ios/scripts/qa.sh, the rudder-ios-qa skill).
+  RudderUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: Rudder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.viraat.rudder.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Rudder

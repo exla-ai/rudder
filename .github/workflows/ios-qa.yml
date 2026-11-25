@@ -1,0 +1,62 @@
+name: iOS click-through
+
+# The iPhone app clicked through on an Offstage Mac's simulator, signed in as
+# the account behind RUDDER_QA_TOKEN (.offstage/ios-qa.mjs). This runner only
+# drives the Offstage API. This repository is public and the video shows a
+# real account, so the output is uploaded encrypted to the public key the
+# caller passes; only the caller can open it. The rudder-ios-qa skill has the
+# commands.
+on:
+  workflow_dispatch:
+    inputs:
+      public_key:
+        description: "base64 of an RSA public key (PEM) to encrypt the output to"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  clickthrough:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the Offstage SDK
+        run: |
+          sdk="$RUNNER_TEMP/offstage-cloud-0.3.1.tgz"
+          curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
+          echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
+          npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
+      - name: Click through on an Offstage Mac
+        id: qa
+        continue-on-error: true
+        env:
+          OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
+          OFFSTAGE_API_URL: https://api.offstage.cloud
+          RUDDER_QA_TOKEN: ${{ secrets.RUDDER_QA_TOKEN }}
+        run: node .offstage/ios-qa.mjs
+      - name: Encrypt the output
+        env:
+          PUBLIC_KEY: ${{ inputs.public_key }}
+        run: |
+          printf '%s' "$PUBLIC_KEY" | base64 --decode > "$RUNNER_TEMP/public.pem"
+          openssl rand -hex 32 > "$RUNNER_TEMP/pass"
+          mkdir sealed
+          tar -czf - -C offstage-out ios-qa | openssl enc -aes-256-cbc -pbkdf2 -pass "file:$RUNNER_TEMP/pass" -out sealed/out.tgz.enc
+          openssl pkeyutl -encrypt -pubin -inkey "$RUNNER_TEMP/public.pem" -in "$RUNNER_TEMP/pass" -out sealed/pass.enc
+          rm "$RUNNER_TEMP/pass"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-qa-sealed
+          path: sealed/
+          retention-days: 3
+      - name: Result
+        if: steps.qa.outcome != 'success'
+        run: exit 1

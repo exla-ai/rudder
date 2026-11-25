@@ -31,7 +31,10 @@ final class ClickThrough: XCTestCase {
         var misses = 0
         var shots = 0
 
+        continueAfterFailure = true
         let app = XCUIApplication()
+        // iOS asks about notifications over the first screen: answer it, or no tap lands.
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.launchArguments = ["-pairCode", code, "-RudderServerURL", server]
         app.launch()
 
@@ -44,6 +47,8 @@ final class ClickThrough: XCTestCase {
 
         for (index, step) in steps.enumerated() {
             let name = "step \(index + 1) \(step)"
+            let refuse = springboard.buttons["Don\u{2019}t Allow"]
+            if refuse.exists { refuse.tap() }
             if let text = step["waitFor"] as? String {
                 let timeout = (step["timeout"] as? NSNumber)?.doubleValue ?? 20
                 if find(text, timeout: timeout) == nil { misses += 1; log.append("MISS \(name)") } else { log.append("ok \(name)") }

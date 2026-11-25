@@ -1300,6 +1300,9 @@ input.rename::selection { background: color-mix(in srgb, var(--accent) 26%, tran
 .sa-state { display: inline-flex; align-items: center; gap: 6px; color: var(--c); font-weight: 600; }
 .sa-state .dot { width: 7px; height: 7px; }
 .sa-facts { font-variant-numeric: tabular-nums; }
+/* The model behind its harness's logo, sized to the line's small text. */
+.sa-model { white-space: nowrap; }
+.sa-model .harness-logo { width: 12px; height: 12px; margin-right: 4px; vertical-align: -1.5px; flex: none; }
 .sa-line { margin-top: 2px; font-family: var(--font); font-size: 13.5px; color: var(--ink-2); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .sa-line[hidden] { display: none; }
 .sa-body { padding: 10px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }

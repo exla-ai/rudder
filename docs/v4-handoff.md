@@ -14,8 +14,11 @@ and the app. Its workspace starts from a copy of the parent's files,
 uncommitted edits included (overlay forks are private to each agent's mount
 namespace, so it cannot read the parent's path). At each helper turn end the
 dashboard reads its final message from the backend's session record into
-`.rudder/helpers/<id>.json`, which `agents_result` returns; a failed turn (a
-usage limit) lands there as an error reply. The rule in the prompts: send a helper file paths,
+`.rudder/helpers/<id>.json`; a failed turn (a usage limit) lands there as an
+error reply. Each reply wakes the parent: it is queued as a steer and arrives
+in the parent's chat as a message from Rudder (first 16,000 bytes), so the
+parent never waits in a tool call and its row reads "waiting on 1 helper"
+meanwhile. `agents_result` only reads replies again, in full. The rule in the prompts: send a helper file paths,
 never pasted contents (`agy -p` keeps about 200 KB of one message). Legacy
 owners now attach a helpers-only `rudder_agents` server. Antigravity and
 OpenCode parents get no per-run MCP, so they cannot start helpers yet.

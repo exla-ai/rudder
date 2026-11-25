@@ -6476,8 +6476,9 @@ impl App {
                         if let Some(run) = self.agents.iter_mut().find(|run| run.id == result.run_id) {
                             // A row waiting on its background work shows what is
                             // still out, as it changes.
-                            if run.wait_signal == Some(WaitSignal::Background) && run.background != result.work {
-                                run.background = result.work;
+                            let work = background::BackgroundWork { helpers: run.background.helpers, ..result.work };
+                            if run.wait_signal == Some(WaitSignal::Background) && run.background != work {
+                                run.background = work;
                                 let _ = save_native_run_record(&self.cwd, run);
                                 self.dirty = true;
                             }
@@ -22861,10 +22862,21 @@ What to do\n\
         background.sort_unstable();
         let background: HashSet<_> = background.into_iter().take(BACKGROUND_DRAINS_PER_TICK)
             .map(|(_, index)| index).collect();
+        // Helpers still working, by the agent that started them (helpers.rs):
+        // that agent's finished turn waits on their replies.
+        let mut working_helpers: HashMap<String, usize> = HashMap::new();
+        for run in &self.agents {
+            if let Some(parent) = &run.parent_run {
+                if run.status == AgentStatus::Running && run.wait_signal.is_none() {
+                    *working_helpers.entry(parent.clone()).or_default() += 1;
+                }
+            }
+        }
         for (index, run) in self.agents.iter_mut().enumerate() {
             // This lifecycle is consumed only by managed_app's authenticated
             // helper channel. Legacy exit/hooks cannot certify its checkpoint.
             let mut changed = false;
+            let helpers = working_helpers.get(&run.id).copied().unwrap_or(0);
             let mut worker_gone_exit: Option<u32> = None;
             let is_orchestrator = run.is_orchestrator();
             // What run.json says this row is waiting on (the phone's "needs
@@ -23190,6 +23202,10 @@ What to do\n\
                 // The work a finished turn left running has all ended, and for a
                 // minute no notification has started a turn: the agent is done
                 // (settled below, with no signal pending).
+                if run.wait_signal == Some(WaitSignal::Background) && run.background.helpers != helpers {
+                    run.background.helpers = helpers;
+                    changed = true;
+                }
                 let background_over = run.wait_signal == Some(WaitSignal::Background)
                     && !run.background.any()
                     && run.last_output_at.elapsed() >= IDLE_WITHOUT_SIGNAL
@@ -23292,7 +23308,10 @@ What to do\n\
                                 } else {
                                     signals::clear_signal(&run.id);
                                     run.wait_signal = None;
-                                    let work = scan.map(|scan| scan.work).unwrap_or_default();
+                                    let work = background::BackgroundWork {
+                                        helpers,
+                                        ..scan.map(|scan| scan.work).unwrap_or_default()
+                                    };
                                     if work.any() {
                                         // The turn ended, the work it started did
                                         // not: each piece restarts the agent when

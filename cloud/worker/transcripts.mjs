@@ -434,11 +434,15 @@ function showUserTask(messages, record) {
 // with the prompt behind it, not as the user's words: the turn a session
 // resumes on after the home restarted to update (native main.rs
 // HOME_BOOT_CONTINUE_PROMPT) or after a move off a machine did not finish,
+// a helper's reply to the agent that started it,
 // and the brief a migrated or restored chat starts a fresh session from
 // (run.json `migration.freshPrompt`), which goes in framed as a task.
 const RUDDER_PROMPTS = [
   [/^Rudder restarted this machine to update it\. Continue the task where you left off\./, "Rudder restarted this machine to update it"],
   [/^The move off this machine did not finish\. Continue the original task here from the existing workspace: /, "Rudder resumed this chat here after a move did not finish"],
+  // A helper's reply, sent to the agent that started it (native helpers.rs wake_message).
+  [/^Rudder: your helper \S+ \([^)]*\) replied\./, "A helper replied"],
+  [/^Rudder: your helper \S+ \([^)]*\) sent no reply: /, "A helper sent no reply"],
 ];
 
 function rudderPrompt(message, record) {

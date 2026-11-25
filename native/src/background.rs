@@ -51,16 +51,19 @@ pub(crate) struct BackgroundWork {
     pub(crate) agents: usize,
     /// Agent-team teammates that are working.
     pub(crate) teammates: usize,
+    /// Helpers it started with agents_start that are still working
+    /// (helpers.rs). Each one's reply starts its next turn.
+    pub(crate) helpers: usize,
 }
 
 impl BackgroundWork {
     pub(crate) fn any(self) -> bool {
-        self.shells + self.agents + self.teammates > 0
+        self.shells + self.agents + self.teammates + self.helpers > 0
     }
 
     /// The row's status: "waiting on 2 helpers and 1 command".
     pub(crate) fn label(self) -> String {
-        let helpers = self.agents + self.teammates;
+        let helpers = self.agents + self.teammates + self.helpers;
         let plural = |count: usize, word: &str| {
             format!("{count} {word}{}", if count == 1 { "" } else { "s" })
         };
@@ -78,7 +81,7 @@ impl BackgroundWork {
     pub(crate) fn to_json(self) -> serde_json::Value {
         serde_json::json!({
             "shells": self.shells,
-            "agents": self.agents,
+            "agents": self.agents + self.helpers,
             "teammates": self.teammates,
         })
     }
@@ -224,6 +227,7 @@ impl TranscriptTasks {
             shells: count(TaskKind::Shell),
             agents: count(TaskKind::Agent),
             teammates: 0,
+            helpers: 0,
         }
     }
 }
@@ -415,14 +419,14 @@ mod tests {
         // A background Bash and an async subagent are out when the first turn ends.
         assert_eq!(
             work_through("stop-1", since),
-            BackgroundWork { shells: 1, agents: 1, teammates: 0 }
+            BackgroundWork { shells: 1, agents: 1, teammates: 0, helpers: 0 }
         );
         // The shell's notification closes it as soon as it is queued; the
         // subagent and a new Monitor are still out. A persistent Monitor
         // watches for the whole session and is not waited on.
         assert_eq!(
             work_through("stop-2", since),
-            BackgroundWork { shells: 1, agents: 1, teammates: 0 }
+            BackgroundWork { shells: 1, agents: 1, teammates: 0, helpers: 0 }
         );
         // A Monitor event (no status) closes nothing; the subagent's
         // notification (a queued_command attachment) closes it; TaskStop
@@ -432,7 +436,7 @@ mod tests {
         // Bash that moved to the background counts like any other.
         assert_eq!(
             work_through("stop-4", since),
-            BackgroundWork { shells: 1, agents: 0, teammates: 0 }
+            BackgroundWork { shells: 1, agents: 0, teammates: 0, helpers: 0 }
         );
         assert_eq!(work_through("stop-5", since), BackgroundWork::default());
     }
@@ -492,7 +496,7 @@ mod tests {
             tasks: TranscriptTasks::default(),
         };
         tracker.read_new_lines();
-        assert_eq!(tracker.tasks.work(), BackgroundWork { shells: 1, agents: 1, teammates: 0 });
+        assert_eq!(tracker.tasks.work(), BackgroundWork { shells: 1, agents: 1, teammates: 0, helpers: 0 });
         let read = tracker.offset;
         assert_eq!(read as usize, head.len() + 1, "the partial line is left");
         std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
@@ -504,10 +508,11 @@ mod tests {
 
     #[test]
     fn labels_name_helpers_and_commands() {
-        let work = |shells, agents, teammates| BackgroundWork { shells, agents, teammates };
+        let work = |shells, agents, teammates| BackgroundWork { shells, agents, teammates, helpers: 0 };
         assert_eq!(work(0, 1, 2).label(), "waiting on 3 helpers");
         assert_eq!(work(1, 0, 0).label(), "waiting on 1 background command");
         assert_eq!(work(2, 1, 0).label(), "waiting on 1 helper and 2 commands");
         assert_eq!(work(0, 0, 0).label(), "waiting on background work");
+        assert_eq!(BackgroundWork { helpers: 1, ..work(0, 1, 0) }.label(), "waiting on 2 helpers");
     }
 }

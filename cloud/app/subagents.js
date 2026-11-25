@@ -14,6 +14,7 @@
 
 import { icon, toolIcon, h, setText, reconcile, renderMarkdown, markdownReady } from "/app/render.js";
 import { paintToolFiles, paintToolOutput, toolFilesSig } from "/app/tool-files.js";
+import { harnessLogo } from "/app/harness-logos.js";
 
 export const SUBAGENT_STATUS = {
   running: { label: "Running", cls: "s-working", live: true },
@@ -110,6 +111,30 @@ export function subagentFacts(s, now) {
   return { st, title, who, model: s.model || "", time: elapsed == null ? "" : duration(elapsed), calls };
 }
 
+/**
+ * A card's facts on one line, "Explore · [logo] Opus 5.5 · 1m 05s · 3 tool
+ * calls": the model sits behind its harness's logo (harness-logos.js), so a
+ * chat that mixes Claude, Codex and Gemini helpers reads at a glance. `lead`
+ * starts the line with a separator, after text that comes before it.
+ */
+export function paintFacts(el, s, parts, lead = false) {
+  const model = s.model || "";
+  const logo = model ? harnessLogo(s.backend) : "";
+  const sig = [lead, logo ? s.backend : "", ...parts].join("|");
+  if (el._factsSig === sig) return;
+  el._factsSig = sig;
+  el.replaceChildren();
+  parts.forEach((part, i) => {
+    if (i || lead) el.append(" · ");
+    // On a phone the facts wrap between items, never inside one.
+    const text = part.replace(/ /g, "\u00a0");
+    if (part !== model || !logo) return el.append(text);
+    const span = h(`<span class="sa-model">${logo}<span></span></span>`);
+    span.lastElementChild.textContent = text;
+    el.append(span);
+  });
+}
+
 function paint(box, m, open) {
   const s = m.subagent;
   box._msg = m;
@@ -128,8 +153,7 @@ function paint(box, m, open) {
   setText(row.querySelector(".sa-title"), title);
   row.querySelector(".dot").classList.toggle("live", !!st.live);
   setText(row.querySelector(".sa-label"), st.label);
-  // On a phone the facts wrap between items, never inside one.
-  setText(row.querySelector(".sa-facts"), facts.map((f) => f.replace(/ /g, "\u00a0")).join(" · "));
+  paintFacts(row.querySelector(".sa-facts"), s, facts);
   // Closed, a finished card says what it came back with.
   const line = row.querySelector(".sa-line");
   const text = open || s.status === "running" ? "" : oneLine(s.result || "");

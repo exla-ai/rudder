@@ -14,7 +14,7 @@
 import { h, icon, reconcile, setText } from "/app/render.js";
 import { api, track } from "/app/core.js";
 import { UpdateNow } from "/app/home-update.js";
-import { paintSubagentActivity, subagentFacts } from "/app/subagents.js";
+import { paintFacts, paintSubagentActivity, subagentFacts } from "/app/subagents.js";
 
 // Something runs or one is open: its steps show as they happen. Otherwise the
 // tray only waits for a new subagent.
@@ -142,7 +142,7 @@ export function mountSubagentTray({ workspace, run, isWorking = () => false }) {
     setText(openEl.querySelector(".sat-open-title"), f.title);
     openEl.querySelector(".dot").classList.toggle("live", !!f.st.live);
     setText(openEl.querySelector(".sa-label"), f.st.label);
-    setText(openEl.querySelector(".sat-open-facts"), [f.who, f.model, f.time, f.calls].filter(Boolean).join(" · "));
+    paintFacts(openEl.querySelector(".sat-open-facts"), s, [f.who, f.model, f.time, f.calls].filter(Boolean));
     loading.hidden = !!opened;
     if (!opened) return;
     // Only your own agents have a tray, so their files open (file-link.js, mounted on the tray by app.js).
@@ -172,7 +172,7 @@ export function mountSubagentTray({ workspace, run, isWorking = () => false }) {
     setText(who, f.who);
     who.hidden = !f.who;
     setText(node.querySelector(".sat-c-state"), f.st.label);
-    setText(node.querySelector(".sat-c-facts"), facts ? ` · ${facts}` : "");
+    paintFacts(node.querySelector(".sat-c-facts"), s, [f.model, f.time, f.calls].filter(Boolean), true);
     node.setAttribute("aria-label", [f.title, f.who, [f.st.label, facts].filter(Boolean).join(", "), "Open its activity"].filter(Boolean).join(". "));
   }
 

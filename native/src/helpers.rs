@@ -18,8 +18,13 @@
 //!   message), and its edits never reach the asking agent's files.
 //! - When a helper's turn ends (detect.rs `finish_turn`), its final message is
 //!   read off the App loop from its backend's own session record and appended
-//!   to `.rudder/helpers/<run id>.json`, where `agents_result` reads it. This
-//!   works for every harness, including Antigravity, which has no peer tools.
+//!   to `.rudder/helpers/<run id>.json`. This works for every harness,
+//!   including Antigravity, which has no peer tools.
+//! - Each new reply wakes the agent that asked: it is queued as a steer for
+//!   that agent (`wake_parent`), so the reply arrives in its chat as a message
+//!   and starts its next turn. The asking agent never waits in a tool call;
+//!   until the reply comes its row reads "waiting on 1 helper"
+//!   (background.rs `helpers`). `agents_result` reads replies again, in full.
 
 use super::*;
 use std::sync::Mutex;
@@ -29,6 +34,9 @@ const SHAPE: &str = "expected <harness> <model> [effort], then the task on the n
 const MAX_LIVE_HELPERS: usize = 4;
 /// How long a finished turn's final message may take to reach its session record.
 const REPLY_WAIT: Duration = Duration::from_secs(30);
+/// The most of one reply a wake carries into the asking agent's chat; past
+/// it the message says how to read the rest.
+const WAKE_REPLY_BYTES: usize = 16_000;
 
 /// `.rudder/helpers/<run id>.json`: who asked, on what, and every reply so far.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -89,8 +97,8 @@ fn write_helper_record(repo: &Path, record: &HelperRecord) -> Result<(), String>
 /// Serializes read-modify-write of helper records within this process.
 static RECORD_LOCK: Mutex<()> = Mutex::new(());
 
-/// Append one finished turn. The same message twice in a row is one turn
-/// reported twice, so it is kept once.
+/// Append one finished turn and wake the agent that asked. The same message
+/// twice in a row is one turn reported twice, so it is kept, and sent, once.
 pub(crate) fn append_helper_reply(repo: &Path, run_id: &str, reply: HelperReply) -> Result<(), String> {
     let _guard = RECORD_LOCK.lock().map_err(|_| "helper record lock failed".to_string())?;
     let mut record = read_helper_record(repo, run_id)?;
@@ -102,7 +110,57 @@ pub(crate) fn append_helper_reply(repo: &Path, run_id: &str, reply: HelperReply)
         return Ok(());
     }
     record.replies.push(reply);
-    write_helper_record(repo, &record)
+    write_helper_record(repo, &record)?;
+    wake_parent(repo, &record)
+}
+
+/// What the asking agent is sent for the record's newest reply. cloud/worker/
+/// transcripts.mjs shows a prompt that starts this way as Rudder's, not the
+/// user's.
+pub(crate) fn wake_message(record: &HelperRecord) -> String {
+    let reply = record.replies.last().expect("a wake follows a reply");
+    let who = format!("Rudder: your helper {} ({} {})", record.run_id, record.harness, record.model);
+    match (&reply.text, &reply.error) {
+        (Some(text), _) if text.len() > WAKE_REPLY_BYTES => {
+            let mut end = WAKE_REPLY_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(
+                "{who} replied.\n\n{}\n\n[Cut at {end} of {} bytes. Call agents_result with run_id {} and after {} for all of it.]",
+                &text[..end],
+                text.len(),
+                record.run_id,
+                record.replies.len() - 1,
+            )
+        }
+        (Some(text), _) => format!("{who} replied.\n\n{text}"),
+        (None, error) => format!("{who} sent no reply: {}", error.as_deref().unwrap_or("no reason was recorded")),
+    }
+}
+
+/// Queue the newest reply as a steer for the agent that asked. The dashboard
+/// types it into that agent like any other message (main.rs steer inbox).
+fn wake_parent(repo: &Path, record: &HelperRecord) -> Result<(), String> {
+    let inbox = repo.join(".rudder").join("steer");
+    fs::create_dir_all(&inbox).map_err(|error| format!("could not create {}: {error}", inbox.display()))?;
+    let request_id = format!("helper-reply-{}", uuid::Uuid::new_v4().simple());
+    let request = serde_json::json!({
+        "kind": "steer",
+        "taskId": record.parent_run_id,
+        "requestId": request_id,
+        "instruction": wake_message(record),
+    });
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let file = inbox.join(format!("{millis}-{request_id}.json"));
+    let temp = inbox.join(format!(".{millis}-{request_id}.tmp"));
+    let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    fs::write(&temp, bytes)
+        .and_then(|()| fs::rename(&temp, &file))
+        .map_err(|error| format!("could not write {}: {error}", file.display()))
 }
 
 #[derive(Debug, PartialEq)]
@@ -462,6 +520,24 @@ mod tests {
         append_helper_reply(&repo, "review-1a2b", reply("second")).unwrap();
         let texts: Vec<_> = read_helper_record(&repo, "review-1a2b").unwrap().replies.into_iter().filter_map(|r| r.text).collect();
         assert_eq!(texts, ["first", "second"]);
+        // Each kept reply wakes the agent that asked, once, as a steer.
+        let mut wakes: Vec<serde_json::Value> = fs::read_dir(repo.join(".rudder/steer"))
+            .unwrap()
+            .map(|entry| serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap())
+            .collect();
+        wakes.sort_by_key(|wake| wake["instruction"].as_str().unwrap().to_string());
+        let sent: Vec<_> = wakes.iter().map(|wake| (wake["kind"].as_str().unwrap(), wake["taskId"].as_str().unwrap(), wake["instruction"].as_str().unwrap())).collect();
+        assert_eq!(sent, [
+            ("steer", "main", "Rudder: your helper review-1a2b (antigravity gemini-4-neon-xhigh) replied.\n\nfirst"),
+            ("steer", "main", "Rudder: your helper review-1a2b (antigravity gemini-4-neon-xhigh) replied.\n\nsecond"),
+        ]);
+        // A long reply is cut on a character and says where the rest is.
+        let mut long = read_helper_record(&repo, "review-1a2b").unwrap();
+        long.replies.push(reply(&"é".repeat(WAKE_REPLY_BYTES)));
+        let message = wake_message(&long);
+        assert!(message.ends_with("[Cut at 16000 of 32000 bytes. Call agents_result with run_id review-1a2b and after 2 for all of it.]"), "{}", &message[message.len() - 120..]);
+        long.replies.push(HelperReply { at: "2".into(), text: None, error: Some("the helper's turn failed: usage limit".into()) });
+        assert_eq!(wake_message(&long), "Rudder: your helper review-1a2b (antigravity gemini-4-neon-xhigh) sent no reply: the helper's turn failed: usage limit");
         assert_eq!(read_helper_record(&repo, "other").unwrap_err(), "no helper other in this project");
         for bad in ["", "../x", ".hidden", "a/b"] {
             assert!(read_helper_record(&repo, bad).unwrap_err().contains("is not a run id"), "{bad:?}");

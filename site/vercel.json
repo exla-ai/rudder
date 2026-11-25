@@ -30,6 +30,11 @@
       "permanent": false
     },
     {
+      "source": "/app/:path*",
+      "destination": "https://rudder-cloud-control.fly.dev/app/:path*",
+      "permanent": false
+    },
+    {
       "source": "/setup",
       "destination": "/docs/setup",
       "permanent": false

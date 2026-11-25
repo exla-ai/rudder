@@ -54,8 +54,9 @@ final class ClickThrough: XCTestCase {
                 if find(text, timeout: timeout) == nil { misses += 1; log.append("MISS \(name)") } else { log.append("ok \(name)") }
             } else if let text = step["tap"] as? String {
                 if let element = find(text, timeout: 8) {
+                    // Read the label first: the tap can take the element off the screen.
+                    log.append("ok \(name) -> \"\(element.label)\"")
                     if element.isHittable { element.tap() } else { element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
-                    log.append("ok \(name) -> \(element.elementType.rawValue) \"\(element.label)\"")
                 } else { misses += 1; log.append("MISS \(name)") }
             } else if let point = step["tapAt"] as? [NSNumber], point.count == 2 {
                 app.coordinate(withNormalizedOffset: CGVector(dx: point[0].doubleValue, dy: point[1].doubleValue)).tap()

@@ -380,8 +380,9 @@ whatever order they finish.</p>
 <h2 id="agent">Hand this to your agent</h2>
 <p>Paste this into Claude Code, Codex or any coding agent running on your laptop, in
 the project you want to run in the cloud:</p>
-<pre><code>Read https://rudder.exla.ai/docs/cloud-env and make my Rudder cloud machine
-match this project's local environment. Follow the "Rules for agents" section.</code></pre>
+<pre><code>Read https://rudder.exla.ai/docs/cloud-env and make my
+Rudder cloud machine match this project's local environment.
+Follow the "Rules for agents" section.</code></pre>
 <p>The rest of this page is what the agent will do, and what you can do by hand.</p>
 
 <h2 id="why">Why it matters</h2>

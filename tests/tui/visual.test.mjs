@@ -29,7 +29,8 @@ function isRunningTeal(fg) {
   const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/.exec(hex);
   if (!match) return false;
   const [r, g, b] = match.slice(1).map((part) => parseInt(part, 16));
-  return g > b && b > r;
+  // The dark foreground adds blue at the brightest shimmer frame (#acdbdd).
+  return Math.min(g, b) - r >= 40 && Math.abs(g - b) <= 12;
 }
 
 test("a running worker's status renders in the running color", { timeout: 60_000 }, async (t) => {

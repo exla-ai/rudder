@@ -127,6 +127,7 @@ test("remote cache env configures sccache multilevel webdav and Turborepo when p
     JJ_CONFIG: "/u/jj.toml",
     RUDDER_REMOTE_CACHE_URL: "  http://127.0.0.1:41234/  ",
     RUDDER_REMOTE_CACHE_TOKEN: "  rdrc_test_token  ",
+    RUDDER_BURST_SOCKET: "/run/rudder/burst.sock",
   };
   for (const role of ["agent", "builder"]) {
     const out = toolCacheEnv(role, { root, env, hasTool: () => true });
@@ -163,6 +164,7 @@ test("remote cache env configures sccache multilevel webdav and Turborepo when p
 
   // Codex shell policy picks up every remote cache variable automatically.
   const codexArgs = codexShellEnvConfigArgs(toolCacheEnv("agent", { root, env, hasTool: () => true }));
+  assert.ok(codexArgs.includes('shell_environment_policy.set.RUDDER_BURST_SOCKET="/run/rudder/burst.sock"'));
   assert.ok(codexArgs.includes('shell_environment_policy.set.SCCACHE_WEBDAV_ENDPOINT="http://127.0.0.1:41234/sccache"'));
   assert.ok(codexArgs.includes('shell_environment_policy.set.TURBO_API="http://127.0.0.1:41234/turbo"'));
 });

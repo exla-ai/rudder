@@ -261,6 +261,24 @@ await ensureAgentSkills(baseChildEnv);
 const accountQuotaChecks = new Map();
 const lastQuotaChecks = new Map();
 
+// An account that began on the phone or the web never ran `rudder onboard`, so
+// nothing has said what new agents start on and no dashboard starts. Its first
+// agent sign-in says it; the dashboards that could not start come up then.
+async function adoptFirstBackend(provider) {
+  const { loadConfig, saveConfig } = await import(fromDist("state.js"));
+  const config = await loadConfig();
+  if (config.lastUsedBackend ?? config.defaultBackend) return;
+  config.defaultBackend = provider;
+  await saveConfig(config);
+  log(`new agents start on ${provider}`);
+  for (const project of projects.values()) {
+    if (project.status === "failed" && !project.term && fs.existsSync(path.join(project.dir, ".git"))) {
+      project.restarts = [];
+      project.spawnDashboard();
+    }
+  }
+}
+
 // Claude Code, Codex, OpenCode and Antigravity sign-ins started from the phone (cloud/worker/logins.mjs).
 const logins = createLoginRunner({
   spawnPty: pty.spawn,
@@ -278,6 +296,7 @@ const logins = createLoginRunner({
       // when signed in): the next request reads the lists again.
       models = null;
       void credentialsAfterLogin(provider, session.account);
+      void adoptFirstBackend(provider).catch((error) => log(`default agent: ${error.message}`));
     } else if (session.endedAt && freshAccounts.delete(fresh)) {
       // An added account that never signed in is not an account.
       void accounts.removeAccount(provider, session.account, baseChildEnv)

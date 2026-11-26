@@ -180,7 +180,7 @@ function needsList() {
 // reach the router and store through `app`.
 Object.assign(app, {
   store, navigate: (...a) => navigate(...a), goBack: (...a) => goBack(...a), refreshState: () => refreshState(),
-  updateScreen: () => updateScreen(), onSignedOut: () => handleSignedOut(), signOut: () => signOut(),
+  updateScreen: () => updateScreen(), onSignedOut: () => handleSignedOut(), signOut: () => signOut(), deleteAccount: () => deleteAccount(),
   openComputerSignIn: (c) => openComputerSignIn(c), openGithubConnect: () => openGithubConnect(),
   githubState: (st) => githubState(st), machineLabel: (hm) => machineLabel(hm), isDesktop: () => isDesktop(),
   // team.js: a teammate's agent reads with the same labels as your own.
@@ -652,6 +652,29 @@ async function signOut() {
   // A paired browser holds a bearer token too: revoke it.
   if (token) done.push(fetch("/api/app/sign-out", { method: "POST", headers: { Authorization: `Bearer ${token}` } }));
   await Promise.allSettled(done);
+  location.reload();
+}
+
+// Deleting the account leaves nothing on the server to sign out of, so it
+// ends the way signing out does: this device forgets the account and shows
+// the sign-in screen.
+async function deleteAccount() {
+  const ok = await confirmDialog({
+    title: "Delete your account?",
+    body: "This deletes your Rudder account and everything in it: your cloud machine and all that is on it, your projects' clones, your agents and their conversations, your secrets and your connected services. This cannot be undone.",
+    confirm: "Delete account",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api("/api/app/account/delete", { method: "POST" });
+  } catch (err) {
+    // The only admin of an org other people are in: the server says which.
+    showError(err);
+    return;
+  }
+  forgetAccount();
+  if (NATIVE) { postNative({ type: "signOut" }); return; }
   location.reload();
 }
 

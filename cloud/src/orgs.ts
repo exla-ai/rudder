@@ -238,6 +238,14 @@ export function createOrgStore(database: Database.Database, options: { now?: () 
     `),
     revokeInvite: database.prepare("update rudder_org_invites set revoked_at = ? where id = ?"),
     acceptInvite: database.prepare("update rudder_org_invites set accepted_at = ?, accepted_by = ? where id = ?"),
+    // A deleted account's id stays nowhere: the org it created is recorded
+    // under its longest-standing admin, and the invites it sent or took go.
+    passOnOrg: database.prepare(`
+      update rudder_orgs set created_by = (
+        select account_id from rudder_org_members where org_id = ? and role = 'admin' order by joined_at limit 1
+      ) where id = ? and created_by = ?
+    `),
+    deleteInvitesOf: database.prepare("delete from rudder_org_invites where created_by = ? or accepted_by = ?"),
   };
 
   function orgRow(orgId: string): OrgRow {
@@ -465,6 +473,32 @@ export function createOrgStore(database: Database.Database, options: { now?: () 
           throw new OrgError(409, LAST_ADMIN_MESSAGE);
         }
         q.removeMember.run(orgId, accountId);
+      })();
+    },
+
+    /** Takes a deleted account out of every org. An org it was alone in goes
+     * with it (its id is returned, so what the org owned can go too). An org
+     * with other members and no other admin refuses the whole thing: nothing
+     * changes and the error names the org. */
+    removeAccount(accountId: string): string[] {
+      return database.transaction(() => {
+        const deleted: string[] = [];
+        for (const orgId of (q.orgIds.all(accountId) as Array<{ org_id: string }>).map((row) => row.org_id)) {
+          if ((q.memberCount.get(orgId) as { n: number }).n <= 1) {
+            q.deleteInvites.run(orgId);
+            q.deleteMembers.run(orgId);
+            q.deleteOrg.run(orgId);
+            deleted.push(orgId);
+            continue;
+          }
+          if (roleOf(accountId, orgId) === "admin" && adminCount(orgId) <= 1) {
+            throw new OrgError(409, `You are the only admin of ${orgRow(orgId).name}. Make someone else an admin first, then delete your account.`);
+          }
+          q.removeMember.run(orgId, accountId);
+          q.passOnOrg.run(orgId, orgId, accountId);
+        }
+        q.deleteInvitesOf.run(accountId, accountId);
+        return deleted;
       })();
     },
   };

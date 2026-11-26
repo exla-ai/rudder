@@ -227,6 +227,9 @@ export function SettingsScreen() {
   const signOutBtn = h(`<button type="button" class="btn block danger">Sign out</button>`);
   signOutBtn.addEventListener("click", () => app.signOut?.());
   more.appendChild(signOutBtn);
+  const deleteBtn = h(`<button type="button" class="btn block danger">Delete account</button>`);
+  deleteBtn.addEventListener("click", () => app.deleteAccount?.());
+  more.appendChild(deleteBtn);
 
   function paintAccount() {
     const s = app.store?.state || {};

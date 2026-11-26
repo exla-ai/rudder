@@ -909,10 +909,10 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
     are dropped) and returns `{env, image}` once. The CLI writes `/etc/rudder/home.env`
     (0600, over ssh stdin) and `/etc/rudder/image`, then starts `rudder-home.service`.
     `--copy-from-fly` only prints the manual rsync steps; the disk copy is the operator's.
-  - The control plane never calls Fly for an external home: `ensureHomeRunning` and
-    `startHome` answer from the control socket (503 when it is down), the idle stop sweep
-    skips it, region moves and stop are 409, deletion leaves the Fly machine and volume
-    alone. The row is `stopped` until the supervisor connects (`markExternalHomeRunning`).
+  - The control plane never calls Fly for an external home while it lives:
+    `ensureHomeRunning` and `startHome` answer from the control socket (503 when it is
+    down), the idle stop sweep skips it, region moves and stop are 409. Deleting it
+    frees the Fly machine and volume its row still holds from before the switch. The row is `stopped` until the supervisor connects (`markExternalHomeRunning`).
   - Updates: the supervisor reports `host: {kind, image}` in its state
     (`cloud/worker/home-host.mjs`). When idle on another image, `updateExternalHome`
     sets a next token and sends the `update` RPC `{image, workerToken}`. The image is
@@ -976,6 +976,24 @@ the same key; it carries repo + staged auth), then the row. Whatever fails stays
 A `deleting` row is dead to everything else: heartbeats get 410 and cannot resurrect it,
 worker/attach upgrades get 410, stop/pause/resume get 409, and the admin GC skips it.
 The dashboard removes its local rows as soon as the cloud accepts the delete.
+A home on an external host is deleted the same way: the Fly machine and volume it
+ran on before the switch are still on its row, and the reaper frees them.
+
+**Deleting an account** (`POST /api/app/account/delete`, the "Delete account" button
+at the bottom of Settings in the app, on every platform). One transaction removes
+everything that can sign in or holds a secret (tokens, sessions, provider links, the
+user row, the vault and its key, integrations, digests, prefs, Slack identities, org
+memberships and invites) and marks every sail and workspace `deleting`; the reaper
+above then frees the machines and volumes without needing the user row. An org the
+account was alone in goes with it. Being the only admin of an org with other members
+refuses the whole deletion with 409 before anything changes. Slack tokens are revoked
+after the rows are gone, as disconnect does. A row in `rudder_account_deletions` stays
+until no `deleting` row of the account is left, then the sweep deletes what the account
+had stored under `snapshots/<accountId>/` and the build cache prefix
+`cache/v1/accounts/<sha256(accountId)>/` (only objects from before the deletion, since
+a GitHub device-code account keeps its id if it signs in again). The fabric store
+(`fabric/v1/accounts/<digest>`) is NOT deleted: its bucket policy denies the control
+plane every delete there, so removing an account's fabric objects is an operator step.
 
 ### 9.7 WebSocket streaming
 Each sail/workspace has a `Channel`: one worker WS + N client WS + a ~256KB ring buffer

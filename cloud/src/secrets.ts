@@ -54,14 +54,7 @@ export class SecretsVaultError extends Error {
   }
 }
 
-export type SecretsVault = ReturnType<typeof createSecretsVault>;
-
-export function createSecretsVault(database: Database, kekBase64: string) {
-  const kek = Buffer.from(kekBase64, "base64");
-  if (kek.length !== 32) {
-    throw new Error("RUDDER_SECRETS_KEY must be 32 bytes of base64");
-  }
-
+function ensureSecretsSchema(database: Database): void {
   database.exec(`
     create table if not exists rudder_account_keys (
       account_id text primary key,
@@ -85,6 +78,25 @@ export function createSecretsVault(database: Database, kekBase64: string) {
       primary key (account_id, name)
     );
   `);
+}
+
+/** A deleted account: its secrets and the key that opens them. Needs no vault
+ * key, so it works on a control plane where the vault is not configured. */
+export function forgetAccountSecrets(database: Database, accountId: string): void {
+  ensureSecretsSchema(database);
+  database.prepare("delete from rudder_secrets where account_id = ?").run(accountId);
+  database.prepare("delete from rudder_account_keys where account_id = ?").run(accountId);
+}
+
+export type SecretsVault = ReturnType<typeof createSecretsVault>;
+
+export function createSecretsVault(database: Database, kekBase64: string) {
+  const kek = Buffer.from(kekBase64, "base64");
+  if (kek.length !== 32) {
+    throw new Error("RUDDER_SECRETS_KEY must be 32 bytes of base64");
+  }
+
+  ensureSecretsSchema(database);
 
   const findAccountKey = database.prepare("select * from rudder_account_keys where account_id = ?");
   const insertAccountKey = database.prepare(`

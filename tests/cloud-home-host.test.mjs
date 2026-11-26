@@ -100,7 +100,7 @@ async function bootServer(t, extraEnv) {
   return { port, base, dbPath, log: () => log };
 }
 
-serverTest("an external home never touches Fly: switch, fence, refusals, update RPC, deletion and back", async (t) => {
+serverTest("an external home never touches Fly while it lives: switch, fence, refusals, update RPC, deletion and back", async (t) => {
   const flyCalls = [];
   const fly = http.createServer(async (req, res) => {
     let body = "";
@@ -254,13 +254,18 @@ serverTest("an external home never touches Fly: switch, fence, refusals, update 
   assert.equal(row("home-b").next, null);
   assert.equal(row("home-b").hash, tokenHash(switchedB.env.RUDDER_WORKER_TOKEN));
 
-  // Deleting an external home destroys nothing on Fly.
+  // Deleting an external home frees the Fly machine and volume it ran on
+  // before the switch: its row was the last thing that knew about them.
   const deleted = await (await b("/api/rudder/workspace/home-b", "DELETE")).json();
   assert.equal(deleted.status, "deleted", JSON.stringify(deleted));
+  assert.deepEqual(flyCalls.filter((call) => /m-b|vol-b/.test(call.url)), [
+    { method: "DELETE", url: "/v1/apps/workers/machines/m-b?force=true" },
+    { method: "DELETE", url: "/v1/apps/workers/volumes/vol-b" },
+  ], log());
 
-  // Through at least one idle stop sweep: still not a single call about either home.
+  // Through at least one idle stop sweep: not a single call about the home that stays.
   await sleep(Math.max(0, bootedAt + 11_500 - Date.now()));
-  const touched = flyCalls.filter((call) => /m-a|m-b|vol-a|vol-b/.test(call.url));
+  const touched = flyCalls.filter((call) => /m-a|vol-a/.test(call.url));
   assert.deepEqual(touched, [], log());
 
   // Back to Fly: the old machine goes, a new one on the same volume gets a

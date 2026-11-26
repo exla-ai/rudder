@@ -169,6 +169,7 @@ dialog.handoff-dialog { max-width: min(440px, calc(100vw - 32px)); }
 .set-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .set-acts .btn { flex: 1 1 auto; justify-content: flex-start; white-space: nowrap; }
 .set-foot { margin-top: 28px; }
+.set-foot .btn + .btn { margin-top: 10px; }
 .scope-list { margin-bottom: 10px; }
 .org-av { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 14px; flex: none; }
 .org-av svg { width: 18px; height: 18px; }

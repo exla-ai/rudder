@@ -362,7 +362,10 @@ export function createIntegrations(deps: IntegrationsDeps) {
   const deleteInstall = database.prepare(
     "delete from rudder_integrations where owner_kind = ? and owner_id = ? and provider = ?",
   );
-  const slackInstallsForTeam = database.prepare("select * from rudder_integrations where provider = 'slack' and team_id = ?");
+  const installsOfOwner = database.prepare("select * from rudder_integrations where owner_kind = ? and owner_id = ?");
+  const deleteInstallsOfOwner = database.prepare("delete from rudder_integrations where owner_kind = ? and owner_id = ?");
+  const deleteLinksOfAccount = database.prepare("delete from rudder_slack_links where account_id = ?");
+  const slackInstallsForTeam =database.prepare("select * from rudder_integrations where provider = 'slack' and team_id = ?");
   const findLink = database.prepare("select account_id from rudder_slack_links where team_id = ? and user_id = ?");
   const upsertLink = database.prepare(`
     insert into rudder_slack_links (team_id, user_id, account_id, created_at) values (?, ?, ?, ?)
@@ -565,6 +568,26 @@ export function createIntegrations(deps: IntegrationsDeps) {
       });
     }
     capture(account.accountId, "integration_disconnected", { provider, scope: owner.kind, platform });
+  }
+
+  /** A deleted account or org: every install it owns goes, each token revoked
+   * the way disconnect revokes one. The rows are gone before the first await.
+   * For an account, so are its Slack identities and what was posted for it. */
+  async function removeOwner(kind: Owner["kind"], id: string): Promise<void> {
+    const installs = (installsOfOwner.all(kind, id) as Row[]).map(installFromRow);
+    deleteInstallsOfOwner.run(kind, id);
+    if (kind === "account") {
+      deleteLinksOfAccount.run(id);
+      memory.delete(id);
+    }
+    for (const install of installs) {
+      const accessToken = install ? str(install.token.accessToken) : "";
+      if (accessToken) {
+        await revokeSlackToken(deps.fetch, accessToken).catch((error: unknown) => {
+          log(`integrations: slack token revoke failed for ${kind}:${id}: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    }
   }
 
   async function routeApp(req: IncomingMessage, res: ServerResponse, url: URL, account: Account): Promise<boolean> {
@@ -961,6 +984,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
     handleAppApi,
     handlePublicApi,
     onHomeState,
+    removeOwner,
     configured,
     // Resolves once background work (slash-command task delivery) settles.
     idle: async () => {

@@ -8,12 +8,12 @@ import { Readable } from "node:stream";
 import { betterAuth } from "better-auth";
 import Database from "better-sqlite3";
 import { toNodeHandler } from "better-auth/node";
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { fromTokenFile } from "@aws-sdk/credential-provider-web-identity";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
-import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
+import { createSecretsVault, forgetAccountSecrets, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
 import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall, type VoiceCallControl } from "./voice-call.js";
 import { TwilioWatch, type RudderCallRecord } from "./twilio-watch.js";
 import { composeDigest, DEFAULT_DIGEST_TIME_ZONE, digestDueDay, digestPreview, digestWindow, validTimeZone, zonedClock, type Digest, type DigestRawProject } from "./digest.js";
@@ -1716,17 +1716,17 @@ async function reapDeletion(kind: DeletionKind, id: string): Promise<string | un
     const runtime = optionalString(row.runtime) ?? "fly";
     // A BYO VM sail's machine is the user's own: there is nothing of ours to
     // destroy, and its worker is refused from here on (heartbeat 410).
-    // An external home's host and disk are the user's too; switching it there
-    // already let its Fly machine go.
-    const external = kind === "workspace" && homeHostKind(row.host_kind) === "external";
-    const ownsMachine = !external && (kind === "workspace" || runtime === "fly");
+    // An external home's host and disk are the user's too, but the Fly machine
+    // and volume it ran on before the switch are still on its row, and with
+    // the row gone nothing else would ever free them.
+    const ownsMachine = kind === "workspace" || runtime === "fly";
     if (ownsMachine && machineId) {
       if (!flyApiToken || !flyAppName) {
         throw new Error("Fly is not configured; cannot destroy the machine");
       }
       await destroyFlyMachine(machineId);
     }
-    const volumeId = kind === "workspace" && !external ? optionalString(row.volume_id) : undefined;
+    const volumeId = kind === "workspace" ? optionalString(row.volume_id) : undefined;
     if (volumeId) {
       await destroyWorkspaceVolume(volumeId);
     }
@@ -1770,6 +1770,176 @@ async function sweepDeletions(): Promise<void> {
   for (const row of listDeletingWorkspaces.all() as Record<string, unknown>[]) {
     await reapDeletion("workspace", String(row.id));
   }
+  for (const row of listAccountDeletions.all() as Array<{ account_id: string; requested_at: string }>) {
+    await reapAccountDeletion(row.account_id, row.requested_at);
+  }
+}
+
+// ---- Account deletion ------------------------------------------------------
+//
+// Deleting an account is one transaction that removes everything that can
+// sign in or holds a secret (tokens, sessions, provider links, the user row,
+// the vault, integrations) and marks every machine and project `deleting`.
+// From there the reaper above owns the infrastructure and needs no user row.
+// A row in rudder_account_deletions outlives the transaction until the
+// account's stored objects are gone too, so a restart in between loses nothing.
+database.exec(`
+  create table if not exists rudder_account_deletions (
+    account_id text primary key,
+    requested_at text not null,
+    error text
+  );
+`);
+const insertAccountDeletion = database.prepare(
+  "insert or replace into rudder_account_deletions (account_id, requested_at, error) values (?, ?, null)",
+);
+const listAccountDeletions = database.prepare("select account_id, requested_at from rudder_account_deletions");
+const recordAccountDeletionError = database.prepare("update rudder_account_deletions set error = ? where account_id = ?");
+const removeAccountDeletion = database.prepare("delete from rudder_account_deletions where account_id = ?");
+const countAccountDeleting = database.prepare(`
+  select (select count(*) from rudder_sails where account_id = @accountId and status = 'deleting')
+       + (select count(*) from rudder_workspaces where account_id = @accountId and status = 'deleting')
+    as n
+`);
+// Every row, not the newest 100 the listings show.
+const listAccountSailIds = database.prepare("select id from rudder_sails where account_id = ? and status <> 'deleting'");
+const listAccountWorkspaceRows = database.prepare(
+  "select id, source_kind from rudder_workspaces where account_id = ? and status <> 'deleting'",
+);
+// Foreign keys are off in this database, so sessions and provider links are
+// deleted by name rather than by cascade. An account that signed in with a
+// GitHub device code (`github:<id>`) has no user row; these then match nothing.
+const accountRowDeletes = [
+  "delete from rudder_tokens where account_id = ?",
+  "delete from session where userId = ?",
+  "delete from account where userId = ?",
+  'delete from "user" where id = ?',
+  "delete from rudder_digests where account_id = ?",
+  "delete from rudder_voice_calls where account_id = ?",
+  "delete from rudder_account_prefs where account_id = ?",
+  "delete from rudder_agent_visibility where workspace_id in (select id from rudder_workspaces where account_id = ?)",
+].map((sql) => database.prepare(sql));
+
+async function deleteAccount(accountId: string): Promise<void> {
+  // A machine being started right now would be created after its row was
+  // marked; let the start settle first.
+  await homeStarts.get(accountId)?.catch(() => undefined);
+  const now = new Date().toISOString();
+  const revokes: Promise<void>[] = [];
+  const removed = database.transaction(() => {
+    // First, because it is the one step that can refuse (the only admin of an
+    // org other people are in): nothing has changed when it throws.
+    const orgIds = orgStore.removeAccount(accountId);
+    insertAccountDeletion.run(accountId, now);
+    const sails = (listAccountSailIds.all(accountId) as Array<{ id: string }>).map((row) => row.id);
+    const workspaces = listAccountWorkspaceRows.all(accountId) as Array<{ id: string; source_kind: string | null }>;
+    for (const id of sails) {
+      markSailDeleting.run({ id, accountId, updatedAt: now });
+    }
+    for (const { id } of workspaces) {
+      markWorkspaceDeleting.run({ id, accountId, tombstoneKey: `deleted:${id}`, updatedAt: now });
+    }
+    for (const statement of accountRowDeletes) {
+      statement.run(accountId);
+    }
+    forgetAccountSecrets(database, accountId);
+    // Last: each call deletes its rows here, inside the transaction, and
+    // revokes the tokens afterwards.
+    revokes.push(integrations.removeOwner("account", accountId));
+    for (const orgId of orgIds) {
+      revokes.push(integrations.removeOwner("org", orgId));
+    }
+    return { sails, workspaces };
+  })();
+  forgetAccountInMemory(accountId);
+  for (const id of removed.sails) {
+    closeChannel("sail", id);
+  }
+  for (const { id, source_kind } of removed.workspaces) {
+    closeChannel("workspace", id);
+    if (source_kind === "home") {
+      closeHomeControl(id);
+      homeStates.delete(id);
+      void builderPool?.destroyForHome(id).catch(() => undefined);
+    }
+  }
+  // Written out before the answer, so a restart cannot bring the account back.
+  await persistDatabaseToS3();
+  await Promise.all(revokes);
+  console.log(`deleted account ${accountId}: ${removed.workspaces.length} workspaces and ${removed.sails.length} sails left to the reaper`);
+  // The machines and volumes are the reaper's from here; do not hold the
+  // request open for Fly.
+  void sweepDeletions().catch(() => undefined);
+}
+
+function forgetAccountInMemory(accountId: string): void {
+  // A pairing code or an approved login still waiting to be collected would
+  // hand out a token for the deleted account.
+  for (const [code, pairing] of pairings) {
+    if (pairing.accountId === accountId) {
+      pairings.delete(code);
+    }
+  }
+  for (const login of [...deviceLogins.values()]) {
+    if (login.accountId === accountId) {
+      forgetDeviceLogin(login);
+    }
+  }
+  for (const key of [...appActiveSeen.keys()]) {
+    if (key.startsWith(`${accountId}|`)) {
+      appActiveSeen.delete(key);
+    }
+  }
+  for (const map of [phoneGithubLogins, lastPlatform, internalAccounts, homeWakeFailedAt, voiceMints, voiceMemories, digestWakeAt] as Map<string, unknown>[]) {
+    map.delete(accountId);
+  }
+}
+
+/** The objects an account stored, once none of its machines is left to write
+ * more. Only what existed when the account was deleted: an account id that
+ * signs in again later (a GitHub device-code account keeps its id) starts
+ * clean and keeps what it stores from then on.
+ * The fabric store (fabric/v1/accounts/<digest>) is not touched: its bucket
+ * policy denies this server every delete there. */
+async function reapAccountDeletion(accountId: string, requestedAt: string): Promise<void> {
+  if ((countAccountDeleting.get({ accountId }) as { n: number }).n > 0) {
+    return;
+  }
+  try {
+    const before = new Date(requestedAt);
+    if (snapshotBucket) {
+      await deleteS3Prefix(s3, snapshotBucket, `snapshots/${accountId}/`, before);
+    }
+    if (fabricS3 && fabricBucket) {
+      const digest = createHash("sha256").update(accountId).digest("hex");
+      await deleteS3Prefix(fabricS3, fabricBucket, `cache/v1/accounts/${digest}/`, before);
+    }
+    removeAccountDeletion.run(accountId);
+    schedulePersistDatabase();
+    console.log(`deleted account ${accountId}: nothing of it is left`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    recordAccountDeletionError.run(message, accountId);
+    console.warn(`delete account ${accountId} not finished, will retry: ${message}`);
+  }
+}
+
+async function deleteS3Prefix(client: S3Client, bucket: string, prefix: string, before: Date): Promise<void> {
+  let page: string | undefined;
+  do {
+    const listed = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: page }));
+    const objects = (listed.Contents ?? [])
+      .filter((object) => object.Key && object.LastModified && object.LastModified <= before)
+      .map((object) => ({ Key: object.Key! }));
+    if (objects.length > 0) {
+      const result = await client.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: objects, Quiet: true } }));
+      const failed = result.Errors?.[0];
+      if (failed) {
+        throw new Error(`could not delete ${failed.Key}: ${failed.Message ?? failed.Code}`);
+      }
+    }
+    page = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (page);
 }
 
 const deleteSweepIntervalMs = Number(process.env.RUDDER_DELETE_SWEEP_MS || 30 * 1000);
@@ -7745,6 +7915,16 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (await handleTeamApi(req, res, url, account, teamApiDeps)) {
+    return;
+  }
+  if (url.pathname === "/api/app/account/delete") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    await deleteAccount(account.accountId);
+    captureProductEvent(account.accountId, "account_deleted", { platform: requestPlatform(req) });
+    sendJson(res, 200, { ok: true });
     return;
   }
   const home = findHomeRow(account.accountId);

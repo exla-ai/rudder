@@ -1,5 +1,16 @@
 # Rudder v4 handoff (2026-11-04)
 
+Delete account (App Store 5.1.1(v)): Settings ends with a "Delete account"
+button on every platform; `POST /api/app/account/delete` removes the account
+in one transaction and leaves its machines to the reaper (reference 9.6.1).
+Deleting an external home now frees the Fly machine and volume its row still
+held. Not released. Before it ships, check that the snapshot bucket's key may
+list and delete `snapshots/<accountId>/` (the Fabric role's rights for
+`cache/v1/accounts/*` are in `infra/fabric-store.mjs`); a denied list keeps
+the account's row in `rudder_account_deletions` with the error and retries
+every sweep. Fabric objects of a deleted account stay: the bucket policy
+denies the control plane deletes there.
+
 Cloud homes and burst builders configure Buck2's native action and content caches
 through their account's S3 namespace. On a configured Linux x64 worker,
 `npm run build-board` builds the shipped stylesheet with `//:board_css`.

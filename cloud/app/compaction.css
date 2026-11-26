@@ -94,7 +94,14 @@
 .notice .n-icon { flex: none; display: inline-grid; place-items: center; height: 18px; }
 .notice .n-icon svg { width: 13px; height: 13px; }
 .notice.n-warning { color: var(--needs); }
-.notice.n-error { color: var(--failed); }
+/* An error is a sentence or two, often with a link: a small tinted card,
+   read from the left. */
+.notice.n-error {
+  width: fit-content; max-width: min(560px, calc(100% - 24px)); box-sizing: border-box; padding: 8px 12px; border-radius: 10px;
+  justify-content: flex-start; text-align: left; color: var(--failed);
+  background: color-mix(in srgb, var(--failed) 8%, transparent);
+}
+.notice a { color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
 
 /* A tool call still running (app.js paintToolIcon): a small spinner in place
    of its icon. */

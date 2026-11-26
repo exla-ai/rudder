@@ -11,6 +11,7 @@ import {
 import { PlanView, planOf } from "/app/plan.js";
 import { AgentStats, PlanUsage } from "/app/agent-stats.js";
 import { ContextMeter } from "/app/context-meter.js";
+import { noticeParts } from "/app/notice-text.js";
 import { GoalChip } from "/app/goal-chip.js";
 import { filesButton, followFiles } from "/app/files-panel.js";
 import { canvasButton, followCanvas } from "/app/canvas-panel.js";
@@ -1840,7 +1841,15 @@ function paintNotice(node, m) {
   const box = node.querySelector(".n-icon");
   if (box.dataset.ic !== ic) { box.innerHTML = ic ? icon(ic) : ""; box.dataset.ic = ic; }
   box.hidden = !ic;
-  setText(node.querySelector(".n-text"), m.text);
+  const text = node.querySelector(".n-text");
+  if (text.dataset.said === m.text) return;
+  text.dataset.said = m.text;
+  text.replaceChildren(...noticeParts(m.text).map((part) => {
+    if (typeof part === "string") return part;
+    const link = document.createElement("a");
+    link.href = part.href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = part.label;
+    return link;
+  }));
 }
 
 async function uploadAttachment(ws, file) {

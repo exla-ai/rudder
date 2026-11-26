@@ -2,7 +2,7 @@
 # The iPhone app's App Store upload, one stage per call, run on an Offstage
 # Mac by .offstage/ios-appstore.mjs from the checkout's root (which holds ios/):
 #
-#   archive  xcodegen, then a Release archive for iOS devices, signed ad hoc,
+#   archive  xcodegen, then a Release archive for iOS devices, unsigned,
 #            and build/upload.env with the version and build number in it
 #   upload   Xcode signs the archive for App Store distribution with the
 #            team's cloud-managed certificate and uploads it to App Store
@@ -44,10 +44,10 @@ case "$stage" in
     cd "$root/ios"
     xcodebuild -version | sed -n 1p
     "$tools/xcodegen/bin/xcodegen" generate --quiet
-    # Ad hoc here; Xcode applies the distribution signature at upload.
+    # Unsigned here; Xcode applies the distribution signature at upload.
     run_logged archive.log xcodebuild archive -project Rudder.xcodeproj -scheme Rudder -configuration Release \
       -destination 'generic/platform=iOS' -archivePath build/Rudder.xcarchive \
-      CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY=- AD_HOC_CODE_SIGNING_ALLOWED=YES
+      CODE_SIGNING_ALLOWED=NO
     app=build/Rudder.xcarchive/Products/Applications/Rudder.app
     if [ ! -f "$app/PrivacyInfo.xcprivacy" ]; then
       echo "the archived app has no PrivacyInfo.xcprivacy; App Store Connect requires it"

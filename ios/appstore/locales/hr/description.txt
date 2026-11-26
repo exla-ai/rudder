@@ -1,0 +1,17 @@
+Rudder pokreće tvoje agente za kodiranje (Claude Code i Codex) na računalu u oblaku i stavlja ih u tvoj džep: čitaj njihove razgovore, odgovaraj na pitanja, odobravaj izmjene, pokreći nove zadatke i spajaj njihov rad s mobitela.
+
+Sve projekte i agente vidiš na prvi pogled. Kad agent ima pitanje, treba odobrenje ili ima spreman plan, Rudder ga stavlja na vrh i prikazuje značku, pa odgovoriš u nekoliko dodira i pustiš ga da nastavi.
+
+S mobitela možeš:
+- Čitati razgovor svakog agenta dok radi i poslati mu poruku.
+- Odgovarati na pitanja, odobravati radnje i odobravati planove.
+- Pokrenuti novog agenta na bilo kojem projektu i odabrati mu model.
+- Priložiti fotografije, snimke zaslona i datoteke uz poruku.
+- Razgovarati s aplikacijom Rudder: glasom pitati što tvoji agenti rade ili im reći što da naprave.
+- Prijaviti Claude Code ili Codex na svom računalu u oblaku bez laptopa.
+- Dobiti jutarnji sažetak onoga što su tvoji agenti napravili od jučer.
+- Provjeriti svoje računalo u oblaku, njegove radne prostore i potrošnju svoje pretplate.
+
+Rudder ima i aplikaciju za Mac te alat za naredbeni redak. Ostaju usklađeni: pokreni agenta na laptopu i prati ga na mobitelu.
+
+Rudder je besplatan i otvorenog koda. Prijavljuješ se putem računa Apple, Google ili GitHub, a agenti koriste tvoju vlastitu pretplatu na Claude ili ChatGPT.

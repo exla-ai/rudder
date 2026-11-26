@@ -14,4 +14,4 @@ From your phone you can:
 
 Rudder also has a Mac app and a command line tool. They stay in sync: start an agent on your laptop and follow it on your phone.
 
-Rudder is free and open source. You sign in with Google or GitHub, and the agents use your own Claude or ChatGPT plan.
+Rudder is free and open source. You sign in with Apple, Google or GitHub, and the agents use your own Claude or ChatGPT plan.

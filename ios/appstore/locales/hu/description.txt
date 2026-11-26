@@ -1,0 +1,17 @@
+A Rudder egy felhőbeli gépen futtatja a kódoló ágenseidet (Claude Code és Codex), és a zsebedbe teszi őket: a telefonodról olvashatod a beszélgetéseiket, válaszolhatsz a kérdéseikre, jóváhagyhatod a módosításokat, új feladatokat indíthatsz, és összefésülheted a munkájukat.
+
+Minden projektet és ágenst egy pillantással áttekinthetsz. Ha egy ágensnek kérdése van, jóváhagyásra vár, vagy elkészült egy tervvel, a Rudder a lista tetejére teszi és jelvénnyel jelöli, így néhány koppintással válaszolhatsz, az ágens pedig folytathatja a munkát.
+
+A telefonodról:
+- Olvashatod az egyes ágensek beszélgetését munka közben, és üzenetet küldhetsz nekik.
+- Válaszolhatsz a kérdésekre, jóváhagyhatod a műveleteket és a terveket.
+- Új ágenst indíthatsz bármelyik projekten, és kiválaszthatod a modelljét.
+- Fényképeket, képernyőképeket és fájlokat csatolhatsz az üzenetekhez.
+- Beszélhetsz a Rudderrel: hanggal megkérdezheted, min dolgoznak az ágenseid, vagy megmondhatod nekik, mit csináljanak.
+- Laptop nélkül bejelentkeztetheted a Claude Code-ot vagy a Codexet a felhőbeli gépeden.
+- Reggeli összefoglalót kaphatsz arról, mit végeztek az ágenseid tegnap óta.
+- Ellenőrizheted a felhőbeli gépedet, a munkaterületeit és az előfizetésed felhasználását.
+
+A Rudderhez Mac-alkalmazás és parancssori eszköz is tartozik. Ezek szinkronban maradnak: indíts el egy ágenst a laptopodon, és kövesd a telefonodon.
+
+A Rudder ingyenes és nyílt forráskódú. Apple-, Google- vagy GitHub-fiókkal jelentkezhetsz be, az ágensek pedig a saját Claude- vagy ChatGPT-előfizetésedet használják.

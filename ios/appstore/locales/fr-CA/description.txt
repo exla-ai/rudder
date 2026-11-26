@@ -1,0 +1,17 @@
+Rudder exécute vos agents de programmation (Claude Code et Codex) sur une machine infonuagique et les met dans votre poche : lisez leurs conversations, répondez à leurs questions, approuvez les modifications, démarrez de nouvelles tâches et fusionnez le travail à partir de votre téléphone.
+
+Voyez tous vos projets et vos agents d'un seul coup d'œil. Lorsqu'un agent a une question, a besoin d'une approbation ou a un plan prêt, Rudder le place en haut de la liste et affiche une pastille. Vous répondez en quelques touchers et il poursuit son travail.
+
+À partir de votre téléphone, vous pouvez :
+- Lire la conversation de chaque agent pendant qu'il travaille et lui envoyer un message.
+- Répondre aux questions, approuver des actions et approuver des plans.
+- Démarrer un nouvel agent dans n'importe quel projet et choisir son modèle.
+- Joindre des photos, des captures d'écran et des fichiers à un message.
+- Parler à Rudder : demandez de vive voix ce que font vos agents, ou dites-leur quoi faire.
+- Ouvrir une session Claude Code ou Codex sur votre machine infonuagique sans ordinateur portable.
+- Recevoir chaque matin un résumé de ce que vos agents ont fait depuis la veille.
+- Vérifier votre machine infonuagique, ses espaces de travail et l'utilisation de votre forfait.
+
+Rudder offre aussi une application Mac et un outil en ligne de commande. Tout reste synchronisé : démarrez un agent sur votre portable et suivez-le sur votre téléphone.
+
+Rudder est gratuit et à code source ouvert. Vous ouvrez une session avec Apple, Google ou GitHub, et les agents utilisent votre propre forfait Claude ou ChatGPT.

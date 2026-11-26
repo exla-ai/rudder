@@ -1,0 +1,17 @@
+Rudder spouští vaše kódovací agenty (Claude Code a Codex) na cloudovém stroji a dává vám je do kapsy: čtěte jejich konverzace, odpovídejte na jejich otázky, schvalujte změny, zadávejte nové úkoly a slučujte práci přímo z telefonu.
+
+Všechny projekty a agenty vidíte na první pohled. Když má agent otázku, potřebuje schválení nebo má připravený plán, Rudder ho zobrazí nahoře a označí odznakem, takže odpovíte několika klepnutími a agent může pokračovat.
+
+Z telefonu můžete:
+- Číst konverzaci každého agenta během práce a poslat mu zprávu.
+- Odpovídat na otázky, schvalovat akce a schvalovat plány.
+- Spustit nového agenta v libovolném projektu a vybrat mu model.
+- Přikládat ke zprávám fotky, snímky obrazovky a soubory.
+- Mluvit s aplikací Rudder: hlasem se zeptat, co vaši agenti dělají, nebo jim říct, co mají udělat.
+- Přihlásit Claude Code nebo Codex na svém cloudovém stroji bez notebooku.
+- Dostávat ranní přehled toho, co vaši agenti od včerejška udělali.
+- Zkontrolovat svůj cloudový stroj, jeho pracovní prostory a využití svého předplatného.
+
+Rudder má také aplikaci pro Mac a nástroj pro příkazový řádek. Vše zůstává synchronizované: spusťte agenta na notebooku a sledujte ho na telefonu.
+
+Rudder je zdarma a má otevřený zdrojový kód. Přihlásíte se přes Apple, Google nebo GitHub a agenti používají vaše vlastní předplatné Claude nebo ChatGPT.

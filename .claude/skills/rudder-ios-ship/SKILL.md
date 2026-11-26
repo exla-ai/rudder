@@ -145,6 +145,14 @@ version's listing changes only with a new version and build; promotional
 text is the exception, and the user edits it on the live version in App
 Store Connect (`prepare` only touches the version being prepared).
 
+The listing is translated: `ios/appstore` holds the English one and
+`ios/appstore/locales/<App Store language>/` each translation (`listing.json`
+with name, subtitle, keywords and promotionalText, `description.txt`,
+`whats-new.txt`). `prepare` sends them all. When the English text changes,
+change every translation in the same commit, `whats-new.txt` included.
+Translations have no screenshots of their own; the App Store shows the English
+ones. English regions (UK, Australia, Canada) read the en-US listing.
+
 ## Before submitting
 
 - `check` passes and `status` shows the build `VALID` and the version

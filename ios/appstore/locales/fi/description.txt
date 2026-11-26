@@ -1,0 +1,17 @@
+Rudder ajaa koodausagenttejasi (Claude Code ja Codex) pilvikoneella ja tuo ne taskuusi: lue niiden keskusteluja, vastaa niiden kysymyksiin, hyväksy muutoksia, aloita uusia tehtäviä ja yhdistä työt puhelimesta.
+
+Näet kaikki projektit ja agentit yhdellä silmäyksellä. Kun agentilla on kysymys, se tarvitsee hyväksynnän tai sen suunnitelma on valmis, Rudder nostaa sen ylimmäksi ja näyttää merkin, joten voit vastata muutamalla napautuksella ja antaa sen jatkaa.
+
+Puhelimesta voit:
+- Lukea kunkin agentin keskustelua sen työskennellessä ja lähettää sille viestin.
+- Vastata kysymyksiin sekä hyväksyä toimia ja suunnitelmia.
+- Käynnistää uuden agentin missä tahansa projektissa ja valita sen mallin.
+- Liittää viestiin valokuvia, näyttökuvia ja tiedostoja.
+- Puhua Rudderille: kysy äänellä, mitä agenttisi tekevät, tai kerro niille, mitä tehdä.
+- Kirjata Claude Coden tai Codexin sisään pilvikoneellasi ilman kannettavaa.
+- Saada aamukoosteen siitä, mitä agenttisi ovat tehneet eilisen jälkeen.
+- Tarkistaa pilvikoneesi, sen työtilat ja tilauksesi käytön.
+
+Rudderilla on myös Mac-sovellus ja komentorivityökalu. Ne pysyvät synkronoituina: käynnistä agentti kannettavallasi ja seuraa sitä puhelimesta.
+
+Rudder on ilmainen ja avointa lähdekoodia. Kirjaudut sisään Applen, Googlen tai GitHubin tunnuksilla, ja agentit käyttävät omaa Claude- tai ChatGPT-tilaustasi.

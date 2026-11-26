@@ -1,0 +1,17 @@
+O Rudder executa os seus agentes de código (Claude Code e Codex) numa máquina na cloud e põe-nos no seu bolso: leia as conversas, responda às perguntas, aprove alterações, inicie novas tarefas e faça merge do trabalho a partir do telemóvel.
+
+Veja todos os projetos e agentes num relance. Quando um agente tem uma pergunta, precisa de uma aprovação ou tem um plano pronto, o Rudder coloca-o no topo e mostra um indicador, para que possa responder em poucos toques e deixá-lo continuar.
+
+A partir do telemóvel pode:
+- Ler a conversa de cada agente enquanto trabalha e enviar-lhe uma mensagem.
+- Responder a perguntas, aprovar ações e aprovar planos.
+- Iniciar um novo agente em qualquer projeto e escolher o modelo.
+- Anexar fotografias, capturas de ecrã e ficheiros a uma mensagem.
+- Falar com o Rudder: pergunte por voz o que os seus agentes estão a fazer ou diga-lhes o que fazer.
+- Iniciar sessão no Claude Code ou no Codex na sua máquina na cloud sem um portátil.
+- Receber todas as manhãs um resumo do que os seus agentes fizeram desde ontem.
+- Consultar a sua máquina na cloud, os espaços de trabalho e a utilização do seu plano.
+
+O Rudder também tem uma app para Mac e uma ferramenta de linha de comandos. Ficam sincronizadas: inicie um agente no portátil e acompanhe-o no telemóvel.
+
+O Rudder é gratuito e de código aberto. Inicia sessão com a Apple, o Google ou o GitHub, e os agentes usam o seu próprio plano do Claude ou do ChatGPT.

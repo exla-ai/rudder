@@ -65,6 +65,7 @@ test("checkListing names wrong sizes and alpha, and hashes good sets in name ord
       releaseType: "MANUAL", keywords: "ai,coding", promotionalText: "", supportUrl: "https://example.com/support",
       marketingUrl: "https://example.com", privacyPolicyUrl: "https://example.com/privacy", screenshotSets: ["APP_IPHONE_67"],
       description: "Rudder steers agents.", whatsNew: "New.", reviewNotes: "Sign in with the demo account.",
+      translations: [{ locale: "de-DE", name: "Rudder", subtitle: "Agenten vom iPhone steuern", keywords: "ki,code", promotionalText: "", description: "Rudder steuert Agenten.", whatsNew: "Neu." }],
     }
     const sets = checkListing(listing, dir)
     assert.deepEqual(sets[0].files.map((file) => file.name), ["01-home.jpg", "02-chat.jpg"])
@@ -72,6 +73,11 @@ test("checkListing names wrong sizes and alpha, and hashes good sets in name ord
 
     writeFileSync(path.join(iphone, "03-settings.png"), png(1290, 2796, 6))
     writeFileSync(path.join(iphone, "04-ipad.jpg"), jpeg(2064, 2752))
+    assert.throws(() => checkListing({ ...listing, translations: [{ ...listing.translations[0], locale: "de", keywords: "ki, code" }] }, dir), (error) => {
+      assert.match(error.message, /locales\/de: not an App Store language/)
+      assert.match(error.message, /locales\/de: keywords has a space after a comma/)
+      return true
+    })
     assert.throws(() => checkListing({ ...listing, subtitle: "Steer agents — from anywhere at all" }, dir), (error) => {
       assert.match(error.message, /subtitle is 35 characters/)
       assert.match(error.message, /subtitle has an em dash/)

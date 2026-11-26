@@ -90,6 +90,14 @@ export const SCREENSHOT_SIZES = {
 const REVIEW_KEYS = ["contactFirstName", "contactLastName", "contactPhone", "contactEmail", "demoAccountRequired", "demoAccountName", "demoAccountPassword"]
 const LISTING_KEYS = ["locale", "name", "subtitle", "primaryCategory", "secondaryCategory", "contentRightsDeclaration", "copyright", "releaseType", "keywords", "promotionalText", "supportUrl", "marketingUrl", "privacyPolicyUrl", "screenshotSets"]
 
+// What a translation in ios/appstore/locales/<locale>/listing.json holds; its
+// description.txt and whats-new.txt sit beside it. Everything else (URLs,
+// categories, screenshots) is the primary listing's: the App Store shows the
+// primary language's screenshots where a language has none.
+const TRANSLATION_KEYS = ["name", "subtitle", "keywords", "promotionalText"]
+// The languages App Store Connect takes a listing in.
+const STORE_LOCALES = new Set(["ar-SA", "ca", "cs", "da", "de-DE", "el", "en-AU", "en-CA", "en-GB", "en-US", "es-ES", "es-MX", "fi", "fr-CA", "fr-FR", "he", "hi", "hr", "hu", "id", "it", "ja", "ko", "ms", "nl-NL", "no", "pl", "pt-BR", "pt-PT", "ro", "ru", "sk", "sv", "th", "tr", "uk", "vi", "zh-Hans", "zh-Hant"])
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
@@ -148,8 +156,14 @@ export function imageInfo(bytes) {
 
 export function loadListing(dir = LISTING_DIR) {
   const listing = JSON.parse(readFileSync(path.join(dir, "listing.json"), "utf8"))
-  const text = (name) => readFileSync(path.join(dir, name), "utf8").trim()
-  return { ...listing, description: text("description.txt"), whatsNew: text("whats-new.txt"), reviewNotes: text("review-notes.txt") }
+  const text = (...names) => readFileSync(path.join(dir, ...names), "utf8").trim()
+  const translations = readdirSync(path.join(dir, "locales")).sort().map((locale) => ({
+    locale,
+    ...JSON.parse(text("locales", locale, "listing.json")),
+    description: text("locales", locale, "description.txt"),
+    whatsNew: text("locales", locale, "whats-new.txt"),
+  }))
+  return { ...listing, description: text("description.txt"), whatsNew: text("whats-new.txt"), reviewNotes: text("review-notes.txt"), translations }
 }
 
 /**
@@ -162,18 +176,31 @@ export function checkListing(listing, dir = LISTING_DIR) {
     if (listing[key] === undefined) problems.push(`listing.json has no ${key}`)
   }
   for (const key of Object.keys(listing)) {
-    if (![...LISTING_KEYS, "description", "whatsNew", "reviewNotes"].includes(key)) problems.push(`listing.json has an unknown key ${key}`)
+    if (![...LISTING_KEYS, "description", "whatsNew", "reviewNotes", "translations"].includes(key)) problems.push(`listing.json has an unknown key ${key}`)
   }
-  for (const [key, [min, max]] of Object.entries(LIMITS)) {
-    const value = listing[key] ?? ""
-    if ([...value].length < min || [...value].length > max) problems.push(`${key} is ${[...value].length} characters; App Store Connect takes ${min} to ${max}`)
-    if (value.includes("—")) problems.push(`${key} has an em dash`)
+  const checkText = (texts, keys, where) => {
+    for (const key of keys) {
+      const [min, max] = LIMITS[key]
+      const value = texts[key] ?? ""
+      if ([...value].length < min || [...value].length > max) problems.push(`${where}${key} is ${[...value].length} characters; App Store Connect takes ${min} to ${max}`)
+      if (value.includes("—")) problems.push(`${where}${key} has an em dash`)
+    }
+    if (/,\s/.test(texts.keywords ?? "")) problems.push(`${where}keywords has a space after a comma; it counts against the 100`)
+  }
+  checkText(listing, Object.keys(LIMITS), "")
+  if (!STORE_LOCALES.has(listing.locale)) problems.push(`locale ${listing.locale} is not an App Store language`)
+  for (const translation of listing.translations) {
+    const where = `locales/${translation.locale}: `
+    if (!STORE_LOCALES.has(translation.locale)) problems.push(`${where}not an App Store language`)
+    if (translation.locale === listing.locale) problems.push(`${where}is the primary language; its text lives in ios/appstore itself`)
+    const keys = Object.keys(translation).filter((key) => !["locale", "description", "whatsNew"].includes(key))
+    if (keys.sort().join() !== [...TRANSLATION_KEYS].sort().join()) problems.push(`${where}listing.json holds ${keys.join(", ")}; it takes ${TRANSLATION_KEYS.join(", ")}`)
+    checkText(translation, [...TRANSLATION_KEYS, "description", "whatsNew"], where)
   }
   for (const key of ["supportUrl", "marketingUrl", "privacyPolicyUrl"]) {
     if (!/^https:\/\/\S+$/.test(listing[key] ?? "")) problems.push(`${key} is not an https URL`)
   }
   if (!["MANUAL", "AFTER_APPROVAL"].includes(listing.releaseType)) problems.push("releaseType is not MANUAL or AFTER_APPROVAL")
-  if (/,\s/.test(listing.keywords ?? "")) problems.push("keywords has a space after a comma; it counts against the 100")
 
   const sets = []
   for (const type of listing.screenshotSets ?? []) {
@@ -487,17 +514,23 @@ async function prepare(client, context) {
   }
 
   const localizations = (await client.api("GET", `/v1/appStoreVersions/${storeVersion.id}/appStoreVersionLocalizations?limit=50`)).data
-  const versionLocalization = localizations.find((l) => l.attributes.locale === listing.locale)
-  const localization = await upsert(client, versionLocalization, "appStoreVersionLocalizations", {
-    ...(versionLocalization ? {} : { locale: listing.locale }),
-    description: listing.description,
-    keywords: listing.keywords,
-    marketingUrl: listing.marketingUrl,
-    promotionalText: listing.promotionalText,
-    supportUrl: listing.supportUrl,
-    ...(released ? { whatsNew: listing.whatsNew } : {}),
-  }, { appStoreVersion: ref("appStoreVersions", storeVersion.id) })
-  console.log(`set the ${listing.locale} description, keywords, promotional text and URLs${released ? " and What's New" : ""}`)
+  // One listing per language: the primary one, then each translation.
+  const languages = [listing, ...listing.translations]
+  let localization
+  for (const texts of languages) {
+    const existing = localizations.find((l) => l.attributes.locale === texts.locale)
+    const saved = await upsert(client, existing, "appStoreVersionLocalizations", {
+      ...(existing ? {} : { locale: texts.locale }),
+      description: texts.description,
+      keywords: texts.keywords,
+      marketingUrl: listing.marketingUrl,
+      promotionalText: texts.promotionalText,
+      supportUrl: listing.supportUrl,
+      ...(released ? { whatsNew: texts.whatsNew } : {}),
+    }, { appStoreVersion: ref("appStoreVersions", storeVersion.id) })
+    if (texts === listing) localization = saved
+  }
+  console.log(`set the description, keywords, promotional text and URLs${released ? " and What's New" : ""} in ${languages.length} languages`)
 
   const appInfo = (await client.api("GET", `/v1/apps/${app.id}/appInfos`)).data.find((info) => EDITABLE_APP_INFO.has(info.attributes.state))
   if (!appInfo) throw new Error("App Store Connect has no editable app info (name, subtitle, categories)")
@@ -505,15 +538,17 @@ async function prepare(client, context) {
     data: { type: "appInfos", id: appInfo.id, relationships: { primaryCategory: ref("appCategories", listing.primaryCategory), secondaryCategory: ref("appCategories", listing.secondaryCategory) } },
   })
   const infoLocalizations = (await client.api("GET", `/v1/appInfos/${appInfo.id}/appInfoLocalizations?limit=50`)).data
-  const infoLocalization = infoLocalizations.find((l) => l.attributes.locale === listing.locale)
-  await upsert(client, infoLocalization, "appInfoLocalizations", {
-    ...(infoLocalization ? {} : { locale: listing.locale }),
-    name: listing.name,
-    subtitle: listing.subtitle,
-    privacyPolicyUrl: listing.privacyPolicyUrl,
-  }, { appInfo: ref("appInfos", appInfo.id) })
+  for (const texts of languages) {
+    const existing = infoLocalizations.find((l) => l.attributes.locale === texts.locale)
+    await upsert(client, existing, "appInfoLocalizations", {
+      ...(existing ? {} : { locale: texts.locale }),
+      name: texts.name,
+      subtitle: texts.subtitle,
+      privacyPolicyUrl: listing.privacyPolicyUrl,
+    }, { appInfo: ref("appInfos", appInfo.id) })
+  }
   await client.api("PATCH", `/v1/apps/${app.id}`, { data: { type: "apps", id: app.id, attributes: { contentRightsDeclaration: listing.contentRightsDeclaration } } })
-  console.log(`set the name, subtitle, privacy policy, categories and content rights`)
+  console.log(`set the name and subtitle in ${languages.length} languages, and the privacy policy, categories and content rights`)
 
   const full = (await client.api("GET", `/v1/appStoreVersions/${storeVersion.id}?include=appStoreReviewDetail,build`)).data
   const detail = full.relationships.appStoreReviewDetail.data

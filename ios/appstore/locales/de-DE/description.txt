@@ -1,0 +1,17 @@
+Rudder lässt deine Coding-Agenten (Claude Code und Codex) auf einer Cloud-Maschine laufen und bringt sie in deine Hosentasche: Lies ihre Unterhaltungen, beantworte ihre Fragen, gib Änderungen frei, starte neue Aufgaben und merge Arbeit direkt vom Handy.
+
+Alle Projekte und Agenten auf einen Blick. Wenn ein Agent eine Frage hat, eine Freigabe braucht oder einen Plan fertig hat, setzt Rudder ihn ganz nach oben und zeigt ein Badge. So antwortest du mit ein paar Fingertipps und er arbeitet weiter.
+
+Vom Handy aus kannst du:
+- Die Unterhaltung jedes Agenten mitlesen, während er arbeitet, und ihm eine Nachricht schicken.
+- Fragen beantworten, Aktionen freigeben und Pläne freigeben.
+- In jedem Projekt einen neuen Agenten starten und sein Modell wählen.
+- Fotos, Screenshots und Dateien an eine Nachricht anhängen.
+- Mit Rudder sprechen: per Sprache fragen, was deine Agenten gerade tun, oder ihnen sagen, was sie tun sollen.
+- Claude Code oder Codex ohne Laptop auf deiner Cloud-Maschine anmelden.
+- Jeden Morgen eine Zusammenfassung bekommen, was deine Agenten seit gestern erledigt haben.
+- Deine Cloud-Maschine, ihre Workspaces und den Verbrauch deines Abos prüfen.
+
+Rudder gibt es auch als Mac-App und als Kommandozeilen-Tool. Alles bleibt synchron: Starte einen Agenten auf dem Laptop und verfolge ihn auf dem Handy.
+
+Rudder ist kostenlos und Open Source. Du meldest dich mit Apple, Google oder GitHub an, und die Agenten nutzen dein eigenes Claude- oder ChatGPT-Abo.

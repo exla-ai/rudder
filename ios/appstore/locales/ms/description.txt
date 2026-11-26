@@ -1,0 +1,17 @@
+Rudder menjalankan ejen pengekodan anda (Claude Code dan Codex) pada mesin awan dan meletakkannya di dalam poket anda: baca perbualan mereka, jawab soalan mereka, luluskan perubahan, mulakan tugasan baharu dan gabungkan hasil kerja dari telefon anda.
+
+Lihat setiap projek dan ejen sepintas lalu. Apabila ejen ada soalan, memerlukan kelulusan atau pelannya sudah siap, Rudder meletakkannya di bahagian atas dan memaparkan lencana, supaya anda boleh menjawab dengan beberapa ketikan dan membiarkannya meneruskan kerja.
+
+Dari telefon, anda boleh:
+- Membaca perbualan setiap ejen semasa ia bekerja, dan menghantar mesej kepadanya.
+- Menjawab soalan, meluluskan tindakan dan meluluskan pelan.
+- Memulakan ejen baharu pada mana-mana projek dan memilih modelnya.
+- Melampirkan foto, tangkapan skrin dan fail pada mesej.
+- Bercakap dengan Rudder: tanya apa yang sedang dibuat oleh ejen anda, atau beritahu apa yang perlu mereka buat, dengan suara.
+- Log masuk Claude Code atau Codex pada mesin awan anda tanpa komputer riba.
+- Menerima ringkasan pagi tentang apa yang dibuat oleh ejen anda sejak semalam.
+- Menyemak mesin awan anda, ruang kerjanya dan penggunaan pelan langganan anda.
+
+Rudder juga mempunyai aplikasi Mac dan alat baris perintah. Semuanya kekal segerak: mulakan ejen pada komputer riba dan ikutinya pada telefon.
+
+Rudder percuma dan bersumber terbuka. Anda log masuk dengan Apple, Google atau GitHub, dan ejen menggunakan pelan Claude atau ChatGPT anda sendiri.

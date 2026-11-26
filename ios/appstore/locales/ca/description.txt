@@ -1,0 +1,17 @@
+Rudder executa els teus agents de codi (Claude Code i Codex) en una màquina al núvol i te'ls posa a la butxaca: llegeix les seves converses, respon les seves preguntes, aprova canvis, inicia tasques noves i fusiona la feina des del mòbil.
+
+Veus tots els projectes i agents d'un cop d'ull. Quan un agent té una pregunta, necessita una aprovació o té un pla a punt, Rudder el posa a dalt de tot i mostra un distintiu, perquè puguis respondre amb uns quants tocs i deixar que continuï.
+
+Des del mòbil pots:
+- Llegir la conversa de cada agent mentre treballa i enviar-li un missatge.
+- Respondre preguntes, aprovar accions i aprovar plans.
+- Iniciar un agent nou en qualsevol projecte i triar-ne el model.
+- Adjuntar fotos, captures de pantalla i fitxers a un missatge.
+- Parlar amb Rudder: pregunta què fan els teus agents, o digues-los què han de fer, amb la veu.
+- Iniciar la sessió de Claude Code o Codex a la teva màquina al núvol sense cap portàtil.
+- Rebre cada matí un resum del que han fet els teus agents des d'ahir.
+- Consultar la teva màquina al núvol, els seus espais de treball i l'ús del teu pla.
+
+Rudder també té una app per a Mac i una eina de línia d'ordres. Es mantenen sincronitzades: inicia un agent al portàtil i segueix-lo al mòbil.
+
+Rudder és gratuït i de codi obert. Inicies la sessió amb Apple, Google o GitHub, i els agents fan servir el teu propi pla de Claude o ChatGPT.

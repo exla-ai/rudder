@@ -1,0 +1,17 @@
+Rudder, kod ajanlarını (Claude Code ve Codex) bir bulut makinesinde çalıştırır ve cebine getirir: telefonundan konuşmalarını oku, sorularını yanıtla, değişiklikleri onayla, yeni görevler başlat ve işleri merge et.
+
+Tüm projelerini ve ajanlarını tek bakışta gör. Bir ajanın sorusu olduğunda, onaya ihtiyaç duyduğunda ya da planı hazır olduğunda Rudder onu en üste taşır ve bir rozet gösterir; sen de birkaç dokunuşla yanıt verip devam etmesini sağlarsın.
+
+Telefonundan şunları yapabilirsin:
+- Her ajanın konuşmasını çalışırken oku ve ona mesaj gönder.
+- Soruları yanıtla, işlemleri ve planları onayla.
+- Herhangi bir projede yeni bir ajan başlat ve modelini seç.
+- Mesaja fotoğraf, ekran görüntüsü ve dosya ekle.
+- Rudder ile konuş: ajanlarının ne yaptığını sor ya da ne yapacaklarını sesinle söyle.
+- Dizüstü bilgisayar olmadan bulut makinende Claude Code veya Codex oturumu aç.
+- Ajanlarının dünden beri neler yaptığını anlatan bir sabah özeti al.
+- Bulut makineni, çalışma alanlarını ve plan kullanımını kontrol et.
+
+Rudder'ın bir Mac uygulaması ve bir komut satırı aracı da var. Hepsi eşzamanlı kalır: dizüstü bilgisayarında bir ajan başlat, telefonundan takip et.
+
+Rudder ücretsiz ve açık kaynaklıdır. Apple, Google veya GitHub ile oturum açarsın; ajanlar senin kendi Claude veya ChatGPT planını kullanır.

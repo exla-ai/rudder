@@ -1,0 +1,17 @@
+Rudder chạy các agent lập trình của bạn (Claude Code và Codex) trên một máy chủ đám mây và đặt chúng vào túi bạn: đọc hội thoại, trả lời câu hỏi, duyệt thay đổi, bắt đầu tác vụ mới và merge kết quả ngay trên điện thoại.
+
+Xem mọi dự án và agent chỉ trong nháy mắt. Khi một agent có câu hỏi, cần bạn duyệt hoặc đã có kế hoạch sẵn sàng, Rudder đưa nó lên đầu và hiển thị huy hiệu, để bạn trả lời sau vài lần chạm rồi cho nó làm tiếp.
+
+Từ điện thoại, bạn có thể:
+- Đọc hội thoại của từng agent trong lúc nó làm việc và gửi tin nhắn cho nó.
+- Trả lời câu hỏi, duyệt hành động và duyệt kế hoạch.
+- Khởi chạy agent mới trên bất kỳ dự án nào và chọn model cho nó.
+- Đính kèm ảnh, ảnh chụp màn hình và tệp vào tin nhắn.
+- Nói chuyện với Rudder: hỏi các agent đang làm gì, hoặc bảo chúng phải làm gì, bằng giọng nói.
+- Đăng nhập Claude Code hoặc Codex trên máy chủ đám mây mà không cần laptop.
+- Nhận bản tóm tắt buổi sáng về những gì các agent đã làm từ hôm qua.
+- Kiểm tra máy chủ đám mây, các workspace và mức sử dụng gói của bạn.
+
+Rudder còn có ứng dụng Mac và công cụ dòng lệnh. Tất cả luôn đồng bộ: khởi chạy một agent trên laptop rồi theo dõi nó trên điện thoại.
+
+Rudder miễn phí và mã nguồn mở. Bạn đăng nhập bằng Apple, Google hoặc GitHub, và các agent dùng chính gói Claude hoặc ChatGPT của bạn.

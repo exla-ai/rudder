@@ -1,0 +1,17 @@
+Rudder kör dina kodagenter (Claude Code och Codex) på en molnmaskin och ger dig dem i fickan: läs deras konversationer, svara på deras frågor, godkänn ändringar, starta nya uppgifter och merga arbete från mobilen.
+
+Se alla projekt och agenter på ett ögonblick. När en agent har en fråga, behöver ett godkännande eller har en plan klar lägger Rudder den överst och visar en bricka, så att du kan svara med några tryck och låta den jobba vidare.
+
+Från mobilen kan du:
+- Läsa varje agents konversation medan den arbetar och skicka ett meddelande till den.
+- Svara på frågor, godkänna åtgärder och godkänna planer.
+- Starta en ny agent i vilket projekt som helst och välja modell.
+- Bifoga foton, skärmbilder och filer i ett meddelande.
+- Prata med Rudder: fråga vad dina agenter gör, eller säg åt dem vad de ska göra, med rösten.
+- Logga in Claude Code eller Codex på din molnmaskin utan en bärbar dator.
+- Få en morgonsammanfattning av vad dina agenter har gjort sedan i går.
+- Kolla din molnmaskin, dess arbetsytor och hur mycket av ditt abonnemang du har använt.
+
+Rudder finns också som Mac-app och kommandoradsverktyg. De hålls synkade: starta en agent på din bärbara dator och följ den i mobilen.
+
+Rudder är gratis och har öppen källkod. Du loggar in med Apple, Google eller GitHub, och agenterna använder ditt eget Claude- eller ChatGPT-abonnemang.

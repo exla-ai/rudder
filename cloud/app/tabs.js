@@ -9,8 +9,9 @@
 // collapses its group to the chip, which then says how many tabs it hides and
 // whether one of their agents is working or needs you; the tab on screen
 // stays out beside it. The chip's menu (right click, the context-menu key or
-// Shift+F10) opens a tab in the project, collapses the other projects, or
-// closes the group's tabs. Which groups are collapsed belongs to this device.
+// Shift+F10) opens a tab in the project, collapses the other projects, sets
+// the project's color, or closes the group's tabs. Which groups are collapsed
+// belongs to this device; a project's color belongs to the account.
 //
 // A tab you leave keeps its screens mounted, out of sight at the size they
 // had, so its chat, scroll, draft and focus are where you left them, and its
@@ -29,7 +30,7 @@
 import { h, icon, setText, reconcile } from "/app/render.js";
 import { ls, PLATFORM } from "/app/core.js";
 import { tabDragPosition } from "/app/tab-drag.js";
-import { arrange, groupsOf, placeFor, regroup } from "/app/tab-groups.js";
+import { COLORS, arrange, groupColors, groupsOf, ownColor, placeFor, regroup } from "/app/tab-groups.js";
 import { rowMenu, showAgentMenu } from "/app/agent-menu.js";
 import { teamAgent } from "/app/team.js";
 
@@ -43,9 +44,11 @@ const TAB_MOVE = { id: "tab-reorder", duration: 190, easing: "cubic-bezier(.2,.7
  * hooks: `park()` takes the screens off its panes and returns them, per pane
  * ([{ route, screen } | null]); `loadSplit(split)` gives it the split of the
  * tab coming in. `navigate`, `parseRoute`, `projectPath`, `findAgent`,
- * `findProject` and `agentStatus` are the app's own.
+ * `findProject` and `agentStatus` are the app's own, as are
+ * `chosenColor(ws)` (the color the account chose for a project, or null)
+ * and `setColor(ws, color)`.
  */
-export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath, findAgent, findProject, agentStatus }) {
+export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath, findAgent, findProject, agentStatus, chosenColor, setColor }) {
   // A tab's group: the project of its page (of a split's left agent), or null
   // for a page of no project of yours.
   const groupOf = (t) => {
@@ -65,6 +68,8 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
   const collapsed = new Set(saved?.collapsed);
   // Per project, the tab last on screen in its group (Cmd+Option+[ and ]).
   const lastUsed = new Map();
+  // The color of each project with a group in the strip (groupColors), as last painted.
+  let colors = new Map();
   const cur = () => tabs.find((t) => t.id === active);
   // In sight: the tab on screen, and every tab of an expanded group.
   const shown = (t) => t.id === active || !collapsed.has(groupOf(t));
@@ -219,6 +224,12 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
             save();
             paint();
           },
+        },
+        "divider",
+        {
+          label: "Color",
+          swatches: COLORS.map((c) => ({ value: c, label: `Color: ${c[0].toUpperCase()}${c.slice(1)}`, checked: c === colors.get(key) })),
+          pick: (c) => setColor(key, c),
         },
         "divider",
         // The last tabs stay, as the last tab does.
@@ -455,6 +466,7 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
     const cls = needs ? "s-needs" : working ? "s-working" : "";
     chip.className = `tab-chip${cls ? ` ${cls}` : ""}`;
     chip.dataset.group = key;
+    chip.dataset.color = colors.get(key);
     chip.tabIndex = -1;
     chip.setAttribute("aria-expanded", String(!folded));
     setText(chip.querySelector(".tab-chip-n"), name);
@@ -476,7 +488,9 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
     list.toggleAttribute("data-reorderable", many);
     lastUsed.set(groupOf(cur()), active);
     // Each project's chip, then its tabs; pages of no project have no chip.
-    const items = groupsOf(tabs, groupOf).flatMap((g) => (g.key === null ? g.tabs : [g, ...g.tabs]));
+    const groups = groupsOf(tabs, groupOf);
+    colors = groupColors(groups.filter((g) => g.key !== null).map((g) => g.key), chosenColor);
+    const items = groups.flatMap((g) => (g.key === null ? g.tabs : [g, ...g.tabs]));
     reconcile(list, items, (x) => (x.tabs ? `g:${x.key}` : x.id),
       (x) => (x.tabs
         ? h(`<button type="button" class="tab-chip"><span class="dot" hidden></span><span class="tab-chip-n"></span><span class="tab-chip-c"></span></button>`)
@@ -488,6 +502,8 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
         const key = groupOf(t);
         tabEl.className = `tab${on ? " on" : ""}${key === null ? "" : " grouped"}${d.status ? ` ${d.status.cls}` : ""}`;
         tabEl.dataset.group = key ?? "";
+        if (key === null) delete tabEl.dataset.color;
+        else tabEl.dataset.color = colors.get(key);
         tabEl.hidden = !shown(t);
         // The chip shows the project; a tab says it too, to a screen reader and in its tooltip.
         const project = key !== null && parseRoute(t.path).name !== "project" ? projectName(key) : "";
@@ -518,6 +534,8 @@ export function Tabs({ main, park, loadSplit, navigate, parseRoute, projectPath,
     el,
     revive,
     split: () => cur().split,
+    // A project's color: its group's while it has one in the strip.
+    colorOf: (ws) => colors.get(ws) || chosenColor(ws) || ownColor(ws),
     saveSplit(split) {
       const t = cur();
       const was = groupOf(t);

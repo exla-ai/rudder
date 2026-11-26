@@ -338,6 +338,17 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal(await orderOf(), 0, "a refused order changes nothing");
   assert.equal((await fetch(`${base}/api/app/project-order`, orderBody([]))).status, 200);
   assert.equal(await orderOf(), null, "a project left out goes back to having no place");
+  // So is a project's color, one of the app's palette.
+  const colorOf = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json())
+    .projects.find((p) => p.workspaceId === "libra-test").color;
+  const colorBody = (color, workspace = "libra-test") => ({ method: "POST", headers: auth, body: JSON.stringify({ workspace, color }) });
+  assert.equal(await colorOf(), null);
+  assert.deepEqual(await (await fetch(`${base}/api/app/project-color`, colorBody("sage"))).json(), { workspaceId: "libra-test", color: "sage" });
+  assert.equal(await colorOf(), "sage");
+  assert.equal((await fetch(`${base}/api/app/project-color`, colorBody("teal"))).status, 400);
+  assert.equal((await fetch(`${base}/api/app/project-color`, colorBody(null))).status, 400);
+  assert.equal((await fetch(`${base}/api/app/project-color`, colorBody("rose", "other-test"))).status, 404);
+  assert.equal(await colorOf(), "sage", "a refused color changes nothing");
   // (delete is a real action now: cloud-home-move.test.mjs covers it.)
   const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "reboot" }) });
   assert.equal(badAction.status, 400);

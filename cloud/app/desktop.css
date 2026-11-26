@@ -345,6 +345,7 @@ body.desktop .toasts { left: var(--side); }
 .ds-tw[aria-expanded="true"] svg { transform: rotate(90deg); }
 .ds-pn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 9px; text-decoration: none; color: var(--ink); }
 .ds-proj.on > .ds-prow .ds-pn { background: var(--surface-3); }
+.ds-pcol { flex: none; width: 8px; height: 8px; margin-right: -2px; border-radius: 2px; background: var(--tg); }
 .ds-pname { flex: 1; min-width: 0; font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ds-pc { font-size: 11.5px; font-weight: 700; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; display: grid; place-items: center; }
 .ds-pc:empty { display: none; }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { arrange, groupsOf, placeFor, regroup } from "../cloud/app/tab-groups.js";
+import { COLORS, arrange, groupColors, groupsOf, ownColor, placeFor, regroup } from "../cloud/app/tab-groups.js";
 
 // A tab is its id; its group is the letter before the digit, "-" for no project.
 const tab = (id) => ({ id });
@@ -48,4 +48,34 @@ test("a tab that leaves for a page of no project joins those at the start", () =
 
 test("groups read off in order", () => {
   assert.deepEqual(groupsOf(list("-1 a1 a2 b1"), keyOf).map((g) => [g.key, ids(g.tabs)]), [[null, "-1"], ["a", "a1 a2"], ["b", "b1"]]);
+});
+
+test("a project's own color comes from its id, is the same every time, and is never the grey", () => {
+  const ids = Array.from({ length: 200 }, (_, i) => `ws-${i.toString(36)}-${(i * 7919).toString(16)}`);
+  const own = ids.map(ownColor);
+  assert.deepEqual(ids.map(ownColor), own);
+  assert.ok(own.every((c) => COLORS.includes(c) && c !== "grey"));
+  assert.equal(new Set(own).size, COLORS.length - 1, "every hue gets used");
+});
+
+test("open projects take their own colors, and one whose color is taken moves to the next free hue", () => {
+  const hues = COLORS.filter((c) => c !== "grey");
+  // Ids by their own color: two share rose, one is plum.
+  const pool = Array.from({ length: 400 }, (_, i) => `p${i}`);
+  const of = (c) => pool.filter((k) => ownColor(k) === c);
+  const [a, b] = of("rose").sort();
+  const [c] = of("plum");
+  const none = () => null;
+  const colors = groupColors([b, c, a], none);
+  assert.equal(colors.get(a), "rose", "the first by id keeps it, wherever its group sits");
+  assert.equal(colors.get(c), "plum", "a project whose color is free keeps it");
+  assert.equal(colors.get(b), "violet", "the next hue after rose and plum");
+  // A chosen color wins, and the project it belonged to moves on.
+  const picked = groupColors([a, c], (k) => (k === c ? "rose" : null));
+  assert.equal(picked.get(c), "rose");
+  assert.equal(picked.get(a), "plum");
+  // The grey only when chosen; past every hue, own colors repeat.
+  assert.equal(groupColors([a], () => "grey").get(a), "grey");
+  const all = [...groupColors(hues.flatMap((h) => of(h).slice(0, 2)), none).values()];
+  assert.deepEqual(hues.map((h) => all.filter((x) => x === h).length), hues.map(() => 2));
 });

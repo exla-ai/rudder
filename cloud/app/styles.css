@@ -29,6 +29,21 @@
   --idle: #8b867d;
   --idle-soft: rgba(139, 134, 125, 0.13);
 
+  /* Project colors (tab-groups.js COLORS): muted hues kept apart from the
+     state colors above, so a status dot stays the signal. A chip's ground
+     takes --group-tint of its hue over the strip, its text --group-text of
+     the hue over the ink. */
+  --group-rose: #b07086;
+  --group-plum: #a274a0;
+  --group-violet: #8c7bb3;
+  --group-slate: #628ca9;
+  --group-sage: #73915b;
+  --group-olive: #8f8949;
+  --group-clay: #b07658;
+  --group-grey: #82868e;
+  --group-tint: 24%;
+  --group-text: 50%;
+
   --bubble-user: #1f2a44;
   --bubble-user-ink: #f5f3ee;
   --code-bg: #f3f0e9;
@@ -79,6 +94,17 @@
   --idle: #8e8b84;
   --idle-soft: rgba(142, 139, 132, 0.14);
 
+  --group-rose: #d293a7;
+  --group-plum: #c496c1;
+  --group-violet: #ad9dd4;
+  --group-slate: #86adca;
+  --group-sage: #95b37e;
+  --group-olive: #b0ab6f;
+  --group-clay: #d2997c;
+  --group-grey: #a3a8af;
+  --group-tint: 30%;
+  --group-text: 42%;
+
   --bubble-user: #2b3a63;
   --bubble-user-ink: #eef1fb;
   --code-bg: #15171b;
@@ -88,6 +114,17 @@
   --shadow-2: 0 14px 40px -12px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
+
+/* Anything showing a project's color (tab chips and rules, menu swatches,
+   the sidebar) reads it as --tg. */
+[data-color="rose"] { --tg: var(--group-rose); }
+[data-color="plum"] { --tg: var(--group-plum); }
+[data-color="violet"] { --tg: var(--group-violet); }
+[data-color="slate"] { --tg: var(--group-slate); }
+[data-color="sage"] { --tg: var(--group-sage); }
+[data-color="olive"] { --tg: var(--group-olive); }
+[data-color="clay"] { --tg: var(--group-clay); }
+[data-color="grey"] { --tg: var(--group-grey); }
 
 * { box-sizing: border-box; }
 html, body {
@@ -875,6 +912,12 @@ div.compact { margin: 18px 0; }
 .menu small { font-size: 12px; color: var(--faint); }
 .menu button[disabled] { color: var(--faint); }
 .menu button[disabled]:active, .menu button[disabled]:hover { background: none; }
+/* A row of colors (showAgentMenu swatches); a ring marks the one in use. */
+.menu .m-swatches { display: flex; gap: 2px; padding: 4px 6px; }
+.menu .m-swatches button { flex: none; width: 28px; min-height: 28px; height: 28px; padding: 0; justify-content: center; border-radius: 50%; }
+.menu .m-swatches button:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.m-sw { width: 16px; height: 16px; border-radius: 50%; background: var(--tg); }
+.menu .m-swatches [aria-checked="true"] .m-sw { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--tg); width: 14px; height: 14px; }
 /* Above the paperclip, left-aligned with it (the menu sits in the composer's form). */
 .composer .attach-menu {
   top: auto; right: auto; bottom: calc(100% + 6px); left: 0;

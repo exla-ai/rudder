@@ -241,9 +241,12 @@ export function closeAgentMenu() { openMenu?.(); }
 
 /**
  * A menu at a point (`x`, `y`: a right click) or under a row (`anchor`: the
- * keyboard). `items` are `{ label, icon, run, danger, disabled }` or "divider".
- * Up and Down move, Esc or a click elsewhere closes, focus goes back to
- * `returnFocus`.
+ * keyboard). `items` are `{ label, icon, run, danger, disabled }`, "divider",
+ * or a row of colors `{ label, swatches: [{ value, label, checked }], pick }`:
+ * picking one marks it and keeps the menu open, to see it and try another.
+ * Up and Down move (a row of colors is one stop, at its checked one), Left
+ * and Right move along a row, Esc or a click elsewhere closes, focus goes
+ * back to `returnFocus`.
  */
 export function showAgentMenu({ x, y, anchor, label, items, returnFocus }) {
   closeAgentMenu();
@@ -260,13 +263,22 @@ export function showAgentMenu({ x, y, anchor, label, items, returnFocus }) {
     if (refocus && returnFocus?.isConnected) returnFocus.focus();
   };
   const onAway = () => close(false);
-  const buttons = () => [...menu.querySelectorAll("button:not([disabled])")];
+  const stops = () => [...menu.querySelectorAll("button:not([disabled])")]
+    .filter((b) => !b.closest(".m-swatches") || b.getAttribute("aria-checked") === "true");
   const onKey = (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return; }
     if (e.key === "Tab") { e.preventDefault(); close(); return; }
-    const list = buttons();
+    const row = document.activeElement?.closest(".m-swatches");
+    if (row && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      const all = [...row.children];
+      const next = all.indexOf(document.activeElement) + (e.key === "ArrowRight" ? 1 : -1);
+      all[(next + all.length) % all.length].focus();
+      return;
+    }
+    const list = stops();
     if (!list.length) return;
-    const at = list.indexOf(document.activeElement);
+    const at = list.indexOf(row ? row.querySelector('[aria-checked="true"]') : document.activeElement);
     const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: list.length - 1 }[e.key];
     if (to === undefined) return;
     e.preventDefault();
@@ -274,6 +286,24 @@ export function showAgentMenu({ x, y, anchor, label, items, returnFocus }) {
   };
   for (const item of items) {
     if (item === "divider") { menu.appendChild(h("<hr>")); continue; }
+    if (item.swatches) {
+      const row = h(`<div class="m-swatches" role="group"></div>`);
+      row.setAttribute("aria-label", item.label);
+      for (const sw of item.swatches) {
+        const b = h(`<button type="button" role="menuitemradio"><span class="m-sw"></span></button>`);
+        b.dataset.color = sw.value;
+        b.setAttribute("aria-label", sw.label);
+        b.title = sw.label;
+        b.setAttribute("aria-checked", String(sw.checked));
+        b.addEventListener("click", () => {
+          for (const other of row.children) other.setAttribute("aria-checked", String(other === b));
+          item.pick(sw.value);
+        });
+        row.appendChild(b);
+      }
+      menu.appendChild(row);
+      continue;
+    }
     const b = h(`<button type="button" role="menuitem">${icon(item.icon)}<span></span></button>`);
     b.querySelector("span").textContent = item.label;
     if (item.danger) b.classList.add("danger");
@@ -308,7 +338,7 @@ export function showAgentMenu({ x, y, anchor, label, items, returnFocus }) {
   document.addEventListener("keydown", onKey, true);
   addEventListener("resize", onAway);
   addEventListener("blur", onAway);
-  buttons()[0]?.focus();
+  stops()[0]?.focus();
   return close;
 }
 

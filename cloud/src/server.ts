@@ -129,6 +129,9 @@ type Workspace = {
   // "home-repo" rows: where the user put the project in their list (0 first).
   // Unset until they move one; unset rows sit at the top of their group.
   sortOrder?: number;
+  // "home-repo" rows: the color the user chose for the project's tab group,
+  // one of PROJECT_COLORS. Unset, the app gives it one of its own.
+  color?: string;
   // "home" rows: where the home runs (home-host.ts). Fly unless switched.
   hostKind?: HomeHostKind;
   // "home" rows: why the last image update failed on the host, until one works.
@@ -374,6 +377,7 @@ ensureColumn("rudder_workspaces", "failure_reason", "text");
 ensureColumn("rudder_sails", "failure_reason", "text");
 ensureColumn("rudder_workspaces", "pinned_at", "text");
 ensureColumn("rudder_workspaces", "sort_order", "integer");
+ensureColumn("rudder_workspaces", "color", "text");
 // A home on an external host (cloud/host/) instead of a Fly machine: null or
 // 'fly' is the original shape, 'external' means never call Fly for it.
 ensureColumn("rudder_workspaces", "host_kind", "text");
@@ -4445,6 +4449,7 @@ function rowToWorkspace(row: unknown): Workspace {
     failureReason: optionalString(value.failure_reason),
     pinnedAt: optionalString(value.pinned_at),
     sortOrder: typeof value.sort_order === "number" ? value.sort_order : undefined,
+    color: optionalString(value.color),
     hostKind: homeHostKind(value.host_kind),
     updateError: optionalString(value.update_error),
     lastActivityAt: optionalString(value.last_activity_at),
@@ -5521,6 +5526,11 @@ const listHomeRepoRows = database.prepare(
 );
 const setHomeRepoPinned = database.prepare(
   "update rudder_workspaces set pinned_at = @pinnedAt where id = @id and account_id = @accountId",
+);
+// The colors a project's tab group can have (the app's tab-groups.js COLORS).
+const PROJECT_COLORS = ["rose", "plum", "violet", "slate", "sage", "olive", "clay", "grey"];
+const setHomeRepoColor = database.prepare(
+  "update rudder_workspaces set color = @color where id = @id and account_id = @accountId",
 );
 const setHomeRepoSortOrder = database.prepare(
   "update rudder_workspaces set sort_order = @sortOrder where id = @id and account_id = @accountId",
@@ -7226,6 +7236,7 @@ function homeProjects(home: Workspace, { coordinator = false } = {}): JsonRecord
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,
       sortOrder: row.sortOrder ?? null,
+      color: row.color ?? null,
       agentOrder: homeRepoAgentOrder(row.id),
       lastActivityAt: row.lastActivityAt ?? null,
     };
@@ -8331,6 +8342,18 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const pinnedAt = pinned ? repo.pinnedAt ?? new Date().toISOString() : null;
     setHomeRepoPinned.run({ id: repo.id, accountId: account.accountId, pinnedAt });
     sendJson(res, 200, { workspaceId: repo.id, pinnedAt });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/project-color") {
+    // The color of a project's tab group. Kept on the row like pins, so every
+    // device shows the same.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const color = stringField(body, "color") ?? "";
+    if (!PROJECT_COLORS.includes(color)) throw badRequest(`color must be one of ${PROJECT_COLORS.join(", ")}`);
+    setHomeRepoColor.run({ id: repo.id, accountId: account.accountId, color });
+    schedulePersistDatabase();
+    sendJson(res, 200, { workspaceId: repo.id, color });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/project-order") {

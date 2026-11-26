@@ -678,12 +678,18 @@ Antigravity Remote Control when the CLI provides its address.
 Keyboard navigation reveals a collapsed project or Needs You section when it
 contains the destination agent. The Mac tab strip appears when Cmd+T opens a
 second tab. Control+Tab and Control+Shift+Tab cycle through the open tabs.
-Desktop tabs group by project: each project's tabs sit behind a neutral chip
-with its name, pages of no project come first, and a tab that goes to another
+Desktop tabs group by project: each project's tabs sit behind a chip with its
+name, pages of no project come first, and a tab that goes to another
 project's page moves to that group. A chip click collapses the group to a
 count and the most urgent status, keeping the tab on screen beside it; the
-chip menu opens a tab in the project, collapses the others or closes the
-group. Cmd+Option+[ and ] step between projects in the Mac app.
+chip menu opens a tab in the project, collapses the others, sets the
+project's color or closes the group. Cmd+Option+[ and ] step between projects
+in the Mac app. Each project has a color from eight muted hues kept apart
+from the state colors (tab-groups.js COLORS, --group-* tokens): its own from
+the workspace id, moved to a free hue when another open group shows it, or
+one the account chose (POST /api/app/project-color, the `color` column on the
+project row). It tints the chip, colors the rule under the group's tabs and
+marks the project in the sidebar.
 
 Chat links open supported images and PDFs in the read-only file viewer. Bare
 image filenames in inline code also link to the viewer.

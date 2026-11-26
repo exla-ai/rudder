@@ -931,7 +931,7 @@ function DesktopShell() {
   // Tabs (tabs.js), each with its own page and split, above the main area.
   // A tab left keeps its screens: parking takes them off the panes.
   const tabs = Tabs({
-    main, navigate, parseRoute, projectPath, findAgent, findProject, agentStatus,
+    main, navigate, parseRoute, projectPath, findAgent, findProject, agentStatus, chosenColor, setColor: setProjectColor,
     park: () => panes.map((p) => {
       const kept = p.screen ? { route: p.route, screen: p.screen } : null;
       p.route = null; p.screen = null;
@@ -1576,7 +1576,7 @@ function DesktopShell() {
     // reconcile keeps unkeyed children, so the "Loading…" placeholder goes by hand.
     if (projects.length) projectsEl.querySelector(":scope > .ds-none")?.remove();
     reconcile(projectsEl, projects, (p) => p.workspaceId,
-      () => h(`<div class="ds-proj"><div class="ds-prow" draggable="true"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link aria-describedby="ds-move-hint"><span class="ds-pname"></span><span class="ds-pc"></span></a><button type="button" class="ds-pin" aria-pressed="false">${icon("pin")}</button></div><div class="ds-agents" role="list"></div></div>`),
+      () => h(`<div class="ds-proj"><div class="ds-prow" draggable="true"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link aria-describedby="ds-move-hint"><span class="ds-pcol" aria-hidden="true"></span><span class="ds-pname"></span><span class="ds-pc"></span></a><button type="button" class="ds-pin" aria-pressed="false">${icon("pin")}</button></div><div class="ds-agents" role="list"></div></div>`),
       (pEl, p) => {
         const ws = p.workspaceId;
         const open = openSet.has(ws);
@@ -1595,6 +1595,8 @@ function DesktopShell() {
         const link = pEl.querySelector(".ds-pn");
         link.href = projectPath(ws);
         setText(pEl.querySelector(".ds-pname"), p.name || p.repo);
+        // The project's color, as on its tab group.
+        pEl.querySelector(".ds-pcol").dataset.color = tabs.colorOf(ws);
         const n = (p.agents || []).filter(needsYou).length;
         const live = (p.agents || []).filter((a) => a.status === "working" || a.status === "starting").length;
         const pc = pEl.querySelector(".ds-pc");
@@ -3269,14 +3271,15 @@ async function setPinned(ws, pinned) {
   updateScreen();
 }
 
-// Saves a move of one order (the project list, or one project's agents). The
-// move shows at once (`show`) and stays until its save is through (`saved`,
-// then `drop`). Saves of one order go one at a time, and a move made meanwhile
-// saves instead, so quick moves (Alt+Down, Alt+Down) can't reach the server
-// out of order. A failed save says so and puts the server's order back (`drop`).
+// Saves a move of one order (the project list, or one project's agents), or
+// a project's color. The change shows at once (`show`) and stays until its
+// save is through (`saved`, then `drop`). Saves of one key go one at a time,
+// and a change made meanwhile saves instead, so quick moves (Alt+Down,
+// Alt+Down) can't reach the server out of order. A failed save says so
+// (`failed`) and puts the server's state back (`drop`).
 const orderSeqs = new Map(); // order key -> its latest move
 const orderSaves = new Map(); // order key -> the save in flight
-async function saveOrder(key, { show, post, saved, drop }) {
+async function saveOrder(key, { show, post, saved, drop, failed }) {
   const mine = (orderSeqs.get(key) || 0) + 1;
   orderSeqs.set(key, mine);
   show();
@@ -3295,7 +3298,7 @@ async function saveOrder(key, { show, post, saved, drop }) {
     } catch (err) {
       if (mine !== orderSeqs.get(key)) return;
       drop();
-      if (err.status !== 401) toast(`Couldn't move it: ${err.message}`, { error: true });
+      if (err.status !== 401) toast(`${failed}: ${err.message}`, { error: true });
     }
     updateScreen();
   })();
@@ -3345,6 +3348,7 @@ function setProjectOrder(ids) {
     post: () => api("/api/app/project-order", { method: "POST", body: { workspaces: ids } }),
     saved: () => { for (const p of store.state?.projects || []) p.sortOrder = placeIn(ids, p.workspaceId); },
     drop: () => { orderOverride = null; },
+    failed: "Couldn't move it",
   });
 }
 
@@ -3372,6 +3376,24 @@ function setAgentOrder(ws, runs) {
     post: () => api("/api/app/agent-order", { method: "POST", body: { workspace: ws, runs } }),
     saved: () => { const p = findProject(ws); if (p) p.agentOrder = runs; },
     drop: () => { agentOrderOverrides.delete(ws); },
+    failed: "Couldn't move it",
+  });
+}
+
+// The color the account chose for a project (its tab group's, tab-groups.js),
+// kept on the project like its pin so every device shows it, or null for the
+// project's own. A pick shows at once and saves through saveOrder.
+const colorOverrides = new Map(); // workspace id -> the color picked here
+function chosenColor(ws) {
+  return colorOverrides.get(ws) || findProject(ws)?.color || null;
+}
+function setProjectColor(ws, color) {
+  return saveOrder(`color ${ws}`, {
+    show: () => { colorOverrides.set(ws, color); },
+    post: () => api("/api/app/project-color", { method: "POST", body: { workspace: ws, color } }),
+    saved: () => { const p = findProject(ws); if (p) p.color = color; },
+    drop: () => { colorOverrides.delete(ws); },
+    failed: "Couldn't change the color",
   });
 }
 // What a screen reader hears after a move, which it would not otherwise notice.

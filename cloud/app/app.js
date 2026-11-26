@@ -4738,9 +4738,10 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
     pill.setAttribute("aria-keyshortcuts", "Alt+B");
   }
 
-  // Alt+V and Alt+B, as on the dashboard. Alt+V puts the start of the message
-  // above the top of the view at the top, so each press goes one further
-  // back; from the first message shown, the page before it loads first. Alt+B
+  // Alt+V and Alt+B, as on the dashboard. Alt+V puts the start of your own
+  // message above the top of the view at the top, so each press goes one
+  // exchange further back, question first with its answer below; from the
+  // first of yours shown, the page before it loads first. Alt+B
   // goes to the newest and follows it again. Jumps are instant, so a press
   // always starts where the last one landed, and they set atBottom at once,
   // so a paint before the scroll event cannot pull the chat back down.
@@ -4750,7 +4751,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   function messageAbove() {
     const line = scroller.getBoundingClientRect().top + MSG_MARGIN - 2;
     let found = null;
-    for (const node of msgsEl.querySelectorAll(":scope > .msg")) {
+    for (const node of msgsEl.querySelectorAll(":scope > .msg.user")) {
       if (node.getBoundingClientRect().top >= line) break;
       found = node;
     }
@@ -5923,7 +5924,7 @@ document.addEventListener("keydown", (e) => {
   term.set(!term.isOpen());
 }, { capture: true });
 // Alt+V and Alt+B walk the open chat (AgentScreen), the composer focused or
-// not: back a message per press, and down to the newest. They match e.code,
+// not: back one of your messages per press, and down to the newest. They match e.code,
 // as Option+V and Option+B arrive in e.key as "√" and "∫". The terminal keeps
 // them: Option is Meta there, and Meta+B moves back a word.
 document.addEventListener("keydown", (e) => {

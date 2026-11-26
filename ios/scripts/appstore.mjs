@@ -5,15 +5,18 @@
 // and the build number is derived from it. The listing comes from ios/appstore/.
 //
 //   check                    checks ios/appstore against Apple's limits (no network, no key)
-//   status                   the app's App Store versions, latest builds and review submissions
-//   identity                 checks the key belongs to the project's team, registers the
-//                            bundle id if it is missing and enables the capabilities the
-//                            app's entitlements need (none today)
+//   status                   the app's App Store versions, latest builds and review
+//                            submissions, or that the app record does not exist yet
+//   identity                 registers the bundle id if it is missing, checks the key
+//                            belongs to the project's team, enables the capabilities the
+//                            app's entitlements need (none today) and checks the app record
+//                            exists (only the App Store Connect website creates it)
 //   testflight               waits for this build to finish processing; internal testers
 //                            get it from TestFlight then
-//   prepare                  makes the App Store version match the repo: creates or renames
-//                            it, sets the text, categories and App Review details, attaches
-//                            this build and uploads the screenshots. Submits nothing.
+//   prepare                  makes the App Store version match the repo: the bundle id's
+//                            capabilities (as identity), creates or renames the version, sets
+//                            the text, categories and App Review details, attaches this
+//                            build and uploads the screenshots. Submits nothing.
 //   submit --confirm X.Y.Z   submits the prepared version for App Review. The only command
 //                            that does, and only when --confirm names the version.
 //   release --confirm X.Y.Z  releases an approved version (the listing's releaseType is MANUAL)
@@ -342,11 +345,17 @@ function dryClient(context) {
   }
 }
 
-async function findApp(client, { bundleId }) {
-  const app = (await client.api("GET", `/v1/apps?filter[bundleId]=${bundleId}`)).data.find((a) => a.attributes.bundleId === bundleId)
-  if (!app) {
-    throw new Error(`App Store Connect has no app for ${bundleId}, and the API cannot create one. In App Store Connect: Apps, +, New App; platform iOS, name Rudder, primary language English (U.S.), bundle id ${bundleId}, SKU rudder-ios, full access`)
-  }
+// The API cannot create an app record (POST /v1/apps is not allowed).
+const createAppRecord = (bundleId) =>
+  `The API cannot create it. In App Store Connect: Apps, +, New App; platform iOS, name Rudder, primary language English (U.S.), bundle id ${bundleId}, SKU rudder-ios, user access Full Access`
+
+async function lookupApp(client, { bundleId }) {
+  return (await client.api("GET", `/v1/apps?filter[bundleId]=${bundleId}`)).data.find((a) => a.attributes.bundleId === bundleId)
+}
+
+async function findApp(client, context) {
+  const app = await lookupApp(client, context)
+  if (!app) throw new Error(`App Store Connect has no app record for ${context.bundleId}. ${createAppRecord(context.bundleId)}`)
   return app
 }
 
@@ -386,7 +395,11 @@ async function uploadScreenshot(client, setId, file) {
   throw new Error(`${file.name} was still processing after two minutes`)
 }
 
-async function identity(client, context) {
+/**
+ * Registers the bundle id if it is missing, checks the key's team owns it and
+ * enables the capability each entitlement needs.
+ */
+export async function ensureBundleId(client, context) {
   const { team, bundleId, entitlements } = context
   let bundle = (await client.api("GET", `/v1/bundleIds?filter[identifier]=${bundleId}&filter[platform]=IOS`)).data.find((b) => b.attributes.identifier === bundleId)
   if (!bundle) {
@@ -419,6 +432,10 @@ async function identity(client, context) {
   }
   if (unknown.length) throw new Error(`no capability is mapped for ${unknown.join(", ")}: add it to ENTITLEMENT_CAPABILITIES`)
   console.log(`${bundleId} on team ${team}: entitlements ${entitlements.join(", ") || "none"}; capabilities ${[...enabled].join(", ") || "none"}`)
+}
+
+async function identity(client, context) {
+  await ensureBundleId(client, context)
   // The upload needs the app record, which only the website creates.
   const app = await findApp(client, context)
   console.log(`app record ${app.attributes.name} (${app.id})`)
@@ -446,6 +463,7 @@ async function prepare(client, context) {
   const listing = loadListing()
   const sets = checkListing(listing)
   const review = reviewDetails(client.dryRun)
+  await ensureBundleId(client, context)
   const app = await findApp(client, context)
   const versions = await iosVersions(client, app)
   const plan = planVersion(versions, version)
@@ -577,8 +595,12 @@ async function release(client, context) {
   console.log(`released ${version} on the App Store`)
 }
 
-async function status(client, context) {
-  const app = await findApp(client, context)
+export async function status(client, context) {
+  const app = await lookupApp(client, context)
+  if (!app) {
+    console.log(`no app record for ${context.bundleId} on team ${context.team} yet. ${createAppRecord(context.bundleId)}`)
+    return
+  }
   console.log(`app ${app.attributes.name} (${app.id})`)
   for (const v of await iosVersions(client, app)) console.log(`version ${v.attributes.versionString}: ${v.attributes.appVersionState}`)
   const builds = await client.api("GET", `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=5&include=preReleaseVersion`)

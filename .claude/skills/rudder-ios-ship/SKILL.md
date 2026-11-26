@@ -16,10 +16,10 @@ do them only when the user asked for that step.
 |---|---|
 | `upload` | runs `identity`, archives the commit's app on an Offstage Mac, uploads it, waits until TestFlight has it (internal testers) |
 | `identity` | registers the bundle id if missing, checks it is the project's team, enables the capabilities the entitlements need, checks the app record exists |
-| `prepare` | creates or renames the App Store version, sets text, categories and App Review details from `ios/appstore`, attaches the build, uploads screenshots. Submits nothing |
+| `prepare` | does what `identity` does to the bundle id, creates or renames the App Store version, sets text, categories and App Review details from `ios/appstore`, attaches the build, uploads screenshots. Submits nothing |
 | `submit` | sends the prepared version to App Review. Needs `confirm` set to the version |
 | `release` | puts an approved version live (`releaseType` is `MANUAL`). Needs `confirm` |
-| `status` | versions, builds and review submissions |
+| `status` | versions, builds and review submissions, or that the app record does not exist yet and how to create it |
 
 ```sh
 gh workflow run ios-appstore.yml --ref v5.1.0 -f step=upload
@@ -46,6 +46,25 @@ Moving to another team or bundle id means a new app record: App Store
 Connect cannot move a bundle id between teams except by an app transfer
 (App Store Connect, App Information, Transfer App, done by both Account
 Holders, only for an app that has been on the App Store).
+
+## The old TestFlight app
+
+Builds up to 12 went to TestFlight as `dev.viraat.rudder` on the user's
+personal team (`3C4383262W`). The Exla app is a different app, not an
+update to it:
+
+- It has its own TestFlight groups; nothing moves from the old record.
+- Testers install it fresh and sign in again. Nothing on the phone carries
+  over (the Keychain token, notification permission, settings); accounts and
+  agents live on the server and are all there after sign-in.
+- Both apps claim the `rudder://` scheme, so with both installed a
+  `rudder://pair` link may open the old one. Testers delete the old app.
+- The old app gets no more builds; TestFlight builds expire 90 days after
+  upload. Its record on the personal team is left alone unless the user asks
+  to remove it.
+- The TestFlight join link in `site/index.html`, `README.md` and
+  `cloud/app/tutorial.js` (`PHONE_APP_URL`) is the old app's. Replace it with
+  the App Store link once the app is live.
 
 ## Capabilities
 
@@ -78,30 +97,27 @@ changed; web app changes reach it through Cloud with no new build.
 
 ## First publication
 
-1. The user, as Account Holder of Exla Corp.: accept any pending agreement at
-   developer.apple.com/account and in App Store Connect, Business (a 403 "A
-   required agreement is missing or has expired" means this).
-2. The user creates the app record in App Store Connect (the API cannot):
+1. The user creates the app record in App Store Connect (the API cannot):
    Apps, +, New App; platform iOS, name Rudder, primary language English
    (U.S.), bundle id `ai.exla.rudder`, SKU `rudder-ios`, user access Full
    Access. `identity` fails with these fields until it exists.
-3. The user, in App Store Connect once: App Privacy (answers below), age
+2. The user, in App Store Connect once: App Privacy (answers below), age
    rating (every content question None or No, unrestricted web access No,
    giving 4+), Pricing and Availability (Free), and a TestFlight internal
    group with access to all builds.
-4. Demo account: a Google account made for App Review with a Rudder account,
+3. Demo account: a Google account made for App Review with a Rudder account,
    a running cloud machine, two or three projects with agents that have a
    question and a plan waiting, and Claude Code signed in. Set
    `gh secret set RUDDER_DEMO_TOKEN` (its `rdr_` token) and
    `gh secret set APPSTORE_REVIEW < review.json` (JSON: `contactFirstName`,
    `contactLastName`, `contactPhone`, `contactEmail`, `demoAccountRequired`,
    `demoAccountName`, `demoAccountPassword`). Neither is ever printed.
-5. Screenshots: `scripts/ios-qa.sh /workspace/rudder-scratch/<task>/shots main appstore`
+4. Screenshots: `scripts/ios-qa.sh /workspace/rudder-scratch/<task>/shots main appstore`
    (the rudder-ios-qa skill). Look at every image: they are public. Copy the
    good ones to `ios/appstore/screenshots/<display type>/NN-name.jpg`; files
    upload in name order, 1 to 10 per set. Commit.
-6. `upload`, then `prepare`, then the checks below, then `submit`.
-7. After approval: `release` (or Release This Version in App Store Connect).
+5. `upload`, then `prepare`, then the checks below, then `submit`.
+6. After approval: `release` (or Release This Version in App Store Connect).
 
 ## Updates
 

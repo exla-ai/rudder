@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { appIdentity, checkListing, imageInfo, planVersion } from "../ios/scripts/appstore.mjs"
+import { appIdentity, checkListing, ensureBundleId, imageInfo, planVersion } from "../ios/scripts/appstore.mjs"
 
 const v = (versionString, appVersionState) => ({ id: versionString, attributes: { platform: "IOS", versionString, appVersionState } })
 
@@ -104,4 +104,35 @@ test("appIdentity and identity.sh read the same team and bundle id, and entitlem
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// Answers GETs from `data` by the URL's last path segment and records writes.
+function fakeClient(data) {
+  const writes = []
+  return {
+    writes,
+    async api(method, url, body) {
+      if (method !== "GET") {
+        writes.push([method, url, body?.data?.attributes])
+        return { data: { type: body.data.type, id: "new", attributes: body.data.attributes } }
+      }
+      return { data: data[url.split("?")[0].split("/").at(-1)] }
+    },
+  }
+}
+
+test("ensureBundleId enables mapped capabilities once, skips CarPlay and refuses another team's key or an unmapped entitlement", async () => {
+  const bundle = { type: "bundleIds", id: "B1", attributes: { identifier: "ai.example.app", seedId: "TEAM123" } }
+  const context = { team: "TEAM123", bundleId: "ai.example.app", entitlements: ["aps-environment", "com.apple.developer.carplay-voice-based-conversation", "keychain-access-groups"] }
+  const push = fakeClient({ bundleIds: [bundle], bundleIdCapabilities: [] })
+  await ensureBundleId(push, context)
+  assert.deepEqual(push.writes, [["POST", "/v1/bundleIdCapabilities", { capabilityType: "PUSH_NOTIFICATIONS" }]])
+  const already = fakeClient({ bundleIds: [bundle], bundleIdCapabilities: [{ attributes: { capabilityType: "PUSH_NOTIFICATIONS" } }] })
+  await ensureBundleId(already, context)
+  assert.deepEqual(already.writes, [])
+  const missing = fakeClient({ bundleIds: [], bundleIdCapabilities: [] })
+  await assert.rejects(ensureBundleId(missing, { ...context, entitlements: [] }), /App ID prefix undefined, not TEAM123/)
+  assert.equal(missing.writes[0][1], "/v1/bundleIds")
+  await assert.rejects(ensureBundleId(fakeClient({ bundleIds: [bundle], bundleIdCapabilities: [] }), { ...context, team: "OTHER" }), /belongs to another team/)
+  await assert.rejects(ensureBundleId(fakeClient({ bundleIds: [bundle], bundleIdCapabilities: [] }), { ...context, entitlements: ["com.apple.developer.healthkit"] }), /no capability is mapped/)
 })

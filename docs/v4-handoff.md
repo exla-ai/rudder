@@ -1,5 +1,18 @@
 # Rudder v4 handoff (2026-11-04)
 
+Sign in with Apple (App Store 4.8): the iPhone sign-in screen has the system
+"Continue with Apple" button next to Google. The app posts Apple's identity
+token to `POST /api/app/apple-signin`, which verifies it (Apple's keys from
+`APPLE_JWKS_URL`, audience `APPLE_APP_BUNDLE_ID`, the nonce, a verified
+email), signs in through Better Auth's apple provider and answers with a
+Rudder token. No Services ID or client secret. Not released, and not yet
+built on a Mac: the Swift, the ad hoc signed archive and the entitlement check
+in `ios/scripts/appstore.sh` have never run. Run `node ios/scripts/appstore.mjs
+identity` before the first upload so the bundle id has the capability. Open:
+deleting an account does not revoke the Apple sign-in at Apple (that call
+needs a Sign in with Apple key and the authorization code, which the
+identity-token flow never holds).
+
 Delete account (App Store 5.1.1(v)): Settings ends with a "Delete account"
 button on every platform; `POST /api/app/account/delete` removes the account
 in one transaction and leaves its machines to the reaper (reference 9.6.1).

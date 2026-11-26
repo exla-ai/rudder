@@ -2,13 +2,16 @@
 # The iPhone app's App Store upload, one stage per call, run on an Offstage
 # Mac by .offstage/ios-appstore.mjs from the checkout's root (which holds ios/):
 #
-#   archive  xcodegen, then a Release archive for iOS devices, unsigned,
-#            and build/upload.env with the version and build number in it
+#   archive  xcodegen, then a Release archive for iOS devices, built unsigned
+#            and then signed ad hoc with the app's entitlements, and
+#            build/upload.env with the version and build number in it
 #   upload   Xcode signs the archive for App Store distribution with the
-#            team's cloud-managed certificate and uploads it to App Store
-#            Connect. Needs IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID and IOS_ASC_KEY_P8,
-#            an Admin key of the team in ios/project.yml (cloud signing needs
-#            Admin), so no certificate or provisioning profile is stored.
+#            team's cloud-managed certificate, once into build/check to see
+#            that the signed app has every entitlement, then again to upload
+#            it to App Store Connect. Needs IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID
+#            and IOS_ASC_KEY_P8, an Admin key of the team in ios/project.yml
+#            (cloud signing needs Admin), so no certificate or provisioning
+#            profile is stored.
 #   collect  ../out.tgz with the logs and build/upload.env
 #
 # Each stage is its own command in the same sandbox, so tools/ and ios/build/
@@ -34,6 +37,39 @@ run_logged() {
   fi
 }
 
+# Stops unless the app's signature carries every entitlement the project
+# asks for (ios/App/Rudder.entitlements). An app uploaded without one passes
+# App Store Connect and then fails on the phone: no Sign in with Apple.
+require_entitlements() {
+  local app="$1" signed key missing=0
+  signed="$(codesign -d --entitlements - --xml "$app" 2>/dev/null || true)"
+  for key in $(sed -n 's/.*<key>\([^<]*\)<\/key>.*/\1/p' "$root/ios/App/Rudder.entitlements"); do
+    if [[ "$signed" != *"<key>$key</key>"* ]]; then
+      echo "$app is signed without the entitlement $key"
+      missing=1
+    fi
+  done
+  if [ "$missing" != 0 ]; then exit 1; fi
+}
+
+# ExportOptions.plist for `xcodebuild -exportArchive`: cloud-managed App Store
+# signing, written to disk (export) or sent to App Store Connect (upload).
+export_options() {
+  cat > build/ExportOptions.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>app-store-connect</string>
+  <key>destination</key><string>$1</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>teamID</key><string>$TEAM_ID</string>
+  <key>manageAppVersionAndBuildNumber</key><false/>
+</dict>
+</plist>
+PLIST
+}
+
 case "$stage" in
   archive)
     mkdir -p "$tools"
@@ -44,11 +80,23 @@ case "$stage" in
     cd "$root/ios"
     xcodebuild -version | sed -n 1p
     "$tools/xcodegen/bin/xcodegen" generate --quiet
-    # Unsigned here; Xcode applies the distribution signature at upload.
+    # Built unsigned: signing a device build needs a development certificate
+    # and a registered device, and this Mac has neither. Xcode applies the
+    # distribution signature at upload.
     run_logged archive.log xcodebuild archive -project Rudder.xcodeproj -scheme Rudder -configuration Release \
       -destination 'generic/platform=iOS' -archivePath build/Rudder.xcarchive \
       CODE_SIGNING_ALLOWED=NO
     app=build/Rudder.xcarchive/Products/Applications/Rudder.app
+    # At upload Xcode keeps the entitlements it reads from the archived app's
+    # signature, and an unsigned app has none. So the archived app is signed
+    # ad hoc with the project's entitlements plus the two every signed app has.
+    # (Asking xcodebuild for the ad hoc signature fails: "has entitlements that
+    # require signing with a development certificate".)
+    cp App/Rudder.entitlements build/archive.entitlements
+    /usr/libexec/PlistBuddy -c "Add :application-identifier string $TEAM_ID.$BUNDLE_ID" \
+      -c "Add :com.apple.developer.team-identifier string $TEAM_ID" build/archive.entitlements
+    run_logged adhoc-sign.log codesign --force --sign - --entitlements build/archive.entitlements "$app"
+    require_entitlements "$app"
     if [ ! -f "$app/PrivacyInfo.xcprivacy" ]; then
       echo "the archived app has no PrivacyInfo.xcprivacy; App Store Connect requires it"
       exit 1
@@ -71,25 +119,24 @@ case "$stage" in
     key="$HOME/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8"
     mkdir -p "$(dirname "$key")"
     (umask 077 && printf '%s\n' "$IOS_ASC_KEY_P8" > "$key")
+    trap 'rm -f "$key"' EXIT
     cd "$root/ios"
-    cat > build/ExportOptions.plist <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>method</key><string>app-store-connect</string>
-  <key>destination</key><string>upload</string>
-  <key>signingStyle</key><string>automatic</string>
-  <key>teamID</key><string>$TEAM_ID</string>
-  <key>manageAppVersionAndBuildNumber</key><false/>
-</dict>
-</plist>
-PLIST
+    # Signed for the App Store into build/check first, so an app that lost an
+    # entitlement on the way is caught here and never reaches App Store Connect.
+    rm -rf build/check build/export
+    export_options export
+    run_logged export-check.log xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
+      -exportOptionsPlist build/ExportOptions.plist -exportPath build/check \
+      -allowProvisioningUpdates -authenticationKeyPath "$key" \
+      -authenticationKeyID "$IOS_ASC_KEY_ID" -authenticationKeyIssuerID "$IOS_ASC_ISSUER_ID"
+    ipa="$(ls build/check/*.ipa)"
+    unzip -q "$ipa" -d build/check/ipa
+    require_entitlements build/check/ipa/Payload/Rudder.app
+    export_options upload
     run_logged export.log xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
       -exportOptionsPlist build/ExportOptions.plist -exportPath build/export \
       -allowProvisioningUpdates -authenticationKeyPath "$key" \
       -authenticationKeyID "$IOS_ASC_KEY_ID" -authenticationKeyIssuerID "$IOS_ASC_ISSUER_ID"
-    rm "$key"
     # App Store Connect's warnings (an SDK deadline, a missing API reason) come back here.
     grep -E "warning: |Uploaded |EXPORT SUCCEEDED" export.log | cut -c1-300
     ;;

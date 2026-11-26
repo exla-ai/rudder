@@ -25,6 +25,8 @@ kill_timeout = "10s"
   RUDDER_PUBLIC_LOGIN_URL = "https://rudder.exla.ai/login"
   GOOGLE_CLIENT_ID = "126214446123-b245olbglilh1edvnk0qu7sb2asbin2q.apps.googleusercontent.com"
   GITHUB_CLIENT_ID = "Iv23liKY5Nx0Mc4EqByY"
+  APPLE_APP_BUNDLE_ID = "ai.exla.rudder"
+  APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
   RUDDER_SLACK_CHANNEL = "C0BFZGYE5FH"
 
 [http_service]

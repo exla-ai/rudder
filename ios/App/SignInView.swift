@@ -1,3 +1,4 @@
+import AuthenticationServices
 import SwiftUI
 
 enum Theme {
@@ -29,6 +30,7 @@ struct SignInView: View {
     @State private var code = ""
     @FocusState private var codeFocused: Bool
     @State private var showCode = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack {
@@ -63,6 +65,18 @@ struct SignInView: View {
                     .buttonStyle(.plain)
                     .disabled(session.signingIn)
                     .accessibilityLabel("Continue with Google")
+
+                    // The system's own button, the same size as Google's.
+                    SignInWithAppleButton(.continue) { request in
+                        session.prepareAppleSignIn(request)
+                    } onCompletion: { result in
+                        session.finishAppleSignIn(result)
+                    }
+                    .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .disabled(session.signingIn)
 
                     Button("Use GitHub instead") {
                         session.signIn(provider: "github")

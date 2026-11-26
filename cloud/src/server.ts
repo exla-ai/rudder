@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { betterAuth } from "better-auth";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import Database from "better-sqlite3";
 import { toNodeHandler } from "better-auth/node";
 import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -179,6 +180,12 @@ const stateKey = process.env.RUDDER_CLOUD_STATE_KEY || "control-plane/rudder-clo
 const persistStateToS3 = process.env.RUDDER_CLOUD_PERSIST_STATE !== "0";
 const githubDeviceClientId = process.env.RUDDER_GITHUB_DEVICE_CLIENT_ID || "178c6fc778ccc68e1d6a";
 const publicLoginUrl = (process.env.RUDDER_PUBLIC_LOGIN_URL || "").trim();
+// Sign in with Apple, from the iPhone app only: the app asks iOS for an
+// identity token (a JWT whose audience is the app's bundle id) and posts it
+// here. No Apple Services ID or client secret is involved. Without the bundle
+// id Apple sign-in is not configured, like Google without its credentials.
+const appleBundleId = (process.env.APPLE_APP_BUNDLE_ID || "").trim();
+const appleKeys = appleBundleId ? createRemoteJWKSet(new URL(requiredEnv("APPLE_JWKS_URL"))) : null;
 const adminEmails = new Set((process.env.RUDDER_ADMIN_EMAILS || "viraat.laldas@gmail.com,viraat@exla.ai")
   .split(",")
   .map((email) => email.trim().toLowerCase())
@@ -955,6 +962,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (url.pathname === "/api/app/pair/start" || url.pathname === "/api/app/pair/finish") {
       await handleAppPairing(req, res, url);
+      return;
+    }
+    if (url.pathname === "/api/app/apple-signin") {
+      await handleAppleSignIn(req, res);
       return;
     }
     if (url.pathname === "/api/app/sign-out") {
@@ -5291,6 +5302,8 @@ function requireWorkerBearer(req: IncomingMessage, sailRow: Record<string, unkno
   }
 }
 
+type SocialProviders = NonNullable<Parameters<typeof betterAuth>[0]["socialProviders"]>;
+
 function createBetterAuth() {
   return betterAuth({
     baseURL: authBaseURL,
@@ -5303,7 +5316,7 @@ function createBetterAuth() {
     account: {
       accountLinking: {
         enabled: true,
-        trustedProviders: ["google", "github"],
+        trustedProviders: ["google", "github", "apple"],
       },
     },
     // A sign-in whose state is gone (expired, opened in another browser)
@@ -5332,11 +5345,12 @@ function configuredProviders(): JsonRecord {
     google: Boolean(oauthValue("GOOGLE_CLIENT_ID", "google_client_id") && oauthValue("GOOGLE_CLIENT_SECRET", "google_client_secret")),
     github: Boolean(oauthValue("GITHUB_CLIENT_ID", "github_client_id") && oauthValue("GITHUB_CLIENT_SECRET", "github_client_secret")),
     githubDevice: Boolean(githubDeviceClientId),
+    apple: Boolean(appleBundleId),
   };
 }
 
-function socialProviders(): JsonRecord {
-  const providers: JsonRecord = {};
+function socialProviders(): SocialProviders {
+  const providers: SocialProviders = {};
   const googleClientId = oauthValue("GOOGLE_CLIENT_ID", "google_client_id");
   const googleClientSecret = oauthValue("GOOGLE_CLIENT_SECRET", "google_client_secret");
   const githubClientId = oauthValue("GITHUB_CLIENT_ID", "github_client_id");
@@ -5359,7 +5373,37 @@ function socialProviders(): JsonRecord {
       prompt: "select_account",
     };
   }
+  if (appleBundleId) {
+    providers.apple = {
+      clientId: appleBundleId,
+      appBundleIdentifier: appleBundleId,
+      verifyIdToken: verifyAppleIdentityToken,
+    };
+  }
   return providers;
+}
+
+// The identity token is Apple's (signed by one of its published keys), made
+// for this app, still valid, and answers the nonce the app made for this one
+// sign-in: the app sends Apple the nonce's SHA-256 and sends the nonce itself
+// here. An address Apple has not verified is refused, because a trusted
+// provider's sign-in joins the existing account with the same address.
+async function verifyAppleIdentityToken(token: string, nonce?: string): Promise<boolean> {
+  if (!appleKeys || !nonce) {
+    return false;
+  }
+  try {
+    const { payload } = await jwtVerify(token, appleKeys, {
+      algorithms: ["RS256"],
+      issuer: "https://appleid.apple.com",
+      audience: appleBundleId,
+      requiredClaims: ["exp", "sub"],
+    });
+    return payload.nonce === createHash("sha256").update(nonce).digest("hex")
+      && (payload.email_verified === true || payload.email_verified === "true");
+  } catch {
+    return false;
+  }
 }
 
 function oauthValue(envName: string, settingKey: string): string | undefined {
@@ -8623,7 +8667,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
 // for a Rudder bearer token, handed back on the app's own URL scheme. The token
 // is the same kind `rudder login` stores, scoped to the same account.
 const SIGNIN_ERRORS: Record<string, string> = {
-  account_not_linked: "This email already has a Rudder account from another sign-in (GitHub or Google). Sign in that way once; after that both work.",
+  account_not_linked: "This email already has a Rudder account from another sign-in (Apple, GitHub or Google). Sign in that way once; after that they all work.",
   access_denied: "Sign-in was cancelled.",
   state_mismatch: "The sign-in took too long or was opened in another browser. Try again.",
   please_restart_the_process: "The sign-in took too long or was opened in another browser. Try again.",
@@ -8669,6 +8713,56 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
   res.statusCode = 302;
   res.setHeader("Location", `rudder://auth?token=${encodeURIComponent(issued.token)}`);
   res.end();
+}
+
+// The iPhone app's Sign in with Apple: the identity token iOS gave the app is
+// signed in through Better Auth (the same user and provider link rows a
+// browser sign-in makes, joined to an existing account by verified email) and
+// answered with a Rudder bearer token, like /app/native-done.
+async function handleAppleSignIn(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "method not allowed" });
+    return;
+  }
+  if (!appleBundleId) {
+    sendJson(res, 404, { error: "Apple sign-in is not configured." });
+    return;
+  }
+  const body = await readJsonBody(req);
+  const identityToken = stringField(body, "identityToken");
+  const nonce = stringField(body, "nonce");
+  if (!identityToken || !nonce) {
+    throw badRequest("identityToken and nonce are required");
+  }
+  // Apple gives the name only the first time someone signs in to the app.
+  const firstName = stringField(body, "givenName");
+  const lastName = stringField(body, "familyName");
+  refreshAuthHandler();
+  const response = await auth.handler(new Request(`${authBaseURL}/sign-in/social`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: baseURL },
+    body: JSON.stringify({
+      provider: "apple",
+      idToken: { token: identityToken, nonce, ...(firstName || lastName ? { user: { name: { firstName, lastName } } } : {}) },
+    }),
+  }));
+  const parsed = parseJson(await response.text());
+  const answer = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const user = response.ok && answer.user && typeof answer.user === "object" && !Array.isArray(answer.user) ? answer.user : null;
+  if (!user || typeof user.id !== "string") {
+    const notLinked = answer.code === "OAUTH_LINK_ERROR";
+    console.log(`sign-in refused (apple): ${String(answer.code ?? response.status).slice(0, 80)}`);
+    noteSignInFailed({ provider: "apple", platform: "ios", reason: reasonCode(typeof answer.code === "string" ? answer.code : "signin") });
+    sendJson(res, notLinked ? 409 : 401, {
+      error: notLinked ? SIGNIN_ERRORS.account_not_linked : "Apple could not confirm this sign-in. Try again.",
+    });
+    return;
+  }
+  const email = typeof user.email === "string" && user.emailVerified === true ? user.email : undefined;
+  const issued = issueRudderToken(user.id, email);
+  captureProductEvent(user.id, "signed_in", { platform: "ios", via: "apple", new_account: !findHomeRow(user.id) });
+  schedulePersistDatabase();
+  sendJson(res, 200, { token: issued.token, email: email ?? null });
 }
 
 // Signing out of the phone or Mac app revokes its bearer token, so the next

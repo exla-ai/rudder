@@ -1,6 +1,7 @@
 # Rudder for iOS. A native shell around the Rudder phone app (/app on the
 # control plane): Google sign-in through ASWebAuthenticationSession (Google
-# refuses OAuth inside web views), the bearer token in the Keychain, and the
+# refuses OAuth inside web views), Sign in with Apple through the system
+# sheet, the bearer token in the Keychain, and the
 # app UI in a WKWebView. The version is Rudder's: `npm version` sets the two
 # version keys below (scripts/version.mjs). ios/scripts/appstore.sh archives
 # and uploads it on an Offstage Mac (the rudder-ios-ship skill).
@@ -39,6 +40,9 @@ targets:
         # Info.plist lists all four for iPad and keeps the iPhone in portrait.
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: App/Info.plist
+        # Sign in with Apple. ios/scripts/appstore.mjs enables the matching
+        # capability on the bundle id from the keys in this file.
+        CODE_SIGN_ENTITLEMENTS: App/Rudder.entitlements
 
   # The simulator click-through (ios/scripts/qa.sh, the rudder-ios-qa skill).
   RudderUITests:

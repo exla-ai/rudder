@@ -88,7 +88,7 @@ test("appIdentity and identity.sh read the same team and bundle id, and entitlem
   const real = appIdentity()
   const shell = execFileSync("bash", ["-c", 'source ios/scripts/identity.sh && echo "$TEAM_ID $BUNDLE_ID"'], { encoding: "utf8" }).trim()
   assert.equal(shell, `${real.team} ${real.bundleId}`)
-  assert.deepEqual(real.entitlements, [])
+  assert.deepEqual(real.entitlements, ["com.apple.developer.applesignin"])
 
   const root = mkdtempSync(path.join(tmpdir(), "appstore-identity-"))
   try {

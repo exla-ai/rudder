@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import Observation
 import Security
@@ -13,6 +14,10 @@ import WebKit
 /// the control plane redirects to `rudder://auth?token=rdr_...`: a bearer token
 /// for the same account `rudder login` uses on the laptop. It lives in the
 /// Keychain and is handed to the web app at document start.
+///
+/// Sign in with Apple needs no browser: iOS gives the app an identity token,
+/// and the control plane trades it for the same kind of bearer token
+/// (`/api/app/apple-signin`).
 @MainActor
 @Observable
 final class Session {
@@ -50,8 +55,12 @@ final class Session {
     // MARK: Sign-in steps
 
     private static let deviceKey = "analyticsDevice"
-    /// The sign-in under way (google, github or pair), for its outcome.
+    /// The sign-in under way (google, github, apple or pair), for its outcome.
     private var signInProvider = "google"
+    /// The nonce of the Apple sign-in under way. Apple gets its SHA-256 and
+    /// signs it into the identity token; the control plane gets the nonce
+    /// itself, so a token made for another sign-in is refused.
+    private var appleNonce: String?
 
     /// The steps before there is an account (first open, the sign-in screen,
     /// a sign-in button, signed in or not), keyed by a random id this phone
@@ -146,6 +155,86 @@ final class Session {
             // The server says why (an email already signed up another way, a
             // cancelled or expired sign-in).
             errorMessage = items.first(where: { $0.name == "message" })?.value ?? "Sign-in did not finish. Try again."
+        }
+    }
+
+    // MARK: Sign in with Apple
+
+    /// Fills in the request the system's Sign in with Apple button is about
+    /// to make: the name and email (Apple gives the name only the first time
+    /// someone signs in to the app) and a nonce for this one sign-in.
+    func prepareAppleSignIn(_ request: ASAuthorizationAppleIDRequest) {
+        errorMessage = nil
+        signInProvider = "apple"
+        deviceEvent("signin_clicked", ["provider": "apple"])
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            // No nonce, so the control plane will refuse whatever comes back.
+            appleNonce = nil
+            return
+        }
+        let nonce = bytes.map { String(format: "%02x", $0) }.joined()
+        appleNonce = nonce
+        request.requestedScopes = [.fullName, .email]
+        request.nonce = SHA256.hash(data: Data(nonce.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// What the system's sheet came back with: an identity token to trade for
+    /// a Rudder token, a cancel, or an error.
+    func finishAppleSignIn(_ result: Result<ASAuthorization, any Error>) {
+        let nonce = appleNonce
+        appleNonce = nil
+        switch result {
+        case .failure(let error):
+            if let error = error as? ASAuthorizationError, error.code == .canceled {
+                deviceEvent("signin_failed", ["provider": "apple", "reason": "cancelled"])
+                return
+            }
+            errorMessage = error.localizedDescription
+            deviceEvent("signin_failed", ["provider": "apple", "reason": "error"])
+        case .success(let authorization):
+            guard let nonce,
+                  let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+                  let identityToken = credential.identityToken.flatMap({ String(data: $0, encoding: .utf8) }) else {
+                errorMessage = "Apple did not finish the sign-in. Try again."
+                deviceEvent("signin_failed", ["provider": "apple", "reason": "no_token"])
+                return
+            }
+            var body = ["identityToken": identityToken, "nonce": nonce]
+            if let givenName = credential.fullName?.givenName, !givenName.isEmpty {
+                body["givenName"] = givenName
+            }
+            if let familyName = credential.fullName?.familyName, !familyName.isEmpty {
+                body["familyName"] = familyName
+            }
+            Task { await appleSignIn(body: body) }
+        }
+    }
+
+    private func appleSignIn(body: [String: String]) async {
+        guard !signingIn else { return }
+        signingIn = true
+        defer { signingIn = false }
+        var request = URLRequest(url: server.appendingPathComponent("api/app/apple-signin"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("ios", forHTTPHeaderField: "X-Rudder-Platform")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let answer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if let token = answer["token"] as? String, token.hasPrefix("rdr_") {
+                Keychain.write(token)
+                self.token = token
+                deviceEvent("signin_completed", ["provider": "apple"])
+            } else {
+                // The control plane counted this refusal itself (signin_failed)
+                // and says why (an email already signed up another way).
+                errorMessage = (answer["error"] as? String) ?? "Sign-in did not finish. Try again."
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            deviceEvent("signin_failed", ["provider": "apple", "reason": "error"])
         }
     }
 

@@ -68,12 +68,26 @@ update to it:
 
 ## Capabilities
 
-The app has no entitlements today. To add one (push, associated domains,
-app groups, Sign in with Apple), create `ios/App/Rudder.entitlements`, set
-`CODE_SIGN_ENTITLEMENTS: App/Rudder.entitlements` on the Rudder target and
-run `identity`: it enables the matching capability on the bundle id
-(`ENTITLEMENT_CAPABILITIES` in `appstore.mjs`), and Xcode's cloud signing
-puts it in the profile at upload. Side work per capability:
+The app has one entitlement, Sign in with Apple
+(`ios/App/Rudder.entitlements`, set as `CODE_SIGN_ENTITLEMENTS` on the Rudder
+target). To add another (push, associated domains, app groups), add its key to
+that file and run `identity`: it enables the matching capability on the bundle
+id (`ENTITLEMENT_CAPABILITIES` in `appstore.mjs`), and Xcode's cloud signing
+puts it in the profile at upload.
+
+The archive is built unsigned, and Xcode keeps at upload only the entitlements
+it reads from the archived app's signature. So `appstore.sh archive` signs the
+archived app ad hoc with the entitlements file, and `upload` first exports the
+App Store signed app to `build/check` and stops unless `codesign -d
+--entitlements` shows every key of the file on it; only then does it upload.
+A stage that says "is signed without the entitlement" has uploaded nothing.
+
+Side work per capability:
+
+- Sign in with Apple (`com.apple.developer.applesignin`): the server needs
+  `APPLE_APP_BUNDLE_ID` and `APPLE_JWKS_URL` (`cloud/fly.toml`); the app posts
+  Apple's identity token to `/api/app/apple-signin`. No Services ID, key or
+  client secret.
 
 - Push (`aps-environment`): an APNs key (.p8) of team `P76SY8RFGL`, topic
   `ai.exla.rudder`, on the server sending pushes.

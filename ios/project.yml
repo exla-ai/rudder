@@ -1,8 +1,9 @@
 # Rudder for iOS. A native shell around the Rudder phone app (/app on the
 # control plane): Google sign-in through ASWebAuthenticationSession (Google
 # refuses OAuth inside web views), the bearer token in the Keychain, and the
-# app UI in a WKWebView. Built without xcodebuild by the ios-testflight skill's
-# build-ipa.sh, which reads the two version keys below.
+# app UI in a WKWebView. The version is Rudder's: `npm version` sets the two
+# version keys below (scripts/version.mjs). ios/scripts/appstore.sh archives
+# and uploads it on an Offstage Mac (the rudder-ios-ship skill).
 name: Rudder
 options:
   bundleIdPrefix: dev.viraat
@@ -14,8 +15,8 @@ settings:
     DEVELOPMENT_TEAM: 3C4383262W
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "1.0.4"
-    CURRENT_PROJECT_VERSION: "12"
+    MARKETING_VERSION: "5.1.0"
+    CURRENT_PROJECT_VERSION: "5001000"
 
 targets:
   Rudder:

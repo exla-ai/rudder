@@ -1,0 +1,16 @@
+{
+  "locale": "en-US",
+  "name": "Rudder",
+  "subtitle": "Steer Agents from your Phone",
+  "primaryCategory": "DEVELOPER_TOOLS",
+  "secondaryCategory": "PRODUCTIVITY",
+  "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT",
+  "copyright": "2026 Exla",
+  "releaseType": "MANUAL",
+  "keywords": "ai,coding,code,developer,programming,terminal,cli,cloud,remote,assistant,automation,voice,llm",
+  "promotionalText": "Your coding agents keep working while you are away. Rudder shows what each one is doing, tells you when one needs you, and lets you answer from your phone.",
+  "supportUrl": "https://rudder.exla.ai/support",
+  "marketingUrl": "https://rudder.exla.ai",
+  "privacyPolicyUrl": "https://rudder.exla.ai/privacy",
+  "screenshotSets": ["APP_IPHONE_67", "APP_IPHONE_61", "APP_IPAD_PRO_3GEN_129"]
+}

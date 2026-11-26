@@ -1,6 +1,7 @@
 import XCTest
 
-/// Drives the real app on a simulator through ios/UITests/steps.json and
+/// Drives the real app on a simulator through the steps file QA_STEPS names
+/// (steps for the click-through, appstore for the App Store screenshots) and
 /// leaves a screenshot and the accessibility tree for every "shot" step in
 /// the test runner's Documents/qa (ios/scripts/qa.sh copies it out).
 ///
@@ -21,7 +22,8 @@ final class ClickThrough: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         let code = try XCTUnwrap(env["QA_PAIR_CODE"], "QA_PAIR_CODE is not set")
         let server = try XCTUnwrap(env["QA_SERVER"], "QA_SERVER is not set")
-        let stepsURL = try XCTUnwrap(Bundle(for: ClickThrough.self).url(forResource: "steps", withExtension: "json"))
+        let stepsName = try XCTUnwrap(env["QA_STEPS"], "QA_STEPS is not set")
+        let stepsURL = try XCTUnwrap(Bundle(for: ClickThrough.self).url(forResource: stepsName, withExtension: "json"), "no \(stepsName).json in the test bundle")
         let steps = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: stepsURL)) as? [[String: Any]])
 
         let out = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/qa")

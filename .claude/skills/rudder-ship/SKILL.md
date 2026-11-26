@@ -42,8 +42,9 @@ git -C /workspace/code/exla-ai-rudder -c credential.helper= -c 'credential.helpe
   push origin "$sha:refs/heads/release-check/$v"
 ```
 
-- `npm version` runs `scripts/version.mjs`: it sets the Mac app's
-  `MARKETING_VERSION` and build number in `mac/project.yml` and the worker
+- `npm version` runs `scripts/version.mjs`: it sets the Mac and iPhone apps'
+  `MARKETING_VERSION` and build number in `mac/project.yml` and
+  `ios/project.yml` and the worker
   image pin `registry.fly.io/rudder-workers-exla:X.Y.Z` in `cloud/fly.toml`.
   Never set them by hand. The Mac release waits for Cloud to run that pin, so
   it must be in the tagged commit.

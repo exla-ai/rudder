@@ -1,0 +1,102 @@
+name: iPhone App Store
+
+# The iPhone app on the App Store. This runner builds nothing: it drives the
+# Offstage API (an Offstage Mac archives and uploads the build,
+# .offstage/ios-appstore.mjs) and App Store Connect's API
+# (ios/scripts/appstore.mjs). The version is Rudder's, from the checked-out
+# commit. The rudder-ios-ship skill has the commands.
+#
+#   upload   archive and upload this commit's build, then hand it to TestFlight
+#            testers (the "Beta testers" group and its beta review)
+#   prepare  make the App Store version match ios/appstore and attach the build
+#   submit   send the prepared version to App Review; confirm must name it
+#   release  put an approved version on the App Store; confirm must name it
+#   status   versions, builds and review submissions
+#
+# The repository and these logs are public: the scripts print versions,
+# states and counts only.
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "upload, prepare, submit, release or status"
+        type: choice
+        options: [upload, prepare, submit, release, status]
+        required: true
+      confirm:
+        description: "For submit and release: the version, for example 5.1.0"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-appstore
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: inputs.step == 'upload'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the Offstage SDK
+        run: |
+          sdk="$RUNNER_TEMP/offstage-cloud-0.3.1.tgz"
+          curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
+          echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
+          npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
+      - name: Archive and upload on an Offstage Mac
+        env:
+          OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
+          OFFSTAGE_API_URL: https://api.offstage.cloud
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: node .offstage/ios-appstore.mjs
+      - name: Give it to the testers
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: node ios/scripts/appstore.mjs testflight
+      - name: Offstage logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-appstore-logs
+          path: offstage-out/ios-appstore/
+          if-no-files-found: ignore
+
+  appstore:
+    if: inputs.step != 'upload'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: App Store Connect
+        env:
+          STEP: ${{ inputs.step }}
+          CONFIRM: ${{ inputs.confirm }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          APPSTORE_REVIEW: ${{ secrets.APPSTORE_REVIEW }}
+        run: |
+          args=("$STEP")
+          if [[ "$STEP" == submit || "$STEP" == release ]]; then
+            args+=(--confirm "$CONFIRM")
+          fi
+          node ios/scripts/appstore.mjs "${args[@]}"

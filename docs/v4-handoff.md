@@ -719,6 +719,21 @@ assistant text only, 50 results, 5 per chat, 4 seconds. An older worker shows
 the update sheet. In the Mac app, Edit > Find opens the chat's find on a chat,
 and Edit > Search Everything opens the panel.
 
+The iPhone app carries Rudder's version (`scripts/version.mjs` writes
+`ios/project.yml`) and ships through the iPhone App Store workflow: an
+Offstage Mac archives and uploads with the App Store Connect key's
+cloud-managed signing, and `ios/scripts/appstore.mjs` sets the listing from
+`ios/appstore`, attaches the build and submits only on `submit` with the
+version confirmed (the rudder-ios-ship skill). The GitHub-hosted `ios.yml`
+and `distribute.mjs` are gone. Before the first App Review submission these
+are still open: in-app account deletion (5.1.1(v); the privacy page asks
+for a GitHub issue), a login that hides the email such as Sign in with Apple
+(4.8; only Google and GitHub today), consent before Talk to Rudder sends
+audio to OpenAI (5.1.2), a privacy policy link inside the app, a
+`rudder.exla.ai/support` page, a demo account App Review can sign in to,
+and the screenshots from it. CarPlay needs Apple's entitlement before it
+can show up in a car.
+
 ## 1. Which doc is authoritative (locked 2026-11-04)
 
 Only two docs steer work. Everything else is reference or evidence.

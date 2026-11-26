@@ -64,7 +64,7 @@ out. Typing a draft and leaving it unsent is fine.
   sandbox and mints a ten-minute pair code just before the run stage, so the
   account's token never reaches the Mac.
 - `.github/workflows/ios-qa.yml` runs the driver with the repository's
-  `OFFSTAGE_API_KEY` and `RUDDER_QA_TOKEN` secrets. Its Linux runner only
+  `OFFSTAGE_API_KEY`, `RUDDER_QA_TOKEN` and `RUDDER_DEMO_TOKEN` secrets. Its Linux runner only
   calls the Offstage API. The repository is public, so the workflow encrypts
   the output to a one-time key that `scripts/ios-qa.sh` makes; the public log
   shows counts only. Keep it that way: never print labels, trees or
@@ -73,8 +73,16 @@ out. Typing a draft and leaving it unsent is fine.
   fails with "pair/start answered 401", make a new token (the phone-visual-qa
   memory has the steps) and `gh secret set RUDDER_QA_TOKEN < ~/.rudder-qa-token`.
 - With an Offstage key on this machine the driver also runs directly:
-  `OFFSTAGE_API_KEY=... RUDDER_QA_TOKEN="$(cat ~/.rudder-qa-token)" node .offstage/ios-qa.mjs`
+  `QA_PASS=clickthrough OFFSTAGE_API_KEY=... RUDDER_QA_TOKEN="$(cat ~/.rudder-qa-token)" node .offstage/ios-qa.mjs`
   (install the SDK into `.offstage` first, as the workflow does).
+
+## App Store screenshots
+
+`scripts/ios-qa.sh <out-dir> main appstore` runs `ios/UITests/appstore.json`
+signed in as the demo account (`RUDDER_DEMO_TOKEN`, never the user's), on
+each simulator in `STORE_DEVICES` in `.offstage/ios-qa.mjs`, with a 9:41
+status bar. The output has `appstore/<display type>/NN-name.jpg` plus each
+shot's tree and `log.txt`. The rudder-ios-ship skill says where they go next.
 
 For the web app at phone width without a Mac, `scripts/phone-qa.mjs` is
 faster; this skill is for the native shell and real WebKit.

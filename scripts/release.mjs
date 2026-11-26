@@ -35,7 +35,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { createNativeManifest, NATIVE_BINARIES, NATIVE_PLATFORMS, MANIFEST_NAME, verifyNativeArtifact, verifyNativeArtifacts } from "./native-artifacts.mjs";
-import { checkVersionFiles, macBuild, WORKER_IMAGE_REPOSITORY } from "./version.mjs";
+import { checkVersionFiles, appBuild, WORKER_IMAGE_REPOSITORY } from "./version.mjs";
 
 export const REPO = "exla-ai/rudder";
 const PACKAGE = "@exla/rudder";
@@ -332,7 +332,7 @@ async function putMac(dir) {
   check(dir, "usage: release.mjs put-mac <dir with Rudder.dmg, appcast.xml and release.env>");
   const ctx = ciContext("branch");
   const env = releaseEnv(path.join(dir, "release.env"));
-  check(env.VERSION === ctx.version && env.BUILD === macBuild(ctx.version), `release.env is ${env.VERSION} (${env.BUILD}), not ${ctx.version} (${macBuild(ctx.version)})`);
+  check(env.VERSION === ctx.version && env.BUILD === appBuild(ctx.version), `release.env is ${env.VERSION} (${env.BUILD}), not ${ctx.version} (${appBuild(ctx.version)})`);
   const api = github();
   await putPart(api, await theDraft(api, ctx), ctx, "mac", dir, { build: env.BUILD });
 }

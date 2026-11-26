@@ -1,6 +1,7 @@
-# fastlane Fastfile: Rudder iOS. Auth is the App Store Connect API key from
-# fastlane/.asc.env (gitignored). The .ipa itself is built by the
-# ios-testflight skill's build-ipa.sh (no xcodebuild build service).
+# fastlane Fastfile: Rudder iOS, for installing straight onto a phone from a
+# Mac (ios/scripts/install-device.sh). Auth is the App Store Connect API key
+# from fastlane/.asc.env (gitignored). App Store builds do not use fastlane:
+# ios/scripts/appstore.sh signs them with the team's cloud-managed certificate.
 default_platform(:ios)
 
 APP_ID = ENV["APP_IDENTIFIER"] || "dev.viraat.rudder"
@@ -16,14 +17,6 @@ def asc_api_key
 end
 
 platform :ios do
-  desc "Distribution certificate + App Store provisioning profile."
-  lane :prep_signing do
-    key = asc_api_key
-    UI.user_error!("ASC API key not configured") unless key
-    cert(api_key: key, generate_apple_certs: true, output_path: "build/certs")
-    sigh(api_key: key, app_identifier: APP_ID, platform: "ios", force: true, output_path: "build/profiles")
-  end
-
   desc "Register an iPhone (UDID env DEVICE_UDID) and make a development profile for direct installs."
   lane :dev_signing do
     key = asc_api_key

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# The iPhone click-through from this machine: starts the "iOS click-through"
-# workflow (an Offstage Mac does the work), waits, and opens the sealed output
-# into the directory given. Usage: scripts/ios-qa.sh <out-dir> [git ref]
+# The iPhone click-through, or the App Store screenshots, from this machine:
+# starts the "iOS click-through" workflow (an Offstage Mac does the work),
+# waits, and opens the sealed output into the directory given.
+# Usage: scripts/ios-qa.sh <out-dir> [git ref] [clickthrough|appstore]
 set -euo pipefail
-out="${1:?usage: scripts/ios-qa.sh <out-dir> [git ref]}"
+out="${1:?usage: scripts/ios-qa.sh <out-dir> [git ref] [clickthrough|appstore]}"
 ref="${2:-main}"
+pass="${3:-clickthrough}"
 key="$(mktemp -d)"
 trap 'rm -rf "$key"' EXIT
 openssl genrsa -out "$key/private.pem" 3072 2>/dev/null
 openssl rsa -in "$key/private.pem" -pubout -out "$key/public.pem" 2>/dev/null
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh workflow run ios-qa.yml --ref "$ref" -f public_key="$(base64 -w0 "$key/public.pem")"
+gh workflow run ios-qa.yml --ref "$ref" -f public_key="$(base64 -w0 "$key/public.pem")" -f pass="$pass"
 run=""
 for _ in $(seq 30); do
   sleep 4
@@ -21,7 +23,7 @@ done
 echo "run $run"
 code=0
 gh run watch "$run" --exit-status --interval 20 > /dev/null || code=$?
-gh run view "$run" --log 2>/dev/null | grep -E "offstage: |screenshots, |failed: " | sed 's/^.*Z //' || true
+gh run view "$run" --log 2>/dev/null | grep -E "offstage: |screenshots|failed: " | sed 's/^.*Z //' || true
 mkdir -p "$out"
 gh run download "$run" --name ios-qa-sealed --dir "$key/sealed"
 openssl pkeyutl -decrypt -inkey "$key/private.pem" -in "$key/sealed/pass.enc" -out "$key/pass"

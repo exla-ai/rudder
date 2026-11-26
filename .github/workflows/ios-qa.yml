@@ -1,11 +1,12 @@
 name: iOS click-through
 
-# The iPhone app clicked through on an Offstage Mac's simulator, signed in as
-# the account behind RUDDER_QA_TOKEN (.offstage/ios-qa.mjs). This runner only
-# drives the Offstage API. This repository is public and the video shows a
-# real account, so the output is uploaded encrypted to the public key the
-# caller passes; only the caller can open it. The rudder-ios-qa skill has the
-# commands.
+# The iPhone app on an Offstage Mac's simulators (.offstage/ios-qa.mjs). The
+# clickthrough pass is signed in as the account behind RUDDER_QA_TOKEN; the
+# appstore pass makes the App Store screenshots as the demo account behind
+# RUDDER_DEMO_TOKEN. This runner only drives the Offstage API. This repository
+# is public and the output shows an account, so it is uploaded encrypted to
+# the public key the caller passes; only the caller can open it. The
+# rudder-ios-qa skill has the commands.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +14,11 @@ on:
         description: "base64 of an RSA public key (PEM) to encrypt the output to"
         type: string
         required: true
+      pass:
+        description: "clickthrough, or appstore for the App Store screenshots"
+        type: choice
+        options: [clickthrough, appstore]
+        default: clickthrough
 
 permissions:
   contents: read
@@ -20,7 +26,7 @@ permissions:
 jobs:
   clickthrough:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,13 +40,15 @@ jobs:
           curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
           echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
           npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
-      - name: Click through on an Offstage Mac
+      - name: Run on an Offstage Mac
         id: qa
         continue-on-error: true
         env:
           OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
           OFFSTAGE_API_URL: https://api.offstage.cloud
+          QA_PASS: ${{ inputs.pass }}
           RUDDER_QA_TOKEN: ${{ secrets.RUDDER_QA_TOKEN }}
+          RUDDER_DEMO_TOKEN: ${{ secrets.RUDDER_DEMO_TOKEN }}
         run: node .offstage/ios-qa.mjs
       - name: Encrypt the output
         env:

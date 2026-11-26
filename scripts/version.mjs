@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // One Rudder version everywhere: `npm version` runs this (package.json
 // "version" script), so the version commit also carries
-//   - the Mac app's version in mac/project.yml, with the build number Sparkle
-//     compares derived from it (5.0.8 -> 5000008), and
+//   - the Mac and iPhone apps' version in mac/project.yml and ios/project.yml,
+//     with the build number derived from it (5.0.8 -> 5000008), which Sparkle
+//     and App Store Connect compare, and
 //   - the Cloud worker image pin in cloud/fly.toml. The Mac release waits for
 //     Cloud to run that image, so the pin must be in the tagged commit.
 // scripts/release.mjs checks the same lines before it stages anything.
@@ -12,17 +13,18 @@ import { fileURLToPath } from "node:url";
 
 export const WORKER_IMAGE_REPOSITORY = "registry.fly.io/rudder-workers-exla";
 
-export function macBuild(version) {
+export function appBuild(version) {
   const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (!parts) throw new Error(`version ${version} is not MAJOR.MINOR.PATCH; the Mac app needs a plain release version`);
+  if (!parts) throw new Error(`version ${version} is not MAJOR.MINOR.PATCH; the Mac and iPhone apps need a plain release version`);
   const [major, minor, patch] = parts.slice(1).map(Number);
-  if (minor > 999 || patch > 999) throw new Error(`version ${version} does not fit the Mac build number`);
+  if (minor > 999 || patch > 999) throw new Error(`version ${version} does not fit the app build number`);
   return String(major * 1_000_000 + minor * 1_000 + patch);
 }
 
 // file -> [the text before the quoted value, the value] for each versioned line.
 const LINES = {
-  "mac/project.yml": version => [["MARKETING_VERSION: ", version], ["CURRENT_PROJECT_VERSION: ", macBuild(version)]],
+  "mac/project.yml": version => [["MARKETING_VERSION: ", version], ["CURRENT_PROJECT_VERSION: ", appBuild(version)]],
+  "ios/project.yml": version => [["MARKETING_VERSION: ", version], ["CURRENT_PROJECT_VERSION: ", appBuild(version)]],
   "cloud/fly.toml": version => [["RUDDER_WORKER_IMAGE = ", `${WORKER_IMAGE_REPOSITORY}:${version}`]],
 };
 

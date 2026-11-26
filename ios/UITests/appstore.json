@@ -1,0 +1,22 @@
+[
+  {"waitFor": "Skip", "timeout": 90},
+  {"tap": "Skip"},
+  {"wait": 4},
+  {"shot": "home"},
+  {"tap": " working, "},
+  {"wait": 5},
+  {"shot": "project"},
+  {"tap": "Has a question"},
+  {"wait": 6},
+  {"shot": "question"},
+  {"tap": "Message the agent"},
+  {"wait": 1},
+  {"type": "Yes, keep the old endpoint for a week and log who still calls it"},
+  {"wait": 1},
+  {"shot": "reply"},
+  {"tap": "Back to project"},
+  {"wait": 2},
+  {"tap": "Plan ready"},
+  {"wait": 6},
+  {"shot": "plan"}
+]

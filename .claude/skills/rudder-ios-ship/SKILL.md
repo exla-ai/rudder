@@ -97,7 +97,10 @@ changed; web app changes reach it through Cloud with no new build.
 
 ## First publication
 
-1. The user creates the app record in App Store Connect (the API cannot):
+1. The user creates the app record (Apple's API cannot, for any key). On
+   their own Mac: `ios/scripts/create-app.sh <their Apple ID>`, which runs
+   fastlane produce and asks for their password and two-factor code there.
+   Never sign in as the user from an agent. Or by hand in App Store Connect:
    Apps, +, New App; platform iOS, name Rudder, primary language English
    (U.S.), bundle id `ai.exla.rudder`, SKU `rudder-ios`, user access Full
    Access. `identity` fails with these fields until it exists.

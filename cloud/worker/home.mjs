@@ -2992,6 +2992,14 @@ function acceptClaudeDialogs(paths) {
   } catch (error) {
     log(`claude config: ${error.message}`);
   }
+  // Agents here start in bypass-permissions mode; unanswered, its one-time
+  // warning holds every agent of an account that began on the phone or the web.
+  const settingsPath = path.join(HOME, ".claude", "settings.json");
+  const settings = fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : {};
+  if (settings.skipDangerousModePermissionPrompt !== true) {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ ...settings, skipDangerousModePermissionPrompt: true }, null, 2));
+  }
 }
 
 function buildChildEnv(vaultEnv) {

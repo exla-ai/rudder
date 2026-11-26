@@ -64,6 +64,14 @@ final class ClickThrough: XCTestCase {
                 app.coordinate(withNormalizedOffset: CGVector(dx: point[0].doubleValue, dy: point[1].doubleValue)).tap()
                 log.append("ok \(name)")
             } else if let text = step["type"] as? String {
+                // "into" names the field: one tap does not always give a web
+                // view's field the keyboard, and typing without it fails the test.
+                if let into = step["into"] as? String {
+                    for _ in 0..<3 where !app.keyboards.firstMatch.exists {
+                        find(into, timeout: 8)?.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                        _ = app.keyboards.firstMatch.waitForExistence(timeout: 3)
+                    }
+                }
                 app.typeText(text)
                 log.append("ok \(name)")
             } else if let direction = step["swipe"] as? String {

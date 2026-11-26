@@ -23,8 +23,8 @@ import { Sandbox } from "offstage-cloud"
 // App Store screenshot sets (ios/appstore/screenshots/<type>) and the
 // simulator that makes each at the size the set takes.
 const STORE_DEVICES = [
-  ["APP_IPHONE_67", "iPhone 17 Pro Max"],
-  ["APP_IPHONE_61", "iPhone 17 Pro"],
+  ["APP_IPHONE_67", "iPhone 18 Pro Max"],
+  ["APP_IPHONE_61", "iPhone 18 Pro"],
   ["APP_IPAD_PRO_3GEN_129", "iPad Pro 13-inch (M5)"],
 ]
 

@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   CODEX_VERSION, CODEX_VERSIONS, buildClaudeCommands, buildCodexCommands, buildQueue, claudeInitialize, claudeListKey, claudeStamp, codexHasVoice,
-  codexPackageDir, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
+  codexPackageDir, buildAntigravityCommands, parseAntigravityMenu, parseClaudeMenu, readClaudeBinaryCommands, readClaudeMenu, readCodexState,
 } from "../cloud/worker/slash-commands.mjs";
 import { rank } from "../cloud/app/slash-rank.js";
 
@@ -220,6 +220,41 @@ test("Claude Code's popup is read off its screen", () => {
   assert.deepEqual(parseClaudeMenu(above).map((r) => r.display), ["add-dir", "clear"], "the popup is the longest block of rows");
   assert.equal(parseClaudeMenu("❯ hello\n"), null, "no menu until / is typed");
   assert.throws(() => parseClaudeMenu(`❯ /\n  ❯ /add-dir   Add\n    ↓ 117 more\n`), /did not fit/);
+});
+
+test("Antigravity's commands are read off the commands tab of its /help", () => {
+  // agy 1.5.18, read in a terminal.
+  const screen = [
+    "──────────────────────────────",
+    ">",
+    "──────────────────────────────",
+    "",
+    "Antigravity CLI   general    commands    shortcuts   (←/→ or tab to cycle)",
+    "",
+    "Available Commands",
+    "",
+    "> /add-dir                        Add a directory to the workspace",
+    "  /codesearch (cs, search)        Search code in the workspace (usage: /codesearch <query>)",
+    "  /config (settings)              Open settings panel",
+    "  /model                          Set a model, or run a single prompt on another model",
+    "  /swarm                          (Preview & Quota Heavy) Run a swarm: several agents working in parallel on one task",
+    "",
+    "Keyboard: ↑/↓ Navigate  ←/→ Switch View  esc Close",
+  ].join("\n");
+  const commands = buildAntigravityCommands(parseAntigravityMenu(screen));
+  assert.deepEqual(commands.map((c) => [c.name, c.aliases, c.opens, c.args]), [
+    ["add-dir", [], null, null],
+    ["codesearch", ["cs", "search"], null, "required"],
+    ["config", ["settings"], "terminal", null],
+    ["model", [], "model", null],
+    ["swarm", [], null, "required"],
+  ]);
+  assert.equal(commands[4].description, "(Preview & Quota Heavy) Run a swarm: several agents working in parallel on one task");
+  // The general tab, or the "/" popup, is not the list.
+  assert.equal(parseAntigravityMenu("> /\n> /add-dir  Add a directory to the workspace\n   ↓ 46 more"), null);
+  assert.throws(() => parseAntigravityMenu("Available Commands\n> /add-dir  Add a directory\n   ↓ 46 more"), /did not fit/);
+  // An alias finds its row, as in agy's own popup.
+  assert.deepEqual(rank(commands, "settings", "antigravity").map(({ command, alias }) => [command.name, alias]), [["config", "settings"]]);
 });
 
 test("Claude rows get the inserted name, argument rule and what they open", () => {

@@ -3,14 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Capability skills Rudder ships to every agent it runs (Claude Code and
-// Codex), unlike the orchestrator's `.claude/skills/rudder-*` dashboard
+// Capability skills Rudder ships to every agent it runs (Claude Code, Codex
+// and Antigravity), unlike the orchestrator's `.claude/skills/rudder-*` dashboard
 // controls. Sources live in the package under assets/skills/<name>/ and are
 // installed user-wide as rudder-<name>, so isolated workspaces, the main
 // checkout and cloud workers all see them. Files are rewritten only when they
 // differ; anything else in those directories is the user's and left alone.
 
-export type AgentSkillTarget = { agent: "claude" | "codex"; dir: string };
+export type AgentSkillTarget = { agent: "claude" | "codex" | "antigravity"; dir: string };
 
 export function agentSkillsSourceDir(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "assets", "skills");
@@ -20,6 +20,8 @@ export function agentSkillTargets(home = os.homedir(), env: NodeJS.ProcessEnv = 
   return [
     { agent: "claude", dir: path.join(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), "skills") },
     { agent: "codex", dir: path.join(env.CODEX_HOME || path.join(home, ".codex"), "skills") },
+    // agy's global customization root; it has no variable to move it.
+    { agent: "antigravity", dir: path.join(home, ".gemini", "config", "skills") },
   ];
 }
 

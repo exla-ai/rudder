@@ -1,5 +1,5 @@
 // The "/" menu in a chat's composer: what "/" offers in the agent's own CLI,
-// Claude Code's, Codex's or OpenCode's, with their names and descriptions. The home
+// Claude Code's, Codex's, OpenCode's or Antigravity's, with their names and descriptions. The home
 // builds each list ahead of time (cloud/worker/slash-commands.mjs). This
 // device keeps the lists it has had, so the menu shows the moment "/" is
 // typed: the agent's own last list, or for an agent not opened here yet, the
@@ -109,11 +109,10 @@ export function mountSlashMenu(composer, { workspace, run, agent, modelControl, 
 
   const list = listFor(workspace, run);
   // Asked once the agent's row is in (a chat opened by its URL comes before
-  // the app's state; opening the menu asks again). Rudder has no "/" list for
-  // Antigravity agents (cloud/worker/slash-commands.mjs).
+  // the app's state; opening the menu asks again).
   const ask = () => {
     const a = agent();
-    if (a && a.backend !== "antigravity") refresh(workspace, run, list, a.model ?? null, paint);
+    if (a) refresh(workspace, run, list, a.model ?? null, paint);
   };
   ask();
   // Until the home answers: the list this device saved (the agent's row may

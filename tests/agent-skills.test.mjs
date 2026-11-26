@@ -44,6 +44,7 @@ test("the shipped burst build skill is installed for Claude and Codex as rudder-
   const result = await installAgentSkills({ targets });
   assert.ok(result.installed.includes("claude:rudder-burst"));
   assert.ok(result.installed.includes("codex:rudder-burst"));
+  assert.ok(result.installed.includes("antigravity:rudder-burst"));
   for (const target of targets) {
     const skill = await fsp.readFile(path.join(target.dir, "rudder-burst", "SKILL.md"), "utf8");
     assert.match(skill, /^---\nname: rudder-burst\ndescription: .+\n---\n/);
@@ -69,7 +70,7 @@ test("installing again rewrites nothing, repairs edits, and leaves the user's ow
 
 test("skill targets honor CLAUDE_CONFIG_DIR and CODEX_HOME", () => {
   const targets = agentSkillTargets("/home/u", { CLAUDE_CONFIG_DIR: "/cfg/claude", CODEX_HOME: "/cfg/codex" });
-  assert.deepEqual(targets.map((t) => t.dir), ["/cfg/claude/skills", "/cfg/codex/skills"]);
+  assert.deepEqual(targets.map((t) => t.dir), ["/cfg/claude/skills", "/cfg/codex/skills", "/home/u/.gemini/config/skills"]);
 });
 
 test("a missing source directory installs nothing instead of throwing", async () => {

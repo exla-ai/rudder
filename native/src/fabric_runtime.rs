@@ -1471,8 +1471,28 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
         }
         // Antigravity reads MCP servers only from `mcp_config.json` in
         // `~/.gemini/config/` or the workspace's `.agents/`, with no launch
-        // flag, so a per-run peer server has nowhere to go.
-        Backend::Opencode | Backend::Antigravity => {}
+        // flag. It starts them with the session's environment, so the global
+        // file's `rudder_agents` entry runs the script this launch names.
+        Backend::Antigravity => {
+            let global = signals::antigravity_mcp_path().context("no home directory for Antigravity's MCP file")?;
+            signals::ensure_antigravity_mcp(&global)?;
+            let script = config.with_extension("sh");
+            let parent = script.parent().context("agent tools directory")?;
+            fs::create_dir_all(parent)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o700)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&script)?;
+            file.write_all(signals::antigravity_mcp_script(&exe, &arguments).as_bytes())?;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+            command
+                .env
+                .push((signals::ANTIGRAVITY_MCP_ENV.into(), script.display().to_string()));
+        }
+        Backend::Opencode => {}
     }
     Ok(())
 }

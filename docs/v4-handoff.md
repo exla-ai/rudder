@@ -593,7 +593,15 @@ file is newer than it, not only when it is a day old. agy also takes
 `--model gemini-4-neon --effort low` (no effort runs its default, High for
 Neon), which a later change could use to drop the slug-per-effort ids. agy wraps a typed prompt in `<USER_REQUEST>` and adds notes for the
 model after it (the time, a model switch); the chat shows only the request.
-Rudder has no "/" list for it, and the app does not ask. Open: phone answers to its permission
+Its "/" list is the commands tab of its /help, read off-screen
+(`readAntigravityMenu` in cloud/worker/slash-commands.mjs). A slash command
+reaches agy typed, never as `-i`: at launch agy 1.5.18 drops the command name
+and sends the rest as a plain prompt, so `/swarm <task>` for a stopped chat
+reopens the conversation first (`reopen_for_typed_command`). agy has no flag
+for an MCP server, so `~/.gemini/config/mcp_config.json` carries one
+`rudder_agents` entry that runs the script `RUDDER_AGY_MCP` names for a
+Rudder agent and serves no tools to any other agy session (signals.rs). The
+`rudder-*` skills install to `~/.gemini/config/skills`. Open: phone answers to its permission
 prompts, the files an edit wrote in a handoff
 from it (its CODE_ACTION step), and the files hub showing `~/.gemini`
 instructions and skills.

@@ -19,7 +19,7 @@
 //! - When a helper's turn ends (detect.rs `finish_turn`), its final message is
 //!   read off the App loop from its backend's own session record and appended
 //!   to `.rudder/helpers/<run id>.json`. This works for every harness,
-//!   including Antigravity, which has no peer tools.
+//!   including OpenCode, which has no peer tools.
 //! - Each new reply wakes the agent that asked: it is queued as a steer for
 //!   that agent (`wake_parent`), so the reply arrives in its chat as a message
 //!   and starts its next turn. The asking agent never waits in a tool call;

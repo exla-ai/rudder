@@ -17094,11 +17094,13 @@ Address the objection directly. If you disagree, say why inside \
             || self.draft_settling(index)
     }
 
-    /// Codex runs a slash command only when it is typed: given at launch, it
-    /// is sent to the model as text (0.170), so `/goal <text>` for a stopped
-    /// chat never set a goal. A command for a Codex chat with no process
-    /// reopens its conversation, and the command is typed once the composer
-    /// shows.
+    /// Codex and Antigravity run a slash command only when it is typed. Given
+    /// at launch, Codex sends it to the model as text (0.170), so `/goal
+    /// <text>` for a stopped chat never set a goal, and agy drops the command
+    /// name and sends the rest as a plain prompt (1.5.18), so `/swarm <task>`
+    /// for a stopped chat ran the task with no swarm. A command for such a
+    /// chat with no process reopens its conversation, and the command is
+    /// typed once the composer shows.
     fn reopen_for_typed_command(&mut self, index: usize, instruction: &str) -> bool {
         let Some(run) = self.agents.get_mut(index) else {
             return false;
@@ -17108,7 +17110,7 @@ Address the objection directly. If you disagree, say why inside \
             run.status,
             AgentStatus::Done | AgentStatus::Paused | AgentStatus::Stopped | AgentStatus::Failed | AgentStatus::Orphaned
         );
-        if run.backend != Backend::Codex
+        if !matches!(run.backend, Backend::Codex | Backend::Antigravity)
             || !instruction.trim_start().starts_with('/')
             || live
             || !at_rest

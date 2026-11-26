@@ -29,6 +29,13 @@
 //
 // OpenCode. The CLI's local /command endpoint resolves project, user and MCP
 // commands. The TUI registers its own actions separately.
+//
+// Antigravity. `agy` lists every command its "/" popup offers (built-ins,
+// its skills, the user's and the project's) on the commands tab of /help, in
+// the popup's order with aliases and descriptions. An interactive session in
+// the agent's directory, started off-screen in a private tmux, is sent /help
+// and that tab is read (readAntigravityMenu). Nothing reaches a model.
+// `agy -p /help` is not the list: print mode has 12 of the 51 (1.5.18).
 
 import fs from "node:fs";
 import os from "node:os";
@@ -757,6 +764,146 @@ export function codexConfigModel(text) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Antigravity
+// ---------------------------------------------------------------------------
+
+// In the chat these open its model sheet, the app's control for both.
+const ANTIGRAVITY_MODEL_COMMANDS = new Set(["model", "effort"]);
+// These draw a panel, a picker or a form over the prompt that the
+// conversation never records, so the chat brings up the terminal with them.
+const ANTIGRAVITY_TUI_COMMANDS = new Set(["agents", "artifact", "changelog", "config", "context", "credits", "diff", "feedback", "help",
+  "hooks", "keybindings", "mcp", "open", "permissions", "plugin", "projects", "record", "resume", "rewind", "skills", "tasks", "usage", "voice"]);
+// Named with what they act on (`/swarm <task>`, `/codesearch <query>`): picked
+// bare, the menu fills the name in and waits for the rest.
+const ANTIGRAVITY_NEEDS_ARGS = new Set(["btw", "codesearch", "goal", "schedule", "swarm"]);
+
+/** The rows of the commands tab of agy's /help: [{ name, aliases, description }], or null when it is not showing. */
+export function parseAntigravityMenu(screen) {
+  const lines = screen.split("\n").map((line) => line.trimEnd());
+  const start = lines.findIndex((line) => line.trim() === "Available Commands");
+  if (start < 0) return null;
+  const rows = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*[↑↓] \d+ more/.test(line)) throw new Error("Antigravity's command list did not fit the off-screen terminal");
+    // "> /name (alias, alias)  description"; the first row carries the cursor.
+    const m = /^[> ] \/(\S+)(?: \(([^)]*)\))?(?: {2,}(.*))?$/.exec(line);
+    if (!m) {
+      if (rows.length) break;
+      continue;
+    }
+    rows.push({ name: m[1], aliases: m[2] ? m[2].split(",").map((alias) => alias.trim()).filter(Boolean) : [], description: (m[3] ?? "").trim() });
+  }
+  return rows.length ? rows : null;
+}
+
+/** The app's rows for agy's command list (`menu`, parseAntigravityMenu). */
+export function buildAntigravityCommands(menu) {
+  return menu.map(({ name, aliases, description }) => ({
+    name,
+    description: clip(description),
+    hint: null,
+    args: ANTIGRAVITY_NEEDS_ARGS.has(name) ? "required" : null,
+    opens: ANTIGRAVITY_MODEL_COMMANDS.has(name) ? "model" : ANTIGRAVITY_TUI_COMMANDS.has(name) ? "terminal" : null,
+    aliases,
+  }));
+}
+
+/**
+ * agy's command list in `cwd`: an interactive session started in a private
+ * tmux server with the agent's environment, sent /help and moved to its
+ * commands tab. Returns { version, menu }. The session is given no prompt, so
+ * no model is called and no conversation is kept.
+ */
+export async function readAntigravityMenu({ bin, cwd, env, timeoutMs = 45_000 }) {
+  const tmux = which("tmux", env);
+  const socket = path.join(os.tmpdir(), `rudder-slash-${process.pid}-${menuSeq++}`);
+  const t = (...args) => run(tmux, ["-S", socket, "-f", "/dev/null", ...args], { cwd, env });
+  const screen = async () => (await t("capture-pane", "-p", "-t", "menu")).stdout;
+  const deadline = Date.now() + timeoutMs;
+  const pause = () => new Promise((resolve) => setTimeout(resolve, MENU_POLL_MS));
+  // Waits until `test(screen)` gives a value; `what` names it in the error.
+  const until = async (test, what) => {
+    for (;;) {
+      const text = await screen();
+      if (/Do you trust the contents of this project\?/.test(text)) {
+        throw new Error(`Antigravity has not been trusted in ${cwd}`);
+      }
+      const found = test(text);
+      if (found) return found;
+      const dead = (await t("display-message", "-p", "-t", "menu", "#{pane_dead}")).stdout.trim() === "1";
+      if (dead || Date.now() > deadline) {
+        const said = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 3).join(" ");
+        throw new Error(`Antigravity ${dead ? "exited" : `showed no ${what}`} before its commands could be read${said ? `: ${said}` : ""}`);
+      }
+      await pause();
+    }
+  };
+  let group = null;
+  try {
+    await t("set-option", "-g", "remain-on-exit", "on", ";",
+      "new-session", "-d", "-s", "menu", "-x", String(MENU_COLUMNS), "-y", String(MENU_ROWS), "-c", cwd,
+      // No Rudder run: the global hook and MCP entries answer for themselves
+      // (signals.rs), and the session reports to nobody.
+      "env", "-u", "TMUX", "-u", "TMUX_PANE", "-u", "RUDDER_AGY_HOOK", "-u", "RUDDER_AGY_MCP", "TERM=xterm-256color",
+      // As Rudder starts every agy agent (launch.rs antigravity_mode_args).
+      bin, "--dangerously-skip-permissions");
+    const panePid = (await t("display-message", "-p", "-t", "menu", "#{pane_pid}")).stdout.trim();
+    if (!/^\d+$/.test(panePid)) throw new Error(`tmux gave no process id for Antigravity's pane: "${panePid}"`);
+    group = Number(panePid);
+    // The banner names the version above the composer ("Antigravity CLI 1.5.18").
+    const version = await until((text) => (/^>\s*$/m.test(text) || /^> \S/m.test(text)) && /Antigravity CLI (\d+\.\d+\.\d+\S*)/.exec(text)?.[1], "prompt");
+    await t("send-keys", "-t", "menu", "-l", "/help");
+    // The popup narrows to /help before Enter runs it.
+    await until((text) => /^> \/help\s/m.test(text.split("\n").filter((line) => /^[> ] \/\S/.test(line)).join("\n")), "/help in its menu");
+    await t("send-keys", "-t", "menu", "Enter");
+    await until((text) => /^Antigravity CLI\s+general\s+commands\s+shortcuts/m.test(text), "help panel");
+    await t("send-keys", "-t", "menu", "Right");
+    let last = null;
+    let since = 0;
+    for (;;) {
+      await pause();
+      const rows = parseAntigravityMenu(await screen());
+      const sig = JSON.stringify(rows);
+      if (sig !== last) {
+        last = sig;
+        since = Date.now();
+      } else if (rows && Date.now() - since >= MENU_STILL_MS) {
+        return { version, menu: rows };
+      }
+      if (Date.now() > deadline) {
+        throw new Error(rows ? "Antigravity's command list kept changing" : "Antigravity showed no command list in /help");
+      }
+    }
+  } finally {
+    if (group === null) await t("kill-server").catch(() => {});
+    else {
+      await t("kill-server");
+      await reapGroup(group);
+    }
+    fs.rmSync(socket, { force: true });
+  }
+}
+
+// What agy's command list depends on: the CLI, its built-in skills and
+// plugins, the user's skills, plugins and MCP servers (~/.gemini/config), and
+// the project's (.agents in the folder and its parents).
+function antigravityStamp({ bin, cwd, env }) {
+  const gemini = path.join(env.HOME || os.homedir(), ".gemini");
+  const real = fs.realpathSync(bin);
+  const parts = [real, fileStamp(real), fileStamp(path.join(gemini, "antigravity-cli", "builtin", ".manifest"))];
+  const customizations = (dir) => {
+    for (const name of ["skills.json", "plugins.json", "mcp_config.json"]) parts.push(fileStamp(path.join(dir, name)));
+    for (const name of ["skills", "plugins"]) treeStamp(path.join(dir, name), 2, parts);
+  };
+  customizations(path.join(gemini, "config"));
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    customizations(path.join(dir, ".agents"));
+    if (path.dirname(dir) === dir) break;
+  }
+  return createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
 function run(bin, args, { cwd, env, timeoutMs = 20_000 }) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -1212,7 +1359,8 @@ export function createSlashCommands({ envFor, log, projectDirs, file }) {
   };
   const binaryCache = new Map(); // claude realpath -> Promise<Map>
   // Codex reads its state in milliseconds; it does not wait behind Claude.
-  const queues = { claude: buildQueue(), codex: buildQueue(), opencode: buildQueue() };
+  const queues = { claude: buildQueue(), codex: buildQueue(), opencode: buildQueue(), antigravity: buildQueue() };
+  const antigravityBinary = (env) => which(env.RUDDER_AGY_BIN?.trim() || "agy", env);
   const opencodeBinary = (env) => which(env.RUDDER_OPENCODE_BIN?.trim() || "opencode", env);
 
   const claudeBinary = (bin) => {
@@ -1266,6 +1414,14 @@ export function createSlashCommands({ envFor, log, projectDirs, file }) {
           withSession: buildOpencodeCommands(commands, { hasSession: true }),
           withoutSession: buildOpencodeCommands(commands, { hasSession: false }),
         };
+      },
+    },
+    antigravity: {
+      key: ({ cwd }) => `antigravity\n${cwd}`,
+      stamp: ({ cwd }, env) => antigravityStamp({ bin: antigravityBinary(env), cwd, env }),
+      build: async ({ cwd }, publish, env) => {
+        const { version, menu } = await readAntigravityMenu({ bin: antigravityBinary(env), cwd, env });
+        return { version, commands: buildAntigravityCommands(menu) };
       },
     },
   };
@@ -1347,7 +1503,7 @@ export function createSlashCommands({ envFor, log, projectDirs, file }) {
       return { backend, input: { cwd, account, model: record.model?.trim() || null, permissionMode } };
     }
     if (backend === "codex") return { backend, input: { cwd, account, plugins: codexPluginsFor(record.mode) } };
-    if (backend === "opencode") return { backend, input: { cwd, account } };
+    if (backend === "opencode" || backend === "antigravity") return { backend, input: { cwd, account } };
     throw new Error(`the app has no "/" list for ${backend} agents`);
   }
 
@@ -1362,6 +1518,7 @@ export function createSlashCommands({ envFor, log, projectDirs, file }) {
       // settling: a first reading; the app asks again for the finished list.
       return { backend, ...entry.value, ...(entry.settling ? { settling: true } : {}) };
     }
+    if (backend === "antigravity") return { backend, ...entry.value };
     if (backend === "opencode") {
       const { version, withSession, withoutSession } = entry.value;
       return { backend, version, commands: record.session?.nativeSessionId ? withSession : withoutSession };

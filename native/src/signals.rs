@@ -159,6 +159,7 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-claude.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-agents-mcp.json")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}-agents-mcp.sh")));
     let _ = crate::prompt_suggestion::cleanup(&dir, run_id);
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-notify.sh")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.session")));
@@ -826,6 +827,93 @@ fn ensure_antigravity_hooks(path: &Path) -> Result<()> {
     let tmp = dir.join(format!("hooks.json.rudder.{}.tmp", std::process::id()));
     std::fs::write(&tmp, body).with_context(|| format!("could not write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("could not install {}", path.display()))
+}
+
+/// The name of Rudder's server in Antigravity's `mcp_config.json`, and of the
+/// environment variable that hands a run's server to it.
+pub(crate) const ANTIGRAVITY_MCP_SERVER: &str = "rudder_agents";
+pub(crate) const ANTIGRAVITY_MCP_ENV: &str = "RUDDER_AGY_MCP";
+
+/// The `rudder_agents` entry of Antigravity's global MCP file. agy starts
+/// every configured server with the session's environment and has no launch
+/// flag for one, so the entry runs the script `RUDDER_AGY_MCP` names (a
+/// Rudder agent's own server, `antigravity_mcp_script`). An Antigravity
+/// session Rudder did not launch gets a server with no tools.
+pub(crate) fn antigravity_mcp_entry() -> serde_json::Value {
+    let outside = concat!(
+        r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\("[^"]*"\|[0-9]*\).*/\1/p'); "#,
+        r#"case "$line" in "#,
+        r#"*'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"rudder_agents","version":"0"}}}\n' "$id";; "#,
+        r#"*'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id";; "#,
+        r#"*'"id"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";; "#,
+        r#"esac; done"#,
+    );
+    serde_json::json!({
+        "command": "sh",
+        "args": ["-c", format!("if [ -n \"${0}\" ]; then exec \"${0}\"; fi; {1}", ANTIGRAVITY_MCP_ENV, outside)],
+    })
+}
+
+/// `existing` (the MCP file's text, if any) with Rudder's server set and
+/// everything else kept. An empty file is an empty config, as agy leaves it
+/// at first run. `None` when the file is not a JSON object.
+pub(crate) fn antigravity_mcp_with_rudder(existing: Option<&str>) -> Option<String> {
+    let text = existing.map(|text| text.trim_start_matches('\u{feff}').trim()).filter(|text| !text.is_empty());
+    let mut config = match text {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text).ok()?,
+        None => serde_json::json!({}),
+    };
+    let servers = config
+        .as_object_mut()?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()?;
+    servers.insert(ANTIGRAVITY_MCP_SERVER.to_string(), antigravity_mcp_entry());
+    serde_json::to_string_pretty(&config).ok().map(|body| body + "\n")
+}
+
+/// Antigravity's global MCP file: `~/.gemini/config/mcp_config.json`.
+pub(crate) fn antigravity_mcp_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+    Some(PathBuf::from(home).join(".gemini").join("config").join("mcp_config.json"))
+}
+
+/// Make sure the global MCP file carries Rudder's server, rewriting it only
+/// when that entry is missing or different. A file that is not a JSON object
+/// fails the launch with the reason: the agent would start without its tools.
+pub(crate) fn ensure_antigravity_mcp(path: &Path) -> Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("could not read {}", path.display())),
+    };
+    if let Some(text) = existing.as_deref() {
+        let current = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok();
+        if current.as_ref().and_then(|value| value.pointer(&format!("/mcpServers/{ANTIGRAVITY_MCP_SERVER}")))
+            == Some(&antigravity_mcp_entry())
+        {
+            return Ok(());
+        }
+    }
+    let body = antigravity_mcp_with_rudder(existing.as_deref())
+        .with_context(|| format!("{} is not a JSON object; fix it so Rudder can add its tools", path.display()))?;
+    let dir = path.parent().context("the MCP file has no folder")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let tmp = dir.join(format!("mcp_config.json.rudder.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, body).with_context(|| format!("could not write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("could not install {}", path.display()))
+}
+
+/// One run's `rudder_agents` server as a script: `exe` with `arguments`,
+/// each quoted for sh.
+pub(crate) fn antigravity_mcp_script(exe: &Path, arguments: &[String]) -> String {
+    let quote = |word: &str| format!("'{}'", word.replace('\'', r"'\''"));
+    let mut line = format!("exec {}", quote(&exe.display().to_string()));
+    for argument in arguments {
+        line.push(' ');
+        line.push_str(&quote(argument));
+    }
+    format!("#!/bin/sh\n# Rudder agent tools for one Antigravity run (mcp_config.json runs it).\n{line}\n")
 }
 
 /// The per-run Antigravity hook script: the event name in `$1`, the payload

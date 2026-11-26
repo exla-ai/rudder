@@ -2089,6 +2089,70 @@ fn antigravity_hooks_merge_beside_the_users_own() {
 }
 
 #[test]
+fn antigravity_mcp_file_gains_the_rudder_server_and_keeps_the_rest() {
+    let existing = r#"{"mcpServers":{"sqlite":{"command":"sqlite-mcp"}},"other":1}"#;
+    let merged = signals::antigravity_mcp_with_rudder(Some(existing)).expect("object file");
+    let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(value["mcpServers"]["sqlite"]["command"], "sqlite-mcp");
+    assert_eq!(value["other"], 1);
+    assert_eq!(value["mcpServers"]["rudder_agents"], signals::antigravity_mcp_entry());
+    // agy creates the file empty at first run.
+    for empty in [None, Some(""), Some("\n")] {
+        let value: serde_json::Value =
+            serde_json::from_str(&signals::antigravity_mcp_with_rudder(empty).expect("empty config")).unwrap();
+        assert_eq!(value["mcpServers"]["rudder_agents"], signals::antigravity_mcp_entry());
+    }
+    assert_eq!(signals::antigravity_mcp_with_rudder(Some("[1, 2]")), None);
+    assert_eq!(signals::antigravity_mcp_with_rudder(Some(r#"{"mcpServers":[]}"#)), None);
+}
+
+#[test]
+fn antigravity_mcp_entry_runs_the_named_script_or_serves_no_tools() {
+    use std::io::Write;
+    let entry = signals::antigravity_mcp_entry();
+    let args: Vec<String> = entry["args"].as_array().unwrap().iter().map(|arg| arg.as_str().unwrap().to_string()).collect();
+    let run = |script: Option<&Path>, input: &str| {
+        let mut command = std::process::Command::new(entry["command"].as_str().unwrap());
+        command.args(&args).env_remove(signals::ANTIGRAVITY_MCP_ENV);
+        if let Some(script) = script {
+            command.env(signals::ANTIGRAVITY_MCP_ENV, script);
+        }
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    // A session Rudder did not launch: a server that answers and has no tools.
+    let out = run(
+        None,
+        concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#, "\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, "\n",
+            r#"{"jsonrpc":"2.0","id":"b","method":"tools/list"}"#, "\n",
+        ),
+    );
+    let replies: Vec<serde_json::Value> = out.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(replies.len(), 2, "{out}");
+    assert_eq!(replies[0]["id"], 1);
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "rudder_agents");
+    assert_eq!(replies[1], serde_json::json!({"jsonrpc":"2.0","id":"b","result":{"tools":[]}}));
+    // A Rudder agent: its own script, with every argument intact.
+    let dir = unique_test_repo("agy-mcp-script");
+    let script = dir.join("run-agents-mcp.sh");
+    std::fs::write(
+        &script,
+        signals::antigravity_mcp_script(Path::new("/bin/echo"), &["fabric".into(), "it's a 'run'".into(), "--project".into(), "/a b".into()]),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    assert_eq!(run(Some(&script), ""), "fabric it's a 'run' --project /a b\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn antigravity_hook_script_reports_the_conversation_and_turn_state() {
     let dir = std::env::temp_dir().join(format!("rudder-agy-hook-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

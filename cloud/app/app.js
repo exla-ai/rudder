@@ -18,6 +18,7 @@ import { canvasButton, followCanvas } from "/app/canvas-panel.js";
 import { FilesHubScreen } from "/app/files-hub.js";
 import { NOTES_ICON, followNotes, notesButton, openNotes } from "/app/notes.js";
 import { followTerminal, setTerminal, terminalOpen } from "/app/terminal-panel.js";
+import { followShell, setShell, shellOpen } from "/app/shell-panel.js";
 import { followFileLink, mountFileRefs } from "/app/file-link.js";
 import { mountCommandPalette } from "/app/command-palette.js";
 import { chatFind, mountChatFindKey } from "/app/chat-find.js";
@@ -828,6 +829,7 @@ function mountScreen(dir = "forward", { revealSidebar = false } = {}) {
   followCanvas(route, findAgent);
   followNotes(route, findAgent);
   followTerminal(route, findAgent);
+  followShell();
   followFileLink(route);
 }
 function updateScreen() {
@@ -993,6 +995,7 @@ function DesktopShell() {
     followCanvas(r, findAgent);
     followNotes(r, findAgent);
     followTerminal(r, findAgent);
+    followShell();
     followFileLink(r);
   }
   const onPaneEvent = (e) => {
@@ -5815,7 +5818,7 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   return {
     el,
     update: () => { noteState(); paint(); },
-    // The Cmd+K palette's "Open terminal" (paletteCommands). A teammate's agent has none.
+    // The Cmd+K palette's "Show agent's terminal" (paletteCommands). A teammate's agent has none.
     terminal: ro ? null : { isOpen: () => terminalOpen(ws, run), set: setTerm },
     // Alt+V and Alt+B (the keydown listener after mountCommandPalette).
     chat: { previous: previousMessage, newest: newestMessage },
@@ -5894,11 +5897,16 @@ function paletteCommands() {
   // A new chat starts from its project's task box (newChat).
   const startChat = (p) => () => newChat(p.workspaceId);
   const rows = [];
+  // The machine's shell (shell-panel.js), from any page, then the terminal of
+  // the agent on screen, which is the agent's own and read only.
+  const shell = shellOpen();
+  rows.push({ label: shell ? "Close terminal" : "Terminal", detail: "A shell on your cloud machine",
+    icon: icon("terminal"), keywords: ["shell", "console", "bash", "ssh", "open"], run: () => { void setShell(!shell); } });
   const term = screen?.terminal;
   if (term) {
     const open = term.isOpen();
-    rows.push({ label: open ? "Close terminal" : "Open terminal", detail: findAgent(route.ws, route.run)?.title || "",
-      icon: icon("terminal"), keywords: ["shell", "console"], run: () => term.set(!open) });
+    rows.push({ label: open ? "Hide agent's terminal" : "Show agent's terminal", detail: findAgent(route.ws, route.run)?.title || "",
+      icon: icon("terminal"), keywords: ["screen", "tui"], run: () => term.set(!open) });
   }
   if (route.name === "all" || route.name === "all-agent") rows.push({ label: "New chat", detail: "All agents", icon: icon("plus"), run: go(`${ALL_PATH}/new`) });
   if (here) {

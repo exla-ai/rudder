@@ -37,6 +37,7 @@ import { createFabricHttpHandler } from "./fabric-http.js";
 import { createRemoteBuildCacheHandler, S3RemoteCacheStorage } from "./remote-build-cache.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
 import { HomeControlSessions, HomeRpcEffectUnknownError } from "./home-control-sessions.js";
+import { ShellRelay } from "./shell-relay.js";
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
 import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
@@ -1051,6 +1052,12 @@ server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
           wss.handleUpgrade(req,socket,head,ws=>{void canonicalTerminalRelay.attach(selection,clientId,ws).catch(()=>ws.close(4001,"Current terminal custody is unavailable"));});
         } catch { destroyUpgrade(socket,403); }
       })();
+      return;
+    }
+    if (url.pathname === "/api/app/shell") {
+      const accountId = shellRelay.redeem(url.searchParams.get("ticket") ?? "");
+      if (!accountId) { destroyUpgrade(socket, 401); return; }
+      wss.handleUpgrade(req, socket, head, (ws) => { enableSocketLiveness(ws); shellRelay.attach(accountId, ws); });
       return;
     }
     const sailMatch = SAIL_ATTACH_PATH_RE.exec(url.pathname);
@@ -6712,6 +6719,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
       }
       return;
     }
+    if (shellRelay.fromHome(homeId, message as JsonRecord)) return;
     if (type === "update-failed") {
       noteHomeUpdateFailed(homeId, message);
       return;
@@ -6737,6 +6745,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
     if (session) homeRpcSessions.close(session);
     if (homeControls.get(homeId) === ws) {
       homeControls.delete(homeId);
+      shellRelay.homeGone(homeId);
       telemetry.recordHomeDisconnect(homeId);
     }
   });
@@ -7701,6 +7710,15 @@ const vibeprintRoutes = new VibeprintRoutes({
   },
   rpc: (homeId, params, signal) => homeRpc(homeId, "vibeprint", params as JsonRecord, 10_000, signal),
 });
+const shellRelay = new ShellRelay({
+  home: async (accountId) => {
+    const known = findHomeRow(accountId);
+    if (!known || known.status === "deleting") throw new Error("You have no cloud machine yet. Add a project to start one.");
+    return (await homeWithControl(accountId)).id;
+  },
+  rpc: (homeId, method, params) => homeRpc(homeId, method, params),
+  post: (homeId, message) => { sendSocket(homeControls.get(homeId), JSON.stringify(message)); },
+});
 const canonicalTerminalRelay = new CanonicalTerminalRelay({
   authorize: async ({actor,workspaceId}) => {try {requireHomeRepo(actor,workspaceId);return true;} catch {return false;}},
   read: async ({actor,workspaceId,runId},signal) => {
@@ -8190,6 +8208,10 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   if (req.method === "GET" && url.pathname === "/api/app/screen") {
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     sendJson(res, 200, await homeRpc(home.id, "screen", { workspaceId: repo.id, runId: url.searchParams.get("run") ?? "" }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/shell-ticket") {
+    sendJson(res, 200, { ticket: shellRelay.ticket(account.accountId) });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/keys") {

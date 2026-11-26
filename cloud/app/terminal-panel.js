@@ -4,13 +4,15 @@
 // (side-panel.js): a desktop column that slides open, or narrower a
 // full-screen sheet. It opens and closes from Cmd+K, the agent's More menu,
 // its close button and Ctrl+`. Esc belongs to the terminal and never closes it.
+// The machine's own shell, which takes typing, is shell-panel.js.
 //
 // The screen is the agent's canonical terminal (terminal-client.js). Every
 // frame is a complete ANSI repaint of the agent's PTY, so the panel shows its
 // geometry, colors and cursor exactly, read only. Saved and legacy agents
 // keep the HTTP text screen and the key strip.
-import { api, coarse, openExternal, postNative, toast, track, PLATFORM } from "/app/core.js";
-import { h, icon, copyText, setText } from "/app/render.js";
+import { api, coarse, postNative, toast, track } from "/app/core.js";
+import { h, icon, setText } from "/app/render.js";
+import { FONT_FAMILY, FONT_SIZE, newTerm, termTheme } from "/app/xterm-kit.js";
 import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openSide, closeSide, placeSide, dragColumn } from "/app/side-panel.js";
 
@@ -18,16 +20,7 @@ const SLIDE_MS = 200; // .dsk's grid-template-columns transition (desktop.css)
 const SHEET_OUT_MS = 160;
 const POLL_MS = 1000;
 
-// Type and behavior, modeled on Ghostty's defaults. The web loads JetBrains
-// Mono (free, OFL; its @font-face rides in /app/vendor/xterm.css); the Mac
-// app draws with the system's SF Mono, then Menlo.
-const FONT_FAMILY = PLATFORM === "mac"
-  ? `ui-monospace, "SF Mono", Menlo, monospace`
-  : `"JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace`;
-const FONT_SIZE = 13;
 const MIN_FONT_SIZE = 9; // an agent's wide screen shrinks to the panel down to this
-const LINE_HEIGHT = 1.15;
-const COPY_ON_SELECT = true;
 
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
@@ -83,98 +76,27 @@ document.addEventListener("visibilitychange", () => {
 
 // ---------- xterm.js ----------
 
-let lib = null;
-let term = null, fit = null, failed = null;
-const loadCss = () => new Promise((resolve, reject) => {
-  const link = h(`<link rel="stylesheet" href="/app/vendor/xterm.css">`);
-  link.addEventListener("load", resolve, { once: true });
-  link.addEventListener("error", () => reject(new Error("Couldn't load the terminal's stylesheet")), { once: true });
-  document.head.appendChild(link);
-});
-const loadLib = () => (lib ??= Promise.all([import("/app/vendor/xterm.js"), loadCss(), document.fonts.load(`${FONT_SIZE}px ${FONT_FAMILY}`)])
-  .then(([mod]) => mod).catch((error) => { lib = null; throw error; }));
-
-/** The terminal's colors, from the app's palette (terminal-panel.css). */
-function readTheme() {
-  const css = getComputedStyle(el);
-  const color = (name) => {
-    const value = css.getPropertyValue(`--term-${name}`).trim();
-    if (!value) throw new Error(`terminal-panel.css has no --term-${name}`);
-    return value;
-  };
-  const theme = {
-    background: color("bg"), foreground: color("fg"), cursor: color("cursor"), cursorAccent: color("bg"),
-    selectionBackground: color("selection"), selectionInactiveBackground: color("selection-inactive"),
-    scrollbarSliderBackground: color("scrollbar"), scrollbarSliderHoverBackground: color("scrollbar-hover"),
-    scrollbarSliderActiveBackground: color("scrollbar-hover"),
-  };
-  for (const name of ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]) {
-    theme[name] = color(name);
-    theme[`bright${name[0].toUpperCase()}${name.slice(1)}`] = color(`bright-${name}`);
-  }
-  return theme;
-}
+let term = null, fit = null, failed = null, making = null;
 // Settings > Appearance (theme.js) flips html[data-theme]; the terminal follows.
-new MutationObserver(() => { if (term && el.isConnected) term.options.theme = readTheme(); })
+new MutationObserver(() => { if (term && el.isConnected) term.options.theme = termTheme(el); })
   .observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
-/** One terminal for the page, made on first open. WebGL draws it, or nothing
- * does: a browser without WebGL 2 gets a message, not a slower renderer. */
+/** One terminal for the page, made on first open (xterm-kit.js newTerm). */
 async function ensureTerm() {
   if (term) return term;
   if (failed) throw failed;
-  const { Terminal, FitAddon, WebLinksAddon, Unicode11Addon, WebglAddon } = await loadLib();
-  if (term) return term;
-  const t = new Terminal({
-    fontFamily: FONT_FAMILY, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT, letterSpacing: 0,
-    cursorStyle: "block", cursorBlink: true, cursorInactiveStyle: "outline",
-    scrollback: 10000, disableStdin: true, allowProposedApi: true,
-    macOptionIsMeta: true, macOptionClickForcesSelection: true,
-    drawBoldTextInBrightColors: false, minimumContrastRatio: 1,
-    theme: readTheme(),
-  });
-  fit = new FitAddon();
-  t.loadAddon(fit);
-  t.loadAddon(new Unicode11Addon());
-  t.unicode.activeVersion = "11";
-  t.loadAddon(new WebLinksAddon((e, uri) => { e.preventDefault(); openExternal(uri); }));
-  t.open(hostEl);
-  try { loadWebgl(t, WebglAddon); }
-  catch (error) { t.dispose(); fit = null; failed = error; throw error; }
-  // Copy on select, as Ghostty and iTerm2 do by default: once a drag or a
-  // double-click ends, not on every step of it.
-  if (COPY_ON_SELECT) {
-    hostEl.addEventListener("mouseup", () => setTimeout(() => {
-      const text = t.hasSelection() ? t.getSelection() : "";
-      if (text) void copyText(text).then((ok) => { if (!ok) toast("Couldn't copy the selection", { error: true }); });
-    }, 0));
-  }
-  term = t;
-  return t;
+  making ??= newTerm(hostEl, el, { stdin: false, onLost }).finally(() => { making = null; });
+  try { ({ term, fit } = await making); }
+  catch (error) { if (error.webgl) failed = error; throw error; }
+  return term;
 }
 
-function loadWebgl(t, WebglAddon) {
-  let webgl;
-  try {
-    webgl = new WebglAddon();
-    t.loadAddon(webgl);
-  } catch {
-    throw new Error("This browser can't draw the terminal. It needs WebGL 2.");
-  }
-  // The GPU dropped the context (a sleep, a driver reset): draw with a new one.
-  // Without one, the terminal goes rather than fall back to xterm's DOM renderer.
-  webgl.onContextLoss(() => {
-    webgl.dispose();
-    try { loadWebgl(t, WebglAddon); }
-    catch (error) {
-      failed = error;
-      state.view?.stop();
-      state.view = null;
-      t.dispose();
-      term = null; fit = null;
-      showMessage(error.message);
-    }
-  });
+function onLost(error) {
+  failed = error;
+  state.view?.stop();
+  state.view = null;
+  term = null; fit = null;
+  showMessage(error.message);
 }
 
 /** An agent's screen keeps its own columns, so a wide one shrinks its type to
@@ -322,7 +244,7 @@ export async function setTerminal(target, on) {
   if (!(await place())) return;
   state.open = true;
   if (!wasOpen) track("feature_used", { feature: "terminal" });
-  if (term) term.options.theme = readTheme();
+  if (term) term.options.theme = termTheme(el);
   if (!sameTarget(state.target, target) || !state.view) await retarget(target);
   else if (!wasOpen) startStream();
   if (term && state.open && !coarse) term.focus();

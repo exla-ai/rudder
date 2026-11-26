@@ -40,6 +40,7 @@ import { readClosedChats } from "./closed-chats.mjs";
 import { runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTailscale } from "./tailscale-login.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
+import { createMachineShell } from "./machine-shell.mjs";
 import { RUN_WATCH_MS, createRunWatch, runSignature } from "./run-watch.mjs";
 import { queueSteer, readSteerReceipt, waitRunWorking, waitSteerReceipt, withdrawSteer } from "./steer-inbox.mjs";
 import { cleanupPaths, createCleanupJob, readProcesses } from "./cleanup.mjs";
@@ -731,6 +732,14 @@ function connectControl() {
       }
       return;
     }
+    if (message?.type === "shell-input") {
+      machineShell.input(message.data);
+      return;
+    }
+    if (message?.type === "shell-resize") {
+      try { machineShell.resize(message); } catch { /* a size it cannot take changes nothing */ }
+      return;
+    }
     if (message?.type === "rpc" && typeof message.id === "string") {
       void handleRpc(message.method, message.params ?? {})
         .then((result) => sendControl({ type: "rpc-result", id: message.id, result: result ?? null }))
@@ -830,6 +839,9 @@ function restartFields(record, options) {
   };
 }
 
+// The app's Terminal (machine-shell.mjs): a shell with what agents here get.
+const machineShell = createMachineShell({ spawn: pty.spawn, cwd: HOME, env: baseChildEnv, send: (message) => sendControl(message) });
+
 function sendControl(message) {
   if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
     controlSocket.send(JSON.stringify(message));
@@ -848,6 +860,9 @@ function transcriptPage(params) {
 }
 
 async function handleRpc(method, params) {
+  if (method === "shell-open") {
+    return machineShell.open(params);
+  }
   if (method === "close") {
     const project = projects.get(params.workspaceId);
     if (project) {

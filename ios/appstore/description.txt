@@ -1,4 +1,4 @@
-Rudder runs coding agents such as Claude Code and Codex on a cloud machine of your own. This app lets you steer them from your phone.
+Rudder runs your coding agents (Claude Code and Codex) on a cloud machine and puts them in your pocket: read their conversations, answer their questions, approve changes, start new tasks and merge work from your phone.
 
 See every project and agent at a glance. When an agent has a question, needs an approval or has a plan ready, Rudder puts it at the top and shows a badge, so you can answer in a few taps and let it carry on.
 

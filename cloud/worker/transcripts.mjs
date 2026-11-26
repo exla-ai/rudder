@@ -1155,7 +1155,7 @@ function opencodeSessionPage(record, home, { end, start, limit, stats }) {
 // OpenCode's rows as chat messages: a user's text, the agent's text and
 // tool calls (each with its result), a compaction's marker with its summary,
 // and a finished turn's duration.
-function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
+export function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
   const messages = [];
   const lines = [];
   const spawns = [];
@@ -1228,6 +1228,15 @@ function opencodeChat(rows, outputLimit = TOOL_OUTPUT_LIMIT) {
         const childId = state.metadata?.sessionId;
         if (part.tool === "task" && isOpencodeSessionId(childId)) {
           spawns.push({ message, childId });
+        }
+      } else if (part.type === "reasoning") {
+        // OpenCode saves a thought's words when the thought ends. Until then
+        // the chat says it is thinking; after, how the thought began.
+        const thought = String(part.text || "").trim().split(/\n\s*\n/)[0];
+        if (thought) {
+          messages.push({ id, role: "system", ts: at, text: thought.length > 280 ? `${thought.slice(0, 279).trimEnd()}…` : thought });
+        } else if (!part.time?.end && !data.time?.completed) {
+          messages.push({ id, role: "system", ts: at, text: "Thinking" });
         }
       }
     });

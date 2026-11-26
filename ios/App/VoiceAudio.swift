@@ -40,7 +40,7 @@ final class VoiceAudio: @unchecked Sendable {
     /// on either SDK without a deprecation.
     private static let bluetoothHFP = AVAudioSession.CategoryOptions(rawValue: 0x4)
 
-    private static let queue = DispatchQueue(label: "dev.viraat.rudder.voice.audio", qos: .userInitiated)
+    private static let queue = DispatchQueue(label: "ai.exla.rudder.voice.audio", qos: .userInitiated)
     private var queue: DispatchQueue { Self.queue }
 
     private let handlers: Handlers

@@ -6,9 +6,9 @@
 #            and build/upload.env with the version and build number in it
 #   upload   Xcode signs the archive for App Store distribution with the
 #            team's cloud-managed certificate and uploads it to App Store
-#            Connect. Needs ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (an
-#            Admin key: cloud signing needs it), so no certificate or
-#            provisioning profile is stored anywhere.
+#            Connect. Needs IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID and IOS_ASC_KEY_P8,
+#            an Admin key of the team in ios/project.yml (cloud signing needs
+#            Admin), so no certificate or provisioning profile is stored.
 #   collect  ../out.tgz with the logs and build/upload.env
 #
 # Each stage is its own command in the same sandbox, so tools/ and ios/build/
@@ -19,7 +19,7 @@ set -euo pipefail
 stage="${1:?usage: ios/scripts/appstore.sh archive|upload|collect}"
 root="$PWD"
 tools="$root/../tools"
-TEAM=3C4383262W
+source "$root/ios/scripts/identity.sh"
 
 xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
 export DEVELOPER_DIR="$xcode/Contents/Developer"
@@ -47,23 +47,30 @@ case "$stage" in
     # Ad hoc here; Xcode applies the distribution signature at upload.
     run_logged archive.log xcodebuild archive -project Rudder.xcodeproj -scheme Rudder -configuration Release \
       -destination 'generic/platform=iOS' -archivePath build/Rudder.xcarchive \
-      DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY=- AD_HOC_CODE_SIGNING_ALLOWED=YES
+      CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY=- AD_HOC_CODE_SIGNING_ALLOWED=YES
     app=build/Rudder.xcarchive/Products/Applications/Rudder.app
     if [ ! -f "$app/PrivacyInfo.xcprivacy" ]; then
       echo "the archived app has no PrivacyInfo.xcprivacy; App Store Connect requires it"
       exit 1
     fi
+    bundle=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+    if [ "$bundle" != "$BUNDLE_ID" ]; then
+      echo "the archived app is $bundle, not $BUNDLE_ID"
+      exit 1
+    fi
     {
+      echo "TEAM=$TEAM_ID"
+      echo "BUNDLE_ID=$bundle"
       echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")"
       echo "BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")"
     } > build/upload.env
     cat build/upload.env
     ;;
   upload)
-    : "${ASC_KEY_ID:?ASC_KEY_ID is not set}" "${ASC_ISSUER_ID:?ASC_ISSUER_ID is not set}" "${ASC_KEY_P8:?ASC_KEY_P8 is not set}"
-    key="$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8"
+    : "${IOS_ASC_KEY_ID:?IOS_ASC_KEY_ID is not set}" "${IOS_ASC_ISSUER_ID:?IOS_ASC_ISSUER_ID is not set}" "${IOS_ASC_KEY_P8:?IOS_ASC_KEY_P8 is not set}"
+    key="$HOME/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8"
     mkdir -p "$(dirname "$key")"
-    (umask 077 && printf '%s\n' "$ASC_KEY_P8" > "$key")
+    (umask 077 && printf '%s\n' "$IOS_ASC_KEY_P8" > "$key")
     cd "$root/ios"
     cat > build/ExportOptions.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -73,7 +80,7 @@ case "$stage" in
   <key>method</key><string>app-store-connect</string>
   <key>destination</key><string>upload</string>
   <key>signingStyle</key><string>automatic</string>
-  <key>teamID</key><string>$TEAM</string>
+  <key>teamID</key><string>$TEAM_ID</string>
   <key>manageAppVersionAndBuildNumber</key><false/>
 </dict>
 </plist>
@@ -81,7 +88,7 @@ PLIST
     run_logged export.log xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
       -exportOptionsPlist build/ExportOptions.plist -exportPath build/export \
       -allowProvisioningUpdates -authenticationKeyPath "$key" \
-      -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+      -authenticationKeyID "$IOS_ASC_KEY_ID" -authenticationKeyIssuerID "$IOS_ASC_ISSUER_ID"
     rm "$key"
     # App Store Connect's warnings (an SDK deadline, a missing API reason) come back here.
     grep -E "warning: |Uploaded |EXPORT SUCCEEDED" export.log | cut -c1-300

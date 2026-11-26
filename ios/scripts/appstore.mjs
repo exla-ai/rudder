@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // ios/scripts/appstore.mjs: the iPhone app in App Store Connect, through its
-// API. The version is Rudder's (package.json, written into ios/project.yml by
-// scripts/version.mjs) and the build number is derived from it. The listing
-// comes from ios/appstore/.
+// API. The team and bundle id come from ios/project.yml, the version is
+// Rudder's (package.json, written into ios/project.yml by scripts/version.mjs)
+// and the build number is derived from it. The listing comes from ios/appstore/.
 //
 //   check                    checks ios/appstore against Apple's limits (no network, no key)
 //   status                   the app's App Store versions, latest builds and review submissions
-//   testflight               waits for this build to finish processing, adds it to the
-//                            "Beta testers" group (the public TestFlight link) and submits
-//                            it for beta review
+//   identity                 checks the key belongs to the project's team, registers the
+//                            bundle id if it is missing and enables the capabilities the
+//                            app's entitlements need (none today)
+//   testflight               waits for this build to finish processing; internal testers
+//                            get it from TestFlight then
 //   prepare                  makes the App Store version match the repo: creates or renames
 //                            it, sets the text, categories and App Review details, attaches
 //                            this build and uploads the screenshots. Submits nothing.
@@ -19,8 +21,9 @@
 //   --dry-run  prints every request instead of sending it, answered with made-up ids
 //              and states, so it needs no key.
 //
-// Env: ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 (the .p8 file's text). prepare
-// also needs APPSTORE_REVIEW, JSON with the App Review contact and demo account:
+// Env: IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID and IOS_ASC_KEY_P8 (the .p8 file's
+// text), an App Store Connect key of the team in ios/project.yml; the Mac's
+// ASC_* key is another team's. prepare also needs APPSTORE_REVIEW, JSON with the App Review contact and demo account:
 // contactFirstName, contactLastName, contactPhone, contactEmail,
 // demoAccountRequired (true or false), demoAccountName, demoAccountPassword.
 //
@@ -34,9 +37,23 @@ import { appBuild, checkVersionFiles } from "../../scripts/version.mjs"
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const LISTING_DIR = path.join(ROOT, "ios/appstore")
-const BUNDLE_ID = "dev.viraat.rudder"
-const BETA_GROUP = "Beta testers"
 const API = "https://api.appstoreconnect.apple.com"
+const KEY_ENV = ["IOS_ASC_KEY_ID", "IOS_ASC_ISSUER_ID", "IOS_ASC_KEY_P8"]
+
+// Entitlement -> the bundle id capability App Store Connect must have enabled
+// for a provisioning profile to carry it. Entitlements Apple grants on
+// request (CarPlay) cannot be enabled through the API.
+const ENTITLEMENT_CAPABILITIES = {
+  "aps-environment": { capabilityType: "PUSH_NOTIFICATIONS" },
+  "com.apple.developer.associated-domains": { capabilityType: "ASSOCIATED_DOMAINS" },
+  "com.apple.security.application-groups": { capabilityType: "APP_GROUPS" },
+  "com.apple.developer.applesignin": {
+    capabilityType: "APPLE_ID_AUTH",
+    settings: [{ key: "APPLE_ID_AUTH_APP_CONSENT", options: [{ key: "PRIMARY_APP_CONSENT" }] }],
+  },
+}
+const NO_CAPABILITY = new Set(["keychain-access-groups"])
+const GRANTED_BY_APPLE = /^com\.apple\.developer\.carplay-/
 
 // AppVersionState values. A version takes changes only in EDITABLE; while one
 // is IN_FLIGHT, App Store Connect makes no new version.
@@ -71,6 +88,23 @@ const REVIEW_KEYS = ["contactFirstName", "contactLastName", "contactPhone", "con
 const LISTING_KEYS = ["locale", "name", "subtitle", "primaryCategory", "secondaryCategory", "contentRightsDeclaration", "copyright", "releaseType", "keywords", "promotionalText", "supportUrl", "marketingUrl", "privacyPolicyUrl", "screenshotSets"]
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * The Apple team, bundle id and entitlement keys of the Rudder target in
+ * ios/project.yml (ios/scripts/identity.sh reads the same lines).
+ */
+export function appIdentity(root = ROOT) {
+  const text = readFileSync(path.join(root, "ios/project.yml"), "utf8")
+  const team = /^    DEVELOPMENT_TEAM: (\S+)$/m.exec(text)?.[1]
+  const target = /^  Rudder:\n((?:(?: {3,}.*)?\n)*)/m.exec(text)?.[1] ?? ""
+  const bundleId = /PRODUCT_BUNDLE_IDENTIFIER: (\S+)/.exec(target)?.[1]
+  if (!team || !bundleId) throw new Error("ios/project.yml has no DEVELOPMENT_TEAM or no PRODUCT_BUNDLE_IDENTIFIER for the Rudder target")
+  const entitlementsFile = /CODE_SIGN_ENTITLEMENTS: (\S+)/.exec(target)?.[1]
+  const entitlements = entitlementsFile
+    ? [...readFileSync(path.join(root, "ios", entitlementsFile), "utf8").matchAll(/<key>([^<]+)<\/key>/g)].map((match) => match[1])
+    : []
+  return { team, bundleId, entitlements }
+}
 
 /** The version and build this checkout ships: Rudder's, in every versioned file. */
 export function shippedVersion(root = ROOT) {
@@ -219,13 +253,13 @@ export function planVersion(list, version) {
 }
 
 function realClient() {
-  const missing = ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"].filter((name) => !process.env[name])
+  const missing = KEY_ENV.filter((name) => !process.env[name])
   if (missing.length) throw new Error(`${missing.join(", ")} not set`)
-  const key = createPrivateKey(process.env.ASC_KEY_P8)
+  const key = createPrivateKey(process.env.IOS_ASC_KEY_P8)
   const token = () => {
     const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url")
     const now = Math.floor(Date.now() / 1000)
-    const body = `${b64({ alg: "ES256", kid: process.env.ASC_KEY_ID, typ: "JWT" })}.${b64({ iss: process.env.ASC_ISSUER_ID, iat: now, exp: now + 1200, aud: "appstoreconnect-v1" })}`
+    const body = `${b64({ alg: "ES256", kid: process.env.IOS_ASC_KEY_ID, typ: "JWT" })}.${b64({ iss: process.env.IOS_ASC_ISSUER_ID, iat: now, exp: now + 1200, aud: "appstoreconnect-v1" })}`
     return `${body}.${sign("sha256", Buffer.from(body), { key, dsaEncoding: "ieee-p1363" }).toString("base64url")}`
   }
   return {
@@ -265,7 +299,9 @@ function dryClient(context) {
   const one = (type, id, attributes = {}, relationships) => ({ type, id, attributes, ...(relationships ? { relationships } : {}) })
   const versionState = { prepare: null, submit: "PREPARE_FOR_SUBMISSION", release: "PENDING_DEVELOPER_RELEASE" }[context.command]
   const answers = {
-    apps: () => [one("apps", "app", { bundleId: BUNDLE_ID, name: "Rudder" })],
+    apps: () => [one("apps", "app", { bundleId: context.bundleId, name: "Rudder" })],
+    bundleIds: () => [one("bundleIds", "bundle-id", { identifier: context.bundleId, platform: "IOS", seedId: context.team })],
+    bundleIdCapabilities: () => [],
     appStoreVersions: () => versionState ? [one("appStoreVersions", "version", { platform: "IOS", versionString: context.version, appVersionState: versionState })] : [],
     appStoreVersionLocalizations: () => [one("appStoreVersionLocalizations", "version-localization", { locale: "en-US" })],
     appInfos: () => [one("appInfos", "app-info", { state: "PREPARE_FOR_SUBMISSION" })],
@@ -275,7 +311,6 @@ function dryClient(context) {
     appScreenshots: () => [],
     reviewSubmissions: () => [],
     items: () => [],
-    betaGroups: () => [one("betaGroups", "beta-group", { name: BETA_GROUP })],
   }
   const redact = (body) => JSON.parse(JSON.stringify(body, (key, value) => REVIEW_KEYS.includes(key) ? "<APPSTORE_REVIEW>" : value))
   return {
@@ -297,7 +332,6 @@ function dryClient(context) {
         return { data: one("appStoreVersions", last, { versionString: context.version }, { build: { data: build }, appStoreReviewDetail: { data: null } }) }
       }
       if (parent === "appScreenshots") return { data: one("appScreenshots", last, { assetDeliveryState: { state: "COMPLETE" } }) }
-      if (last === "betaAppReviewSubmission") return { data: null }
       const answer = answers[last]
       if (!answer) throw new Error(`the dry run has no answer for GET ${url}`)
       return { data: answer(), included: [] }
@@ -308,9 +342,11 @@ function dryClient(context) {
   }
 }
 
-async function findApp(client) {
-  const app = (await client.api("GET", `/v1/apps?filter[bundleId]=${BUNDLE_ID}`)).data[0]
-  if (!app) throw new Error(`App Store Connect has no app with bundle id ${BUNDLE_ID}`)
+async function findApp(client, { bundleId }) {
+  const app = (await client.api("GET", `/v1/apps?filter[bundleId]=${bundleId}`)).data.find((a) => a.attributes.bundleId === bundleId)
+  if (!app) {
+    throw new Error(`App Store Connect has no app for ${bundleId}, and the API cannot create one. In App Store Connect: Apps, +, New App; platform iOS, name Rudder, primary language English (U.S.), bundle id ${bundleId}, SKU rudder-ios, full access`)
+  }
   return app
 }
 
@@ -350,8 +386,47 @@ async function uploadScreenshot(client, setId, file) {
   throw new Error(`${file.name} was still processing after two minutes`)
 }
 
-async function testflight(client, { build }) {
-  const app = await findApp(client)
+async function identity(client, context) {
+  const { team, bundleId, entitlements } = context
+  let bundle = (await client.api("GET", `/v1/bundleIds?filter[identifier]=${bundleId}&filter[platform]=IOS`)).data.find((b) => b.attributes.identifier === bundleId)
+  if (!bundle) {
+    bundle = (await client.api("POST", "/v1/bundleIds", { data: { type: "bundleIds", attributes: { identifier: bundleId, name: "Rudder", platform: "IOS" } } })).data
+    console.log(`registered ${bundleId}`)
+  }
+  // A bundle id's App ID prefix is its team: this catches another team's key.
+  if (bundle.attributes.seedId !== team) {
+    throw new Error(`${bundleId} has App ID prefix ${bundle.attributes.seedId}, not ${team} from ios/project.yml: IOS_ASC_KEY_* belongs to another team`)
+  }
+  const enabled = new Set((await client.api("GET", `/v1/bundleIds/${bundle.id}/bundleIdCapabilities?limit=200`)).data.map((c) => c.attributes.capabilityType))
+  const unknown = []
+  for (const entitlement of entitlements) {
+    if (NO_CAPABILITY.has(entitlement)) continue
+    if (GRANTED_BY_APPLE.test(entitlement)) {
+      console.log(`${entitlement}: Apple grants it to team ${team} on request; the upload fails until it has`)
+      continue
+    }
+    const capability = ENTITLEMENT_CAPABILITIES[entitlement]
+    if (!capability) {
+      unknown.push(entitlement)
+      continue
+    }
+    if (enabled.has(capability.capabilityType)) continue
+    await client.api("POST", "/v1/bundleIdCapabilities", {
+      data: { type: "bundleIdCapabilities", attributes: capability, relationships: { bundleId: ref("bundleIds", bundle.id) } },
+    })
+    enabled.add(capability.capabilityType)
+    console.log(`enabled ${capability.capabilityType} for ${bundleId}`)
+  }
+  if (unknown.length) throw new Error(`no capability is mapped for ${unknown.join(", ")}: add it to ENTITLEMENT_CAPABILITIES`)
+  console.log(`${bundleId} on team ${team}: entitlements ${entitlements.join(", ") || "none"}; capabilities ${[...enabled].join(", ") || "none"}`)
+  // The upload needs the app record, which only the website creates.
+  const app = await findApp(client, context)
+  console.log(`app record ${app.attributes.name} (${app.id})`)
+}
+
+async function testflight(client, context) {
+  const { build } = context
+  const app = await findApp(client, context)
   // Processing usually takes 5 to 15 minutes; the build is not listed at all at first.
   let found
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -363,24 +438,15 @@ async function testflight(client, { build }) {
     await sleep(30_000)
   }
   if (found?.attributes.processingState !== "VALID") throw new Error(`build ${build} did not finish processing in 30 minutes`)
-  const group = (await client.api("GET", `/v1/betaGroups?filter[app]=${app.id}&filter[name]=${encodeURIComponent(BETA_GROUP)}`)).data[0]
-  if (!group) throw new Error(`no TestFlight group named ${BETA_GROUP}`)
-  await client.api("POST", `/v1/betaGroups/${group.id}/relationships/builds`, { data: [{ type: "builds", id: found.id }] })
-  console.log(`added build ${build} to ${BETA_GROUP}`)
-  const review = (await client.api("GET", `/v1/builds/${found.id}/betaAppReviewSubmission`)).data
-  if (review) {
-    console.log(`beta review: ${review.attributes.betaReviewState}`)
-    return
-  }
-  await client.api("POST", "/v1/betaAppReviewSubmissions", { data: { type: "betaAppReviewSubmissions", relationships: { build: ref("builds", found.id) } } })
-  console.log(`submitted build ${build} for beta review`)
+  console.log(`build ${build} is in TestFlight; internal testers install it from the TestFlight app`)
 }
 
-async function prepare(client, { version, build }) {
+async function prepare(client, context) {
+  const { version, build } = context
   const listing = loadListing()
   const sets = checkListing(listing)
   const review = reviewDetails(client.dryRun)
-  const app = await findApp(client)
+  const app = await findApp(client, context)
   const versions = await iosVersions(client, app)
   const plan = planVersion(versions, version)
   // What's New is refused on an app's first version.
@@ -471,8 +537,9 @@ async function prepare(client, { version, build }) {
   console.log(`${version} is ready for review. Nothing was submitted; submit is its own step.`)
 }
 
-async function submit(client, { version, build }) {
-  const app = await findApp(client)
+async function submit(client, context) {
+  const { version, build } = context
+  const app = await findApp(client, context)
   const storeVersion = (await iosVersions(client, app)).find((v) => v.attributes.versionString === version)
   if (!storeVersion) throw new Error(`App Store Connect has no version ${version}: run prepare first`)
   if (!EDITABLE.has(storeVersion.attributes.appVersionState)) throw new Error(`${version} is ${storeVersion.attributes.appVersionState}`)
@@ -497,8 +564,9 @@ async function submit(client, { version, build }) {
   console.log(`submitted ${version} (build ${build}) for App Review`)
 }
 
-async function release(client, { version }) {
-  const app = await findApp(client)
+async function release(client, context) {
+  const { version } = context
+  const app = await findApp(client, context)
   const storeVersion = (await iosVersions(client, app)).find((v) => v.attributes.versionString === version)
   if (storeVersion?.attributes.appVersionState !== "PENDING_DEVELOPER_RELEASE") {
     throw new Error(`${version} is ${storeVersion?.attributes.appVersionState ?? "not in App Store Connect"}, not waiting to be released`)
@@ -509,8 +577,8 @@ async function release(client, { version }) {
   console.log(`released ${version} on the App Store`)
 }
 
-async function status(client) {
-  const app = await findApp(client)
+async function status(client, context) {
+  const app = await findApp(client, context)
   console.log(`app ${app.attributes.name} (${app.id})`)
   for (const v of await iosVersions(client, app)) console.log(`version ${v.attributes.versionString}: ${v.attributes.appVersionState}`)
   const builds = await client.api("GET", `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=5&include=preReleaseVersion`)
@@ -523,7 +591,7 @@ async function status(client) {
   }
 }
 
-const COMMANDS = { check: null, status, testflight, prepare, submit, release }
+const COMMANDS = { check: null, status, identity, testflight, prepare, submit, release }
 const CONFIRMED = new Set(["submit", "release"])
 
 async function main(argv) {
@@ -540,12 +608,12 @@ async function main(argv) {
   if (positional.length !== 1 || !(command in COMMANDS)) {
     throw new Error(`usage: ios/scripts/appstore.mjs ${Object.keys(COMMANDS).join("|")} [--confirm X.Y.Z] [--dry-run]`)
   }
-  const shipped = shippedVersion()
+  const shipped = { ...shippedVersion(), ...appIdentity() }
   if (CONFIRMED.has(command) && confirm !== shipped.version) {
     throw new Error(`${command} acts on ${shipped.version} for real: pass --confirm ${shipped.version}`)
   }
   if (!CONFIRMED.has(command) && confirm !== undefined) throw new Error(`${command} takes no --confirm`)
-  console.log(`${command} ${shipped.version} (build ${shipped.build})${dryRun ? ", dry run: nothing is sent" : ""}`)
+  console.log(`${command} ${shipped.bundleId} ${shipped.version} (build ${shipped.build}), team ${shipped.team}${dryRun ? ", dry run: nothing is sent" : ""}`)
   if (command === "check") {
     const sets = checkListing(loadListing())
     console.log(`ios/appstore is ready: ${sets.map((set) => `${set.type} ${set.files.length}`).join(", ")}`)

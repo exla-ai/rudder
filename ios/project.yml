@@ -4,15 +4,19 @@
 # app UI in a WKWebView. The version is Rudder's: `npm version` sets the two
 # version keys below (scripts/version.mjs). ios/scripts/appstore.sh archives
 # and uploads it on an Offstage Mac (the rudder-ios-ship skill).
+#
+# The Apple team (Exla Corp.) and the app's bundle id are set here and nowhere
+# else: ios/scripts/identity.sh and ios/scripts/appstore.mjs read
+# DEVELOPMENT_TEAM and the Rudder target's PRODUCT_BUNDLE_IDENTIFIER.
 name: Rudder
 options:
-  bundleIdPrefix: dev.viraat
+  bundleIdPrefix: ai.exla
   deploymentTarget:
     iOS: "17.0"
 
 settings:
   base:
-    DEVELOPMENT_TEAM: 3C4383262W
+    DEVELOPMENT_TEAM: P76SY8RFGL
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "5.1.0"
@@ -29,7 +33,7 @@ targets:
       - path: App
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.viraat.rudder
+        PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder
         # iPhone and iPad. App Store validation refuses an iPad build that does
         # not allow every orientation (Split View and Slide Over need them), so
         # Info.plist lists all four for iPad and keeps the iPhone in portrait.
@@ -46,6 +50,6 @@ targets:
       - target: Rudder
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.viraat.rudder.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Rudder

@@ -123,8 +123,9 @@ open Rudder.xcodeproj        # Run the "Rudder" scheme
 xcodebuild test -project Rudder.xcodeproj -scheme RudderCoreTests -destination 'platform=macOS'
 ```
 
-`project.yml` uses team `3C4383262W` (the iOS app's). Change `DEVELOPMENT_TEAM`
-if the Developer ID certificate lives elsewhere. Point at another control plane
+`project.yml` uses team `3C4383262W`, where the Developer ID certificate lives (the
+iPhone app is on Exla Corp.'s team, `P76SY8RFGL`). Change `DEVELOPMENT_TEAM`
+if the certificate moves. Point at another control plane
 with `defaults write ai.exla.rudder.mac RudderServerURL http://localhost:8787`
 or the `RUDDER_CLOUD_URL` environment variable in the scheme.
 

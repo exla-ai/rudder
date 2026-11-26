@@ -1,11 +1,13 @@
-// ios/scripts/appstore.mjs: which App Store version prepare touches, and the
-// screenshot checks that stand in for App Store Connect's late refusals.
+// ios/scripts/appstore.mjs: which App Store version prepare touches, the
+// screenshot checks that stand in for App Store Connect's late refusals, and
+// the team and bundle id read from ios/project.yml.
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { checkListing, imageInfo, planVersion } from "../ios/scripts/appstore.mjs"
+import { appIdentity, checkListing, imageInfo, planVersion } from "../ios/scripts/appstore.mjs"
 
 const v = (versionString, appVersionState) => ({ id: versionString, attributes: { platform: "IOS", versionString, appVersionState } })
 
@@ -79,5 +81,27 @@ test("checkListing names wrong sizes and alpha, and hashes good sets in name ord
     })
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("appIdentity and identity.sh read the same team and bundle id, and entitlements come from the target's file", () => {
+  const real = appIdentity()
+  const shell = execFileSync("bash", ["-c", 'source ios/scripts/identity.sh && echo "$TEAM_ID $BUNDLE_ID"'], { encoding: "utf8" }).trim()
+  assert.equal(shell, `${real.team} ${real.bundleId}`)
+  assert.deepEqual(real.entitlements, [])
+
+  const root = mkdtempSync(path.join(tmpdir(), "appstore-identity-"))
+  try {
+    mkdirSync(path.join(root, "ios/App"), { recursive: true })
+    writeFileSync(path.join(root, "ios/project.yml"), [
+      "settings:", "  base:", "    DEVELOPMENT_TEAM: TEAM123", "targets:", "  Rudder:", "    settings:", "      base:",
+      "        PRODUCT_BUNDLE_IDENTIFIER: ai.example.app", "", "        CODE_SIGN_ENTITLEMENTS: App/Rudder.entitlements",
+      "  # tests", "  RudderUITests:", "    settings:", "      base:", "        PRODUCT_BUNDLE_IDENTIFIER: ai.example.app.uitests", "",
+    ].join("\n"))
+    writeFileSync(path.join(root, "ios/App/Rudder.entitlements"),
+      "<plist><dict><key>aps-environment</key><string>production</string><key>com.apple.developer.associated-domains</key><array/></dict></plist>")
+    assert.deepEqual(appIdentity(root), { team: "TEAM123", bundleId: "ai.example.app", entitlements: ["aps-environment", "com.apple.developer.associated-domains"] })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

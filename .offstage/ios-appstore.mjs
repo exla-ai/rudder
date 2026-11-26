@@ -6,7 +6,8 @@
 // upload.env back to ./offstage-out/ios-appstore/.
 //
 //   OFFSTAGE_API_KEY                       the team key
-//   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8  the App Store Connect key (Admin), for upload only
+//   IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID, IOS_ASC_KEY_P8  the App Store Connect key (Admin) of the
+//                                     team in ios/project.yml, for upload only
 //
 // Exits with the failing stage's exit code, or collect's when every stage
 // passed but the logs could not be copied back. The sandbox is killed
@@ -16,7 +17,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { Sandbox } from "offstage-cloud"
 
 const stages = ["archive", "upload"]
-const stageSecrets = { archive: [], upload: ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8"] }
+const stageSecrets = { archive: [], upload: ["IOS_ASC_KEY_ID", "IOS_ASC_ISSUER_ID", "IOS_ASC_KEY_P8"] }
 const stageEnvs = Object.fromEntries(stages.map(stage => {
   const envs = { CI: "1" }
   for (const name of stageSecrets[stage]) {

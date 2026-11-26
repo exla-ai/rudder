@@ -4,7 +4,8 @@
 # SIM_DEVICE=iPad picks an iPad simulator instead of an iPhone.
 set -euo pipefail
 IOS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$IOS_DIR/build/sim"; APP="$OUT/Rudder.app"; BUNDLE_ID=dev.viraat.rudder
+OUT="$IOS_DIR/build/sim"; APP="$OUT/Rudder.app"
+source "$IOS_DIR/scripts/identity.sh"
 SERVER="${1:-http://localhost:4321}"; TOKEN="${2-rdr_simulator_test}"; PAIR="${3:-}"; START="${4:-}"
 rm -rf "$OUT"; mkdir -p "$APP"
 xcrun -sdk iphonesimulator swiftc -Onone -DDEBUG -swift-version 6 -target arm64-apple-ios17.0-simulator \
@@ -15,7 +16,7 @@ xcrun actool "$IOS_DIR/App/Assets.xcassets" --compile "$APP" --platform iphonesi
 python3 - "$IOS_DIR/App/Info.plist" "$OUT/icons.plist" "$APP/Info.plist" "$BUNDLE_ID" <<'PY'
 import plistlib, sys
 src, icons, dst, bundle = sys.argv[1:5]
-info = plistlib.load(open(src, "rb")); info.update(plistlib.load(open(icons, "rb")))
+info = plistlib.loads(open(src).read().replace("$(PRODUCT_BUNDLE_IDENTIFIER)", bundle).encode()); info.update(plistlib.load(open(icons, "rb")))
 info.update({"CFBundleExecutable": "Rudder", "CFBundleIdentifier": bundle, "CFBundleName": "Rudder",
   "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1",
   "CFBundleDevelopmentRegion": "en", "CFBundleSupportedPlatforms": ["iPhoneSimulator"], "MinimumOSVersion": "17.0",

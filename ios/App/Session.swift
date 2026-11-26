@@ -249,7 +249,7 @@ private final class PresentationAnchor: NSObject, ASWebAuthenticationPresentatio
 /// The bearer token, in the Keychain (this device only, after first unlock so a
 /// background refresh can still read it).
 enum Keychain {
-    private static let service = "dev.viraat.rudder"
+    private static let service = "ai.exla.rudder"
     private static let account = "rudder-token"
 
     static func read() -> String? {

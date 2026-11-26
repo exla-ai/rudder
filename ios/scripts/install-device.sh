@@ -5,7 +5,8 @@
 # Usage: ios/scripts/install-device.sh [device-id]   (default: first paired iPhone)
 set -euo pipefail
 IOS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$IOS_DIR/build/device"; APP="$OUT/Rudder.app"; BUNDLE_ID=dev.viraat.rudder
+OUT="$IOS_DIR/build/device"; APP="$OUT/Rudder.app"
+source "$IOS_DIR/scripts/identity.sh"
 PROFILE="$IOS_DIR/build/profiles/Development_$BUNDLE_ID.mobileprovision"
 [[ -f "$PROFILE" ]] || { echo "error: run 'cd ios && fastlane dev_signing' first" >&2; exit 1; }
 IDENTITY="${SIGNING_IDENTITY:-Apple Development}"
@@ -24,7 +25,7 @@ xcrun actool "$IOS_DIR/App/Assets.xcassets" --compile "$APP" --platform iphoneos
 python3 - "$IOS_DIR/App/Info.plist" "$OUT/icons.plist" "$APP/Info.plist" "$BUNDLE_ID" "$VERSION" "$BUILD" <<'PY'
 import plistlib, sys
 src, icons, dst, bundle, version, build = sys.argv[1:7]
-info = plistlib.load(open(src, "rb")); info.update(plistlib.load(open(icons, "rb")))
+info = plistlib.loads(open(src).read().replace("$(PRODUCT_BUNDLE_IDENTIFIER)", bundle).encode()); info.update(plistlib.load(open(icons, "rb")))
 info.update({"CFBundleExecutable": "Rudder", "CFBundleIdentifier": bundle, "CFBundleName": "Rudder",
   "CFBundlePackageType": "APPL", "CFBundleShortVersionString": version, "CFBundleVersion": build,
   "CFBundleDevelopmentRegion": "en", "CFBundleInfoDictionaryVersion": "6.0", "CFBundleSupportedPlatforms": ["iPhoneOS"],

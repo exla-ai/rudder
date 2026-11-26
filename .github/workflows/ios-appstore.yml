@@ -4,13 +4,16 @@ name: iPhone App Store
 # Offstage API (an Offstage Mac archives and uploads the build,
 # .offstage/ios-appstore.mjs) and App Store Connect's API
 # (ios/scripts/appstore.mjs). The version is Rudder's, from the checked-out
-# commit. The rudder-ios-ship skill has the commands.
+# commit; the team and bundle id are ios/project.yml's, and IOS_ASC_KEY_* is
+# that team's key (ASC_KEY_* is the Mac's, another team). The rudder-ios-ship
+# skill has the commands.
 #
-#   upload   archive and upload this commit's build, then hand it to TestFlight
-#            testers (the "Beta testers" group and its beta review)
+#   upload   register the bundle id and its capabilities, archive and upload
+#            this commit's build, wait until TestFlight has it
 #   prepare  make the App Store version match ios/appstore and attach the build
 #   submit   send the prepared version to App Review; confirm must name it
 #   release  put an approved version on the App Store; confirm must name it
+#   identity just the bundle id, capabilities and app record check
 #   status   versions, builds and review submissions
 #
 # The repository and these logs are public: the scripts print versions,
@@ -19,9 +22,9 @@ on:
   workflow_dispatch:
     inputs:
       step:
-        description: "upload, prepare, submit, release or status"
+        description: "upload, identity, prepare, submit, release or status"
         type: choice
-        options: [upload, prepare, submit, release, status]
+        options: [upload, identity, prepare, submit, release, status]
         required: true
       confirm:
         description: "For submit and release: the version, for example 5.1.0"
@@ -53,19 +56,25 @@ jobs:
           curl -fsSL -o "$sdk" https://api.offstage.cloud/sdk/offstage-cloud-0.3.1.tgz
           echo "804333522a502dc1e61936f38823f5c704696e797d8ee3dda6daa5326ce629b1  $sdk" | sha256sum -c -
           npm install --prefix .offstage --no-save --no-audit --no-fund "$sdk"
+      - name: Bundle id, capabilities and app record
+        env:
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+          IOS_ASC_KEY_P8: ${{ secrets.IOS_ASC_KEY_P8 }}
+        run: node ios/scripts/appstore.mjs identity
       - name: Archive and upload on an Offstage Mac
         env:
           OFFSTAGE_API_KEY: ${{ secrets.OFFSTAGE_API_KEY }}
           OFFSTAGE_API_URL: https://api.offstage.cloud
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+          IOS_ASC_KEY_P8: ${{ secrets.IOS_ASC_KEY_P8 }}
         run: node .offstage/ios-appstore.mjs
-      - name: Give it to the testers
+      - name: Wait for TestFlight
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+          IOS_ASC_KEY_P8: ${{ secrets.IOS_ASC_KEY_P8 }}
         run: node ios/scripts/appstore.mjs testflight
       - name: Offstage logs
         if: always()
@@ -90,9 +99,9 @@ jobs:
         env:
           STEP: ${{ inputs.step }}
           CONFIRM: ${{ inputs.confirm }}
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+          IOS_ASC_KEY_P8: ${{ secrets.IOS_ASC_KEY_P8 }}
           APPSTORE_REVIEW: ${{ secrets.APPSTORE_REVIEW }}
         run: |
           args=("$STEP")

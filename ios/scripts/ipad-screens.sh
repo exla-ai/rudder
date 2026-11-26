@@ -7,7 +7,8 @@
 set -euo pipefail
 IOS_DIR="$(cd "$(dirname "$0")/.." && pwd)"; ROOT="$(dirname "$IOS_DIR")"
 OUT="${1:-$IOS_DIR/build/screens}"; mkdir -p "$OUT"
-BUNDLE_ID=dev.viraat.rudder; PORT="${PORT:-4321}"; SERVER="http://localhost:$PORT"
+source "$IOS_DIR/scripts/identity.sh"
+PORT="${PORT:-4321}"; SERVER="http://localhost:$PORT"
 
 PORT="$PORT" node "$ROOT/cloud/app/dev-mock.mjs" >"$OUT/mock.log" 2>&1 &
 MOCK=$!

@@ -1,6 +1,6 @@
 ---
 name: rudder-ios-ship
-description: Publish the Rudder iPhone app on the App Store and ship updates to it. Upload a build from an Offstage Mac to App Store Connect and TestFlight, set the listing text, screenshots and App Review details from ios/appstore, submit for review, release, and read a rejection. Use when asked to publish, submit, upload or release the iPhone or iOS app, to make a TestFlight build, to change the App Store listing or screenshots, or when App Review answers.
+description: Publish the Rudder iPhone app on the App Store and ship updates to it. Upload a build from an Offstage Mac to App Store Connect and TestFlight, set the listing text, screenshots and App Review details from ios/appstore, submit for review, release, and read a rejection. Use when asked to publish, submit, upload or release the iPhone or iOS app, to make a TestFlight build, to change the App Store listing or screenshots, to add an iPhone capability (push, associated domains, app groups, CarPlay), or when App Review answers.
 ---
 
 # The iPhone app on the App Store
@@ -14,7 +14,8 @@ do them only when the user asked for that step.
 
 | Step | Does |
 |---|---|
-| `upload` | archives the commit's app, uploads it, waits for processing, adds it to the "Beta testers" TestFlight group and submits it for beta review |
+| `upload` | runs `identity`, archives the commit's app on an Offstage Mac, uploads it, waits until TestFlight has it (internal testers) |
+| `identity` | registers the bundle id if missing, checks it is the project's team, enables the capabilities the entitlements need, checks the app record exists |
 | `prepare` | creates or renames the App Store version, sets text, categories and App Review details from `ios/appstore`, attaches the build, uploads screenshots. Submits nothing |
 | `submit` | sends the prepared version to App Review. Needs `confirm` set to the version |
 | `release` | puts an approved version live (`releaseType` is `MANUAL`). Needs `confirm` |
@@ -31,6 +32,39 @@ Every step has a local dry run that prints the requests and needs no key:
 checks `ios/appstore` against Apple's limits (lengths, em dashes, screenshot
 sizes, alpha).
 
+## Team and bundle id
+
+The iPhone app belongs to Exla Corp.'s Apple team, `P76SY8RFGL`, as
+`ai.exla.rudder`. Both are set once, in `ios/project.yml`
+(`DEVELOPMENT_TEAM`, the Rudder target's `PRODUCT_BUNDLE_IDENTIFIER`);
+`ios/scripts/identity.sh` and `appstore.mjs` read them from there. The key
+is that team's: `IOS_ASC_KEY_ID`, `IOS_ASC_ISSUER_ID`, `IOS_ASC_KEY_P8`. The
+Mac app is on another team with its own `ASC_KEY_*`; never mix them.
+`identity` refuses a key whose team does not own the bundle id.
+
+Moving to another team or bundle id means a new app record: App Store
+Connect cannot move a bundle id between teams except by an app transfer
+(App Store Connect, App Information, Transfer App, done by both Account
+Holders, only for an app that has been on the App Store).
+
+## Capabilities
+
+The app has no entitlements today. To add one (push, associated domains,
+app groups, Sign in with Apple), create `ios/App/Rudder.entitlements`, set
+`CODE_SIGN_ENTITLEMENTS: App/Rudder.entitlements` on the Rudder target and
+run `identity`: it enables the matching capability on the bundle id
+(`ENTITLEMENT_CAPABILITIES` in `appstore.mjs`), and Xcode's cloud signing
+puts it in the profile at upload. Side work per capability:
+
+- Push (`aps-environment`): an APNs key (.p8) of team `P76SY8RFGL`, topic
+  `ai.exla.rudder`, on the server sending pushes.
+- Associated domains (`applinks:rudder.exla.ai`): serve
+  `/.well-known/apple-app-site-association` naming `P76SY8RFGL.ai.exla.rudder`.
+- App groups and keychain access groups: prefix them with the team id.
+- CarPlay (`com.apple.developer.carplay-*`): Apple grants it to the team on
+  request (developer.apple.com/contact/carplay, by the Account Holder);
+  `identity` cannot enable it, and the upload fails until Apple has.
+
 ## Version
 
 The iPhone app's version is Rudder's: `npm version` writes
@@ -44,25 +78,30 @@ changed; web app changes reach it through Cloud with no new build.
 
 ## First publication
 
-1. The user: the Account Holder accepts any pending agreement at
+1. The user, as Account Holder of Exla Corp.: accept any pending agreement at
    developer.apple.com/account and in App Store Connect, Business (a 403 "A
    required agreement is missing or has expired" means this).
-2. The user, in App Store Connect once: App Privacy (answers below), age
+2. The user creates the app record in App Store Connect (the API cannot):
+   Apps, +, New App; platform iOS, name Rudder, primary language English
+   (U.S.), bundle id `ai.exla.rudder`, SKU `rudder-ios`, user access Full
+   Access. `identity` fails with these fields until it exists.
+3. The user, in App Store Connect once: App Privacy (answers below), age
    rating (every content question None or No, unrestricted web access No,
-   giving 4+), Pricing and Availability (Free).
-3. Demo account: a Google account made for App Review with a Rudder account,
+   giving 4+), Pricing and Availability (Free), and a TestFlight internal
+   group with access to all builds.
+4. Demo account: a Google account made for App Review with a Rudder account,
    a running cloud machine, two or three projects with agents that have a
    question and a plan waiting, and Claude Code signed in. Set
    `gh secret set RUDDER_DEMO_TOKEN` (its `rdr_` token) and
-   `gh secret set APPSTORE_REVIEW` (JSON: `contactFirstName`,
+   `gh secret set APPSTORE_REVIEW < review.json` (JSON: `contactFirstName`,
    `contactLastName`, `contactPhone`, `contactEmail`, `demoAccountRequired`,
    `demoAccountName`, `demoAccountPassword`). Neither is ever printed.
-4. Screenshots: `scripts/ios-qa.sh /workspace/rudder-scratch/<task>/shots main appstore`
+5. Screenshots: `scripts/ios-qa.sh /workspace/rudder-scratch/<task>/shots main appstore`
    (the rudder-ios-qa skill). Look at every image: they are public. Copy the
    good ones to `ios/appstore/screenshots/<display type>/NN-name.jpg`; files
    upload in name order, 1 to 10 per set. Commit.
-5. `upload`, then `prepare`, then the checks below, then `submit`.
-6. After approval: `release` (or Release This Version in App Store Connect).
+6. `upload`, then `prepare`, then the checks below, then `submit`.
+7. After approval: `release` (or Release This Version in App Store Connect).
 
 ## Updates
 
@@ -110,6 +149,8 @@ manifest and these answers together.
 
 ## Secrets
 
-`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (Admin key: Xcode's
-cloud-managed distribution signing needs it, so no certificate or profile is
-stored), `OFFSTAGE_API_KEY`, `RUDDER_DEMO_TOKEN`, `APPSTORE_REVIEW`.
+`IOS_ASC_KEY_ID`, `IOS_ASC_ISSUER_ID`, `IOS_ASC_KEY_P8` (team `P76SY8RFGL`,
+the raw .p8 text; Admin role: Xcode's cloud-managed distribution signing
+needs it, so no certificate or profile is stored), `OFFSTAGE_API_KEY`,
+`RUDDER_DEMO_TOKEN`, `APPSTORE_REVIEW`. Set them with
+`gh secret set NAME < file`, never by pasting key material into a chat.

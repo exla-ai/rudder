@@ -725,7 +725,13 @@ Offstage Mac archives and uploads with the App Store Connect key's
 cloud-managed signing, and `ios/scripts/appstore.mjs` sets the listing from
 `ios/appstore`, attaches the build and submits only on `submit` with the
 version confirmed (the rudder-ios-ship skill). The GitHub-hosted `ios.yml`
-and `distribute.mjs` are gone. Before the first App Review submission these
+and `distribute.mjs` are gone. The app moved from the personal team
+(`3C4383262W`, `dev.viraat.rudder`, where the TestFlight builds up to 12
+live) to Exla Corp. (`P76SY8RFGL`, `ai.exla.rudder`, key `IOS_ASC_KEY_*`);
+the Mac app stays on the personal team. That is a new app record: TestFlight
+testers install the new app and sign in again. The TestFlight join link in
+`site/index.html`, `README.md` and `cloud/app/tutorial.js` points at the old
+app until the App Store page replaces it. Before the first App Review submission these
 are still open: in-app account deletion (5.1.1(v); the privacy page asks
 for a GitHub issue), a login that hides the email such as Sign in with Apple
 (4.8; only Google and GitHub today), consent before Talk to Rudder sends

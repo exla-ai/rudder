@@ -18,6 +18,9 @@ root="$PWD"
 tools="$root/../tools"
 out="$root/../qa-out"
 derived="$root/../derived"
+source "$root/ios/scripts/identity.sh"
+# The UI test runner (RudderUITests in ios/project.yml), where the test writes its output.
+runner="$BUNDLE_ID.uitests.xctrunner"
 xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
 export DEVELOPER_DIR="$xcode/Contents/Developer"
 
@@ -50,7 +53,7 @@ case "$stage" in
     udid=$(cat "$out/udid")
     xcrun simctl bootstatus "$udid" -b > /dev/null
     xcrun simctl ui "$udid" appearance dark
-    xcrun simctl uninstall "$udid" dev.viraat.rudder 2>/dev/null || true
+    xcrun simctl uninstall "$udid" "$BUNDLE_ID" 2>/dev/null || true
     rm -f "$out/clickthrough.mp4"
     nohup xcrun simctl io "$udid" recordVideo --codec hevc --force "$out/clickthrough.mp4" > "$out/record.log" 2>&1 &
     recorder=$!
@@ -62,7 +65,7 @@ case "$stage" in
       -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$derived" || code=$?
     kill -INT "$recorder"
     wait "$recorder" 2>/dev/null || true
-    data=$(xcrun simctl get_app_container "$udid" dev.viraat.rudder.uitests.xctrunner data)
+    data=$(xcrun simctl get_app_container "$udid" "$runner" data)
     rm -rf "$out/shots"
     cp -R "$data/Documents/qa" "$out/shots"
     echo "$(ls "$out/shots" | grep -c '\.png$') screenshots, $(grep -c '^MISS' "$out/shots/log.txt" || true) steps missed, video $(du -h "$out/clickthrough.mp4" | cut -f1)"
@@ -84,7 +87,7 @@ print(match)' "$QA_DEVICE")
     # The status bar Apple's own screenshots show.
     xcrun simctl status_bar "$udid" override --time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 \
       --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100
-    xcrun simctl uninstall "$udid" dev.viraat.rudder 2>/dev/null || true
+    xcrun simctl uninstall "$udid" "$BUNDLE_ID" 2>/dev/null || true
     dest="$out/appstore/$QA_DISPLAY_TYPE"
     rm -rf "$dest"
     mkdir -p "$dest"
@@ -93,7 +96,7 @@ print(match)' "$QA_DEVICE")
     TEST_RUNNER_QA_PAIR_CODE="$QA_PAIR_CODE" TEST_RUNNER_QA_SERVER="$QA_SERVER" TEST_RUNNER_QA_STEPS=appstore \
       quiet "$dest/test.log" xcodebuild test-without-building -project Rudder.xcodeproj -scheme Rudder -configuration Debug \
       -destination "platform=iOS Simulator,id=$udid" -derivedDataPath "$derived" || code=$?
-    data=$(xcrun simctl get_app_container "$udid" dev.viraat.rudder.uitests.xctrunner data)
+    data=$(xcrun simctl get_app_container "$udid" "$runner" data)
     # App Store Connect refuses images with an alpha channel; JPEG has none.
     # A test that stopped early leaves fewer files, or none.
     shopt -s nullglob

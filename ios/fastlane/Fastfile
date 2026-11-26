@@ -1,10 +1,15 @@
 # fastlane Fastfile: Rudder iOS, for installing straight onto a phone from a
 # Mac (ios/scripts/install-device.sh). Auth is the App Store Connect API key
-# from fastlane/.asc.env (gitignored). App Store builds do not use fastlane:
+# from fastlane/.asc.env (gitignored), which must be a key of the team in
+# ios/project.yml (Exla Corp.), and the Mac needs that team's Apple
+# Development certificate. App Store builds do not use fastlane:
 # ios/scripts/appstore.sh signs them with the team's cloud-managed certificate.
+require "yaml"
+
 default_platform(:ios)
 
-APP_ID = ENV["APP_IDENTIFIER"] || "dev.viraat.rudder"
+# The bundle id from ios/project.yml, the one place it is set.
+APP_ID = YAML.load_file(File.expand_path("../project.yml", __dir__)).dig("targets", "Rudder", "settings", "base", "PRODUCT_BUNDLE_IDENTIFIER")
 
 def asc_api_key
   return nil unless ENV["ASC_KEY_ID"] && ENV["ASC_ISSUER_ID"] && ENV["ASC_KEY_PATH"]

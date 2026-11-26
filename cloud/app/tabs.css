@@ -11,7 +11,7 @@
   height: calc(var(--sat) + 42px); padding: var(--sat) calc(var(--sar) + 10px) 0 10px;
   background: var(--bg); border-bottom: 1px solid var(--line);
 }
-.tab-list { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 3px; overflow-x: auto; scrollbar-width: none; padding: 2px; }
+.tab-list { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 3px; overflow-x: auto; scrollbar-width: none; padding: 5px 2px; }
 .tab-list::-webkit-scrollbar { display: none; }
 .tab {
   position: relative; flex: 0 1 auto; width: 200px; min-width: 96px; height: 30px; display: flex; align-items: center;
@@ -47,6 +47,30 @@
 .tab:hover .tab-x, .tab.on .tab-x, .tab-x:focus-visible { opacity: 1; }
 .tab-x:hover { background: var(--surface-3); color: var(--ink); }
 .tab-x svg { width: 12px; height: 12px; stroke-width: 2.2; }
+/* A project's chip (tabs.js paintChip) before its tabs: the name, and once
+   collapsed, how many tabs it hides and their most urgent state. Neutral, so
+   the status dots stay the only color. A rule under a group's tabs ties them
+   to their chip. */
+.tab-chip {
+  flex: none; max-width: 168px; height: 24px; display: flex; align-items: center; gap: 6px; padding: 0 9px;
+  border: 0; border-radius: 7px; background: var(--surface-2); color: var(--ink-2);
+  font: 600 12px/1 var(--font); cursor: default; transition: background 120ms, color 120ms;
+}
+.tab-chip:not(:first-child) { margin-left: 9px; }
+.tab-chip:hover { background: var(--surface-3); color: var(--ink); }
+.tab-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tab-chip-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-chip-c { flex: none; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.tab-chip-c:empty { display: none; }
+.tab-chip .dot { width: 7px; height: 7px; }
+/* One unbroken rule from under the chip to the group's last tab in sight. */
+.tab-chip { position: relative; }
+.tab-chip::after, .tab.grouped::after {
+  content: ""; position: absolute; height: 2px; background: var(--line-strong); pointer-events: none;
+}
+.tab-chip::after { left: 0; right: -3px; bottom: -6px; border-radius: 1px 0 0 1px; }
+.tab.grouped::after { left: 0; right: -3px; bottom: -3px; }
+.tab.grouped:has(+ .tab-chip, + .tab:not(.grouped))::after, .tab.grouped:last-child::after { right: 0; border-radius: 0 1px 1px 0; }
 .tab-new {
   flex: none; width: 30px; height: 30px; display: grid; place-items: center;
   border: 0; border-radius: 8px; background: none; color: var(--muted);

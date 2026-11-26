@@ -83,19 +83,20 @@ test("OpenCode: the chat shows the user's words, the agent's text and tool calls
   const shown = page.messages.map((m) => [m.role, m.kind ?? m.tool?.name ?? m.text]);
   assert.deepEqual(shown, [
     ["user", "fix the bug"],
+    ["system", "thinking"],
     ["assistant", "Looking at it."],
     ["tool", "edit"],
     ["tool", "bash"],
     ["assistant", "Done: the test passes now."],
     ["system", "turn"],
     ["system", "compact"],
-  ], "reasoning, step markers and injected text are not the chat's");
-  const [, , edit, bash] = page.messages;
+  ], "a thought shows how it began; step markers and injected text are not the chat's");
+  const [, , , edit, bash] = page.messages;
   assert.deepEqual(edit.tool, { name: "edit", input: "/repo/src/a.ts", output: "Edit applied successfully.", isError: false, files: [{ path: "/repo/src/a.ts", line: 0, end: 0 }] });
   assert.deepEqual(bash.tool, { name: "bash", input: "npm test", output: "exit 1", isError: true });
-  assert.equal(page.messages[5].durationMs, 4200, "from the prompt to the reply that ended the turn");
-  assert.equal(page.messages[6].compact.trigger, "auto");
-  assert.equal(page.messages[6].compact.summary, "## Goal\nFix the bug");
+  assert.equal(page.messages[6].durationMs, 4200, "from the prompt to the reply that ended the turn");
+  assert.equal(page.messages[7].compact.trigger, "auto");
+  assert.equal(page.messages[7].compact.summary, "## Goal\nFix the bug");
   assert.equal(page.stats.model, "opencode/big-pickle");
   assert.equal(page.stats.speed.tokensPerSecond, 27.5);
   assert.deepEqual(page.context, { used: 2210, window: 200_000, autoCompactAt: null, source: null, at: 5200 });
@@ -105,7 +106,7 @@ test("OpenCode: the chat shows the user's words, the agent's text and tool calls
   const newest = readTranscript(repo, "run_o", { home, limit: 2 });
   assert.equal(newest.earlier, `${SESSION}:3:`);
   const earlier = readTranscript(repo, "run_o", { home, limit: 300, before: newest.earlier });
-  assert.deepEqual(earlier.messages.map((m) => m.kind ?? (m.text || m.tool?.name)), ["fix the bug", "Looking at it.", "edit", "bash", "Done: the test passes now.", "turn"]);
+  assert.deepEqual(earlier.messages.map((m) => m.kind ?? (m.text || m.tool?.name)), ["fix the bug", "thinking", "Looking at it.", "edit", "bash", "Done: the test passes now.", "turn"]);
 });
 
 test("OpenCode: the preview is the agent's newest words, and a handoff reads its tool calls", (t) => {

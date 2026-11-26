@@ -397,7 +397,7 @@ async function identity(client, context) {
   if (bundle.attributes.seedId !== team) {
     throw new Error(`${bundleId} has App ID prefix ${bundle.attributes.seedId}, not ${team} from ios/project.yml: IOS_ASC_KEY_* belongs to another team`)
   }
-  const enabled = new Set((await client.api("GET", `/v1/bundleIds/${bundle.id}/bundleIdCapabilities?limit=200`)).data.map((c) => c.attributes.capabilityType))
+  const enabled = new Set((await client.api("GET", `/v1/bundleIds/${bundle.id}/bundleIdCapabilities`)).data.map((c) => c.attributes.capabilityType))
   const unknown = []
   for (const entitlement of entitlements) {
     if (NO_CAPABILITY.has(entitlement)) continue

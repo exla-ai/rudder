@@ -1,6 +1,6 @@
 Rudder is the phone app for Rudder, a free, open source tool that runs AI coding agents (Claude Code, Codex) on a cloud machine that belongs to the user's account. The app lists the user's projects and agents, lets them read and answer each agent, start new ones, and talk to Rudder by voice. Rudder has no purchases; the agents use the user's own Claude or ChatGPT plan, which the demo account already has signed in.
 
-Signing in: tap "Continue with Google" and use the demo account in Sign-In Information. Its cloud machine can take up to a minute to wake after sign-in. "Continue with Apple" (Sign in with Apple) is on the same screen, at the same size; it signs in with the reviewer's own Apple Account and starts a new, empty Rudder account.
+Signing in: on the sign-in screen tap "Have a code from rudder cloud app?" at the bottom, type the code given as the password in Sign-In Information, and tap "Pair". That signs in to the demo account. Its cloud machine can take up to a minute to wake after sign-in. "Continue with Apple" (Sign in with Apple) is on the same screen, at the same size; it signs in with the reviewer's own Apple Account and starts a new, empty Rudder account.
 
 Deleting the account: Settings (the round account button at the top of Home), at the bottom, "Delete account", under "Sign out". It asks once, then deletes the account and everything in it (the cloud machine, projects, agents and their conversations, secrets, connected services) and returns to the sign-in screen.
 

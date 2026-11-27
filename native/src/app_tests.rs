@@ -34086,6 +34086,71 @@ fn chat_edit_mid_turn_stops_the_turn_then_goes_back() {
 
 #[cfg(not(windows))]
 #[test]
+fn chat_edit_goes_back_when_the_interrupted_message_returns_to_the_composer() {
+    let mut env = env_guard();
+    let dir = unique_test_repo("chat-edit-restored");
+    let (home, args_file) = chat_edit_env(&mut env, &dir);
+    let workspace = dir.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let old = "44444444-4444-4444-8444-444444444444";
+    let source = chat_edit_claude_session(&home, &workspace, old);
+    crate::signals::prepare_worker_signals("edit-restored", Backend::Claude).unwrap();
+    // Seen live: Esc before Claude Code answered put the message back in its
+    // composer with no "Interrupted" line, the row stayed Running, and the
+    // edit gave up after 20 seconds.
+    // `ready` appears once the tty is raw: an Esc sent before that sits in the
+    // canonical line buffer and dd never sees it (a slow CI machine did this).
+    let esc_file = dir.join("esc");
+    let ready_file = dir.join("ready");
+    let rule = "\\342\\224\\200".repeat(20);
+    let script = format!(
+        "stty raw -echo; : > '{}'; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '{rule}\\r\\n\\342\\235\\257 first ask\\r\\n{rule}\\r\\n  \\342\\217\\265\\342\\217\\265 bypass permissions on (shift+tab to cycle)\\r\\n'; sleep 30",
+        ready_file.display(),
+        esc_file.display()
+    );
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
+        TerminalPaneOptions { size: TerminalSize { rows: 12, cols: 80 }, cwd: Some(workspace.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("edit-restored", "first ask");
+    run.cwd = workspace.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.session_id = Some(old.to_string());
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready_file.exists() {
+        assert!(Instant::now() < deadline, "the stand-in turn never put its tty in raw mode");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Mid-turn: accepted, the turn is interrupted, nothing is rewound yet.
+    assert!(app.deliver_edit_request("edit-restored", "u2 u2\nsecond ask, said better", "edit-restored-0001").is_none());
+    assert!(app.chat_edits_in_flight.contains("edit-restored"));
+    let receipt = chat_edit_receipt(&mut app, "edit-restored-0001");
+    assert_eq!(receipt["status"], "delivered", "{receipt}");
+    assert_eq!(fs::read_to_string(&esc_file).unwrap().trim(), "1b", "the turn got Esc first");
+
+    // Then it went back to before u2, as for an idle chat.
+    let new = app.agents[0].session_id.clone().unwrap();
+    assert_ne!(new, old);
+    let kept = fs::read_to_string(source.with_file_name(format!("{new}.jsonl"))).unwrap();
+    let kept: Vec<String> = kept.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["uuid"].as_str().unwrap().to_string()).collect();
+    assert_eq!(kept, ["u1", "a1"]);
+    let args = chat_edit_launch_args(&args_file);
+    let at = args.iter().position(|arg| arg == "--resume").expect("resumes the cut copy");
+    assert_eq!(args[at + 1], new);
+    assert_eq!(args[args.len() - 2..], ["--".to_string(), "second ask, said better".to_string()]);
+    assert!(app.chat_edits_in_flight.is_empty());
+    app.agents[0].terminal = None;
+}
+
+#[cfg(not(windows))]
+#[test]
 fn chat_edit_after_a_turn_that_failed_goes_back_at_once() {
     // Seen live: a turn ended on a rate limit (Claude StopFailure), so the row
     // stayed Running, and the edit pressed Esc at an idle composer and waited

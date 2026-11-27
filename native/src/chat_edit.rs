@@ -820,9 +820,15 @@ fn edit_refusal(run: &AgentRun) -> Option<String> {
 /// A turn is running. A row whose last turn ended on an API error (Claude
 /// `StopFailure`: a rate limit, a refusal) stays Running without needing
 /// input, but no turn runs: Esc changes nothing there, so an edit that
-/// waited for it gave up after `TURN_STOP_DEADLINE`.
+/// waited for it gave up after `TURN_STOP_DEADLINE`. Claude Code interrupted
+/// before it answered puts the message back in its composer and reports
+/// nothing, so the row stays Running for a minute (`IDLE_WITHOUT_SIGNAL`):
+/// a pane parked at its composer has no turn either.
 fn mid_turn(run: &mut AgentRun) -> bool {
-    let live = run.terminal.as_mut().is_some_and(|terminal| terminal.is_alive());
+    let backend = run.backend;
+    let live = run.terminal.as_mut().is_some_and(|terminal| {
+        terminal.is_alive() && !terminal_at_idle_prompt(backend, &terminal.live_screen_lines())
+    });
     live
         && run.status == AgentStatus::Running
         && !run.needs_user_input

@@ -8522,13 +8522,14 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const text = (stringField(body, "text") ?? "").trim();
+    const compact = typeof body === "object" && body !== null && !Array.isArray(body) && body.compact === true;
     const branched = await homeRpc(home.id, "agentBranch", {
       workspaceId: repo.id,
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
-      compact: body.compact === true,
+      compact,
     });
-    captureProductEvent(account.accountId, "agent_branched", { platform: requestPlatform(req), prompted: !!text, compact: body.compact === true });
+    captureProductEvent(account.accountId, "agent_branched", { platform: requestPlatform(req), prompted: !!text, compact });
     sendJson(res, 200, branched);
     return;
   }

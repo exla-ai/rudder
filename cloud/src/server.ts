@@ -8526,8 +8526,9 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       workspaceId: repo.id,
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
+      compact: body.compact === true,
     });
-    captureProductEvent(account.accountId, "agent_branched", { platform: requestPlatform(req), prompted: !!text });
+    captureProductEvent(account.accountId, "agent_branched", { platform: requestPlatform(req), prompted: !!text, compact: body.compact === true });
     sendJson(res, 200, branched);
     return;
   }

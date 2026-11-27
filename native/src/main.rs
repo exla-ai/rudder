@@ -1946,6 +1946,8 @@ struct App {
     /// Messages whose receipt waits for the agent to take them (delivery.rs),
     /// the read of their transcripts in flight, and when the last one began.
     pending_deliveries: Vec<delivery::PendingDelivery>,
+    /// First messages of branches that are compacting (branch.rs).
+    compact_follow_ups: Vec<branch::CompactFollowUp>,
     delivery_rx: Option<mpsc::Receiver<Vec<delivery::ScanResult>>>,
     last_delivery_scan: Instant,
     next_delivery_id: u64,
@@ -3749,6 +3751,7 @@ impl App {
             pending_enters: Vec::new(),
             pending_interrupt_sends: Vec::new(),
             pending_deliveries: Vec::new(),
+            compact_follow_ups: Vec::new(),
             goal_dialog_answers: HashMap::new(),
             returned_prompt_clears: HashMap::new(),
             delivery_rx: None,
@@ -16768,8 +16771,8 @@ Address the objection directly. If you disagree, say why inside \
                         continue;
                     }
                 },
-                // Branch an agent: `branch`, then the branch's first prompt
-                // on the next line when there is one. Accepted branches
+                // Branch an agent: `branch` or `branch compact`, then the
+                // branch's first prompt on the next lines when there is one. Accepted branches
                 // answer when they start (finish_branch_launch).
                 "branch" => match self.deliver_branch_request(&task_id, &instruction, &request_id) {
                     Some(result) => result,
@@ -20836,7 +20839,7 @@ Address the objection directly. If you disagree, say why inside \
     fn branch_selected_agent(&mut self) {
         self.delete_pending = None;
         self.dirty = true;
-        match self.branch_agent(self.selected_agent, None, None) {
+        match self.branch_agent(self.selected_agent, None, false, None) {
             // Gone already when it failed before its workspace was made; the
             // notice says why.
             Ok(run_id) => {
@@ -23575,6 +23578,7 @@ What to do\n\
         // needs_user_input) shows its "Implement this plan?" wait this tick.
         self.poll_codex_rollouts();
         self.drive_deliveries();
+        self.drive_compact_follow_ups();
 
         self.finish_interrupt_sends();
 

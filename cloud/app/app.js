@@ -1518,7 +1518,7 @@ function DesktopShell() {
       items: [
         { label: "Rename", icon: "edit", run: () => renameRow(row) },
         { label: pinned ? "Unpin" : "Pin", icon: "pin", run: () => pinAgent({ ws: t.ws, run: t.run, find, pinned: !pinned, repaint: updateScreen }) },
-        { label: "Branch", icon: "branch", run: () => branchAgent({ ws: t.ws, run: t.run, title: (find() || a).title }) },
+        { label: "Branch", icon: "branch", run: () => branchAgent({ ws: t.ws, run: t.run, title: (find() || a).title, backend: (find() || a).backend }) },
         { label: "Notes", icon: "file", run: () => { navigate(agentPath(t.ws, t.run)); void openNotes({ ...t, findAgent }); } },
         { label: "Open beside", icon: "split", disabled: !SPLIT_MQ.matches || !agentOf(route) || shownAgents().some((x) => sameAgent(x, t)), run: () => openIn(1, t) },
         ...(place < 0 ? [] : [

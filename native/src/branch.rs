@@ -1,8 +1,8 @@
 //! Branch an agent: a new agent that starts where another one is, with a copy
 //! of its conversation and of its files, while the original keeps running
 //! untouched. `b` in the dashboard and the app's Branch (steer kind `branch`,
-//! instruction `branch`, then the branch's first prompt on the next line when
-//! there is one) both end in `branch_agent`.
+//! instruction `branch` or `branch compact`, then the branch's first prompt on
+//! the next lines when there is one) both end in `branch_agent`.
 //!
 //! - Files: one jj command in the source's working copy snapshots it and
 //!   duplicates its working-copy commit (`jj duplicate @`). The copy has the
@@ -23,6 +23,17 @@
 //!   (agent_life.rs), and keeps the source's conversation while a branch of
 //!   it is still being set up.
 //!
+//! - Compact (Claude only): a branch copies the whole conversation, and a source
+//!   near its context limit refuses any first message until `/compact` runs.
+//!   With `branch compact` the branch starts with `/compact` as its launch
+//!   prompt (Claude Code runs a slash command given at launch). The first
+//!   message, when there is one, waits in `compact_follow_ups` and is typed
+//!   through the steer path once the compaction is over and the composer is
+//!   idle again; its turn is recorded then. Codex has no launch-time
+//!   `/compact`, so a Codex branch refuses the option.
+//! - Name: a branch with a first message is named after it, as a new agent is
+//!   named after its task. Without one it is "<source> (branch)".
+//!
 //! The row goes in next to its source at once. Its workspace and conversation
 //! are made off the App loop, and `finish_branch_launch` starts it and answers
 //! the app. With no prompt the branch waits, idle, for one.
@@ -32,7 +43,13 @@ use std::io::Seek;
 
 pub(crate) const NOTHING_TO_BRANCH: &str = "Nothing to branch yet";
 const BRANCH_SUFFIX: &str = " (branch)";
-const INSTRUCTION_SHAPE: &str = "expected branch, then an optional first message";
+const INSTRUCTION_SHAPE: &str = "expected branch or branch compact, then an optional first message";
+/// How long a branch waits for `/compact` to show as working before it takes
+/// an idle composer to mean the compaction was instant (a short conversation
+/// answers "Not enough messages to compact" at once).
+const COMPACT_START_WAIT: Duration = Duration::from_secs(10);
+/// How long a held first message waits for the compaction to end.
+const COMPACT_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// What a branch copies, read on the App loop.
 pub(crate) struct BranchSource {
@@ -51,8 +68,28 @@ pub(crate) struct PendingBranch {
     /// The source's name, for notices.
     pub(crate) source_label: String,
     pub(crate) prompt: Option<String>,
+    /// Run `/compact` in the copied conversation before the first message.
+    pub(crate) compact: bool,
     /// The app's request, answered when the branch starts or fails.
     pub(crate) request_id: Option<String>,
+}
+
+/// A first message held back while its branch compacts the conversation.
+pub(crate) struct CompactFollowUp {
+    run_id: String,
+    /// The process that was compacting: a replaced pane drops the message.
+    instance_id: String,
+    text: String,
+    started: Instant,
+    /// The compaction was seen working; the next idle composer ends it.
+    seen_working: bool,
+}
+
+/// What `branch` asks for.
+#[derive(Debug, PartialEq, Eq)]
+struct BranchRequest {
+    compact: bool,
+    prompt: Option<String>,
 }
 
 /// A forked conversation, ready to start.
@@ -274,26 +311,39 @@ fn branch_refusal(run: &AgentRun) -> Option<String> {
     None
 }
 
-/// The source's name, and the branch's: "<name> (branch)".
-fn branch_names(source: &AgentRun) -> (String, String) {
+/// The source's name, and the branch's: named after its first message when it
+/// has one (as a new agent is named after its task), else "<name> (branch)".
+fn branch_names(source: &AgentRun, prompt: Option<&str>) -> (String, String) {
     let name = if source.task_summary.trim().is_empty() {
         summarize_task(&source.task)
     } else {
         source.task_summary.trim().to_string()
     };
-    let room = AGENT_TITLE_MAX_CHARS - BRANCH_SUFFIX.chars().count();
-    (truncate_chars(&name, 60), format!("{}{BRANCH_SUFFIX}", truncate_chars(&name, room)))
+    let label = truncate_chars(&name, 60);
+    let title = match prompt {
+        Some(prompt) => truncate_chars(&summarize_task_to(prompt, AGENT_TITLE_MAX_CHARS), AGENT_TITLE_MAX_CHARS),
+        None => {
+            let room = AGENT_TITLE_MAX_CHARS - BRANCH_SUFFIX.chars().count();
+            format!("{}{BRANCH_SUFFIX}", truncate_chars(&name, room))
+        }
+    };
+    (label, title)
 }
 
-/// `branch`, then optionally the first prompt on the lines after it.
-fn branch_prompt(instruction: &str) -> Result<Option<String>, String> {
-    let rest = instruction.strip_prefix("branch").ok_or_else(|| INSTRUCTION_SHAPE.to_string())?;
-    if rest.is_empty() {
-        return Ok(None);
-    }
-    let text = rest.strip_prefix('\n').ok_or_else(|| INSTRUCTION_SHAPE.to_string())?;
-    let text = sanitize_steer_instruction(text);
-    Ok((!text.trim().is_empty()).then_some(text))
+/// `branch` or `branch compact`, then optionally the first prompt on the
+/// lines after it.
+fn branch_request(instruction: &str) -> Result<BranchRequest, String> {
+    let (head, text) = match instruction.split_once('\n') {
+        Some((head, text)) => (head, Some(text)),
+        None => (instruction, None),
+    };
+    let compact = match head {
+        "branch" => false,
+        "branch compact" => true,
+        _ => return Err(INSTRUCTION_SHAPE.to_string()),
+    };
+    let prompt = text.map(sanitize_steer_instruction).filter(|text| !text.trim().is_empty());
+    Ok(BranchRequest { compact, prompt })
 }
 
 impl App {
@@ -303,11 +353,15 @@ impl App {
         &mut self,
         index: usize,
         prompt: Option<String>,
+        compact: bool,
         request_id: Option<String>,
     ) -> Result<String, String> {
         let run = self.agents.get(index).ok_or_else(|| "no agent selected".to_string())?;
         if let Some(refusal) = branch_refusal(run) {
             return Err(refusal);
+        }
+        if compact && run.backend != Backend::Claude {
+            return Err("Compacting a branch works for Claude agents".to_string());
         }
         if self.pending_launches.contains_key(&run.id) {
             return Err("It is still starting; branch it in a moment".to_string());
@@ -331,11 +385,11 @@ impl App {
         if run.backend == Backend::Claude && !claude_file.is_file() {
             return Err(NOTHING_TO_BRANCH.to_string());
         }
-        let (source_label, name) = branch_names(run);
+        let (source_label, name) = branch_names(run, prompt.as_deref());
         let run_id = new_run_id(&name);
         let mut row = fork_row(
             run_id.clone(),
-            run.task.clone(),
+            prompt.clone().unwrap_or_else(|| run.task.clone()),
             name.clone(),
             (run.backend, run.model.clone(), run.effort),
             // The branch continues the source's conversation, on its account.
@@ -367,7 +421,11 @@ impl App {
         }
         self.dirty = true;
         self.push_activity(format!("{source_label}: branching"));
-        let pending = PendingBranch { source_session: session, source_label, prompt, request_id };
+        if let Some(prompt) = &prompt {
+            // Titled by its message, like a new agent.
+            self.queue_task_title(run_id.clone(), prompt.clone());
+        }
+        let pending = PendingBranch { source_session: session, source_label, prompt, compact, request_id };
         self.begin_workspace_prep(run_id.clone(), PendingLaunchKind::Branch(pending), job);
         Ok(run_id)
     }
@@ -380,11 +438,11 @@ impl App {
         instruction: &str,
         request_id: &str,
     ) -> Option<SteerDelivery> {
-        let started = branch_prompt(instruction).and_then(|prompt| {
+        let started = branch_request(instruction).and_then(|BranchRequest { compact, prompt }| {
             let index = self
                 .agent_index_for_token(task_id)
                 .ok_or_else(|| format!("target not found: {task_id}"))?;
-            self.branch_agent(index, prompt, Some(request_id.to_string()))
+            self.branch_agent(index, prompt, compact, Some(request_id.to_string()))
         });
         match started {
             Ok(_) => None,
@@ -393,6 +451,49 @@ impl App {
                 Some(SteerDelivery::Failed(FailCode::Refused, reason))
             }
         }
+    }
+
+    /// Type each held first message once its branch's `/compact` is over: the
+    /// composer is idle again after working, or has been idle for
+    /// `COMPACT_START_WAIT` (nothing to compact). The message then goes the
+    /// way an app message does (`deliver_steer_request`), which records its
+    /// turn and refuses over a menu or a draft.
+    pub(crate) fn drive_compact_follow_ups(&mut self) {
+        if self.compact_follow_ups.is_empty() {
+            return;
+        }
+        for mut held in std::mem::take(&mut self.compact_follow_ups) {
+            let Some(index) = self.agents.iter().position(|run| run.id == held.run_id) else {
+                continue;
+            };
+            let label = self.agents[index].task_summary.clone();
+            let Some(terminal) = self.agents[index].terminal.as_mut() else {
+                continue;
+            };
+            if terminal.instance_id() != held.instance_id || !terminal.is_alive() {
+                self.notice = Some(format!("\"{label}\" stopped before its first message was sent"));
+                continue;
+            }
+            let lines = terminal.live_screen_lines();
+            if crate::detect::recent_lines_look_busy(Backend::Claude, &lines) {
+                held.seen_working = true;
+            }
+            let idle = crate::detect::terminal_at_idle_prompt(Backend::Claude, &lines);
+            let over = idle && (held.seen_working || held.started.elapsed() >= COMPACT_START_WAIT);
+            if !over || self.typed_input_waits(index, &held.text) {
+                if held.started.elapsed() >= COMPACT_MAX_WAIT {
+                    self.notice = Some(format!("\"{label}\" is still compacting; its first message was not sent"));
+                } else {
+                    self.compact_follow_ups.push(held);
+                }
+                continue;
+            }
+            if let SteerDelivery::Failed(_, reason) = self.deliver_steer_request(&held.run_id, &held.text, false) {
+                self.notice = Some(format!("\"{label}\": first message not sent: {reason}"));
+                self.push_activity(format!("branch: first message not sent: {reason}"));
+            }
+        }
+        self.dirty = true;
     }
 
     /// The branch's workspace and conversation are ready (or failed): start
@@ -457,10 +558,12 @@ impl App {
         // A resumed conversation runs in a terminal here, as an edited chat's does.
         let wired =
             signals::augment_existing_worker_command(&mut command, backend, AgentMode::Execute, &run_id, Some("native"), account.as_deref());
-        if let Some(prompt) = &branch.prompt {
-            // After `--`, text that starts with "-" is the prompt, not a flag.
+        // After `--`, text that starts with "-" is the prompt, not a flag. A
+        // compacting branch is launched on `/compact`; its message follows.
+        let launch_prompt = if branch.compact { Some("/compact") } else { branch.prompt.as_deref() };
+        if let Some(prompt) = launch_prompt {
             command.args.push("--".to_string());
-            command.args.push(prompt.clone());
+            command.args.push(prompt.to_string());
         }
         // It reads RUDDER.md first thing; it should find itself there.
         if let Err(error) = self.write_rudder_context_timed(None) {
@@ -475,6 +578,19 @@ impl App {
         let run = &mut self.agents[index];
         if spawned.is_ok() {
             match &branch.prompt {
+                // Its turn is recorded when the message is typed, after the
+                // compaction (`drive_compact_follow_ups`).
+                Some(prompt) if branch.compact => {
+                    if let Some(instance_id) = run.terminal.as_ref().map(|terminal| terminal.instance_id().to_string()) {
+                        self.compact_follow_ups.push(CompactFollowUp {
+                            run_id: run_id.clone(),
+                            instance_id,
+                            text: prompt.clone(),
+                            started: Instant::now(),
+                            seen_working: false,
+                        });
+                    }
+                }
                 Some(prompt) => {
                     let now = now_stamp();
                     run.current_prompt = prompt.clone();
@@ -483,7 +599,7 @@ impl App {
                     run.last_worker_input_at = Some(Instant::now());
                 }
                 // Resuming runs no turn: it sits at its prompt, like a
-                // finished agent reopened.
+                // finished agent reopened. `/compact` runs between turns.
                 None => {
                     run.status = AgentStatus::Done;
                     run.completed_at = Some(Instant::now());
@@ -497,6 +613,10 @@ impl App {
             return Err(format!("could not start {}: {error}", backend.as_str()));
         }
         let notice = match &branch.prompt {
+            Some(prompt) if branch.compact => {
+                format!("branched \"{}\", compacting it before sending \"{}\"", branch.source_label, steer_preview(prompt))
+            }
+            None if branch.compact => format!("branched \"{}\", compacting it", branch.source_label),
             Some(prompt) => format!("branched \"{}\" and sent \"{}\"", branch.source_label, steer_preview(prompt)),
             None => format!("branched \"{}\"; it waits for your message", branch.source_label),
         };
@@ -518,11 +638,28 @@ mod tests {
 
     #[test]
     fn branch_instruction_carries_an_optional_first_prompt() {
-        assert_eq!(branch_prompt("branch").unwrap(), None);
-        assert_eq!(branch_prompt("branch\n  ").unwrap(), None);
-        assert_eq!(branch_prompt("branch\ntry it with sqlite\n- keep the API").unwrap().as_deref(), Some("try it with sqlite\n- keep the API"));
-        assert!(branch_prompt("branched").is_err());
-        assert!(branch_prompt("try this").is_err());
+        let request = |compact, prompt: Option<&str>| BranchRequest { compact, prompt: prompt.map(str::to_string) };
+        assert_eq!(branch_request("branch").unwrap(), request(false, None));
+        assert_eq!(branch_request("branch\n  ").unwrap(), request(false, None));
+        assert_eq!(
+            branch_request("branch\ntry it with sqlite\n- keep the API").unwrap(),
+            request(false, Some("try it with sqlite\n- keep the API"))
+        );
+        assert_eq!(branch_request("branch compact").unwrap(), request(true, None));
+        assert_eq!(branch_request("branch compact\ntry sqlite").unwrap(), request(true, Some("try sqlite")));
+        assert!(branch_request("branched").is_err());
+        assert!(branch_request("branch compacted").is_err());
+        assert!(branch_request("try this").is_err());
+    }
+
+    #[test]
+    fn a_branch_is_named_after_its_first_message() {
+        let source = fork_row("src-1".to_string(), "general".to_string(), "general".to_string(), (Backend::Claude, String::new(), None), None, PathBuf::new());
+        assert_eq!(branch_names(&source, None), ("general".to_string(), "general (branch)".to_string()));
+        let (label, title) = branch_names(&source, Some("try the sqlite store instead"));
+        assert_eq!(label, "general");
+        assert_eq!(title, summarize_task_to("try the sqlite store instead", AGENT_TITLE_MAX_CHARS));
+        assert!(!title.contains("branch"));
     }
 
     #[test]

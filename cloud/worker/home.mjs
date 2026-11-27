@@ -1168,10 +1168,12 @@ async function handleRpc(method, params) {
   }
   if (method === "agentBranch") {
     // Branch an agent (native branch.rs): a new agent next to it with a copy
-    // of its conversation and files. The instruction is `branch`, then the
+    // of its conversation and files. The instruction is `branch` or
+    // `branch compact` (compact the copied conversation first), then the
     // branch's first prompt on the next line when there is one.
     const text = String(params.text || "").trim();
-    return await steer(project, { kind: "branch", taskId: String(params.runId || ""), instruction: text ? `branch\n${text}` : "branch" });
+    const head = params.compact === true ? "branch compact" : "branch";
+    return await steer(project, { kind: "branch", taskId: String(params.runId || ""), instruction: text ? `${head}\n${text}` : head });
   }
   if (method === "agentEdit") {
     // Edit a prompt in the chat (native chat_edit.rs): the conversation goes

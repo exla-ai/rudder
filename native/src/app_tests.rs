@@ -10541,6 +10541,7 @@ fn deleting_an_agent_keeps_its_conversation_while_a_branch_of_it_is_set_up() {
                 source_session: thread.to_string(),
                 source_label: "source".to_string(),
                 prompt: None,
+                compact: false,
                 request_id: None,
             }),
             typed: Vec::new(),

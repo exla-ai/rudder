@@ -132,16 +132,28 @@ export async function closeAgent({ ws, run, title, project, repaint }) {
 /**
  * Branch an agent: a sheet for an optional first message, then the
  * dashboard starts a new agent with a copy of its conversation and files
- * (native branch.rs). The agent itself keeps running as it is.
+ * (native branch.rs). The agent itself keeps running as it is. A Claude
+ * branch can compact the copied conversation first, so a source near its
+ * context limit still takes a first message.
  */
-export function branchAgent({ ws, run, title }) {
+export function branchAgent({ ws, run, title, backend }) {
   const { dlg, body, close } = openSheet({ title: "Branch agent", className: "branch-sheet" });
   const form = h(`<form style="display:flex;flex-direction:column;gap:10px;min-height:0">
     <p class="create-note" style="text-align:left;margin:0 2px"></p>
     <textarea class="ask-other-text" rows="4" aria-label="First message for the branch" placeholder="What should the branch try? Leave it empty to start it waiting for you." style="max-height:50vh"></textarea>
+    <button type="button" class="card set-switch" role="switch" aria-checked="true" data-act="compact" hidden>
+      <span class="ss-text"><span class="ss-name">Compact the conversation first</span><span class="ss-sub">Summarizes the copied conversation so the branch starts with room to work.</span></span>
+      <span class="ss-track" aria-hidden="true"><span class="ss-knob"></span></span>
+    </button>
     <p class="repo-note err" role="alert" hidden style="padding:0 2px;margin:0"></p>
     <div class="d-actions"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn accent">Branch</button></div>
   </form>`);
+  const compactSwitch = form.querySelector('[data-act="compact"]');
+  // Only Claude Code runs /compact on a resumed conversation here.
+  compactSwitch.hidden = backend !== "claude";
+  compactSwitch.addEventListener("click", () => {
+    compactSwitch.setAttribute("aria-checked", String(compactSwitch.getAttribute("aria-checked") !== "true"));
+  });
   form.querySelector(".create-note").textContent =
     `A new agent starts with a copy of the conversation and files of "${title || "this agent"}", which keeps going as it is.`;
   body.appendChild(form);
@@ -163,8 +175,9 @@ export function branchAgent({ ws, run, title }) {
     send.disabled = true;
     error.hidden = true;
     const text = textarea.value.trim();
+    const compact = !compactSwitch.hidden && compactSwitch.getAttribute("aria-checked") === "true";
     try {
-      const res = await api("/api/app/agent-branch", { method: "POST", body: { workspace: ws, run, text } });
+      const res = await api("/api/app/agent-branch", { method: "POST", body: { workspace: ws, run, text, compact } });
       close();
       // Making its workspace can outlast the wait for an answer.
       toast(res?.status === "queued" ? "Branching. The new agent shows up in a moment" : "Branched into a new agent");

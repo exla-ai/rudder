@@ -5650,6 +5650,8 @@ function AgentScreen(ws, run, { member = null, onClose = null, allAgents = false
   function toolShown(tool) {
     const coordinator = allAgents ? coordinatorTool(tool) : null;
     if (coordinator) return { ...coordinator, icon: "agents" };
+    const helper = helperTool(tool);
+    if (helper) return { ...helper, icon: "agents" };
     return { name: tool.name || "Tool", input: (tool.input || "").replace(/\s+/g, " ").trim(), icon: toolIcon(tool.name) };
   }
 
@@ -6063,4 +6065,16 @@ if (!NATIVE && "serviceWorker" in navigator && (location.protocol === "https:" |
       .catch(() => navigator.serviceWorker.register("/app/sw.js", { scope: "/app/" }))
       .catch((err) => console.warn("service worker not registered", err));
   });
+}
+
+// The tools an agent starts and talks to its helpers with (native
+// agent_mcp.rs). An agents_start call whose helper is running shows as its
+// subagent card instead (worker/transcripts.mjs attachHelpers).
+const HELPER_TOOLS = { agents_start: "Start a helper", agents_result: "Wait for a helper", agents_send: "Message a helper" };
+
+function helperTool(tool) {
+  const name = /^mcp__rudder_agents__(agents_[a-z]+)$/.exec(tool.name || "")?.[1];
+  if (!HELPER_TOOLS[name]) return null;
+  const field = (key) => new RegExp(`"${key}":\\s*"([^"]+)"`).exec(tool.input || "")?.[1] || "";
+  return { name: HELPER_TOOLS[name], input: name === "agents_start" ? field("model") : field("run_id") };
 }

@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { listSubagents } from "../cloud/worker/subagents.mjs";
 import { agentProcesses, watchOutsideAgents } from "../cloud/worker/outside-agents.mjs";
+import { transcriptDetail, transcriptPoll } from "../cloud/worker/transcripts.mjs";
 
 const jsonl = (entries) => entries.map((entry) => `${JSON.stringify(entry)}\n`).join("");
 
@@ -127,3 +128,53 @@ test("a helper started with agents_start is listed under the agent that asked, o
   );
   assert.deepEqual(tray.open.messages.map((m) => m.text), ["Review lib/ and test/.", "Two bugs in lib/pay.ts."]);
 });
+
+test("an agents_start call in the chat is the helper's card, and the chat poll moves while only the helper works", (t) => {
+  const { home, repo, run } = setup(t);
+  const session = "5e551011-0000-4000-8000-0000000000d1";
+  run({ id: "run_lead", backend: "claude", status: "running", process: { pid: process.pid }, session: { nativeSessionId: session } });
+  // A run that names someone else as its parent is not this call's helper.
+  run({ id: "run_stranger", backend: "antigravity", status: "running", parentRunId: "someone-else", process: { pid: process.pid }, session: { nativeSessionId: "stranger-conv" } });
+  const task = "Review lib/ and test/ as a hostile reader.";
+  run({ id: "run_helper", backend: "antigravity", model: "gemini-4-neon-xhigh", status: "running", taskSummary: "Review lib and test", createdAt: 1_800_000_000_000, parentRunId: "run_lead", process: { pid: process.pid }, session: { nativeSessionId: "helper-conv" },
+    task: `Objective: ${task}\nDone when: your final message answers the request in full.\n\n${task}\n\nRudder: you are a helper agent. The agent "lead" started you.` });
+  const at = (s) => new Date(Date.UTC(2027, 0, 15, 8, 0, s)).toISOString();
+  const start = (id, runId) => [
+    { type: "assistant", uuid: `a-${id}`, timestamp: at(1), message: { role: "assistant", content: [{ type: "tool_use", id, name: "mcp__rudder_agents__agents_start", input: { harness: "antigravity", model: "gemini-4-neon-xhigh", task } }] } },
+    { type: "user", uuid: `r-${id}`, timestamp: at(2), message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: JSON.stringify({ run_id: runId, status: "starting" }) }] } },
+  ];
+  const project = path.join(home, ".claude", "projects", "-x");
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(project, `${session}.jsonl`), jsonl([
+    { type: "user", uuid: "u1", timestamp: at(0), message: { role: "user", content: "get a second opinion" } },
+    ...start("toolu_h1", "run_helper"),
+    ...start("toolu_h2", "run_stranger"),
+  ]));
+  const logs = path.join(home, ".gemini", "antigravity-cli", "brain", "helper-conv", ".system_generated", "logs");
+  fs.mkdirSync(logs, { recursive: true });
+  const log = path.join(logs, "transcript_full.jsonl");
+  fs.writeFileSync(log, jsonl([
+    { step_index: 0, source: "USER", type: "USER_INPUT", status: "DONE", created_at: "2027-01-15T08:00:03Z", content: `<USER_REQUEST>\n${task}\n</USER_REQUEST>` },
+  ]));
+
+  const poll = () => transcriptPoll(repo, "run_lead", { limit: 300, home });
+  const first = poll();
+  const card = (body, id) => body.messages.find((m) => m.id === id)?.subagent ?? null;
+  assert.deepEqual(
+    (({ id, backend, kind, model, description, status }) => ({ id, backend, kind, model, description, status }))(card(first.body, "toolu_h1")),
+    { id: "run_helper", backend: "antigravity", kind: "Helper", model: "gemini-4-neon-xhigh", description: "Review lib and test", status: "running" },
+  );
+  assert.equal(card(first.body, "toolu_h2"), null);
+  // Opened, it says what the agent asked it, without Rudder's framing.
+  assert.equal(transcriptDetail(repo, "run_lead", { id: "toolu_h1", limit: 300, home }).message.subagent.prompt, task);
+
+  // The lead waits on agents_result and its log stands still; the helper answers.
+  fs.appendFileSync(log, jsonl([
+    { step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2027-01-15T08:00:09Z", content: "Two bugs in lib/pay.ts.", tool_calls: [] },
+  ]));
+  const second = poll();
+  assert.notEqual(second.etag, first.etag);
+  const opened = transcriptDetail(repo, "run_lead", { id: "toolu_h1", limit: 300, home }).message.subagent;
+  assert.deepEqual(opened.messages.map((m) => m.text), [task, "Two bugs in lib/pay.ts."]);
+});
+

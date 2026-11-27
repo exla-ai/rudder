@@ -159,6 +159,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home, before = nul
   } else if (backend === "antigravity") {
     attachAntigravitySubagents(page.reader, { home, conversationId: conversation, live, shown, depth: 0 });
   }
+  attachHelpers(base.messages, record, { repoDir, home });
   if (!end) {
     base.messages = markRunning(base.messages, live);
   }
@@ -3030,6 +3031,96 @@ function attachCodexSubagents(reader, { home, live, shown, depth }) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers: agents an agent started with agents_start (native helpers.rs), on
+// the harness and model it named. Each is a run of its own whose record names
+// the agent as parentRunId. The agents_start call becomes a subagent card,
+// read from the helper's own log; its result names the helper's run id. The
+// tray lists the same helpers (subagents.mjs helperItems).
+// ---------------------------------------------------------------------------
+
+const HELPER_START = /^mcp__rudder_agents__agents_start$/;
+const HELPER_RUN = /"run_id"\s*:\s*"([A-Za-z0-9._-]+)"/;
+// How soon a helper whose log is not written yet is looked for again.
+const HELPER_RECHECK_MS = 3_000;
+
+function attachHelpers(messages, record, { repoDir, home }) {
+  for (const message of messages) {
+    if (message.role !== "tool" || message.subagent || !HELPER_START.test(message.tool?.name ?? "")) {
+      continue;
+    }
+    const runId = HELPER_RUN.exec(message.tool.output ?? "")?.[1];
+    if (!runId) {
+      continue; // not started yet, or it failed to start
+    }
+    dependPath(path.join(repoDir, ".rudder", "runs", runId, "run.json"));
+    const helper = readRunRecord(repoDir, runId);
+    if (helper?.parentRunId !== record.id) {
+      continue;
+    }
+    const log = helper.backend === "opencode" ? null : transcriptFile(helper, home);
+    if (!log) {
+      dependUntil(Date.now() + HELPER_RECHECK_MS);
+      continue;
+    }
+    const pid = helper.process?.pid;
+    const entry = helperEntry(helper, log, Number.isInteger(pid) && pidAlive(pid));
+    if (!entry) {
+      continue;
+    }
+    const { reader, status } = entry;
+    message.subagent = {
+      id: entry.id,
+      backend: entry.backend,
+      model: reader.model ?? entry.model,
+      kind: entry.kind,
+      name: null,
+      description: entry.description,
+      prompt: entry.prompt ? clip(entry.prompt, SUBAGENT_PROMPT_LIMIT) : null,
+      status,
+      startedAt: entry.startedAt,
+      endedAt: entry.endedAt,
+      toolCalls: reader.toolCalls ?? 0,
+      result: entry.result,
+      ...shownMessages(reader),
+    };
+  }
+}
+
+/** A helper's card and tray entry, read from its log `log`; `live`: its process is up. */
+function helperEntry(record, log, live) {
+  const reader = record.backend === "codex" ? followFile(log, () => codexReader({ child: true }))
+    : record.backend === "antigravity" ? followFile(log, antigravityChildReader)
+    : followFile(log, () => claudeReader({ sub: true }));
+  if (!reader) {
+    return null;
+  }
+  const replies = reader.messages.filter((message) => message.role === "assistant");
+  const status = record.status === "running" && live ? "running"
+    : record.status === "failed" ? "failed" : record.status === "completed" ? "done" : "stopped";
+  return {
+    id: record.id,
+    backend: record.backend ?? "claude",
+    type: "subagent",
+    kind: "Helper",
+    name: null,
+    description: typeof record.taskSummary === "string" && record.taskSummary ? record.taskSummary : null,
+    status,
+    startedAt: Number(record.createdAt) || reader.firstAt || null,
+    endedAt: status === "running" ? null : reader.endedAt ?? reader.lastAt ?? null,
+    result: status === "done" ? replies[replies.length - 1]?.text ?? null : null,
+    // The model it was started on, before its log names one.
+    model: typeof record.model === "string" ? record.model : null,
+    // What the agent asked it: its task without the framing Rudder adds
+    // (native helpers.rs helper_prompt).
+    prompt: reader.prompt ?? (userTask(record.task).replace(HELPER_FRAMING, "") || null),
+    reader,
+    nest: () => {},
+  };
+}
+
+const HELPER_FRAMING = /\n+Rudder: you are a helper agent\. [\s\S]*$/;
+
 function shownMessages(reader) {
   if (!reader) {
     return { messages: [], earlier: 0 };
@@ -3368,7 +3459,7 @@ function toMillis(value) {
 }
 
 // The chat's subagent tray (subagents.mjs) reads subagents with the same readers.
-export { SUBAGENT_PROMPT_LIMIT, codexChildFile, outsideAgents, outsideCodexStatus, antigravityChildReader, antigravityReader, attachAntigravitySubagents, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
+export { SUBAGENT_PROMPT_LIMIT, codexChildFile, helperEntry, outsideAgents, outsideCodexStatus, antigravityChildReader, antigravityReader, attachAntigravitySubagents, attachClaudeSubagents, attachCodexSubagents, claudeInterrupted, claudeReader, claudeSessionHead, claudeSubagentMetas, claudeSubagentsDir, clip, codexReader, followFile, oneLine, readRunRecord, showUserTask, shownMessages, subagentsLive };
 
 // ---------------------------------------------------------------------------
 // The app's poll. The open chat asks for its newest page every few seconds;

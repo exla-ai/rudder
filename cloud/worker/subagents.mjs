@@ -47,6 +47,7 @@ import {
   codexChildFile,
   codexReader,
   followFile,
+  helperEntry,
   oneLine,
   outsideAgents,
   outsideCodexStatus,
@@ -223,7 +224,7 @@ function line(entry) {
 function activity(entry) {
   // Subagents this one started show inside it, as in the chat.
   entry.nest();
-  const prompt = entry.reader.prompt;
+  const prompt = entry.reader.prompt ?? entry.prompt ?? null;
   return {
     ...line(entry),
     prompt: prompt ? clip(prompt, SUBAGENT_PROMPT_LIMIT) : null,
@@ -404,33 +405,7 @@ function helperItems(home, repoDir, runId) {
       continue; // it has not started its session yet
     }
     const live = subagentsLive(record);
-    list.push({ id, file: log, key: [stat.size, stat.mtimeMs, live, record.status, record.model].join("|"), make: () => {
-      const reader = record.backend === "codex" ? followFile(log, () => codexReader({ child: true }))
-        : record.backend === "antigravity" ? followFile(log, antigravityChildReader)
-        : followFile(log, () => claudeReader({ sub: true }));
-      if (!reader) {
-        return null;
-      }
-      const replies = reader.messages.filter((message) => message.role === "assistant");
-      const working = record.status === "running";
-      const status = working && live ? "running" : record.status === "failed" ? "failed" : record.status === "completed" ? "done" : "stopped";
-      return {
-        id,
-        backend: record.backend ?? "claude",
-        type: "subagent",
-        kind: "Helper",
-        name: null,
-        description: typeof record.taskSummary === "string" && record.taskSummary ? record.taskSummary : null,
-        status,
-        startedAt: Number(record.createdAt) || reader.firstAt || null,
-        endedAt: status === "running" ? null : reader.endedAt ?? reader.lastAt ?? null,
-        result: status === "done" ? replies[replies.length - 1]?.text ?? null : null,
-        // The model it was started on, before its log names one.
-        model: typeof record.model === "string" ? record.model : null,
-        reader,
-        nest: () => {},
-      };
-    } });
+    list.push({ id, file: log, key: [stat.size, stat.mtimeMs, live, record.status, record.model].join("|"), make: () => helperEntry(record, log, live) });
   }
   return list;
 }

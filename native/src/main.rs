@@ -1952,6 +1952,9 @@ struct App {
     /// When a waiting message last answered a Codex chat's `Resume paused
     /// goal?` dialog, by run id (`App::answer_paused_goal_dialog`).
     goal_dialog_answers: HashMap<String, Instant>,
+    /// When a waiting message last cleared a prompt Claude Code put back in
+    /// its composer, by run id (`App::clear_returned_prompt`).
+    returned_prompt_clears: HashMap<String, Instant>,
     /// `/sync` messages waiting for their agent's turn to end (agent_sync.rs).
     pending_syncs: Vec<PendingSync>,
     /// Runs a `/sync` was typed into, so the reply turn ends without a review
@@ -3747,6 +3750,7 @@ impl App {
             pending_interrupt_sends: Vec::new(),
             pending_deliveries: Vec::new(),
             goal_dialog_answers: HashMap::new(),
+            returned_prompt_clears: HashMap::new(),
             delivery_rx: None,
             last_delivery_scan: Instant::now(),
             next_delivery_id: 0,
@@ -16979,6 +16983,16 @@ Address the objection directly. If you disagree, say why inside \
                     }
                 }
             };
+            // Interrupted before it answered, Claude Code put the old message
+            // back in its composer: clear it, then type this one.
+            if ready.is_ok() {
+                let (run_id, deadline) = (pending.run_id.clone(), pending.deadline);
+                let returned = self.agents.iter().position(|run| run.id == run_id);
+                if returned.is_some_and(|at| self.clear_returned_prompt(at)) && Instant::now() < deadline {
+                    index += 1;
+                    continue;
+                }
+            }
             let pending = self.pending_interrupt_sends.remove(index);
             let result = match ready {
                 Ok(()) => self.deliver_steer_request(&pending.run_id, &pending.text, pending.opencode_prompt),
@@ -17091,7 +17105,58 @@ Address the objection directly. If you disagree, say why inside \
         self.reopen_for_typed_command(index, instruction)
             || self.answer_paused_goal_dialog(index)
             || self.agent_is_starting(index)
+            || self.clear_returned_prompt(index)
             || self.draft_settling(index)
+    }
+
+    /// Claude Code puts a prompt it did not run back in its composer: one
+    /// interrupted before it answered, or one it refused at the context
+    /// limit. That text is the message Rudder already sent, not a draft, and
+    /// it refused every later message ("its input box already has text").
+    /// For a waiting message it is cleared with Ctrl+C, which empties a
+    /// composer that holds text; only at an idle composer, where no turn can
+    /// take the key. A box still holding text after that is left to the
+    /// refusal check.
+    fn clear_returned_prompt(&mut self, index: usize) -> bool {
+        let Some(run) = self.agents.get_mut(index) else {
+            return false;
+        };
+        if run.backend != Backend::Claude {
+            return false;
+        }
+        let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+        let sent = squeezed(&run.current_prompt);
+        let Some(terminal) = run.terminal.as_mut() else {
+            return false;
+        };
+        if sent.is_empty() || !terminal.is_alive() {
+            return false;
+        }
+        let lines = terminal.live_screen_lines();
+        if !terminal_at_idle_prompt(Backend::Claude, &lines)
+            || terminal_composer_blocked(Backend::Claude, &lines).is_some()
+            || !composer_has_draft(Backend::Claude, &terminal.live_styled_rows())
+            || claude_composer_text(&lines).is_none_or(|draft| squeezed(&draft) != sent)
+        {
+            return false;
+        }
+        let now = Instant::now();
+        if let Some(cleared) = self.returned_prompt_clears.get(&run.id) {
+            let since = now.duration_since(*cleared);
+            if since < delivery::SETTLE_WAIT {
+                return true;
+            }
+            if since < delivery::SETTLE_WAIT * 5 {
+                return false;
+            }
+        }
+        if terminal.write_input(b"\x03").is_err() {
+            return false;
+        }
+        let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
+        self.returned_prompt_clears.insert(run.id.clone(), now);
+        self.push_activity(format!("{label}: cleared the message Claude Code put back in its input box"));
+        true
     }
 
     /// Codex and Antigravity run a slash command only when it is typed. Given

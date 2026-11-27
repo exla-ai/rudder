@@ -1033,6 +1033,21 @@ pub(crate) fn composer_has_draft(backend: Backend, rows: &[Vec<StyledTerminalCel
     }
 }
 
+/// The text in Claude Code's composer, its rows joined: the input row after
+/// `❯` and the rows the draft wraps or continues onto.
+pub(crate) fn claude_composer_text(lines: &[String]) -> Option<String> {
+    let rows: Vec<String> = lines.iter().map(|line| normalize_terminal_line(line)).collect();
+    let top = claude_composer_top(&rows)?;
+    let bottom = rows.iter().rposition(|row| is_claude_rule(row))?;
+    let input = (top + 1..bottom).find(|&row| rows[row].starts_with('\u{276f}'))?;
+    let mut text = rows[input]['\u{276f}'.len_utf8()..].to_string();
+    for row in &rows[input + 1..bottom] {
+        text.push(' ');
+        text.push_str(row);
+    }
+    Some(text)
+}
+
 /// Antigravity's status bar during a turn: `esc to cancel` on the row right
 /// under its composer box, where `? for shortcuts` sits when idle. Its
 /// `auto · <model> · <effort>` block shares the row only when the pane is

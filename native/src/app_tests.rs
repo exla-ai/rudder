@@ -34151,6 +34151,67 @@ fn chat_edit_goes_back_when_the_interrupted_message_returns_to_the_composer() {
 
 #[cfg(not(windows))]
 #[test]
+fn a_message_clears_the_prompt_claude_code_put_back_in_its_composer() {
+    // Seen live: a branch's first message hit the context limit, Claude Code
+    // put it back in its input box, and every message after it was refused
+    // with "its input box already has text".
+    let _env = env_guard();
+    let dir = unique_test_repo("returned-prompt");
+    let key_file = dir.join("key");
+    let ready_file = dir.join("ready");
+    let rule = "\\342\\224\\200".repeat(20);
+    let footer = "  \\342\\217\\265\\342\\217\\265 bypass permissions on (shift+tab to cycle)";
+    // The box holds the returned message until a key arrives, then is empty.
+    let script = format!(
+        "stty raw -echo; printf '{rule}\\r\\n\\342\\235\\257 block the\\r\\n  miners\\r\\n{rule}\\r\\n{footer}\\r\\n'; : > '{}'; dd bs=1 count=1 2>/dev/null | od -An -tx1 > '{}'; printf '\\033[2J\\033[H{rule}\\r\\n\\342\\235\\257 \\r\\n{rule}\\r\\n{footer}\\r\\n'; sleep 30",
+        ready_file.display(),
+        key_file.display()
+    );
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script.as_str()])),
+        TerminalPaneOptions { size: TerminalSize { rows: 12, cols: 80 }, cwd: Some(dir.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let mut run = test_agent_run("returned", "first ask");
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.current_prompt = "block the miners".to_string();
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready_file.exists() {
+        assert!(Instant::now() < deadline, "the stand-in composer never drew");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Its own message is cleared with Ctrl+C, and the new one waits for that.
+    while !app.clear_returned_prompt(0) {
+        assert!(Instant::now() < deadline, "the returned message was not cleared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while fs::read_to_string(&key_file).map_or(true, |key| key.trim().is_empty()) {
+        assert!(Instant::now() < deadline, "no key reached the composer");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(&key_file).unwrap().trim(), "03");
+    // Emptied: nothing more to clear, and nothing blocks the next message.
+    while app.composer_blocked_at(0).is_some() {
+        assert!(Instant::now() < deadline, "the composer never emptied");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!app.clear_returned_prompt(0));
+
+    // Someone's own draft is never cleared.
+    app.agents[0].current_prompt = "another message".to_string();
+    app.returned_prompt_clears.clear();
+    assert!(!app.clear_returned_prompt(0));
+    app.agents[0].terminal = None;
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(windows))]
+#[test]
 fn chat_edit_after_a_turn_that_failed_goes_back_at_once() {
     // Seen live: a turn ended on a rate limit (Claude StopFailure), so the row
     // stayed Running, and the edit pressed Esc at an idle composer and waited
